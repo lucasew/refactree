@@ -149,6 +149,7 @@ Rules:
 - `reference` is the file where the alias is introduced
 - `target` is the reference the imported binding points to
 - use this for plain imports, renamed imports, named imports, and namespace/package aliases
+- for Go package imports, point to package scope such as `path:./helperpkg`, not to one specific file
 - do not encode import aliases as generic relations when the alias binding itself is the thing being tested
 
 Example:
