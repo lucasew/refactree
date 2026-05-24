@@ -1,0 +1,37 @@
+{
+  "files": [
+    {
+      "language": "javascript",
+      "path": "main.js"
+    }
+  ],
+  "entities": [
+    {
+      "reference": "path:./main.js::main",
+      "start_byte": 40,
+      "end_byte": 44
+    }
+  ],
+  "aliases": [
+    {
+      "reference": "path:./main.js",
+      "start_byte": 7,
+      "end_byte": 11,
+      "target": "node:path"
+    }
+  ],
+  "relations": [
+    {
+      "reference": "path:./main.js::main",
+      "start_byte": 51,
+      "end_byte": 55,
+      "target": "node:path"
+    },
+    {
+      "reference": "path:./main.js::main",
+      "start_byte": 56,
+      "end_byte": 60,
+      "target": "node:path::join"
+    }
+  ]
+}

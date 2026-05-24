@@ -1,0 +1,37 @@
+{
+  "files": [
+    {
+      "language": "python",
+      "path": "app.py"
+    }
+  ],
+  "entities": [
+    {
+      "reference": "path:./app.py::main",
+      "start_byte": 16,
+      "end_byte": 20
+    }
+  ],
+  "aliases": [
+    {
+      "reference": "path:./app.py",
+      "start_byte": 7,
+      "end_byte": 9,
+      "target": "python:os"
+    }
+  ],
+  "relations": [
+    {
+      "reference": "path:./app.py::main",
+      "start_byte": 28,
+      "end_byte": 30,
+      "target": "python:os"
+    },
+    {
+      "reference": "path:./app.py::main",
+      "start_byte": 31,
+      "end_byte": 37,
+      "target": "python:os::system"
+    }
+  ]
+}

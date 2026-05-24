@@ -1,0 +1,37 @@
+{
+  "files": [
+    {
+      "language": "go",
+      "path": "main.go"
+    }
+  ],
+  "entities": [
+    {
+      "reference": "path:./main.go::main",
+      "start_byte": 33,
+      "end_byte": 37
+    }
+  ],
+  "aliases": [
+    {
+      "reference": "path:./main.go",
+      "start_byte": 22,
+      "end_byte": 25,
+      "target": "go:fmt"
+    }
+  ],
+  "relations": [
+    {
+      "reference": "path:./main.go::main",
+      "start_byte": 43,
+      "end_byte": 46,
+      "target": "go:fmt"
+    },
+    {
+      "reference": "path:./main.go::main",
+      "start_byte": 47,
+      "end_byte": 54,
+      "target": "go:fmt::Println"
+    }
+  ]
+}
