@@ -21,13 +21,15 @@
       "end_byte": 10
     }
   ],
-  "relations": [
+  "aliases": [
     {
       "reference": "path:./app.py",
       "start_byte": 20,
       "end_byte": 26,
       "target": "path:./helpers.py::helper"
-    },
+    }
+  ],
+  "relations": [
     {
       "reference": "path:./app.py::main",
       "start_byte": 45,

@@ -21,13 +21,15 @@
       "end_byte": 22
     }
   ],
-  "relations": [
+  "aliases": [
     {
       "reference": "path:./main.js",
       "start_byte": 9,
       "end_byte": 15,
       "target": "path:./helper.js::helper"
-    },
+    }
+  ],
+  "relations": [
     {
       "reference": "path:./main.js::main",
       "start_byte": 59,

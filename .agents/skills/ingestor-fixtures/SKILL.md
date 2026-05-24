@@ -135,7 +135,7 @@ Example:
 
 ### `aliases`
 
-Use `aliases` when an import binds a name to a file-scope reference.
+Use `aliases` when an import binds a name to a file-scope or symbol reference.
 
 Each alias entry contains only:
 
@@ -147,8 +147,8 @@ Each alias entry contains only:
 Rules:
 
 - `reference` is the file where the alias is introduced
-- `target` is the file-scope reference the alias points to
-- use this for import aliases and namespace/package aliases
+- `target` is the reference the imported binding points to
+- use this for plain imports, renamed imports, named imports, and namespace/package aliases
 - do not encode import aliases as generic relations when the alias binding itself is the thing being tested
 
 Example:
