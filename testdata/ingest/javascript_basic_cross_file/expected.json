@@ -1,0 +1,38 @@
+{
+  "files": [
+    {
+      "language": "javascript",
+      "path": "main.js"
+    },
+    {
+      "language": "javascript",
+      "path": "helper.js"
+    }
+  ],
+  "entities": [
+    {
+      "reference": "path:./main.js::main",
+      "start_byte": 48,
+      "end_byte": 52
+    },
+    {
+      "reference": "path:./helper.js::helper",
+      "start_byte": 16,
+      "end_byte": 22
+    }
+  ],
+  "relations": [
+    {
+      "reference": "path:./main.js",
+      "start_byte": 9,
+      "end_byte": 15,
+      "target": "path:./helper.js::helper"
+    },
+    {
+      "reference": "path:./main.js::main",
+      "start_byte": 59,
+      "end_byte": 65,
+      "target": "path:./helper.js::helper"
+    }
+  ]
+}
