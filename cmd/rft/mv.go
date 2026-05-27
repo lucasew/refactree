@@ -2,7 +2,12 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
 
+	"github.com/lucasew/refactree/ingest"
 	"github.com/spf13/cobra"
 )
 
@@ -17,16 +22,44 @@ func newMvCmd(root *rootOptions) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			source := args[0]
 			destination := args[1]
-			stubf(
-				cmd.ErrOrStderr(),
-				"mv stub: source=%q destination=%q backup=%t interactive=%t verbose=%t\n",
-				source,
-				destination,
-				backup,
-				interactive,
-				root.verbose,
-			)
-			return fmt.Errorf("mv not implemented")
+
+			srcRef := ingest.ParseReference(source)
+			dir := "."
+			if srcRef.Provider == "path" {
+				p := strings.TrimPrefix(srcRef.Path, "./")
+				if st, err := os.Stat(p); err == nil && st.IsDir() {
+					dir = p
+				} else if p != "" {
+					dir = filepath.Dir(p)
+				}
+			}
+
+			edits, err := ingest.Rename(dir, source, destination)
+			if err != nil {
+				return err
+			}
+
+			if interactive {
+				w := cmd.ErrOrStderr()
+				fmt.Fprintf(w, "Edit plan (%d edits):\n", len(edits))
+				for _, e := range edits {
+					fmt.Fprintf(w, "  %s [%d:%d] → %q\n", e.File, e.StartByte, e.EndByte, e.NewText)
+				}
+				fmt.Fprint(w, "Apply? [y/N] ")
+				var answer string
+				fmt.Fscan(cmd.InOrStdin(), &answer)
+				if answer != "y" && answer != "Y" {
+					return fmt.Errorf("cancelled")
+				}
+			}
+
+			if backup {
+				if err := createBackups(dir, edits); err != nil {
+					return err
+				}
+			}
+
+			return ingest.ApplyEdits(dir, edits)
 		},
 	}
 
@@ -34,4 +67,32 @@ func newMvCmd(root *rootOptions) *cobra.Command {
 	cmd.Flags().BoolVarP(&interactive, "interactive", "i", false, "show edit plan and ask for confirmation")
 
 	return cmd
+}
+
+func createBackups(dir string, edits []ingest.Edit) error {
+	seen := map[string]bool{}
+	for _, e := range edits {
+		if seen[e.File] {
+			continue
+		}
+		seen[e.File] = true
+		src := filepath.Join(dir, e.File)
+		dst := src + ".bak"
+		in, err := os.Open(src)
+		if err != nil {
+			return err
+		}
+		out, err := os.Create(dst)
+		if err != nil {
+			in.Close()
+			return err
+		}
+		_, err = io.Copy(out, in)
+		in.Close()
+		out.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }

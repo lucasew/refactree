@@ -2,7 +2,11 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
+	"github.com/lucasew/refactree/ingest"
 	"github.com/spf13/cobra"
 )
 
@@ -13,13 +17,33 @@ func newDocCmd(root *rootOptions) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			reference := args[0]
-			stubf(
-				cmd.ErrOrStderr(),
-				"doc stub: reference=%q verbose=%t\n",
-				reference,
-				root.verbose,
-			)
-			return fmt.Errorf("doc not implemented")
+			ref := ingest.ParseReference(reference)
+
+			dir := "."
+			if ref.Provider == "path" {
+				p := strings.TrimPrefix(ref.Path, "./")
+				if st, err := os.Stat(p); err == nil && st.IsDir() {
+					dir = p
+				} else if p != "" {
+					dir = filepath.Dir(p)
+				}
+			}
+
+			doc, err := ingest.DocFor(dir, reference)
+			if err != nil {
+				return err
+			}
+
+			w := cmd.OutOrStdout()
+			fmt.Fprintf(w, "# %s\n", doc.Name)
+			if doc.Signature != "" {
+				fmt.Fprintf(w, "Signature: %s\n", doc.Signature)
+			}
+			if doc.DocString != "" {
+				fmt.Fprintln(w, doc.DocString)
+			}
+
+			return nil
 		},
 	}
 }

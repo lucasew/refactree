@@ -1,0 +1,185 @@
+package ingest
+
+import "github.com/lucasew/ccgo-tree-sitter/grammar"
+
+// extractPython walks a Python module AST and produces a fileExtract.
+func extractPython(root *grammar.Node, source []byte, path string) *fileExtract {
+	fe := &fileExtract{
+		language: "python",
+		path:     path,
+	}
+
+	for i := uint32(0); i < root.ChildCount(); i++ {
+		child := root.Child(i)
+		switch child.Type() {
+		case "function_definition":
+			extractPythonFunc(fe, child, source)
+		case "class_definition":
+			extractPythonClass(fe, child, source)
+		case "import_from_statement":
+			extractPythonImportFrom(fe, child, source)
+		case "import_statement":
+			extractPythonImport(fe, child, source)
+		}
+	}
+
+	return fe
+}
+
+func extractPythonFunc(fe *fileExtract, n *grammar.Node, source []byte) {
+	nameNode := childByField(n, "name")
+	if nameNode == nil {
+		return
+	}
+	name := nodeText(nameNode, source)
+
+	fe.entities = append(fe.entities, entityDef{
+		name:      name,
+		startByte: nameNode.StartByte(),
+		endByte:   nameNode.EndByte(),
+		exported:  len(name) == 0 || name[0] != '_',
+	})
+
+	if body := childByField(n, "body"); body != nil {
+		walkPythonUsages(fe, body, source, name)
+	}
+}
+
+func extractPythonClass(fe *fileExtract, n *grammar.Node, source []byte) {
+	nameNode := childByField(n, "name")
+	if nameNode == nil {
+		return
+	}
+	name := nodeText(nameNode, source)
+
+	fe.entities = append(fe.entities, entityDef{
+		name:      name,
+		startByte: nameNode.StartByte(),
+		endByte:   nameNode.EndByte(),
+		exported:  len(name) == 0 || name[0] != '_',
+	})
+
+	if body := childByField(n, "body"); body != nil {
+		walkPythonUsages(fe, body, source, name)
+	}
+}
+
+// extractPythonImportFrom handles: from X import Y [, Z]
+func extractPythonImportFrom(fe *fileExtract, n *grammar.Node, source []byte) {
+	modNode := childByField(n, "module_name")
+	if modNode == nil {
+		return
+	}
+	moduleName := nodeText(modNode, source)
+
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		if n.FieldNameForChild(i) != "name" {
+			continue
+		}
+		child := n.Child(i)
+
+		var nameNode *grammar.Node
+		switch child.Type() {
+		case "dotted_name":
+			nameNode = childByType(child, "identifier")
+		case "identifier":
+			nameNode = child
+		}
+
+		if nameNode == nil {
+			continue
+		}
+		importedName := nodeText(nameNode, source)
+
+		fe.imports = append(fe.imports, importDef{
+			localName:  importedName,
+			sourcePath: moduleName,
+			memberName: importedName,
+			startByte:  nameNode.StartByte(),
+			endByte:    nameNode.EndByte(),
+		})
+	}
+}
+
+// extractPythonImport handles: import X / import X as Y
+func extractPythonImport(fe *fileExtract, n *grammar.Node, source []byte) {
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		if n.FieldNameForChild(i) != "name" {
+			continue
+		}
+		child := n.Child(i)
+
+		switch child.Type() {
+		case "aliased_import":
+			nameNode := childByField(child, "name")
+			aliasNode := childByField(child, "alias")
+			if nameNode == nil || aliasNode == nil {
+				continue
+			}
+			moduleName := nodeText(nameNode, source)
+			if nameNode.Type() == "dotted_name" {
+				if id := childByType(nameNode, "identifier"); id != nil {
+					moduleName = nodeText(id, source)
+				}
+			}
+
+			fe.imports = append(fe.imports, importDef{
+				localName:  nodeText(aliasNode, source),
+				sourcePath: moduleName,
+				startByte:  aliasNode.StartByte(),
+				endByte:    aliasNode.EndByte(),
+			})
+
+		case "dotted_name":
+			if id := childByType(child, "identifier"); id != nil {
+				name := nodeText(id, source)
+				fe.imports = append(fe.imports, importDef{
+					localName:  name,
+					sourcePath: name,
+					startByte:  id.StartByte(),
+					endByte:    id.EndByte(),
+				})
+			}
+		}
+	}
+}
+
+// walkPythonUsages recursively finds call nodes inside a Python function body.
+func walkPythonUsages(fe *fileExtract, n *grammar.Node, source []byte, scope string) {
+	if n.Type() == "call" {
+		funcNode := childByField(n, "function")
+		if funcNode != nil {
+			switch funcNode.Type() {
+			case "identifier":
+				fe.usages = append(fe.usages, usageDef{
+					scope:     scope,
+					name:      nodeText(funcNode, source),
+					startByte: funcNode.StartByte(),
+					endByte:   funcNode.EndByte(),
+				})
+			case "attribute":
+				obj := childByField(funcNode, "object")
+				attr := childByField(funcNode, "attribute")
+				if obj != nil && attr != nil {
+					fe.usages = append(fe.usages, usageDef{
+						scope:         scope,
+						name:          nodeText(attr, source),
+						startByte:     attr.StartByte(),
+						endByte:       attr.EndByte(),
+						qualifier:     nodeText(obj, source),
+						qualStartByte: obj.StartByte(),
+						qualEndByte:   obj.EndByte(),
+					})
+				}
+			}
+		}
+		if args := childByField(n, "arguments"); args != nil {
+			walkPythonUsages(fe, args, source, scope)
+		}
+		return
+	}
+
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		walkPythonUsages(fe, n.Child(i), source, scope)
+	}
+}
