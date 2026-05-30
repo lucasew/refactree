@@ -116,3 +116,20 @@ func TestDocFor_DirectoryReference_GoFiles(t *testing.T) {
 		t.Fatalf("unexpected docstring: %q", doc.DocString)
 	}
 }
+
+func TestDocFor_GoProviderStdlibFunction(t *testing.T) {
+	doc, err := ingest.DocFor(".", "go:fmt::Printf")
+	if err != nil {
+		t.Fatalf("doc lookup failed: %v", err)
+	}
+
+	if doc.Name != "Printf" {
+		t.Fatalf("unexpected name: %q", doc.Name)
+	}
+	if !strings.Contains(doc.Signature, "func Printf(") {
+		t.Fatalf("unexpected signature: %q", doc.Signature)
+	}
+	if !strings.Contains(doc.DocString, "Printf formats according") {
+		t.Fatalf("unexpected docstring: %q", doc.DocString)
+	}
+}

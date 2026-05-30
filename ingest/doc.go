@@ -19,6 +19,17 @@ type DocResult struct {
 // DocFor ingests dir, locates the given reference, and extracts its
 // signature and docstring from the source file.
 func DocFor(dir, reference string) (*DocResult, error) {
+	rawRef := ParseReference(reference)
+	if rawRef.Provider != "" && rawRef.Provider != "path" && rawRef.Symbol != "" {
+		target, ok, err := resolveProviderSymbolTarget(rawRef)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			return docForProviderSymbol(rawRef, target)
+		}
+	}
+
 	result, err := Ingest(dir)
 	if err != nil {
 		return nil, err
@@ -41,6 +52,45 @@ func DocFor(dir, reference string) (*DocResult, error) {
 		return nil, fmt.Errorf("entity not found: %s", reference)
 	}
 
+	return docForEntity(dir, result, ref, entity)
+}
+
+func docForProviderSymbol(ref Reference, target ProviderSymbolTarget) (*DocResult, error) {
+	result, err := Ingest(target.Dir)
+	if err != nil {
+		return nil, err
+	}
+
+	symbol := target.Symbol
+	if symbol == "" {
+		symbol = ref.Symbol
+	}
+
+	matches := make([]int, 0, 1)
+	for i := range result.Entities {
+		entityRef := ParseReference(result.Entities[i].Reference)
+		if entityRef.Symbol == symbol {
+			matches = append(matches, i)
+		}
+	}
+
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("entity not found: %s", ref.String())
+	}
+	if len(matches) > 1 {
+		candidates := make([]string, 0, len(matches))
+		for _, idx := range matches {
+			candidates = append(candidates, result.Entities[idx].Reference)
+		}
+		return nil, fmt.Errorf("ambiguous symbol %q in %q package %q, matches: %s", symbol, ref.Provider, ref.Path, strings.Join(candidates, ", "))
+	}
+
+	entity := &result.Entities[matches[0]]
+	entityRef := ParseReference(entity.Reference)
+	return docForEntity(target.Dir, result, entityRef, entity)
+}
+
+func docForEntity(dir string, result *Result, ref Reference, entity *Entity) (*DocResult, error) {
 	relPath := strings.TrimPrefix(ref.Path, "./")
 	filePath := filepath.Join(dir, relPath)
 

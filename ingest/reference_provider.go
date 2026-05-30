@@ -20,9 +20,35 @@ type ReferenceProvider interface {
 	Resolve(spec string, ctx ImportResolveContext) (string, bool)
 }
 
+// ProviderSymbolTarget points to a directory that can be ingested for a
+// provider-backed symbol lookup.
+type ProviderSymbolTarget struct {
+	Dir    string
+	Symbol string
+}
+
+// SymbolTargetProvider is an optional provider capability used by doc lookup.
+type SymbolTargetProvider interface {
+	ResolveSymbolTarget(ref Reference) (ProviderSymbolTarget, bool, error)
+}
+
 func referenceProviderForName(name string) (ReferenceProvider, bool) {
 	p, ok := builtInReferenceProviders[name]
 	return p, ok
+}
+
+func resolveProviderSymbolTarget(ref Reference) (ProviderSymbolTarget, bool, error) {
+	provider, ok := referenceProviderForName(ref.Provider)
+	if !ok {
+		return ProviderSymbolTarget{}, false, nil
+	}
+
+	symbolProvider, ok := provider.(SymbolTargetProvider)
+	if !ok {
+		return ProviderSymbolTarget{}, false, nil
+	}
+
+	return symbolProvider.ResolveSymbolTarget(ref)
 }
 
 var builtInReferenceProviders = map[string]ReferenceProvider{
