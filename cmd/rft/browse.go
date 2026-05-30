@@ -124,8 +124,8 @@ func newBrowseKeys() browseKeys {
 			key.WithHelp("enter", "open"),
 		),
 		Parent: key.NewBinding(
-			key.WithKeys("h", "backspace"),
-			key.WithHelp("h", "go parent"),
+			key.WithKeys("h", "backspace", "left", "esc"),
+			key.WithHelp("h/esc", "back"),
 		),
 		ToggleAll: key.NewBinding(
 			key.WithKeys("a"),
@@ -328,6 +328,11 @@ func (m *browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.scheduleDocLoadCmd()
 		case key.Matches(msg, m.keys.Parent):
+			if m.focus == browseFocusPreview {
+				m.focus = browseFocusList
+				m.updatePreviewForSelection()
+				return m, m.scheduleDocLoadCmd()
+			}
 			if err := m.goParent(); err != nil {
 				m.err = err
 				return m, tea.Quit
@@ -740,6 +745,7 @@ func (m *browseModel) activateSelection() error {
 		m.list.Select(0)
 		return m.reload()
 	case browseItemSymbol:
+		m.focus = browseFocusPreview
 		m.updatePreviewForSelection()
 	}
 	return nil
