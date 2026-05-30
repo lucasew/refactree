@@ -403,6 +403,58 @@ func TestBrowseNavigateIntoDirectory_ShowsSymbols(t *testing.T) {
 	}
 }
 
+func TestBrowseDocLookupDir_UsesCurrentDirectoryScope(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "pkg")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatalf("create subdir: %v", err)
+	}
+	content := "package pkg\n\n// Exported docs\nfunc Exported() {}\n"
+	if err := os.WriteFile(filepath.Join(sub, "main.go"), []byte(content), 0644); err != nil {
+		t.Fatalf("write go file: %v", err)
+	}
+
+	model, err := newBrowseModel(dir, ".", false)
+	if err != nil {
+		t.Fatalf("new browse model: %v", err)
+	}
+
+	index := findBrowseItemIndex(model.list.Items(), func(it browseItem) bool {
+		return it.kind == browseItemDir && it.targetRel == "pkg"
+	})
+	if index < 0 {
+		t.Fatal("expected directory item for pkg/")
+	}
+	model.list.Select(index)
+	if err := model.activateSelection(); err != nil {
+		t.Fatalf("activate selection: %v", err)
+	}
+
+	symIndex := findBrowseItemIndex(model.list.Items(), func(it browseItem) bool {
+		return it.kind == browseItemSymbol && it.title == "Exported"
+	})
+	if symIndex < 0 {
+		t.Fatal("expected symbol item for Exported")
+	}
+	model.list.Select(symIndex)
+
+	cmd := model.ensureSelectedDocLoadedCmd()
+	if cmd == nil {
+		t.Fatal("expected doc load command")
+	}
+	msg := cmd()
+	loaded, ok := msg.(docLoadedMsg)
+	if !ok {
+		t.Fatalf("unexpected doc msg type: %T", msg)
+	}
+	if strings.Contains(loaded.markdown, "Documentation unavailable:") {
+		t.Fatalf("expected docs to resolve in current directory scope, got: %q", loaded.markdown)
+	}
+	if !strings.Contains(loaded.markdown, "Exported docs") {
+		t.Fatalf("expected fetched doc content, got: %q", loaded.markdown)
+	}
+}
+
 func findRepoRoot(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()

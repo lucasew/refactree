@@ -656,22 +656,10 @@ func (m *browseModel) buildProviderItems() ([]list.Item, error) {
 }
 
 func (m *browseModel) symbolItems() ([]list.Item, error) {
-	ref := m.currentScopeRef()
+	dir, ref := m.currentSymbolScope()
 	options := ingest.ListOptions{IncludeHidden: m.includeHidden}
 	out := make([]list.Item, 0, 64)
 
-	dir := m.rootDir
-	if m.mode == "provider" {
-		dir = "."
-	} else {
-		abs := m.currentAbsPath()
-		if st, err := os.Stat(abs); err == nil && st.IsDir() {
-			// Keep ls-like semantics for the current package directory:
-			// ingest from the current directory root and list path:./ scope.
-			dir = abs
-			ref = "path:./"
-		}
-	}
 	err := ingest.WalkSymbols(dir, ref, options, func(sym ingest.SymbolInfo) bool {
 		path := strings.TrimPrefix(sym.Reference.Path, "./")
 		if path == "" {
@@ -934,10 +922,20 @@ func (m *browseModel) scopeRoot() string {
 }
 
 func (m *browseModel) docLookupDir() string {
+	dir, _ := m.currentSymbolScope()
+	return dir
+}
+
+func (m *browseModel) currentSymbolScope() (string, string) {
 	if m.mode == "provider" {
-		return "."
+		return ".", m.currentScopeRef()
 	}
-	return m.rootDir
+
+	scope := ingest.ResolveReferenceScope(m.rootDir, ingest.Reference{
+		Provider: "path",
+		Path:     m.currentAbsPath(),
+	})
+	return scope.Dir, scope.Reference.String()
 }
 
 func (m *browseModel) selectedSymbolRef() string {
