@@ -264,6 +264,120 @@ func TestBrowseMouseClickSelectsListItem(t *testing.T) {
 	}
 }
 
+func TestBrowseSymbolItems_UsesWalkSymbolsOrder(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc Zebra() {}\nfunc Alpha() {}\n"), 0644); err != nil {
+		t.Fatalf("write go file: %v", err)
+	}
+
+	model, err := newBrowseModel(dir, ".", false)
+	if err != nil {
+		t.Fatalf("new browse model: %v", err)
+	}
+
+	items, err := model.symbolItems()
+	if err != nil {
+		t.Fatalf("symbol items: %v", err)
+	}
+
+	got := make([]string, 0, len(items))
+	for _, raw := range items {
+		item, ok := raw.(browseItem)
+		if !ok {
+			t.Fatalf("unexpected item type: %T", raw)
+		}
+		got = append(got, item.symbolRef)
+	}
+
+	want := []string{}
+	err = ingest.WalkSymbols(dir, "path:./", ingest.ListOptions{}, func(sym ingest.SymbolInfo) bool {
+		want = append(want, sym.Entity.Reference)
+		return true
+	})
+	if err != nil {
+		t.Fatalf("walk symbols: %v", err)
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("unexpected item count: got %d want %d (%v vs %v)", len(got), len(want), got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("unexpected symbol order at %d: got %q want %q (%v vs %v)", i, got[i], want[i], got, want)
+		}
+	}
+}
+
+func TestBrowseSymbols_PathCmdRft_ContainsExecuteLikeLs(t *testing.T) {
+	root := findRepoRoot(t)
+	target := filepath.Join(root, "cmd", "rft")
+
+	model, err := newBrowseModelFromReference(ingest.ParseReference("path:"+target), false)
+	if err != nil {
+		t.Fatalf("new browse model from path reference: %v", err)
+	}
+
+	items, err := model.symbolItems()
+	if err != nil {
+		t.Fatalf("symbol items: %v", err)
+	}
+
+	seen := map[string]bool{}
+	for _, raw := range items {
+		item, ok := raw.(browseItem)
+		if !ok {
+			t.Fatalf("unexpected item type: %T", raw)
+		}
+		seen[item.title] = true
+	}
+
+	if !seen["Execute"] {
+		t.Fatalf("expected Execute symbol for %s, got symbols: %+v", target, seen)
+	}
+
+	want := []string{}
+	err = ingest.WalkSymbols(target, "path:./", ingest.ListOptions{}, func(sym ingest.SymbolInfo) bool {
+		want = append(want, sym.Entity.Reference)
+		return true
+	})
+	if err != nil {
+		t.Fatalf("walk symbols: %v", err)
+	}
+
+	got := make([]string, 0, len(items))
+	for _, raw := range items {
+		item := raw.(browseItem)
+		got = append(got, item.symbolRef)
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("unexpected symbol count: got %d want %d", len(got), len(want))
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("unexpected symbol at %d: got %q want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func findRepoRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("could not find repository root from %q", dir)
+		}
+		dir = parent
+	}
+}
+
 func findBrowseItemIndex(items []list.Item, match func(browseItem) bool) int {
 	for i, raw := range items {
 		item, ok := raw.(browseItem)

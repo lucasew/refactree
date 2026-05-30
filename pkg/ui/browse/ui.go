@@ -658,7 +658,7 @@ func (m *browseModel) buildProviderItems() ([]list.Item, error) {
 func (m *browseModel) symbolItems() ([]list.Item, error) {
 	ref := m.currentScopeRef()
 	options := ingest.ListOptions{IncludeHidden: m.includeHidden}
-	items := make([]browseItem, 0, 64)
+	out := make([]list.Item, 0, 64)
 
 	dir := m.rootDir
 	if m.mode == "provider" {
@@ -669,7 +669,7 @@ func (m *browseModel) symbolItems() ([]list.Item, error) {
 		if path == "" {
 			path = "."
 		}
-		items = append(items, browseItem{
+		out = append(out, browseItem{
 			kind:      browseItemSymbol,
 			title:     sym.Reference.Symbol,
 			desc:      fmt.Sprintf("%s [%s]", path, sym.Language),
@@ -681,20 +681,6 @@ func (m *browseModel) symbolItems() ([]list.Item, error) {
 		return nil, err
 	}
 
-	sort.Slice(items, func(i, j int) bool {
-		if items[i].title != items[j].title {
-			return items[i].title < items[j].title
-		}
-		if items[i].desc != items[j].desc {
-			return items[i].desc < items[j].desc
-		}
-		return items[i].symbolRef < items[j].symbolRef
-	})
-
-	out := make([]list.Item, 0, len(items))
-	for _, item := range items {
-		out = append(out, item)
-	}
 	return out, nil
 }
 
