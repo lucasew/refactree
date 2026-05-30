@@ -156,7 +156,7 @@ func resolveQualifiedUsage(res *Result, imports map[string]resolvedImport, scope
 		Target:    baseTarget,
 	})
 
-	// For local directory targets (Path:./dir), resolve the member to
+	// For local directory targets (path:./dir), resolve the member to
 	// the specific file that defines it.
 	memberTarget := baseTarget + "::" + u.Name
 	baseRef := ParseReference(baseTarget)

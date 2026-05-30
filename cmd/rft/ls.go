@@ -2,9 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/lucasew/refactree/pkg/ingest"
 	"github.com/spf13/cobra"
@@ -22,17 +19,7 @@ func newLsCmd(root *rootOptions) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ref := ingest.ParseReference(args[0])
 			ref = coerceLocalPathRef(ref)
-
-			dir := "."
-			if ref.Provider == "path" {
-				p := strings.TrimPrefix(ref.Path, "./")
-				if st, err := os.Stat(p); err == nil && st.IsDir() {
-					dir = p
-				} else if p != "" {
-					dir = filepath.Dir(p)
-				}
-			}
-			ref = normalizeRefForIngestDir(dir, ref)
+			dir, ref := normalizeRefForCommandScope(ref)
 
 			w := cmd.OutOrStdout()
 			err := ingest.WalkSymbols(dir, ref.String(), ingest.ListOptions{

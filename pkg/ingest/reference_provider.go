@@ -26,13 +26,14 @@ type providerDocPolicy interface {
 // RegisterReferenceProvider registers a reference provider by name.
 // It panics on empty names, nil providers, or duplicate names.
 func RegisterReferenceProvider(name string, provider refpkg.Provider) {
+	name = strings.ToLower(name)
 	if name == "" {
 		panic("ingest: RegisterReferenceProvider with empty name")
 	}
 	if provider == nil {
 		panic("ingest: RegisterReferenceProvider with nil provider")
 	}
-	if provider.Name() != "" && provider.Name() != name {
+	if provider.Name() != "" && !strings.EqualFold(provider.Name(), name) {
 		panic(fmt.Sprintf("ingest: RegisterReferenceProvider name mismatch: key=%q provider=%q", name, provider.Name()))
 	}
 	if _, exists := refpkg.ProviderForName(name); exists {

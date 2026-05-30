@@ -19,15 +19,15 @@ func TestWalkSymbols_NonRecursiveDirectory(t *testing.T) {
 	mustWrite(t, filepath.Join(dir, "root.go"), "package main\n\nfunc Root() {}\n")
 	mustWrite(t, filepath.Join(dir, "sub", "sub.go"), "package main\n\nfunc Sub() {}\n")
 
-	refs, err := collectRefs(dir, "Path:./", ingest.ListOptions{IncludeHidden: true})
+	refs, err := collectRefs(dir, "path:./", ingest.ListOptions{IncludeHidden: true})
 	if err != nil {
 		t.Fatalf("walk symbols: %v", err)
 	}
 
-	if !containsRef(refs, "Path:./root.go::Root") {
+	if !containsRef(refs, "path:./root.go::Root") {
 		t.Fatalf("expected root symbol, got %v", refs)
 	}
-	if containsRef(refs, "Path:./sub/sub.go::Sub") {
+	if containsRef(refs, "path:./sub/sub.go::Sub") {
 		t.Fatalf("did not expect nested symbol in non-recursive listing, got %v", refs)
 	}
 }
@@ -37,12 +37,12 @@ func TestWalkSymbols_RecursiveDirectory(t *testing.T) {
 	mustWrite(t, filepath.Join(dir, "root.go"), "package main\n\nfunc Root() {}\n")
 	mustWrite(t, filepath.Join(dir, "sub", "sub.go"), "package main\n\nfunc Sub() {}\n")
 
-	refs, err := collectRefs(dir, "Path:./", ingest.ListOptions{IncludeHidden: true, Recursive: true})
+	refs, err := collectRefs(dir, "path:./", ingest.ListOptions{IncludeHidden: true, Recursive: true})
 	if err != nil {
 		t.Fatalf("walk symbols: %v", err)
 	}
 
-	if !containsRef(refs, "Path:./root.go::Root") || !containsRef(refs, "Path:./sub/sub.go::Sub") {
+	if !containsRef(refs, "path:./root.go::Root") || !containsRef(refs, "path:./sub/sub.go::Sub") {
 		t.Fatalf("expected recursive symbols, got %v", refs)
 	}
 }
@@ -51,28 +51,28 @@ func TestWalkSymbols_HiddenFilter(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "a.go"), "package main\n\nfunc visible() {}\nfunc _private() {}\nfunc Visible() {}\n")
 
-	refs, err := collectRefs(dir, "Path:./", ingest.ListOptions{})
+	refs, err := collectRefs(dir, "path:./", ingest.ListOptions{})
 	if err != nil {
 		t.Fatalf("walk symbols: %v", err)
 	}
-	if containsRef(refs, "Path:./a.go::visible") {
+	if containsRef(refs, "path:./a.go::visible") {
 		t.Fatalf("did not expect hidden symbol without IncludeHidden, got %v", refs)
 	}
-	if containsRef(refs, "Path:./a.go::_private") {
+	if containsRef(refs, "path:./a.go::_private") {
 		t.Fatalf("did not expect hidden underscore symbol without IncludeHidden, got %v", refs)
 	}
-	if !containsRef(refs, "Path:./a.go::Visible") {
+	if !containsRef(refs, "path:./a.go::Visible") {
 		t.Fatalf("expected exported symbol, got %v", refs)
 	}
 
-	refs, err = collectRefs(dir, "Path:./", ingest.ListOptions{IncludeHidden: true})
+	refs, err = collectRefs(dir, "path:./", ingest.ListOptions{IncludeHidden: true})
 	if err != nil {
 		t.Fatalf("walk symbols: %v", err)
 	}
-	if !containsRef(refs, "Path:./a.go::visible") {
+	if !containsRef(refs, "path:./a.go::visible") {
 		t.Fatalf("expected hidden symbol with IncludeHidden, got %v", refs)
 	}
-	if !containsRef(refs, "Path:./a.go::_private") {
+	if !containsRef(refs, "path:./a.go::_private") {
 		t.Fatalf("expected hidden underscore symbol with IncludeHidden, got %v", refs)
 	}
 }
@@ -82,11 +82,11 @@ func TestWalkSymbols_FileScope(t *testing.T) {
 	mustWrite(t, filepath.Join(dir, "a.go"), "package main\n\nfunc A() {}\n")
 	mustWrite(t, filepath.Join(dir, "b.go"), "package main\n\nfunc B() {}\n")
 
-	refs, err := collectRefs(dir, "Path:./a.go", ingest.ListOptions{IncludeHidden: true})
+	refs, err := collectRefs(dir, "path:./a.go", ingest.ListOptions{IncludeHidden: true})
 	if err != nil {
 		t.Fatalf("walk symbols: %v", err)
 	}
-	if len(refs) != 1 || refs[0] != "Path:./a.go::A" {
+	if len(refs) != 1 || refs[0] != "path:./a.go::A" {
 		t.Fatalf("expected only a.go symbol, got %v", refs)
 	}
 }
@@ -96,7 +96,7 @@ func TestWalkSymbols_StopEarly(t *testing.T) {
 	mustWrite(t, filepath.Join(dir, "a.go"), "package main\n\nfunc A() {}\nfunc B() {}\n")
 
 	count := 0
-	err := ingest.WalkSymbols(dir, "Path:./", ingest.ListOptions{IncludeHidden: true}, func(sym ingest.SymbolInfo) bool {
+	err := ingest.WalkSymbols(dir, "path:./", ingest.ListOptions{IncludeHidden: true}, func(sym ingest.SymbolInfo) bool {
 		_ = sym
 		count++
 		return false

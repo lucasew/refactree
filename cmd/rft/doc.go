@@ -2,9 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/lucasew/refactree/pkg/ingest"
 	"github.com/spf13/cobra"
@@ -19,17 +16,8 @@ func newDocCmd(root *rootOptions) *cobra.Command {
 			reference := args[0]
 			ref := ingest.ParseReference(reference)
 			ref = coerceLocalPathRef(ref)
-
-			dir := "."
-			if ref.Provider == "path" {
-				p := strings.TrimPrefix(ref.Path, "./")
-				if st, err := os.Stat(p); err == nil && st.IsDir() {
-					dir = p
-				} else if p != "" {
-					dir = filepath.Dir(p)
-				}
-			}
-			reference = normalizeRefForIngestDir(dir, ref).String()
+			dir, ref := normalizeRefForCommandScope(ref)
+			reference = ref.String()
 
 			doc, err := ingest.DocFor(dir, reference)
 			if err != nil {

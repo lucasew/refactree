@@ -16,7 +16,7 @@ func TestDocFor_PythonFunction(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	doc, err := ingest.DocFor(dir, "Path:./helper.py::helper")
+	doc, err := ingest.DocFor(dir, "path:./helper.py::helper")
 	if err != nil {
 		t.Fatalf("doc lookup failed: %v", err)
 	}
@@ -39,7 +39,7 @@ func TestDocFor_PythonClass(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	doc, err := ingest.DocFor(dir, "Path:./helper.py::Greeter")
+	doc, err := ingest.DocFor(dir, "path:./helper.py::Greeter")
 	if err != nil {
 		t.Fatalf("doc lookup failed: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestDocFor_DirectoryReference_PythonInit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	doc, err := ingest.DocFor(dir, "Path:./Package::helper")
+	doc, err := ingest.DocFor(dir, "path:./pkg::helper")
 	if err != nil {
 		t.Fatalf("doc lookup failed: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestDocFor_DirectoryReference_JSIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	doc, err := ingest.DocFor(dir, "Path:./Package::helper")
+	doc, err := ingest.DocFor(dir, "path:./pkg::helper")
 	if err != nil {
 		t.Fatalf("doc lookup failed: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestDocFor_DirectoryReference_GoFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	doc, err := ingest.DocFor(dir, "Path:./Package::helper")
+	doc, err := ingest.DocFor(dir, "path:./pkg::helper")
 	if err != nil {
 		t.Fatalf("doc lookup failed: %v", err)
 	}

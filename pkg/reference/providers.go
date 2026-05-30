@@ -1,6 +1,9 @@
 package reference
 
-import "sync"
+import (
+	"strings"
+	"sync"
+)
 
 // ImportResolveContext carries filesystem and index metadata needed by
 // provider-backed import resolution.
@@ -47,6 +50,7 @@ var (
 
 // RegisterProvider registers or overrides a provider name.
 func RegisterProvider(name string, provider Provider) {
+	name = strings.ToLower(name)
 	providersMu.Lock()
 	defer providersMu.Unlock()
 	providers[name] = provider
@@ -54,6 +58,7 @@ func RegisterProvider(name string, provider Provider) {
 
 // ProviderForName looks up a provider by name.
 func ProviderForName(name string) (Provider, bool) {
+	name = strings.ToLower(name)
 	providersMu.RLock()
 	defer providersMu.RUnlock()
 	p, ok := providers[name]

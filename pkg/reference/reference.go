@@ -20,7 +20,7 @@ func Parse(s string) Reference {
 	}
 
 	if i := strings.Index(base, ":"); i >= 0 {
-		r.Provider = base[:i]
+		r.Provider = strings.ToLower(base[:i])
 		r.Path = base[i+1:]
 		return r
 	}
@@ -45,7 +45,7 @@ func Parse(s string) Reference {
 func (r Reference) String() string {
 	base := r.Path
 	if r.Provider != "" {
-		base = r.Provider + ":" + r.Path
+		base = strings.ToLower(r.Provider) + ":" + r.Path
 	}
 	if r.Symbol != "" {
 		return base + "::" + r.Symbol
@@ -66,9 +66,10 @@ func SymbolRef(path, symbol string) string {
 // NormalizePathReference normalizes path-provider references so relative paths
 // are consistently prefixed.
 func NormalizePathReference(ref Reference) Reference {
-	if ref.Provider != "path" {
+	if strings.ToLower(ref.Provider) != "path" {
 		return ref
 	}
+	ref.Provider = "path"
 	if ref.Path == "" || ref.Path == "." {
 		ref.Path = "./"
 		return ref

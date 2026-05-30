@@ -19,14 +19,18 @@ func TestNodeProvider_ResolveFromNodeModules(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ref, ok := (nodeReferenceProvider{}).Resolve("react", ImportResolveContext{
+	provider, ok := referenceProviderForName("node")
+	if !ok {
+		t.Fatal("expected node provider to be registered")
+	}
+	ref, ok := provider.Resolve("react", ImportResolveContext{
 		RootDir:      root,
 		ImporterPath: "src/main.js",
 	})
 	if !ok {
 		t.Fatal("expected provider to resolve")
 	}
-	if ref != "Path:./node_modules/react/index.js" {
+	if ref != "path:./node_modules/react/index.js" {
 		t.Fatalf("unexpected reference: %q", ref)
 	}
 }
@@ -48,7 +52,11 @@ func TestNodeProvider_ResolveFromNODE_PATH(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ref, ok := (nodeReferenceProvider{}).Resolve("react", ImportResolveContext{
+	provider, ok := referenceProviderForName("node")
+	if !ok {
+		t.Fatal("expected node provider to be registered")
+	}
+	ref, ok := provider.Resolve("react", ImportResolveContext{
 		RootDir:      root,
 		ImporterPath: "src/main.js",
 	})
@@ -57,14 +65,18 @@ func TestNodeProvider_ResolveFromNODE_PATH(t *testing.T) {
 	}
 
 	expectedSuffix := filepath.ToSlash(moduleFile)
-	if !strings.HasPrefix(ref, "Path:") || !strings.HasSuffix(ref, expectedSuffix) {
+	if !strings.HasPrefix(ref, "path:") || !strings.HasSuffix(ref, expectedSuffix) {
 		t.Fatalf("expected absolute path reference ending with %q, got %q", expectedSuffix, ref)
 	}
 }
 
 func TestNodeProvider_FallbackSymbolic(t *testing.T) {
 	root := t.TempDir()
-	ref, ok := (nodeReferenceProvider{}).Resolve("totally-missing-pkg", ImportResolveContext{
+	provider, ok := referenceProviderForName("node")
+	if !ok {
+		t.Fatal("expected node provider to be registered")
+	}
+	ref, ok := provider.Resolve("totally-missing-pkg", ImportResolveContext{
 		RootDir:      root,
 		ImporterPath: "main.js",
 	})

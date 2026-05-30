@@ -7,12 +7,22 @@ import (
 )
 
 func TestParseReference_ExplicitProvider(t *testing.T) {
+	ref := ingest.ParseReference("path:./cmd/rft/doc.go::newDocCmd")
+	if ref.Provider != "path" || ref.Path != "./cmd/rft/doc.go" || ref.Symbol != "newDocCmd" {
+		t.Fatalf("unexpected ref: %+v", ref)
+	}
+	if ref.String() != "path:./cmd/rft/doc.go::newDocCmd" {
+		t.Fatalf("unexpected string form: %q", ref.String())
+	}
+}
+
+func TestParseReference_UppercaseProviderCanonicalized(t *testing.T) {
 	ref := ingest.ParseReference("Path:./cmd/rft/doc.go::newDocCmd")
 	if ref.Provider != "path" || ref.Path != "./cmd/rft/doc.go" || ref.Symbol != "newDocCmd" {
 		t.Fatalf("unexpected ref: %+v", ref)
 	}
-	if ref.String() != "Path:./cmd/rft/doc.go::newDocCmd" {
-		t.Fatalf("unexpected string form: %q", ref.String())
+	if ref.String() != "path:./cmd/rft/doc.go::newDocCmd" {
+		t.Fatalf("unexpected canonical string: %q", ref.String())
 	}
 }
 
@@ -21,7 +31,7 @@ func TestParseReference_ShorthandPathSymbol(t *testing.T) {
 	if ref.Provider != "path" || ref.Path != "./cmd/rft/doc.go" || ref.Symbol != "newDocCmd" {
 		t.Fatalf("unexpected ref: %+v", ref)
 	}
-	if ref.String() != "Path:./cmd/rft/doc.go::newDocCmd" {
+	if ref.String() != "path:./cmd/rft/doc.go::newDocCmd" {
 		t.Fatalf("unexpected canonical string: %q", ref.String())
 	}
 }
