@@ -47,7 +47,7 @@ func newBrowseCmd(root *rootOptions) *cobra.Command {
 				return err
 			}
 
-			final, err := tea.NewProgram(model, tea.WithAltScreen()).Run()
+			final, err := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run()
 			if err != nil {
 				return err
 			}
@@ -70,6 +70,8 @@ const (
 	browseFocusList browseFocus = iota
 	browseFocusPreview
 )
+
+const splitLayoutMinWidth = 110
 
 type browseItemKind int
 
@@ -117,15 +119,25 @@ type browseKeys struct {
 	ListBottom  key.Binding
 }
 
+type browseNavState struct {
+	mode         string
+	currentRel   string
+	providerRef  ingest.Reference
+	providerDir  string
+	openedSymbol string
+	focus        browseFocus
+	listIndex    int
+}
+
 func newBrowseKeys() browseKeys {
 	return browseKeys{
 		Open: key.NewBinding(
 			key.WithKeys("enter"),
-			key.WithHelp("enter", "open"),
+			key.WithHelp("enter", "push/open"),
 		),
 		Parent: key.NewBinding(
 			key.WithKeys("h", "backspace", "left", "esc"),
-			key.WithHelp("h/esc", "back"),
+			key.WithHelp("h/esc", "pop/back"),
 		),
 		ToggleAll: key.NewBinding(
 			key.WithKeys("a"),
@@ -184,9 +196,12 @@ type browseModel struct {
 	mode          string
 	providerRef   ingest.Reference
 	providerDir   string
+	openedSymbol  string
+	navStack      []browseNavState
 	includeHidden bool
 	focus         browseFocus
 	showFullHelp  bool
+	showSplit     bool
 	keys          browseKeys
 
 	list    list.Model
@@ -264,6 +279,7 @@ func newBrowseModel(rootDir, currentRel string, includeHidden bool) (*browseMode
 	model.list.Title = "rft browse"
 	model.list.SetShowHelp(false)
 	model.list.SetShowStatusBar(false)
+	model.list.SetShowPagination(false)
 	model.list.SetFilteringEnabled(false)
 	model.list.DisableQuitKeybindings()
 
@@ -300,10 +316,13 @@ func (m *browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case docLoadedMsg:
 		delete(m.loadingDocs, msg.ref)
 		m.docCache[msg.ref] = msg.markdown
-		if m.selectedSymbolRef() == msg.ref {
+		if m.activeSymbolRef() == msg.ref {
 			m.updatePreviewForSelection()
 		}
 		return m, m.scheduleDocLoadCmd()
+	case tea.MouseMsg:
+		cmd := m.handleMouse(msg)
+		return m, tea.Batch(cmd, m.scheduleDocLoadCmd())
 	case tea.KeyMsg:
 		switch {
 		case key.Matches(msg, m.keys.Quit):
@@ -328,7 +347,14 @@ func (m *browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.scheduleDocLoadCmd()
 		case key.Matches(msg, m.keys.Parent):
-			if m.focus == browseFocusPreview {
+			if ok, err := m.popState(); err != nil {
+				m.err = err
+				return m, tea.Quit
+			} else if ok {
+				return m, m.scheduleDocLoadCmd()
+			}
+
+			if m.focus == browseFocusPreview && m.openedSymbol == "" {
 				m.focus = browseFocusList
 				m.updatePreviewForSelection()
 				return m, m.scheduleDocLoadCmd()
@@ -396,20 +422,35 @@ func (m *browseModel) View() string {
 	if m.includeHidden {
 		mode = "hidden:on"
 	}
+	layout := "single"
+	if m.showSplit {
+		layout = "split"
+	}
 
 	m.list.Title = fmt.Sprintf("%s  (%s)", current, focusLabel)
 
-	leftStyle := lipgloss.NewStyle().Width(m.listWidth).Height(m.bodyHeight)
-	rightStyle := lipgloss.NewStyle().Width(m.previewWidth).Height(m.bodyHeight).PaddingLeft(1)
-	if m.focus == browseFocusList {
-		leftStyle = leftStyle.Border(lipgloss.NormalBorder(), false, true, false, false)
+	var body string
+	if m.showSplit {
+		leftStyle := lipgloss.NewStyle().Width(m.listWidth).Height(m.bodyHeight)
+		rightStyle := lipgloss.NewStyle().Width(m.previewWidth).Height(m.bodyHeight).PaddingLeft(1)
+		if m.focus == browseFocusList {
+			leftStyle = leftStyle.Border(lipgloss.NormalBorder(), false, true, false, false)
+		}
+		if m.focus == browseFocusPreview {
+			rightStyle = rightStyle.Border(lipgloss.NormalBorder(), false, false, false, true)
+		}
+		body = lipgloss.JoinHorizontal(lipgloss.Top, leftStyle.Render(m.list.View()), rightStyle.Render(m.preview.View()))
+	} else {
+		panelStyle := lipgloss.NewStyle().Width(m.width).Height(m.bodyHeight)
+		if m.focus == browseFocusPreview || m.openedSymbol != "" {
+			panelStyle = panelStyle.Border(lipgloss.NormalBorder(), false, false, false, true)
+			body = panelStyle.Render(m.preview.View())
+		} else {
+			panelStyle = panelStyle.Border(lipgloss.NormalBorder(), false, true, false, false)
+			body = panelStyle.Render(m.list.View())
+		}
 	}
-	if m.focus == browseFocusPreview {
-		rightStyle = rightStyle.Border(lipgloss.NormalBorder(), false, false, false, true)
-	}
-
-	body := lipgloss.JoinHorizontal(lipgloss.Top, leftStyle.Render(m.list.View()), rightStyle.Render(m.preview.View()))
-	status := fmt.Sprintf("root:%s  scope:%s  %s", m.scopeRoot(), current, mode)
+	status := fmt.Sprintf("root:%s  scope:%s  %s  layout:%s  stack:%d", m.scopeRoot(), current, mode, layout, len(m.navStack))
 
 	return body + "\n" + status + "\n" + m.help.View(m.keys)
 }
@@ -428,23 +469,29 @@ func (m *browseModel) resize() {
 		m.bodyHeight = 4
 	}
 
-	m.listWidth = m.width / 2
-	if m.listWidth < 32 {
-		m.listWidth = 32
-	}
-	m.previewWidth = m.width - m.listWidth
-	if m.previewWidth < 24 {
-		m.previewWidth = 24
-		m.listWidth = m.width - m.previewWidth
-		if m.listWidth < 20 {
-			m.listWidth = 20
+	m.showSplit = m.width >= splitLayoutMinWidth
+	if m.showSplit {
+		m.listWidth = m.width / 2
+		if m.listWidth < 32 {
+			m.listWidth = 32
 		}
-	}
-	if m.listWidth+m.previewWidth > m.width {
 		m.previewWidth = m.width - m.listWidth
-		if m.previewWidth < 0 {
-			m.previewWidth = 0
+		if m.previewWidth < 24 {
+			m.previewWidth = 24
+			m.listWidth = m.width - m.previewWidth
+			if m.listWidth < 20 {
+				m.listWidth = 20
+			}
 		}
+		if m.listWidth+m.previewWidth > m.width {
+			m.previewWidth = m.width - m.listWidth
+			if m.previewWidth < 0 {
+				m.previewWidth = 0
+			}
+		}
+	} else {
+		m.listWidth = m.width
+		m.previewWidth = m.width
 	}
 
 	m.list.SetSize(m.listWidth, m.bodyHeight)
@@ -655,6 +702,11 @@ func (m *browseModel) symbolItems() ([]list.Item, error) {
 }
 
 func (m *browseModel) updatePreviewForSelection() {
+	if m.openedSymbol != "" {
+		m.updatePreviewForOpenedSymbol()
+		return
+	}
+
 	item, ok := m.list.SelectedItem().(browseItem)
 	if !ok {
 		m.preview.SetContent(m.renderMarkdown("No selection"))
@@ -713,6 +765,44 @@ func (m *browseModel) updatePreviewForSelection() {
 	m.preview.GotoTop()
 }
 
+func (m *browseModel) updatePreviewForOpenedSymbol() {
+	ref := m.openedSymbol
+	parsed := ingest.ParseReference(ref)
+	name := parsed.Symbol
+	if name == "" {
+		name = ref
+	}
+
+	var md strings.Builder
+	write := func(format string, args ...any) {
+		_, _ = fmt.Fprintf(&md, format, args...)
+		md.WriteByte('\n')
+	}
+
+	write("## Symbol")
+	write("- **Name:** `%s`", name)
+	write("- **Reference:** `%s`", ref)
+	write("- **Scope:** `%s`", m.currentScopeRef())
+	md.WriteByte('\n')
+	write("_Press Esc to go back._")
+
+	if doc, ok := m.docCache[ref]; ok {
+		header := m.renderMarkdown(md.String())
+		body := m.renderDocMarkdown(ref, doc)
+		combined := strings.TrimRight(header, "\n")
+		if body != "" {
+			combined += "\n\n" + strings.TrimLeft(body, "\n")
+		}
+		m.preview.SetContent(combined)
+		m.preview.GotoTop()
+		return
+	}
+
+	write("_Loading documentation..._")
+	m.preview.SetContent(m.renderMarkdown(md.String()))
+	m.preview.GotoTop()
+}
+
 func (m *browseModel) activateSelection() error {
 	item, ok := m.list.SelectedItem().(browseItem)
 	if !ok {
@@ -721,6 +811,7 @@ func (m *browseModel) activateSelection() error {
 
 	switch item.kind {
 	case browseItemParent, browseItemDir, browseItemFile:
+		prev := m.snapshotState()
 		if m.mode == "provider" {
 			if item.targetRef == "" {
 				return nil
@@ -734,17 +825,30 @@ func (m *browseModel) activateSelection() error {
 			if !ok {
 				return fmt.Errorf("provider scope navigation not supported for %q", ref.Provider)
 			}
+			m.navStack = append(m.navStack, prev)
 			m.providerRef = ref
 			m.providerDir = scope.Dir
+			m.openedSymbol = ""
+			m.focus = browseFocusList
 			m.list.Select(0)
 			return m.reload()
 		}
 		if err := m.setCurrentRel(item.targetRel); err != nil {
 			return err
 		}
+		m.navStack = append(m.navStack, prev)
+		m.openedSymbol = ""
+		m.focus = browseFocusList
 		m.list.Select(0)
 		return m.reload()
 	case browseItemSymbol:
+		if item.symbolRef == "" {
+			return nil
+		}
+		if m.openedSymbol != item.symbolRef {
+			m.navStack = append(m.navStack, m.snapshotState())
+		}
+		m.openedSymbol = item.symbolRef
 		m.focus = browseFocusPreview
 		m.updatePreviewForSelection()
 	}
@@ -768,6 +872,8 @@ func (m *browseModel) goParent() error {
 		}
 		m.providerRef = ref
 		m.providerDir = scope.Dir
+		m.openedSymbol = ""
+		m.focus = browseFocusList
 		m.list.Select(0)
 		return m.reload()
 	}
@@ -778,6 +884,8 @@ func (m *browseModel) goParent() error {
 	if err := m.setCurrentRel(parentRel(m.currentRel)); err != nil {
 		return err
 	}
+	m.openedSymbol = ""
+	m.focus = browseFocusList
 	m.list.Select(0)
 	return m.reload()
 }
@@ -849,8 +957,15 @@ func (m *browseModel) selectedSymbolRef() string {
 	return item.symbolRef
 }
 
+func (m *browseModel) activeSymbolRef() string {
+	if m.openedSymbol != "" {
+		return m.openedSymbol
+	}
+	return m.selectedSymbolRef()
+}
+
 func (m *browseModel) ensureSelectedDocLoadedCmd() tea.Cmd {
-	ref := m.selectedSymbolRef()
+	ref := m.activeSymbolRef()
 	if ref == "" {
 		return nil
 	}
@@ -882,7 +997,7 @@ func (m *browseModel) ensureSelectedDocLoadedCmd() tea.Cmd {
 }
 
 func (m *browseModel) scheduleDocLoadCmd() tea.Cmd {
-	ref := m.selectedSymbolRef()
+	ref := m.activeSymbolRef()
 	if ref == "" {
 		return nil
 	}
@@ -901,6 +1016,150 @@ func (m *browseModel) scheduleDocLoadCmd() tea.Cmd {
 	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
 		return docDebounceMsg{tag: tag}
 	})
+}
+
+func (m *browseModel) snapshotState() browseNavState {
+	return browseNavState{
+		mode:         m.mode,
+		currentRel:   m.currentRel,
+		providerRef:  m.providerRef,
+		providerDir:  m.providerDir,
+		openedSymbol: m.openedSymbol,
+		focus:        m.focus,
+		listIndex:    m.list.Index(),
+	}
+}
+
+func (m *browseModel) popState() (bool, error) {
+	if len(m.navStack) == 0 {
+		return false, nil
+	}
+
+	last := m.navStack[len(m.navStack)-1]
+	m.navStack = m.navStack[:len(m.navStack)-1]
+	if err := m.restoreState(last); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (m *browseModel) restoreState(state browseNavState) error {
+	m.mode = state.mode
+	m.currentRel = state.currentRel
+	m.providerRef = state.providerRef
+	m.providerDir = state.providerDir
+	m.openedSymbol = state.openedSymbol
+	m.focus = state.focus
+
+	if err := m.reload(); err != nil {
+		return err
+	}
+
+	items := m.list.Items()
+	if len(items) == 0 {
+		return nil
+	}
+	index := state.listIndex
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(items) {
+		index = len(items) - 1
+	}
+	m.list.Select(index)
+	m.updatePreviewForSelection()
+	return nil
+}
+
+func (m *browseModel) handleMouse(msg tea.MouseMsg) tea.Cmd {
+	if m.bodyHeight <= 0 {
+		return nil
+	}
+
+	inList := m.mouseInListPane(msg.X, msg.Y)
+	inPreview := m.mouseInPreviewPane(msg.X, msg.Y)
+
+	if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+		if inList {
+			m.focus = browseFocusList
+			if m.selectListIndexFromMouse(msg.Y) {
+				m.updatePreviewForSelection()
+				return nil
+			}
+			m.updatePreviewForSelection()
+			return nil
+		}
+		if inPreview {
+			m.focus = browseFocusPreview
+			m.updatePreviewForSelection()
+			return nil
+		}
+	}
+
+	if inPreview {
+		var cmd tea.Cmd
+		m.preview, cmd = m.preview.Update(msg)
+		return cmd
+	}
+
+	if inList && msg.Action == tea.MouseActionPress {
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			m.list.CursorUp()
+			m.updatePreviewForSelection()
+			return nil
+		case tea.MouseButtonWheelDown:
+			m.list.CursorDown()
+			m.updatePreviewForSelection()
+			return nil
+		}
+	}
+
+	return nil
+}
+
+func (m *browseModel) mouseInListPane(x, y int) bool {
+	if y < 0 || y >= m.bodyHeight {
+		return false
+	}
+	if m.showSplit {
+		return x >= 0 && x < m.listWidth
+	}
+	return m.focus == browseFocusList && m.openedSymbol == ""
+}
+
+func (m *browseModel) mouseInPreviewPane(x, y int) bool {
+	if y < 0 || y >= m.bodyHeight {
+		return false
+	}
+	if m.showSplit {
+		return x >= m.listWidth && x < m.width
+	}
+	return m.focus == browseFocusPreview || m.openedSymbol != ""
+}
+
+func (m *browseModel) selectListIndexFromMouse(y int) bool {
+	row := y
+	if m.list.ShowTitle() {
+		row--
+	}
+	if row < 0 {
+		return false
+	}
+
+	itemRowHeight := 3
+	offset := row / itemRowHeight
+	index := m.list.Paginator.Page*m.list.Paginator.PerPage + offset
+
+	visible := m.list.VisibleItems()
+	if index < 0 || index >= len(visible) {
+		return false
+	}
+	if index == m.list.Index() {
+		return false
+	}
+	m.list.Select(index)
+	return true
 }
 
 func (m *browseModel) renderMarkdown(markdown string) string {

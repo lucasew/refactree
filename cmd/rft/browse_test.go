@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/list"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/lucasew/refactree/pkg/ingest"
 )
 
@@ -108,4 +110,169 @@ func TestDocToMarkdown(t *testing.T) {
 	if !strings.Contains(got, "Printf formats according to a format specifier.") {
 		t.Fatalf("missing doc string in markdown: %q", got)
 	}
+}
+
+func TestBrowseResize_ResponsiveLayout(t *testing.T) {
+	dir := t.TempDir()
+	model, err := newBrowseModel(dir, ".", false)
+	if err != nil {
+		t.Fatalf("new browse model: %v", err)
+	}
+
+	model.width = 90
+	model.height = 24
+	model.resize()
+	if model.showSplit {
+		t.Fatal("expected single-pane layout for narrow width")
+	}
+
+	model.width = 140
+	model.height = 24
+	model.resize()
+	if !model.showSplit {
+		t.Fatal("expected split layout for wide width")
+	}
+}
+
+func TestBrowseEnterEscPushPopDirectory(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "pkg")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatalf("create subdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "main.go"), []byte("package pkg\nfunc Exported() {}\n"), 0644); err != nil {
+		t.Fatalf("write go file: %v", err)
+	}
+
+	model, err := newBrowseModel(dir, ".", false)
+	if err != nil {
+		t.Fatalf("new browse model: %v", err)
+	}
+
+	index := findBrowseItemIndex(model.list.Items(), func(it browseItem) bool {
+		return it.kind == browseItemDir && it.targetRel == "pkg"
+	})
+	if index < 0 {
+		t.Fatal("expected directory item for pkg/")
+	}
+	model.list.Select(index)
+
+	if err := model.activateSelection(); err != nil {
+		t.Fatalf("activate selection: %v", err)
+	}
+	if model.currentRel != "pkg" {
+		t.Fatalf("unexpected current rel after enter: got %q want %q", model.currentRel, "pkg")
+	}
+	if len(model.navStack) != 1 {
+		t.Fatalf("unexpected nav stack size after enter: got %d want %d", len(model.navStack), 1)
+	}
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	_ = cmd
+	restored, ok := next.(*browseModel)
+	if !ok {
+		t.Fatalf("unexpected model type after esc: %T", next)
+	}
+	if restored.currentRel != "." {
+		t.Fatalf("unexpected current rel after esc: got %q want %q", restored.currentRel, ".")
+	}
+	if len(restored.navStack) != 0 {
+		t.Fatalf("unexpected nav stack size after esc: got %d want %d", len(restored.navStack), 0)
+	}
+}
+
+func TestBrowseEnterEscPushPopSymbol(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\nfunc Exported() {}\n"), 0644); err != nil {
+		t.Fatalf("write go file: %v", err)
+	}
+
+	model, err := newBrowseModel(dir, ".", false)
+	if err != nil {
+		t.Fatalf("new browse model: %v", err)
+	}
+
+	index := findBrowseItemIndex(model.list.Items(), func(it browseItem) bool {
+		return it.kind == browseItemSymbol && it.title == "Exported"
+	})
+	if index < 0 {
+		t.Fatal("expected symbol item for Exported")
+	}
+	model.list.Select(index)
+
+	if err := model.activateSelection(); err != nil {
+		t.Fatalf("activate selection: %v", err)
+	}
+	if model.openedSymbol == "" {
+		t.Fatal("expected opened symbol after enter on symbol")
+	}
+	if model.focus != browseFocusPreview {
+		t.Fatalf("unexpected focus after symbol open: got %v want %v", model.focus, browseFocusPreview)
+	}
+	if len(model.navStack) != 1 {
+		t.Fatalf("unexpected nav stack size after symbol open: got %d want %d", len(model.navStack), 1)
+	}
+
+	next, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	_ = cmd
+	restored, ok := next.(*browseModel)
+	if !ok {
+		t.Fatalf("unexpected model type after esc: %T", next)
+	}
+	if restored.openedSymbol != "" {
+		t.Fatalf("expected opened symbol to be cleared, got %q", restored.openedSymbol)
+	}
+	if restored.focus != browseFocusList {
+		t.Fatalf("unexpected focus after esc: got %v want %v", restored.focus, browseFocusList)
+	}
+}
+
+func TestBrowseMouseClickSelectsListItem(t *testing.T) {
+	dir := t.TempDir()
+	model, err := newBrowseModel(dir, ".", false)
+	if err != nil {
+		t.Fatalf("new browse model: %v", err)
+	}
+
+	model.list.SetItems([]list.Item{
+		browseItem{kind: browseItemInfo, title: "one"},
+		browseItem{kind: browseItemInfo, title: "two"},
+		browseItem{kind: browseItemInfo, title: "three"},
+	})
+	model.list.Select(0)
+
+	model.width = 140
+	model.height = 30
+	model.resize()
+	if !model.showSplit {
+		t.Fatal("expected split layout in mouse selection test")
+	}
+
+	msg := tea.MouseMsg{
+		X:      1,
+		Y:      4,
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonLeft,
+	}
+	_ = model.handleMouse(msg)
+
+	if model.focus != browseFocusList {
+		t.Fatalf("unexpected focus after click: got %v want %v", model.focus, browseFocusList)
+	}
+	if model.list.Index() != 1 {
+		t.Fatalf("unexpected selected index after click: got %d want %d", model.list.Index(), 1)
+	}
+}
+
+func findBrowseItemIndex(items []list.Item, match func(browseItem) bool) int {
+	for i, raw := range items {
+		item, ok := raw.(browseItem)
+		if !ok {
+			continue
+		}
+		if match(item) {
+			return i
+		}
+	}
+	return -1
 }
