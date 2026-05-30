@@ -93,6 +93,25 @@ func TestNewBrowseModelFromReference_GoProvider(t *testing.T) {
 	}
 }
 
+func TestNewBrowseModelFromReference_PythonProvider(t *testing.T) {
+	model, err := newBrowseModelFromReference(ingest.ParseReference("python:os"), false)
+	if err != nil {
+		if strings.Contains(err.Error(), "python executable not found") || strings.Contains(err.Error(), "has no filesystem source") {
+			t.Skip(err.Error())
+		}
+		t.Fatalf("new browse model from python reference: %v", err)
+	}
+	if model.mode != "provider" {
+		t.Fatalf("unexpected mode: %q", model.mode)
+	}
+	if model.providerRef.Provider != "python" || model.providerRef.Path != "os" {
+		t.Fatalf("unexpected provider ref: %+v", model.providerRef)
+	}
+	if model.providerDir == "" {
+		t.Fatal("expected providerDir to be resolved")
+	}
+}
+
 func TestDocToMarkdown(t *testing.T) {
 	doc := &ingest.DocResult{
 		Name:      "Printf",

@@ -6,6 +6,7 @@ import (
 	"github.com/lucasew/ccgo-tree-sitter/grammar"
 	_ "github.com/lucasew/ccgo-tree-sitter/grammar/python"
 	"github.com/lucasew/refactree/pkg/ingest"
+	pythonref "github.com/lucasew/refactree/pkg/reference/python"
 )
 
 func init() {
@@ -57,6 +58,57 @@ func (referenceProvider) Resolve(spec string, ctx ingest.ImportResolveContext) (
 		return ingest.FileRef("./" + spec), true
 	}
 	return "python:" + spec, true
+}
+
+func (referenceProvider) ResolveScopeTarget(ref ingest.Reference) (ingest.ProviderScopeTarget, bool, error) {
+	if ref.Path == "" {
+		return ingest.ProviderScopeTarget{}, false, nil
+	}
+	target, err := pythonref.ResolveModuleTarget(ref.Path)
+	if err != nil {
+		return ingest.ProviderScopeTarget{}, true, err
+	}
+	return ingest.ProviderScopeTarget{Dir: target.Dir}, true, nil
+}
+
+func (referenceProvider) ResolveSymbolTarget(ref ingest.Reference) (ingest.ProviderSymbolTarget, bool, error) {
+	target, ok, err := pythonref.ResolveSymbolTarget(ref.Path, ref.Symbol)
+	if !ok || err != nil {
+		return ingest.ProviderSymbolTarget{}, ok, err
+	}
+	return ingest.ProviderSymbolTarget{Dir: target.Dir, Symbol: target.Symbol}, true, nil
+}
+
+func (referenceProvider) ListIngestRecursive(_ ingest.Reference, opts ingest.ListOptions) bool {
+	return opts.Recursive
+}
+
+func (referenceProvider) AllowListEntity(ref ingest.Reference, _ ingest.Reference, entPath, language string, _ ingest.ListOptions) bool {
+	if language != "python" {
+		return false
+	}
+	target, err := pythonref.ResolveModuleTarget(ref.Path)
+	if err != nil {
+		return false
+	}
+	return pythonref.MatchesEntityPath(target, entPath)
+}
+
+func (referenceProvider) ListOutputReference(ref ingest.Reference, entRef ingest.Reference) ingest.Reference {
+	return ingest.Reference{Provider: ref.Provider, Path: ref.Path, Symbol: entRef.Symbol}
+}
+
+func (referenceProvider) DocIngestRecursive(ingest.Reference) bool { return false }
+
+func (referenceProvider) AllowDocEntity(ref ingest.Reference, _ ingest.Reference, entPath, language string) bool {
+	if language != "python" {
+		return false
+	}
+	target, err := pythonref.ResolveModuleTarget(ref.Path)
+	if err != nil {
+		return false
+	}
+	return pythonref.MatchesEntityPath(target, entPath)
 }
 
 func extractPython(root *grammar.Node, source []byte, path string) *ingest.FileExtract {
