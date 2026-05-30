@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lucasew/refactree/pkg/ingest"
 	refpkg "github.com/lucasew/refactree/pkg/reference"
@@ -92,6 +93,11 @@ func (i browseItem) Title() string       { return i.title }
 func (i browseItem) Description() string { return i.desc }
 func (i browseItem) FilterValue() string { return i.title + " " + i.desc }
 
+type docLoadedMsg struct {
+	ref      string
+	markdown string
+}
+
 type browseKeys struct {
 	Open        key.Binding
 	Parent      key.Binding
@@ -110,7 +116,7 @@ func newBrowseKeys() browseKeys {
 	return browseKeys{
 		Open: key.NewBinding(
 			key.WithKeys("enter"),
-			key.WithHelp("enter", "open / load doc"),
+			key.WithHelp("enter", "open"),
 		),
 		Parent: key.NewBinding(
 			key.WithKeys("h", "backspace"),
@@ -182,8 +188,9 @@ type browseModel struct {
 	preview viewport.Model
 	help    help.Model
 
-	docCache map[string]string
-	err      error
+	docCache    map[string]string
+	loadingDocs map[string]bool
+	err         error
 
 	width        int
 	height       int
@@ -239,6 +246,7 @@ func newBrowseModel(rootDir, currentRel string, includeHidden bool) (*browseMode
 		focus:         browseFocusList,
 		keys:          newBrowseKeys(),
 		docCache:      map[string]string{},
+		loadingDocs:   map[string]bool{},
 	}
 	model.help.ShowAll = false
 
@@ -262,7 +270,7 @@ func newBrowseModel(rootDir, currentRel string, includeHidden bool) (*browseMode
 }
 
 func (m *browseModel) Init() tea.Cmd {
-	return nil
+	return m.ensureSelectedDocLoadedCmd()
 }
 
 func (m *browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -272,6 +280,13 @@ func (m *browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.resize()
 		m.updatePreviewForSelection()
+		return m, m.ensureSelectedDocLoadedCmd()
+	case docLoadedMsg:
+		delete(m.loadingDocs, msg.ref)
+		m.docCache[msg.ref] = msg.markdown
+		if m.selectedSymbolRef() == msg.ref {
+			m.updatePreviewForSelection()
+		}
 		return m, nil
 	case tea.KeyMsg:
 		switch {
@@ -281,26 +296,27 @@ func (m *browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showFullHelp = !m.showFullHelp
 			m.help.ShowAll = m.showFullHelp
 			m.resize()
-			return m, nil
+			m.updatePreviewForSelection()
+			return m, m.ensureSelectedDocLoadedCmd()
 		case key.Matches(msg, m.keys.ToggleAll):
 			m.includeHidden = !m.includeHidden
 			if err := m.reload(); err != nil {
 				m.err = err
 				return m, tea.Quit
 			}
-			return m, nil
+			return m, m.ensureSelectedDocLoadedCmd()
 		case key.Matches(msg, m.keys.Refresh):
 			if err := m.reload(); err != nil {
 				m.err = err
 				return m, tea.Quit
 			}
-			return m, nil
+			return m, m.ensureSelectedDocLoadedCmd()
 		case key.Matches(msg, m.keys.Parent):
 			if err := m.goParent(); err != nil {
 				m.err = err
 				return m, tea.Quit
 			}
-			return m, nil
+			return m, m.ensureSelectedDocLoadedCmd()
 		case key.Matches(msg, m.keys.ToggleFocus):
 			if m.focus == browseFocusList {
 				m.focus = browseFocusPreview
@@ -308,13 +324,13 @@ func (m *browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.focus = browseFocusList
 			}
 			m.updatePreviewForSelection()
-			return m, nil
+			return m, m.ensureSelectedDocLoadedCmd()
 		case key.Matches(msg, m.keys.Open):
 			if err := m.activateSelection(); err != nil {
 				m.err = err
 				return m, tea.Quit
 			}
-			return m, nil
+			return m, m.ensureSelectedDocLoadedCmd()
 		}
 
 		if m.focus == browseFocusPreview {
@@ -335,6 +351,7 @@ func (m *browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.list, cmd = m.list.Update(msg)
 		if m.list.Index() != prevIndex {
 			m.updatePreviewForSelection()
+			return m, tea.Batch(cmd, m.ensureSelectedDocLoadedCmd())
 		}
 		return m, cmd
 	}
@@ -646,9 +663,11 @@ func (m *browseModel) updatePreviewForSelection() {
 	case browseItemSymbol:
 		lines = append(lines, fmt.Sprintf("ref:   %s", item.symbolRef))
 		if doc, ok := m.docCache[item.symbolRef]; ok {
-			lines = append(lines, "", doc)
+			lines = append(lines, "", m.renderMarkdown(doc))
+		} else if m.loadingDocs[item.symbolRef] {
+			lines = append(lines, "", "Loading documentation...")
 		} else {
-			lines = append(lines, "", "Press Enter to load documentation for this symbol.")
+			lines = append(lines, "", "Loading documentation...")
 		}
 	}
 
@@ -688,18 +707,6 @@ func (m *browseModel) activateSelection() error {
 		m.list.Select(0)
 		return m.reload()
 	case browseItemSymbol:
-		if _, ok := m.docCache[item.symbolRef]; !ok {
-			docDir := m.rootDir
-			if m.mode == "provider" {
-				docDir = "."
-			}
-			doc, err := ingest.DocFor(docDir, item.symbolRef)
-			if err != nil {
-				m.docCache[item.symbolRef] = fmt.Sprintf("Documentation unavailable: %v", err)
-			} else {
-				m.docCache[item.symbolRef] = formatDoc(doc)
-			}
-		}
 		m.updatePreviewForSelection()
 	}
 	return nil
@@ -786,6 +793,78 @@ func (m *browseModel) scopeRoot() string {
 		return m.providerDir
 	}
 	return m.rootDir
+}
+
+func (m *browseModel) docLookupDir() string {
+	if m.mode == "provider" {
+		return "."
+	}
+	return m.rootDir
+}
+
+func (m *browseModel) selectedSymbolRef() string {
+	item, ok := m.list.SelectedItem().(browseItem)
+	if !ok || item.kind != browseItemSymbol || item.symbolRef == "" {
+		return ""
+	}
+	return item.symbolRef
+}
+
+func (m *browseModel) ensureSelectedDocLoadedCmd() tea.Cmd {
+	ref := m.selectedSymbolRef()
+	if ref == "" {
+		return nil
+	}
+	if _, ok := m.docCache[ref]; ok {
+		return nil
+	}
+	if m.loadingDocs[ref] {
+		return nil
+	}
+
+	dir := m.docLookupDir()
+	m.loadingDocs[ref] = true
+	return func() tea.Msg {
+		doc, err := ingest.DocFor(dir, ref)
+		if err != nil {
+			return docLoadedMsg{
+				ref:      ref,
+				markdown: fmt.Sprintf("Documentation unavailable: %v", err),
+			}
+		}
+		return docLoadedMsg{
+			ref:      ref,
+			markdown: docToMarkdown(doc),
+		}
+	}
+}
+
+func (m *browseModel) renderMarkdown(markdown string) string {
+	if markdown == "" {
+		return ""
+	}
+
+	wrap := m.previewWidth
+	if wrap <= 0 {
+		wrap = 80
+	}
+	// Keep a small margin so wrapped markdown doesn't touch viewport edges.
+	if wrap > 4 {
+		wrap -= 2
+	}
+
+	renderer, err := glamour.NewTermRenderer(
+		glamour.WithAutoStyle(),
+		glamour.WithWordWrap(wrap),
+	)
+	if err != nil {
+		return markdown
+	}
+	out, err := renderer.Render(markdown)
+	if err != nil {
+		return markdown
+	}
+	return strings.TrimRight(out, "\n")
 }
 
 func (i browseItem) kindName() string {
@@ -897,10 +976,12 @@ func browseScopeFromReference(ref ingest.Reference) (rootDir string, currentRel 
 	return filepath.Dir(pathValue), filepath.Base(pathValue), nil
 }
 
-func formatDoc(doc *ingest.DocResult) string {
+func docToMarkdown(doc *ingest.DocResult) string {
 	lines := []string{fmt.Sprintf("# %s", doc.Name)}
 	if doc.Signature != "" {
-		lines = append(lines, "Signature: "+doc.Signature)
+		lines = append(lines, "```")
+		lines = append(lines, doc.Signature)
+		lines = append(lines, "```")
 	}
 	if doc.DocString != "" {
 		lines = append(lines, "", doc.DocString)

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/lucasew/refactree/pkg/ingest"
@@ -87,5 +88,24 @@ func TestNewBrowseModelFromReference_GoProvider(t *testing.T) {
 	}
 	if model.providerDir == "" {
 		t.Fatal("expected providerDir to be resolved")
+	}
+}
+
+func TestDocToMarkdown(t *testing.T) {
+	doc := &ingest.DocResult{
+		Name:      "Printf",
+		Signature: "func Printf(format string, a ...any) (n int, err error)",
+		DocString: "Printf formats according to a format specifier.",
+	}
+
+	got := docToMarkdown(doc)
+	if !strings.Contains(got, "# Printf") {
+		t.Fatalf("missing title in markdown: %q", got)
+	}
+	if !strings.Contains(got, "```") || !strings.Contains(got, "func Printf") {
+		t.Fatalf("missing fenced signature in markdown: %q", got)
+	}
+	if !strings.Contains(got, "Printf formats according to a format specifier.") {
+		t.Fatalf("missing doc string in markdown: %q", got)
 	}
 }
