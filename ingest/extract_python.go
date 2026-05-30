@@ -1,6 +1,26 @@
 package ingest
 
-import "github.com/lucasew/ccgo-tree-sitter/grammar"
+import (
+	"path"
+
+	"github.com/lucasew/ccgo-tree-sitter/grammar"
+)
+
+type pythonLanguageDriver struct{}
+
+func (pythonLanguageDriver) Language() string { return "python" }
+
+func (pythonLanguageDriver) Extract(root *grammar.Node, source []byte, relPath string) *fileExtract {
+	return extractPython(root, source, relPath)
+}
+
+func (pythonLanguageDriver) DirectoryEntryFile(dirRel string) string {
+	return path.Join(dirRel, "__init__.py")
+}
+
+func (pythonLanguageDriver) DestinationFileInDirectory(dstDirRel string, _ Reference) string {
+	return path.Join(dstDirRel, "__init__.py")
+}
 
 // extractPython walks a Python module AST and produces a fileExtract.
 func extractPython(root *grammar.Node, source []byte, path string) *fileExtract {

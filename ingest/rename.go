@@ -55,7 +55,12 @@ func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 		if src.Symbol != dst.Symbol {
 			return nil, fmt.Errorf("cross-file move with symbol rename is not supported yet")
 		}
-		return planGoCrossFileMove(dir, result, src, dst, sourceEntity)
+		srcLang := languageForRefPath(result, src.Path)
+		driver, ok := moveDriverForLanguage(srcLang)
+		if !ok {
+			return nil, fmt.Errorf("cross-file move is not supported for language %q", srcLang)
+		}
+		return driver.PlanCrossFileMove(dir, result, src, dst, sourceEntity)
 	}
 
 	return planSymbolRename(result, sourceRef, dst.Symbol)
@@ -125,11 +130,6 @@ func planSymbolRename(result *Result, sourceRef, destSymbol string) ([]Edit, err
 }
 
 func planGoCrossFileMove(dir string, result *Result, src, dst Reference, sourceEntity Entity) ([]Edit, error) {
-	srcLang := languageForRefPath(result, src.Path)
-	if srcLang != "go" {
-		return nil, fmt.Errorf("cross-file move is currently supported only for Go symbols")
-	}
-
 	srcRel := strings.TrimPrefix(src.Path, "./")
 	dstRel := strings.TrimPrefix(dst.Path, "./")
 	if path.Dir(srcRel) != path.Dir(dstRel) {

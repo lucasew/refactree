@@ -106,19 +106,26 @@ func canonicalSourceReference(dir string, result *Result, ref Reference) (Refere
 }
 
 func pickPreferredDirectoryEntity(candidates []entityCandidate, dirRel string) (Reference, bool) {
-	pyInit := path.Join(dirRel, "__init__.py")
-	jsIndex := path.Join(dirRel, "index.js")
-
-	for _, c := range candidates {
-		candPath := strings.TrimPrefix(c.ref.Path, "./")
-		if c.language == "python" && candPath == pyInit {
-			return c.ref, true
+	// Keep deterministic preference for languages that define a canonical
+	// directory entry file.
+	for _, lang := range []string{"python", "javascript"} {
+		driver, ok := languageDriverForName(lang)
+		if !ok {
+			continue
 		}
-	}
-	for _, c := range candidates {
-		candPath := strings.TrimPrefix(c.ref.Path, "./")
-		if c.language == "javascript" && candPath == jsIndex {
-			return c.ref, true
+		preferred := driver.DirectoryEntryFile(dirRel)
+		if preferred == "" {
+			continue
+		}
+		preferred = path.Clean(preferred)
+		for _, c := range candidates {
+			if c.language != lang {
+				continue
+			}
+			candPath := path.Clean(strings.TrimPrefix(c.ref.Path, "./"))
+			if candPath == preferred {
+				return c.ref, true
+			}
 		}
 	}
 
@@ -159,19 +166,17 @@ func canonicalDestinationReference(dir string, result *Result, srcRef, dstRef Re
 	if srcLang == "" {
 		return dstRef, fmt.Errorf("could not determine language for source %s", srcRef.String())
 	}
-
-	dstDirRel := strings.TrimSuffix(strings.TrimPrefix(dstRef.Path, "./"), "/")
-	switch srcLang {
-	case "python":
-		dstRef.Path = "./" + path.Join(dstDirRel, "__init__.py")
-	case "javascript":
-		dstRef.Path = "./" + path.Join(dstDirRel, "index.js")
-	case "go":
-		srcBase := path.Base(strings.TrimPrefix(srcRef.Path, "./"))
-		dstRef.Path = "./" + path.Join(dstDirRel, srcBase)
-	default:
+	driver, ok := languageDriverForName(srcLang)
+	if !ok {
 		return dstRef, fmt.Errorf("unsupported source language %q for directory destination", srcLang)
 	}
+
+	dstDirRel := strings.TrimSuffix(strings.TrimPrefix(dstRef.Path, "./"), "/")
+	dstRelFile := driver.DestinationFileInDirectory(dstDirRel, srcRef)
+	if dstRelFile == "" {
+		return dstRef, fmt.Errorf("driver %q does not provide directory destination mapping", srcLang)
+	}
+	dstRef.Path = "./" + path.Clean(dstRelFile)
 
 	return dstRef, nil
 }

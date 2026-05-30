@@ -1,6 +1,26 @@
 package ingest
 
-import "github.com/lucasew/ccgo-tree-sitter/grammar"
+import (
+	"path"
+
+	"github.com/lucasew/ccgo-tree-sitter/grammar"
+)
+
+type javascriptLanguageDriver struct{}
+
+func (javascriptLanguageDriver) Language() string { return "javascript" }
+
+func (javascriptLanguageDriver) Extract(root *grammar.Node, source []byte, relPath string) *fileExtract {
+	return extractJavaScript(root, source, relPath)
+}
+
+func (javascriptLanguageDriver) DirectoryEntryFile(dirRel string) string {
+	return path.Join(dirRel, "index.js")
+}
+
+func (javascriptLanguageDriver) DestinationFileInDirectory(dstDirRel string, _ Reference) string {
+	return path.Join(dstDirRel, "index.js")
+}
 
 // extractJavaScript walks a JS program AST and produces a fileExtract.
 func extractJavaScript(root *grammar.Node, source []byte, path string) *fileExtract {

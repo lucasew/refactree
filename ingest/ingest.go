@@ -44,6 +44,10 @@ func parseFile(dir, absPath string) (*fileExtract, error) {
 	if !ok {
 		return nil, nil
 	}
+	driver, ok := languageDriverForFile(absPath)
+	if !ok {
+		return nil, nil
+	}
 
 	relPath, err := filepath.Rel(dir, absPath)
 	if err != nil {
@@ -54,8 +58,6 @@ func parseFile(dir, absPath string) (*fileExtract, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", relPath, err)
 	}
-
-	langName := languageNameByExt(absPath)
 
 	parser := grammar.NewParser()
 	defer parser.Delete()
@@ -68,17 +70,7 @@ func parseFile(dir, absPath string) (*fileExtract, error) {
 	defer tree.Delete()
 
 	root := tree.RootNode()
-
-	switch langName {
-	case "go":
-		return extractGo(root, source, relPath), nil
-	case "python":
-		return extractPython(root, source, relPath), nil
-	case "javascript":
-		return extractJavaScript(root, source, relPath), nil
-	}
-
-	return nil, nil
+	return driver.Extract(root, source, relPath), nil
 }
 
 func languageNameByExt(filename string) string {

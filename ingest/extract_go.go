@@ -1,6 +1,26 @@
 package ingest
 
-import "github.com/lucasew/ccgo-tree-sitter/grammar"
+import (
+	"path"
+	"strings"
+
+	"github.com/lucasew/ccgo-tree-sitter/grammar"
+)
+
+type goLanguageDriver struct{}
+
+func (goLanguageDriver) Language() string { return "go" }
+
+func (goLanguageDriver) Extract(root *grammar.Node, source []byte, relPath string) *fileExtract {
+	return extractGo(root, source, relPath)
+}
+
+func (goLanguageDriver) DirectoryEntryFile(string) string { return "" }
+
+func (goLanguageDriver) DestinationFileInDirectory(dstDirRel string, srcRef Reference) string {
+	srcPath := strings.TrimPrefix(srcRef.Path, "./")
+	return path.Join(dstDirRel, path.Base(srcPath))
+}
 
 // extractGo walks a Go source_file AST and produces a fileExtract.
 func extractGo(root *grammar.Node, source []byte, path string) *fileExtract {
