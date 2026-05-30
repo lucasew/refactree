@@ -24,6 +24,12 @@ func DocFor(dir, reference string) (*DocResult, error) {
 		return nil, err
 	}
 
+	ref, err := canonicalSourceReference(dir, result, ParseReference(reference))
+	if err != nil {
+		return nil, err
+	}
+	reference = ref.String()
+
 	var entity *Entity
 	for i := range result.Entities {
 		if result.Entities[i].Reference == reference {
@@ -35,7 +41,6 @@ func DocFor(dir, reference string) (*DocResult, error) {
 		return nil, fmt.Errorf("entity not found: %s", reference)
 	}
 
-	ref := ParseReference(reference)
 	relPath := strings.TrimPrefix(ref.Path, "./")
 	filePath := filepath.Join(dir, relPath)
 

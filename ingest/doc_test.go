@@ -54,3 +54,65 @@ func TestDocFor_PythonClass(t *testing.T) {
 		t.Fatalf("unexpected docstring: %q", doc.DocString)
 	}
 }
+
+func TestDocFor_DirectoryReference_PythonInit(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "pkg"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := "def helper():\n    \"\"\"from init\"\"\"\n    pass\n"
+	if err := os.WriteFile(filepath.Join(dir, "pkg", "__init__.py"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	doc, err := ingest.DocFor(dir, "path:./pkg::helper")
+	if err != nil {
+		t.Fatalf("doc lookup failed: %v", err)
+	}
+	if doc.DocString != "from init" {
+		t.Fatalf("unexpected docstring: %q", doc.DocString)
+	}
+}
+
+func TestDocFor_DirectoryReference_JSIndex(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "pkg"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := "// helper docs\nfunction helper() {\n}\nexport { helper };\n"
+	if err := os.WriteFile(filepath.Join(dir, "pkg", "index.js"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	doc, err := ingest.DocFor(dir, "path:./pkg::helper")
+	if err != nil {
+		t.Fatalf("doc lookup failed: %v", err)
+	}
+	if doc.Name != "helper" {
+		t.Fatalf("unexpected name: %q", doc.Name)
+	}
+	if !strings.Contains(doc.DocString, "helper docs") {
+		t.Fatalf("unexpected docstring: %q", doc.DocString)
+	}
+}
+
+func TestDocFor_DirectoryReference_GoFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "pkg"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pkg", "a.go"), []byte("package pkg\n\n// helper docs\nfunc helper() {\n}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	doc, err := ingest.DocFor(dir, "path:./pkg::helper")
+	if err != nil {
+		t.Fatalf("doc lookup failed: %v", err)
+	}
+	if doc.Name != "helper" {
+		t.Fatalf("unexpected name: %q", doc.Name)
+	}
+	if !strings.Contains(doc.DocString, "helper docs") {
+		t.Fatalf("unexpected docstring: %q", doc.DocString)
+	}
+}

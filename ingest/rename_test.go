@@ -202,6 +202,54 @@ func TestRename_ModuleAliasMemberCallsite_RenamesMemberAccess(t *testing.T) {
 	}
 }
 
+func TestMove_GoCrossFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "doc.go"), []byte("package main\n\nfunc helper() {\n}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ls.go"), []byte("package main\n\nfunc other() {\n}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {\n\thelper()\n}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	edits, err := ingest.Rename(dir, "doc.go::helper", "ls.go::helper")
+	if err != nil {
+		t.Fatalf("move failed: %v", err)
+	}
+	if len(edits) != 2 {
+		t.Fatalf("expected 2 edits (remove+insert), got %d", len(edits))
+	}
+
+	if err := ingest.ApplyEdits(dir, edits); err != nil {
+		t.Fatalf("apply edits failed: %v", err)
+	}
+
+	doc, err := os.ReadFile(filepath.Join(dir, "doc.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ls, err := os.ReadFile(filepath.Join(dir, "ls.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	main, err := os.ReadFile(filepath.Join(dir, "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if strings.Contains(string(doc), "func helper()") {
+		t.Fatalf("expected helper removed from doc.go, got:\n%s", doc)
+	}
+	if !strings.Contains(string(ls), "func helper()") {
+		t.Fatalf("expected helper inserted into ls.go, got:\n%s", ls)
+	}
+	if !strings.Contains(string(main), "helper()") {
+		t.Fatalf("expected callsite unchanged, got:\n%s", main)
+	}
+}
+
 func TestApplyEdits_AppliesDescendingOffsets(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "main.go")

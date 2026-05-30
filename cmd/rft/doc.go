@@ -28,6 +28,7 @@ func newDocCmd(root *rootOptions) *cobra.Command {
 					dir = filepath.Dir(p)
 				}
 			}
+			reference = normalizeRefForIngestDir(dir, ref).String()
 
 			doc, err := ingest.DocFor(dir, reference)
 			if err != nil {

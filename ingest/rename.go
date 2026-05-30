@@ -3,9 +3,12 @@ package ingest
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/lucasew/ccgo-tree-sitter/grammar"
 )
 
 // Edit describes a text replacement in a source file.
@@ -16,19 +19,58 @@ type Edit struct {
 	NewText   string
 }
 
-// Rename computes the edits needed to rename a symbol from sourceRef to destRef.
-// Both references must use the same provider and path; only the symbol changes.
+// Rename computes the edits needed to rename or move a symbol from sourceRef to
+// destRef. Same-file operations are treated as renames; cross-file operations
+// are treated as moves.
 func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 	src := ParseReference(sourceRef)
 	dst := ParseReference(destRef)
-	sourceRef = src.String()
-	destRef = dst.String()
+	if src.Symbol == "" || dst.Symbol == "" {
+		return nil, fmt.Errorf("source and destination references must include symbols")
+	}
 
 	result, err := Ingest(dir)
 	if err != nil {
 		return nil, err
 	}
 
+	src, err = canonicalSourceReference(dir, result, src)
+	if err != nil {
+		return nil, err
+	}
+	dst, err = canonicalDestinationReference(dir, result, src, dst)
+	if err != nil {
+		return nil, err
+	}
+
+	sourceRef = src.String()
+	destRef = dst.String()
+
+	sourceEntity, ok := findEntityByReference(result, sourceRef)
+	if !ok {
+		return nil, fmt.Errorf("no entity found for reference %s", sourceRef)
+	}
+
+	if src.Path != dst.Path {
+		if src.Symbol != dst.Symbol {
+			return nil, fmt.Errorf("cross-file move with symbol rename is not supported yet")
+		}
+		return planGoCrossFileMove(dir, result, src, dst, sourceEntity)
+	}
+
+	return planSymbolRename(result, sourceRef, dst.Symbol)
+}
+
+func findEntityByReference(result *Result, ref string) (Entity, bool) {
+	for _, ent := range result.Entities {
+		if ent.Reference == ref {
+			return ent, true
+		}
+	}
+	return Entity{}, false
+}
+
+func planSymbolRename(result *Result, sourceRef, destSymbol string) ([]Edit, error) {
 	var edits []Edit
 
 	// 1. Rename the entity definition.
@@ -39,7 +81,7 @@ func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 				File:      strings.TrimPrefix(ref.Path, "./"),
 				StartByte: ent.StartByte,
 				EndByte:   ent.EndByte,
-				NewText:   dst.Symbol,
+				NewText:   destSymbol,
 			})
 		}
 	}
@@ -57,7 +99,7 @@ func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 				File:      strings.TrimPrefix(ref.Path, "./"),
 				StartByte: rel.StartByte,
 				EndByte:   rel.EndByte,
-				NewText:   dst.Symbol,
+				NewText:   destSymbol,
 			})
 		}
 	}
@@ -70,7 +112,7 @@ func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 				File:      strings.TrimPrefix(ref.Path, "./"),
 				StartByte: alias.StartByte,
 				EndByte:   alias.EndByte,
-				NewText:   dst.Symbol,
+				NewText:   destSymbol,
 			})
 		}
 	}
@@ -79,11 +121,117 @@ func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 		return nil, fmt.Errorf("no entity found for reference %s", sourceRef)
 	}
 
-	if src.Symbol == "" || dst.Symbol == "" {
-		return nil, fmt.Errorf("source and destination references must include symbols")
+	return edits, nil
+}
+
+func planGoCrossFileMove(dir string, result *Result, src, dst Reference, sourceEntity Entity) ([]Edit, error) {
+	srcLang := languageForRefPath(result, src.Path)
+	if srcLang != "go" {
+		return nil, fmt.Errorf("cross-file move is currently supported only for Go symbols")
 	}
 
-	return edits, nil
+	srcRel := strings.TrimPrefix(src.Path, "./")
+	dstRel := strings.TrimPrefix(dst.Path, "./")
+	if path.Dir(srcRel) != path.Dir(dstRel) {
+		return nil, fmt.Errorf("cross-directory Go move is not supported yet")
+	}
+
+	pkg, declText, removeStart, removeEnd, err := extractGoDeclFromEntity(filepath.Join(dir, srcRel), sourceEntity.StartByte)
+	if err != nil {
+		return nil, err
+	}
+
+	dstPath := filepath.Join(dir, dstRel)
+	dstContent, err := os.ReadFile(dstPath)
+	dstExists := true
+	if err != nil {
+		if os.IsNotExist(err) {
+			dstExists = false
+		} else {
+			return nil, fmt.Errorf("reading %s: %w", dstRel, err)
+		}
+	}
+
+	insertAt := uint32(0)
+	insertText := ""
+	if dstExists {
+		insertAt = uint32(len(dstContent))
+		if len(dstContent) > 0 && dstContent[len(dstContent)-1] != '\n' {
+			insertText += "\n"
+		}
+		if len(dstContent) > 0 {
+			insertText += "\n"
+		}
+		insertText += declText + "\n"
+	} else {
+		insertText = fmt.Sprintf("package %s\n\n%s\n", pkg, declText)
+	}
+
+	return []Edit{
+		{
+			File:      srcRel,
+			StartByte: removeStart,
+			EndByte:   removeEnd,
+			NewText:   "",
+		},
+		{
+			File:      dstRel,
+			StartByte: insertAt,
+			EndByte:   insertAt,
+			NewText:   insertText,
+		},
+	}, nil
+}
+
+func extractGoDeclFromEntity(filePath string, nameStart uint32) (pkg, declText string, start, end uint32, err error) {
+	source, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", "", 0, 0, err
+	}
+
+	lang, ok := grammar.GetByExtension(filePath)
+	if !ok {
+		return "", "", 0, 0, fmt.Errorf("unsupported language for %s", filePath)
+	}
+
+	parser := grammar.NewParser()
+	defer parser.Delete()
+	if !parser.SetLanguage(lang) {
+		return "", "", 0, 0, fmt.Errorf("failed to set language for %s", filePath)
+	}
+
+	tree := parser.ParseString(string(source))
+	defer tree.Delete()
+	root := tree.RootNode()
+
+	for i := uint32(0); i < root.ChildCount(); i++ {
+		child := root.Child(i)
+		if child.Type() == "package_clause" {
+			if id := childByType(child, "package_identifier"); id != nil {
+				pkg = nodeText(id, source)
+			}
+		}
+	}
+
+	declNode := findDeclContaining(root, nameStart, "go")
+	if declNode == nil {
+		return "", "", 0, 0, fmt.Errorf("declaration not found in %s", filePath)
+	}
+
+	start = declNode.StartByte()
+	end = declNode.EndByte()
+	declText = string(source[start:end])
+
+	// Also remove up to two trailing newlines to avoid leaving extra gaps.
+	removeEnd := end
+	for removeEnd < uint32(len(source)) && (source[removeEnd] == '\n' || source[removeEnd] == '\r') {
+		removeEnd++
+		if removeEnd-end >= 2 {
+			break
+		}
+	}
+
+	return pkg, declText, start, removeEnd, nil
 }
 
 // ApplyEdits applies text replacements to files under dir.

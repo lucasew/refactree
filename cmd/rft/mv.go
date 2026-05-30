@@ -61,6 +61,10 @@ func newMvCmd(root *rootOptions) *cobra.Command {
 				}
 			}
 
+			if err := ensureEditFiles(dir, edits); err != nil {
+				return err
+			}
+
 			return ingest.ApplyEdits(dir, edits)
 		},
 	}
@@ -82,6 +86,9 @@ func createBackups(dir string, edits []ingest.Edit) error {
 		dst := src + ".bak"
 		in, err := os.Open(src)
 		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
 			return err
 		}
 		out, err := os.Create(dst)
@@ -93,6 +100,32 @@ func createBackups(dir string, edits []ingest.Edit) error {
 		in.Close()
 		out.Close()
 		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureEditFiles(dir string, edits []ingest.Edit) error {
+	seen := map[string]bool{}
+	for _, e := range edits {
+		if seen[e.File] {
+			continue
+		}
+		seen[e.File] = true
+
+		p := filepath.Join(dir, e.File)
+		_, err := os.Stat(p)
+		if err == nil {
+			continue
+		}
+		if !os.IsNotExist(err) {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(p, []byte{}, 0644); err != nil {
 			return err
 		}
 	}
@@ -127,6 +160,11 @@ func normalizeRefForIngestDir(dir string, ref ingest.Reference) ingest.Reference
 		return ref
 	}
 
-	ref.Path = "./" + filepath.ToSlash(rel)
+	rel = filepath.ToSlash(rel)
+	if rel == "." {
+		ref.Path = "./"
+		return ref
+	}
+	ref.Path = "./" + rel
 	return ref
 }

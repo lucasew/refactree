@@ -30,6 +30,7 @@ func newLsCmd(root *rootOptions) *cobra.Command {
 					dir = filepath.Dir(p)
 				}
 			}
+			ref = normalizeRefForIngestDir(dir, ref)
 
 			result, err := ingest.Ingest(dir)
 			if err != nil {
@@ -51,6 +52,9 @@ func newLsCmd(root *rootOptions) *cobra.Command {
 					continue
 				}
 				refPath := strings.TrimPrefix(ref.Path, "./")
+				if refPath == "." {
+					refPath = ""
+				}
 				entPath := strings.TrimPrefix(entRef.Path, "./")
 				if refPath != "" && !strings.HasPrefix(entPath, refPath) {
 					continue
