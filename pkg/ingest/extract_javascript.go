@@ -54,12 +54,17 @@ func extractJavaScript(root *grammar.Node, source []byte, path string) *fileExtr
 		switch child.Type() {
 		case "function_declaration":
 			extractJSFunc(fe, child, source)
+		case "class_declaration":
+			extractJSClass(fe, child, source)
 		case "export_statement":
-			// May wrap a function_declaration.
+			// May wrap a function_declaration or class_declaration.
 			for j := uint32(0); j < child.ChildCount(); j++ {
 				inner := child.Child(j)
 				if inner.Type() == "function_declaration" {
 					extractJSFunc(fe, inner, source)
+				}
+				if inner.Type() == "class_declaration" {
+					extractJSClass(fe, inner, source)
 				}
 			}
 		case "import_statement":
@@ -86,6 +91,50 @@ func extractJSFunc(fe *fileExtract, n *grammar.Node, source []byte) {
 
 	if body := childByField(n, "body"); body != nil {
 		walkJSUsages(fe, body, source, name)
+	}
+}
+
+func extractJSClass(fe *fileExtract, n *grammar.Node, source []byte) {
+	nameNode := childByField(n, "name")
+	if nameNode == nil {
+		return
+	}
+	className := nodeText(nameNode, source)
+
+	fe.entities = append(fe.entities, entityDef{
+		name:      className,
+		startByte: nameNode.StartByte(),
+		endByte:   nameNode.EndByte(),
+		exported:  true,
+	})
+
+	body := childByField(n, "body")
+	if body == nil {
+		return
+	}
+
+	for i := uint32(0); i < body.ChildCount(); i++ {
+		member := body.Child(i)
+		if member.Type() != "method_definition" {
+			continue
+		}
+		methodNameNode := childByField(member, "name")
+		if methodNameNode == nil {
+			continue
+		}
+
+		methodShort := nodeText(methodNameNode, source)
+		methodName := className + "." + methodShort
+		fe.entities = append(fe.entities, entityDef{
+			name:      methodName,
+			startByte: methodNameNode.StartByte(),
+			endByte:   methodNameNode.EndByte(),
+			exported:  true,
+		})
+
+		if methodBody := childByField(member, "body"); methodBody != nil {
+			walkJSUsages(fe, methodBody, source, methodName)
+		}
 	}
 }
 

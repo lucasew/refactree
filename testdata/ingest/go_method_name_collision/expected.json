@@ -1,0 +1,21 @@
+{
+  "files": [
+    {
+      "language": "go",
+      "path": "main.go"
+    }
+  ],
+  "entities": [
+    {
+      "reference": "path:./main.go::*B.Run",
+      "start_byte": 95,
+      "end_byte": 98
+    },
+    {
+      "reference": "path:./main.go::A.Run",
+      "start_byte": 58,
+      "end_byte": 61
+    }
+  ],
+  "relations": []
+}

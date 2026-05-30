@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"path"
+	"strings"
 
 	"github.com/lucasew/ccgo-tree-sitter/grammar"
 )
@@ -27,7 +28,8 @@ func (pythonLanguageDriver) AllowListSymbol(name string, opts SymbolListOptions)
 	if opts.IncludeHidden {
 		return true
 	}
-	return !(len(name) > 0 && name[0] == '_')
+	check := pythonVisibilityName(name)
+	return !(len(check) > 0 && check[0] == '_')
 }
 
 func (pythonLanguageDriver) DirectoryEntryFile(dirRel string) string {
@@ -86,17 +88,42 @@ func extractPythonClass(fe *fileExtract, n *grammar.Node, source []byte) {
 	if nameNode == nil {
 		return
 	}
-	name := nodeText(nameNode, source)
+	className := nodeText(nameNode, source)
 
 	fe.entities = append(fe.entities, entityDef{
-		name:      name,
+		name:      className,
 		startByte: nameNode.StartByte(),
 		endByte:   nameNode.EndByte(),
-		exported:  len(name) == 0 || name[0] != '_',
+		exported:  len(className) == 0 || className[0] != '_',
 	})
 
 	if body := childByField(n, "body"); body != nil {
-		walkPythonUsages(fe, body, source, name)
+		for i := uint32(0); i < body.ChildCount(); i++ {
+			child := body.Child(i)
+			if child.Type() != "function_definition" {
+				continue
+			}
+
+			methodNameNode := childByField(child, "name")
+			if methodNameNode == nil {
+				continue
+			}
+			methodShort := nodeText(methodNameNode, source)
+			methodName := className + "." + methodShort
+
+			fe.entities = append(fe.entities, entityDef{
+				name:      methodName,
+				startByte: methodNameNode.StartByte(),
+				endByte:   methodNameNode.EndByte(),
+				exported:  len(methodShort) == 0 || methodShort[0] != '_',
+			})
+
+			if methodBody := childByField(child, "body"); methodBody != nil {
+				walkPythonUsages(fe, methodBody, source, methodName)
+			}
+		}
+
+		walkPythonUsages(fe, body, source, className)
 	}
 }
 
@@ -257,4 +284,14 @@ func walkPythonUsages(fe *fileExtract, n *grammar.Node, source []byte, scope str
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		walkPythonUsages(fe, n.Child(i), source, scope)
 	}
+}
+
+func pythonVisibilityName(name string) string {
+	if name == "" {
+		return ""
+	}
+	if i := strings.LastIndex(name, "."); i >= 0 && i+1 < len(name) {
+		return name[i+1:]
+	}
+	return name
 }

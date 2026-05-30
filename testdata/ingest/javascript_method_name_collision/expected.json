@@ -1,0 +1,31 @@
+{
+  "files": [
+    {
+      "language": "javascript",
+      "path": "main.js"
+    }
+  ],
+  "entities": [
+    {
+      "reference": "path:./main.js::A",
+      "start_byte": 6,
+      "end_byte": 7
+    },
+    {
+      "reference": "path:./main.js::A.run",
+      "start_byte": 12,
+      "end_byte": 15
+    },
+    {
+      "reference": "path:./main.js::B",
+      "start_byte": 47,
+      "end_byte": 48
+    },
+    {
+      "reference": "path:./main.js::B.run",
+      "start_byte": 53,
+      "end_byte": 56
+    }
+  ],
+  "relations": []
+}

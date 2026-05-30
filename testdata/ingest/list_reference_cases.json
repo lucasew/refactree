@@ -1,0 +1,50 @@
+[
+  {
+    "name": "go_method_name_collision",
+    "fixture": "go_method_name_collision",
+    "reference": "path:./main.go",
+    "options": {
+      "include_hidden": false,
+      "recursive": false
+    },
+    "expected_refs": [
+      "path:./main.go::A.Run",
+      "path:./main.go::*B.Run"
+    ],
+    "unexpected_refs": [
+      "path:./main.go::Run"
+    ]
+  },
+  {
+    "name": "python_method_name_collision",
+    "fixture": "python_method_name_collision",
+    "reference": "path:./app.py",
+    "options": {
+      "include_hidden": false,
+      "recursive": false
+    },
+    "expected_refs": [
+      "path:./app.py::A.run",
+      "path:./app.py::B.run"
+    ],
+    "unexpected_refs": [
+      "path:./app.py::run"
+    ]
+  },
+  {
+    "name": "javascript_method_name_collision",
+    "fixture": "javascript_method_name_collision",
+    "reference": "path:./main.js",
+    "options": {
+      "include_hidden": false,
+      "recursive": false
+    },
+    "expected_refs": [
+      "path:./main.js::A.run",
+      "path:./main.js::B.run"
+    ],
+    "unexpected_refs": [
+      "path:./main.js::run"
+    ]
+  }
+]

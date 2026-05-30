@@ -1,0 +1,31 @@
+{
+  "files": [
+    {
+      "language": "python",
+      "path": "app.py"
+    }
+  ],
+  "entities": [
+    {
+      "reference": "path:./app.py::A",
+      "start_byte": 6,
+      "end_byte": 7
+    },
+    {
+      "reference": "path:./app.py::A.run",
+      "start_byte": 17,
+      "end_byte": 20
+    },
+    {
+      "reference": "path:./app.py::B",
+      "start_byte": 52,
+      "end_byte": 53
+    },
+    {
+      "reference": "path:./app.py::B.run",
+      "start_byte": 63,
+      "end_byte": 66
+    }
+  ],
+  "relations": []
+}

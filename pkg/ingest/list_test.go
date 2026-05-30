@@ -1,6 +1,7 @@
 package ingest_test
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,8 @@ import (
 	"github.com/lucasew/refactree/pkg/ingest"
 
 	_ "github.com/lucasew/ccgo-tree-sitter/grammar/go"
+	_ "github.com/lucasew/ccgo-tree-sitter/grammar/javascript"
+	_ "github.com/lucasew/ccgo-tree-sitter/grammar/python"
 )
 
 func TestWalkSymbols_NonRecursiveDirectory(t *testing.T) {
@@ -145,20 +148,52 @@ func TestWalkSymbols_GoProviderReferenceShape(t *testing.T) {
 	}
 }
 
-func TestWalkSymbols_GoMethodsIncludeReceiver(t *testing.T) {
-	dir := t.TempDir()
-	mustWrite(t, filepath.Join(dir, "a.go"), "package main\n\ntype A struct{}\ntype B struct{}\n\nfunc (a A) Error() string { return \"\" }\nfunc (b *B) Error() string { return \"\" }\n")
-
-	refs, err := collectRefs(dir, "path:./", ingest.ListOptions{})
+func TestWalkSymbols_ReferenceFixtures(t *testing.T) {
+	fixtureRoot := filepath.Join("..", "..", "testdata", "ingest")
+	input, err := os.ReadFile(filepath.Join(fixtureRoot, "list_reference_cases.json"))
 	if err != nil {
-		t.Fatalf("walk symbols: %v", err)
+		t.Fatalf("reading list_reference_cases.json: %v", err)
 	}
 
-	if !containsRef(refs, "path:./a.go::A.Error") {
-		t.Fatalf("expected receiver-qualified method symbol, got %v", refs)
+	var cases []struct {
+		Name      string `json:"name"`
+		Fixture   string `json:"fixture"`
+		Reference string `json:"reference"`
+		Options   struct {
+			IncludeHidden bool `json:"include_hidden"`
+			Recursive     bool `json:"recursive"`
+		} `json:"options"`
+		ExpectedRefs   []string `json:"expected_refs"`
+		UnexpectedRefs []string `json:"unexpected_refs"`
 	}
-	if !containsRef(refs, "path:./a.go::*B.Error") {
-		t.Fatalf("expected pointer receiver-qualified method symbol, got %v", refs)
+	if err := json.Unmarshal(input, &cases); err != nil {
+		t.Fatalf("parsing list_reference_cases.json: %v", err)
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.Name, func(t *testing.T) {
+			dir := filepath.Join(fixtureRoot, tc.Fixture)
+			refs, err := collectRefs(dir, tc.Reference, ingest.ListOptions{
+				IncludeHidden: tc.Options.IncludeHidden,
+				Recursive:     tc.Options.Recursive,
+			})
+			if err != nil {
+				t.Fatalf("walk symbols: %v", err)
+			}
+
+			for _, expected := range tc.ExpectedRefs {
+				if !containsRef(refs, expected) {
+					t.Fatalf("expected symbol %q not found, got %v", expected, refs)
+				}
+			}
+
+			for _, unexpected := range tc.UnexpectedRefs {
+				if containsRef(refs, unexpected) {
+					t.Fatalf("unexpected symbol %q found, got %v", unexpected, refs)
+				}
+			}
+		})
 	}
 }
 
