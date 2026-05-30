@@ -20,14 +20,17 @@ type DocResult struct {
 // signature and docstring from the source file.
 func DocFor(dir, reference string) (*DocResult, error) {
 	rawRef := ParseReference(reference)
-	if rawRef.Provider != "" && rawRef.Provider != "path" && rawRef.Symbol != "" {
-		target, ok, err := resolveProviderSymbolTarget(rawRef)
-		if err != nil {
-			return nil, err
+	if rawRef.Provider != "" && rawRef.Provider != "path" {
+		if rawRef.Symbol != "" {
+			target, ok, err := resolveProviderSymbolTarget(rawRef)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				return docForProviderSymbol(rawRef, target)
+			}
 		}
-		if ok {
-			return docForProviderSymbol(rawRef, target)
-		}
+		return nil, fmt.Errorf("provider doc reference requires symbol (::name): %s", reference)
 	}
 
 	result, err := Ingest(dir)

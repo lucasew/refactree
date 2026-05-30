@@ -6,6 +6,8 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	refpkg "github.com/lucasew/refactree/pkg/reference"
 )
 
 type entityCandidate struct {
@@ -14,22 +16,7 @@ type entityCandidate struct {
 }
 
 func normalizePathReference(ref Reference) Reference {
-	if ref.Provider != "path" {
-		return ref
-	}
-	if ref.Path == "" {
-		ref.Path = "./"
-		return ref
-	}
-	if ref.Path == "." {
-		ref.Path = "./"
-		return ref
-	}
-	if strings.HasPrefix(ref.Path, "./") || strings.HasPrefix(ref.Path, "../") || strings.HasPrefix(ref.Path, "/") {
-		return ref
-	}
-	ref.Path = "./" + ref.Path
-	return ref
+	return refpkg.NormalizePathReference(ref)
 }
 
 func languageForRefPath(result *Result, pathRef string) string {
