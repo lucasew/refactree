@@ -20,11 +20,6 @@ type LanguageDriver interface {
 	ResolveImport(sourcePath string, ctx ImportResolveContext) string
 	AllowListSymbol(name string, opts SymbolListOptions) bool
 
-	// DirectoryEntryFile returns the canonical file used when a directory is
-	// referenced as a symbol container (for example __init__.py or index.js).
-	// Return empty string when the language has no single canonical entry file.
-	DirectoryEntryFile(dirRel string) string
-
 	// DestinationFileInDirectory maps a destination directory reference to a
 	// concrete file path for this language.
 	DestinationFileInDirectory(dstDirRel string, srcRef Reference) string
@@ -38,7 +33,10 @@ func languageDriverForName(name string) (LanguageDriver, bool) {
 }
 
 func languageDriverForFile(filename string) (LanguageDriver, bool) {
-	lang := languageNameByExt(filename)
+	lang, ok := LanguageForFile(filename)
+	if !ok {
+		return nil, false
+	}
 	return languageDriverForName(lang)
 }
 

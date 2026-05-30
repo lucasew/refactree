@@ -1,7 +1,6 @@
 package python
 
 import (
-	"path"
 	"strings"
 
 	"github.com/lucasew/ccgo-tree-sitter/grammar"
@@ -11,6 +10,10 @@ import (
 
 func init() {
 	ingest.RegisterLanguageDriver("python", languageDriver{})
+	ingest.RegisterLanguageRules("python", ingest.LanguageRules{
+		Extensions:      []string{".py"},
+		DirectoryModule: false,
+	})
 	ingest.RegisterReferenceProvider("python", referenceProvider{})
 }
 
@@ -37,12 +40,9 @@ func (languageDriver) AllowListSymbol(name string, opts ingest.SymbolListOptions
 	return !(len(check) > 0 && check[0] == '_')
 }
 
-func (languageDriver) DirectoryEntryFile(dirRel string) string {
-	return path.Join(dirRel, "__init__.py")
-}
-
 func (languageDriver) DestinationFileInDirectory(dstDirRel string, _ ingest.Reference) string {
-	return path.Join(dstDirRel, "__init__.py")
+	_ = dstDirRel
+	return ""
 }
 
 type referenceProvider struct{}

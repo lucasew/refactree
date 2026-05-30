@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/lucasew/ccgo-tree-sitter/grammar"
 )
@@ -84,16 +83,4 @@ func parseFile(dir, absPath string) (*FileExtract, error) {
 
 	root := tree.RootNode()
 	return driver.Extract(root, source, relPath), nil
-}
-
-func languageNameByExt(filename string) string {
-	ext := strings.TrimPrefix(filepath.Ext(filename), ".")
-	switch ext {
-	case "py":
-		return "python"
-	case "js":
-		return "javascript"
-	default:
-		return ext
-	}
 }

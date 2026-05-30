@@ -15,6 +15,10 @@ type entityCandidate struct {
 	Language string
 }
 
+func allowDirectorySymbolRef(language string) bool {
+	return LanguageUsesDirectoryModule(language)
+}
+
 func normalizePathReference(ref Reference) Reference {
 	return refpkg.NormalizePathReference(ref)
 }
@@ -77,6 +81,9 @@ func canonicalSourceReference(dir string, result *Result, ref Reference) (Refere
 	if len(candidates) == 0 {
 		return ref, fmt.Errorf("no entity %q found under directory %q", ref.Symbol, ref.Path)
 	}
+	if !hasDirectorySymbolCandidates(candidates) {
+		return ref, fmt.Errorf("directory symbol reference %q is not supported for this language; use a file reference", ref.String())
+	}
 	if len(candidates) == 1 {
 		return candidates[0].Ref, nil
 	}
@@ -93,44 +100,30 @@ func canonicalSourceReference(dir string, result *Result, ref Reference) (Refere
 }
 
 func pickPreferredDirectoryEntity(candidates []entityCandidate, dirRel string) (Reference, bool) {
-	// Keep deterministic preference for languages that define a canonical
-	// directory entry file.
-	for _, lang := range []string{"python", "javascript"} {
-		driver, ok := languageDriverForName(lang)
-		if !ok {
-			continue
-		}
-		preferred := driver.DirectoryEntryFile(dirRel)
-		if preferred == "" {
-			continue
-		}
-		preferred = path.Clean(preferred)
-		for _, c := range candidates {
-			if c.Language != lang {
-				continue
-			}
-			candPath := path.Clean(strings.TrimPrefix(c.Ref.Path, "./"))
-			if candPath == preferred {
-				return c.Ref, true
-			}
-		}
-	}
-
-	goDirect := []Reference{}
+	direct := []Reference{}
 	for _, c := range candidates {
-		if c.Language != "go" {
+		if !LanguageUsesDirectoryModule(c.Language) {
 			continue
 		}
 		candPath := strings.TrimPrefix(c.Ref.Path, "./")
 		if path.Dir(candPath) == dirRel {
-			goDirect = append(goDirect, c.Ref)
+			direct = append(direct, c.Ref)
 		}
 	}
-	if len(goDirect) == 1 {
-		return goDirect[0], true
+	if len(direct) == 1 {
+		return direct[0], true
 	}
 
 	return Reference{}, false
+}
+
+func hasDirectorySymbolCandidates(candidates []entityCandidate) bool {
+	for _, c := range candidates {
+		if allowDirectorySymbolRef(c.Language) {
+			return true
+		}
+	}
+	return false
 }
 
 func canonicalDestinationReference(dir string, result *Result, srcRef, dstRef Reference) (Reference, error) {
@@ -152,6 +145,9 @@ func canonicalDestinationReference(dir string, result *Result, srcRef, dstRef Re
 	srcLang := languageForRefPath(result, srcRef.Path)
 	if srcLang == "" {
 		return dstRef, fmt.Errorf("could not determine language for source %s", srcRef.String())
+	}
+	if !allowDirectorySymbolRef(srcLang) {
+		return dstRef, fmt.Errorf("directory destination %q is not supported for language %q; use a file path", dstRef.Path, srcLang)
 	}
 	driver, ok := languageDriverForName(srcLang)
 	if !ok {

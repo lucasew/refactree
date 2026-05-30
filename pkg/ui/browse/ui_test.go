@@ -403,6 +403,152 @@ func TestBrowseNavigateIntoDirectory_ShowsSymbols(t *testing.T) {
 	}
 }
 
+func TestBrowseNavigateIntoPythonDirectory_ShowsFileModulesOnly(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "pkg")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatalf("create subdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "helper.py"), []byte("def helper():\n    return 1\n"), 0644); err != nil {
+		t.Fatalf("write python file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "more.py"), []byte("def more():\n    return 2\n"), 0644); err != nil {
+		t.Fatalf("write python file: %v", err)
+	}
+
+	model, err := newBrowseModel(dir, ".", false)
+	if err != nil {
+		t.Fatalf("new browse model: %v", err)
+	}
+
+	index := findBrowseItemIndex(model.list.Items(), func(it browseItem) bool {
+		return it.kind == browseItemDir && it.targetRel == "pkg"
+	})
+	if index < 0 {
+		t.Fatal("expected directory item for pkg/")
+	}
+	model.list.Select(index)
+	if err := model.activateSelection(); err != nil {
+		t.Fatalf("activate selection: %v", err)
+	}
+
+	sawModuleFile := false
+	sawSymbol := false
+	for _, raw := range model.list.Items() {
+		item, ok := raw.(browseItem)
+		if !ok {
+			continue
+		}
+		if item.kind == browseItemFile && item.title == "helper.py" {
+			sawModuleFile = true
+		}
+		if item.kind == browseItemSymbol {
+			sawSymbol = true
+		}
+	}
+
+	if !sawModuleFile {
+		t.Fatalf("expected helper.py module entry, got items: %+v", model.list.Items())
+	}
+	if sawSymbol {
+		t.Fatalf("did not expect directory-level symbols for python modules, got items: %+v", model.list.Items())
+	}
+}
+
+func TestBrowsePythonModuleFile_ShowsFileSymbols(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "pkg")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatalf("create subdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "helper.py"), []byte("def helper():\n    return 1\n"), 0644); err != nil {
+		t.Fatalf("write python file: %v", err)
+	}
+
+	model, err := newBrowseModel(dir, "pkg", false)
+	if err != nil {
+		t.Fatalf("new browse model: %v", err)
+	}
+
+	index := findBrowseItemIndex(model.list.Items(), func(it browseItem) bool {
+		return it.kind == browseItemFile && it.title == "helper.py"
+	})
+	if index < 0 {
+		t.Fatalf("expected helper.py module entry, got items: %+v", model.list.Items())
+	}
+	model.list.Select(index)
+	if err := model.activateSelection(); err != nil {
+		t.Fatalf("activate selection: %v", err)
+	}
+
+	found := false
+	for _, raw := range model.list.Items() {
+		item, ok := raw.(browseItem)
+		if !ok {
+			continue
+		}
+		if item.kind == browseItemSymbol && item.title == "helper" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected helper symbol after entering helper.py, got items: %+v", model.list.Items())
+	}
+}
+
+func TestBrowseNavigateIntoJavaScriptDirectory_ShowsFileModulesOnly(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "pkg")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatalf("create subdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "helper.js"), []byte("export function helper() {\n  return 1;\n}\n"), 0644); err != nil {
+		t.Fatalf("write javascript file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "more.js"), []byte("export function more() {\n  return 2;\n}\n"), 0644); err != nil {
+		t.Fatalf("write javascript file: %v", err)
+	}
+
+	model, err := newBrowseModel(dir, ".", false)
+	if err != nil {
+		t.Fatalf("new browse model: %v", err)
+	}
+
+	index := findBrowseItemIndex(model.list.Items(), func(it browseItem) bool {
+		return it.kind == browseItemDir && it.targetRel == "pkg"
+	})
+	if index < 0 {
+		t.Fatal("expected directory item for pkg/")
+	}
+	model.list.Select(index)
+	if err := model.activateSelection(); err != nil {
+		t.Fatalf("activate selection: %v", err)
+	}
+
+	sawModuleFile := false
+	sawSymbol := false
+	for _, raw := range model.list.Items() {
+		item, ok := raw.(browseItem)
+		if !ok {
+			continue
+		}
+		if item.kind == browseItemFile && item.title == "helper.js" {
+			sawModuleFile = true
+		}
+		if item.kind == browseItemSymbol {
+			sawSymbol = true
+		}
+	}
+
+	if !sawModuleFile {
+		t.Fatalf("expected helper.js module entry, got items: %+v", model.list.Items())
+	}
+	if sawSymbol {
+		t.Fatalf("did not expect directory-level symbols for javascript modules, got items: %+v", model.list.Items())
+	}
+}
+
 func TestBrowseDocLookupDir_UsesCurrentDirectoryScope(t *testing.T) {
 	dir := t.TempDir()
 	sub := filepath.Join(dir, "pkg")

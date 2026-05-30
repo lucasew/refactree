@@ -55,7 +55,7 @@ func TestDocFor_PythonClass(t *testing.T) {
 	}
 }
 
-func TestDocFor_DirectoryReference_PythonInit(t *testing.T) {
+func TestDocFor_DirectoryReference_PythonRejected(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "pkg"), 0755); err != nil {
 		t.Fatal(err)
@@ -65,16 +65,16 @@ func TestDocFor_DirectoryReference_PythonInit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	doc, err := ingest.DocFor(dir, "path:./pkg::helper")
-	if err != nil {
-		t.Fatalf("doc lookup failed: %v", err)
+	_, err := ingest.DocFor(dir, "path:./pkg::helper")
+	if err == nil {
+		t.Fatal("expected error for directory reference")
 	}
-	if doc.DocString != "from init" {
-		t.Fatalf("unexpected docstring: %q", doc.DocString)
+	if !strings.Contains(err.Error(), "use a file reference") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func TestDocFor_DirectoryReference_JSIndex(t *testing.T) {
+func TestDocFor_DirectoryReference_JSRejected(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "pkg"), 0755); err != nil {
 		t.Fatal(err)
@@ -84,15 +84,12 @@ func TestDocFor_DirectoryReference_JSIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	doc, err := ingest.DocFor(dir, "path:./pkg::helper")
-	if err != nil {
-		t.Fatalf("doc lookup failed: %v", err)
+	_, err := ingest.DocFor(dir, "path:./pkg::helper")
+	if err == nil {
+		t.Fatal("expected error for directory reference")
 	}
-	if doc.Name != "helper" {
-		t.Fatalf("unexpected Name: %q", doc.Name)
-	}
-	if !strings.Contains(doc.DocString, "helper docs") {
-		t.Fatalf("unexpected docstring: %q", doc.DocString)
+	if !strings.Contains(err.Error(), "use a file reference") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

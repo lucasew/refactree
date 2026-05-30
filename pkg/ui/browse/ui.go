@@ -543,6 +543,9 @@ func (m *browseModel) buildItems() ([]list.Item, error) {
 		}
 
 		dirs := make([]browseItem, 0, len(entries))
+		modules := make([]browseItem, 0, len(entries))
+		onlyGoModules := true
+		hasModules := false
 		for _, entry := range entries {
 			name := entry.Name()
 			if !m.includeHidden && strings.HasPrefix(name, ".") {
@@ -559,11 +562,42 @@ func (m *browseModel) buildItems() ([]list.Item, error) {
 				})
 				continue
 			}
+
+			lang, ok := ingest.LanguageForFile(name)
+			if !ok {
+				continue
+			}
+			hasModules = true
+			if !ingest.LanguageUsesDirectoryModule(lang) {
+				onlyGoModules = false
+				modules = append(modules, browseItem{
+					kind:      browseItemFile,
+					title:     name,
+					desc:      fmt.Sprintf("%s module", lang),
+					targetRel: target,
+					targetRef: m.scopeRefForPathRel(target),
+				})
+			}
 		}
 
 		sort.Slice(dirs, func(i, j int) bool { return dirs[i].title < dirs[j].title })
 		for _, it := range dirs {
 			items = append(items, it)
+		}
+		sort.Slice(modules, func(i, j int) bool { return modules[i].title < modules[j].title })
+		for _, it := range modules {
+			items = append(items, it)
+		}
+
+		if hasModules && !onlyGoModules {
+			if len(items) == 0 {
+				items = append(items, browseItem{
+					kind:  browseItemInfo,
+					title: "(empty)",
+					desc:  "no files or symbols",
+				})
+			}
+			return items, nil
 		}
 	}
 

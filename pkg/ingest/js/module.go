@@ -3,7 +3,6 @@ package js
 import (
 	"encoding/json"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 
@@ -14,6 +13,10 @@ import (
 
 func init() {
 	ingest.RegisterLanguageDriver("javascript", languageDriver{})
+	ingest.RegisterLanguageRules("javascript", ingest.LanguageRules{
+		Extensions:      []string{".js", ".mjs", ".cjs"},
+		DirectoryModule: false,
+	})
 	ingest.RegisterReferenceProvider("node", referenceProvider{})
 }
 
@@ -40,12 +43,9 @@ func (languageDriver) ResolveImport(sourcePath string, ctx ingest.ImportResolveC
 
 func (languageDriver) AllowListSymbol(string, ingest.SymbolListOptions) bool { return true }
 
-func (languageDriver) DirectoryEntryFile(dirRel string) string {
-	return path.Join(dirRel, "index.js")
-}
-
 func (languageDriver) DestinationFileInDirectory(dstDirRel string, _ ingest.Reference) string {
-	return path.Join(dstDirRel, "index.js")
+	_ = dstDirRel
+	return ""
 }
 
 type referenceProvider struct{}

@@ -14,6 +14,10 @@ import (
 
 func init() {
 	ingest.RegisterLanguageDriver("go", languageDriver{})
+	ingest.RegisterLanguageRules("go", ingest.LanguageRules{
+		Extensions:      []string{".go"},
+		DirectoryModule: true,
+	})
 	ingest.RegisterReferenceProvider("go", referenceProvider{})
 }
 
@@ -40,8 +44,6 @@ func (languageDriver) AllowListSymbol(name string, opts ingest.SymbolListOptions
 	r, _ := utf8.DecodeRuneInString(exportName)
 	return unicode.IsUpper(r)
 }
-
-func (languageDriver) DirectoryEntryFile(string) string { return "" }
 
 func (languageDriver) DestinationFileInDirectory(dstDirRel string, srcRef ingest.Reference) string {
 	srcPath := strings.TrimPrefix(srcRef.Path, "./")
