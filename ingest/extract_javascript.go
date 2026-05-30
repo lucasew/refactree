@@ -108,11 +108,14 @@ func extractJSNamedImports(fe *fileExtract, n *grammar.Node, source []byte, sour
 		}
 
 		fe.imports = append(fe.imports, importDef{
-			localName:  localName,
-			sourcePath: sourcePath,
-			memberName: memberName,
-			startByte:  startByte,
-			endByte:    endByte,
+			localName:       localName,
+			sourcePath:      sourcePath,
+			memberName:      memberName,
+			startByte:       startByte,
+			endByte:         endByte,
+			targetStartByte: nameNode.StartByte(),
+			targetEndByte:   nameNode.EndByte(),
+			hasAliasBinding: aliasNode != nil,
 		})
 	}
 }

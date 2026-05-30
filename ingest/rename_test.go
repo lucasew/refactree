@@ -66,7 +66,7 @@ func TestRename_RenamesDefinitionAndCallsite(t *testing.T) {
 	}
 }
 
-func TestRename_PythonAliasedImport_CurrentLimitation(t *testing.T) {
+func TestRename_PythonAliasedImport_RenamesImportedMemberOnly(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "helper.py"), []byte("def helper():\n    pass\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -79,14 +79,108 @@ func TestRename_PythonAliasedImport_CurrentLimitation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rename failed: %v", err)
 	}
-
-	// Current behavior: aliased imports are not linked to target entities,
-	// so only the symbol definition itself is renamed.
-	if len(edits) != 1 {
-		t.Fatalf("expected 1 edit with aliased import limitation, got %d", len(edits))
+	if len(edits) != 2 {
+		t.Fatalf("expected 2 edits (definition + imported member), got %d", len(edits))
 	}
-	if edits[0].File != "helper.py" {
-		t.Fatalf("expected edit in helper.py, got %+v", edits[0])
+
+	if err := ingest.ApplyEdits(dir, edits); err != nil {
+		t.Fatalf("apply edits failed: %v", err)
+	}
+
+	app, err := os.ReadFile(filepath.Join(dir, "app.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper, err := os.ReadFile(filepath.Join(dir, "helper.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(string(helper), "def renamed():") {
+		t.Fatalf("expected helper definition renamed, got:\n%s", helper)
+	}
+	if !strings.Contains(string(app), "from helper import renamed as h") {
+		t.Fatalf("expected imported member renamed, got:\n%s", app)
+	}
+	if !strings.Contains(string(app), "h()") {
+		t.Fatalf("expected aliased callsite to stay as h(), got:\n%s", app)
+	}
+	if strings.Contains(string(app), "renamed()") {
+		t.Fatalf("did not expect aliased callsite renamed, got:\n%s", app)
+	}
+}
+
+func TestRename_JSAliasedImport_RenamesImportedMemberOnly(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "helper.js"), []byte("export function helper() {\n}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.js"), []byte("import { helper as h } from \"./helper.js\";\n\nfunction main() {\n  h();\n}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	edits, err := ingest.Rename(dir, "path:./helper.js::helper", "path:./helper.js::doHelp")
+	if err != nil {
+		t.Fatalf("rename failed: %v", err)
+	}
+	if len(edits) != 2 {
+		t.Fatalf("expected 2 edits (definition + imported member), got %d", len(edits))
+	}
+
+	if err := ingest.ApplyEdits(dir, edits); err != nil {
+		t.Fatalf("apply edits failed: %v", err)
+	}
+
+	main, err := os.ReadFile(filepath.Join(dir, "main.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper, err := os.ReadFile(filepath.Join(dir, "helper.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(string(helper), "function doHelp()") {
+		t.Fatalf("expected helper definition renamed, got:\n%s", helper)
+	}
+	if !strings.Contains(string(main), "import { doHelp as h }") {
+		t.Fatalf("expected imported member renamed, got:\n%s", main)
+	}
+	if !strings.Contains(string(main), "h();") {
+		t.Fatalf("expected aliased callsite to stay as h(), got:\n%s", main)
+	}
+	if strings.Contains(string(main), "doHelp();") {
+		t.Fatalf("did not expect aliased callsite renamed, got:\n%s", main)
+	}
+}
+
+func TestRename_ModuleAliasMemberCallsite_RenamesMemberAccess(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "helpers.py"), []byte("def helper():\n    pass\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte("import helpers as h\n\n\ndef main():\n    h.helper()\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	edits, err := ingest.Rename(dir, "path:./helpers.py::helper", "path:./helpers.py::renamed")
+	if err != nil {
+		t.Fatalf("rename failed: %v", err)
+	}
+	if len(edits) != 2 {
+		t.Fatalf("expected 2 edits (definition + member callsite), got %d", len(edits))
+	}
+
+	if err := ingest.ApplyEdits(dir, edits); err != nil {
+		t.Fatalf("apply edits failed: %v", err)
+	}
+
+	app, err := os.ReadFile(filepath.Join(dir, "app.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(app), "h.renamed()") {
+		t.Fatalf("expected member access renamed, got:\n%s", app)
 	}
 }
 

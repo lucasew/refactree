@@ -1,0 +1,56 @@
+package ingest_test
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/lucasew/refactree/ingest"
+)
+
+func TestDocFor_PythonFunction(t *testing.T) {
+	dir := t.TempDir()
+	content := "def helper(x):\n    \"\"\"does help\"\"\"\n    return x\n"
+	if err := os.WriteFile(filepath.Join(dir, "helper.py"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	doc, err := ingest.DocFor(dir, "path:./helper.py::helper")
+	if err != nil {
+		t.Fatalf("doc lookup failed: %v", err)
+	}
+
+	if doc.Name != "helper" {
+		t.Fatalf("unexpected name: %q", doc.Name)
+	}
+	if !strings.Contains(doc.Signature, "def helper(x)") {
+		t.Fatalf("unexpected signature: %q", doc.Signature)
+	}
+	if doc.DocString != "does help" {
+		t.Fatalf("unexpected docstring: %q", doc.DocString)
+	}
+}
+
+func TestDocFor_PythonClass(t *testing.T) {
+	dir := t.TempDir()
+	content := "class Greeter:\n    \"\"\"Greeter docs\"\"\"\n\n    def hi(self):\n        return 'hi'\n"
+	if err := os.WriteFile(filepath.Join(dir, "helper.py"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	doc, err := ingest.DocFor(dir, "path:./helper.py::Greeter")
+	if err != nil {
+		t.Fatalf("doc lookup failed: %v", err)
+	}
+
+	if doc.Name != "Greeter" {
+		t.Fatalf("unexpected name: %q", doc.Name)
+	}
+	if !strings.Contains(doc.Signature, "class Greeter") {
+		t.Fatalf("unexpected signature: %q", doc.Signature)
+	}
+	if doc.DocString != "Greeter docs" {
+		t.Fatalf("unexpected docstring: %q", doc.DocString)
+	}
+}

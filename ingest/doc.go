@@ -70,14 +70,13 @@ func DocFor(dir, reference string) (*DocResult, error) {
 }
 
 func extractDocFromAST(root *grammar.Node, source []byte, nameStart uint32, name, language string) (*DocResult, error) {
-	// Find the enclosing function declaration.
-	funcNode := findFuncContaining(root, nameStart, language)
-	if funcNode == nil {
+	declNode := findDeclContaining(root, nameStart, language)
+	if declNode == nil {
 		return &DocResult{Name: name}, nil
 	}
 
-	sig := extractSignature(funcNode, source, language)
-	doc := extractDocstring(root, funcNode, source, language)
+	sig := extractSignature(declNode, source, language)
+	doc := extractDocstring(root, declNode, source, language)
 
 	return &DocResult{
 		Name:      name,
@@ -86,23 +85,24 @@ func extractDocFromAST(root *grammar.Node, source []byte, nameStart uint32, name
 	}, nil
 }
 
-// findFuncContaining returns the function/method node whose name starts
-// at nameStart, searching top-level children of root.
-func findFuncContaining(root *grammar.Node, nameStart uint32, language string) *grammar.Node {
-	funcTypes := map[string]bool{}
+// findDeclContaining returns the top-level declaration node whose name starts
+// at nameStart.
+func findDeclContaining(root *grammar.Node, nameStart uint32, language string) *grammar.Node {
+	declTypes := map[string]bool{}
 	switch language {
 	case "go":
-		funcTypes["function_declaration"] = true
-		funcTypes["method_declaration"] = true
+		declTypes["function_declaration"] = true
+		declTypes["method_declaration"] = true
 	case "python":
-		funcTypes["function_definition"] = true
+		declTypes["function_definition"] = true
+		declTypes["class_definition"] = true
 	case "javascript":
-		funcTypes["function_declaration"] = true
+		declTypes["function_declaration"] = true
 	}
 
 	for i := uint32(0); i < root.ChildCount(); i++ {
 		child := root.Child(i)
-		if funcTypes[child.Type()] {
+		if declTypes[child.Type()] {
 			if n := childByField(child, "name"); n != nil && n.StartByte() == nameStart {
 				return child
 			}
@@ -111,7 +111,7 @@ func findFuncContaining(root *grammar.Node, nameStart uint32, language string) *
 		if child.Type() == "export_statement" {
 			for j := uint32(0); j < child.ChildCount(); j++ {
 				inner := child.Child(j)
-				if funcTypes[inner.Type()] {
+				if declTypes[inner.Type()] {
 					if n := childByField(inner, "name"); n != nil && n.StartByte() == nameStart {
 						return inner
 					}
@@ -159,6 +159,9 @@ func extractPythonDocstring(funcNode *grammar.Node, source []byte) string {
 	}
 	for i := uint32(0); i < body.ChildCount(); i++ {
 		child := body.Child(i)
+		if child.Type() == "string" || child.Type() == "concatenated_string" {
+			return strings.Trim(nodeText(child, source), "\"'")
+		}
 		if child.Type() == "expression_statement" {
 			if child.NamedChildCount() > 0 {
 				expr := child.NamedChild(0)

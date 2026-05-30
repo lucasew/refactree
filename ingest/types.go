@@ -31,10 +31,11 @@ type Alias struct {
 
 // Relation is a usage of a symbol at a specific source location.
 type Relation struct {
-	Reference string `json:"reference"`
-	StartByte uint32 `json:"start_byte"`
-	EndByte   uint32 `json:"end_byte"`
-	Target    string `json:"target"`
+	Reference      string `json:"reference"`
+	StartByte      uint32 `json:"start_byte"`
+	EndByte        uint32 `json:"end_byte"`
+	Target         string `json:"target"`
+	ViaImportAlias bool   `json:"via_import_alias,omitempty"`
 }
 
 // --- intermediate types produced by per-file extraction ---
@@ -65,6 +66,16 @@ type importDef struct {
 	memberName string // specific symbol imported; empty for module/package imports
 	startByte  uint32 // byte span of the local binding name
 	endByte    uint32
+
+	// Byte span of the token that names the referenced target symbol.
+	// For member imports this is the imported member token ("helper").
+	// For module/package imports this falls back to startByte/endByte.
+	targetStartByte uint32
+	targetEndByte   uint32
+
+	// True when import syntax used an explicit alias binding (`as`/import alias),
+	// even if alias text equals the imported symbol name.
+	hasAliasBinding bool
 }
 
 // usageDef is a call-site identifier found during extraction.

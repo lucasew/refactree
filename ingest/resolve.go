@@ -14,6 +14,8 @@ type entityLoc struct {
 type resolvedImport struct {
 	target     string // full reference string
 	memberName string // non-empty when a specific member was imported
+	// True when the imported name is bound through explicit alias syntax.
+	hasAliasBinding bool
 }
 
 // resolve takes per-file extracts and produces the final Result by
@@ -56,17 +58,27 @@ func resolve(extracts []*fileExtract) *Result {
 		table := map[string]resolvedImport{}
 		for _, imp := range fe.imports {
 			base := resolveImportPath(fe.language, imp.sourcePath, knownFiles, knownDirs)
-			ri := resolvedImport{target: base}
+			ri := resolvedImport{
+				target:          base,
+				hasAliasBinding: imp.hasAliasBinding,
+			}
 			if imp.memberName != "" {
 				ri.target = base + "::" + imp.memberName
 				ri.memberName = imp.memberName
 			}
 			table[imp.localName] = ri
 
+			startByte := imp.startByte
+			endByte := imp.endByte
+			if imp.targetStartByte != 0 || imp.targetEndByte != 0 {
+				startByte = imp.targetStartByte
+				endByte = imp.targetEndByte
+			}
+
 			res.Aliases = append(res.Aliases, Alias{
 				Reference: FileRef("./" + fe.path),
-				StartByte: imp.startByte,
-				EndByte:   imp.endByte,
+				StartByte: startByte,
+				EndByte:   endByte,
 				Target:    ri.target,
 			})
 		}
@@ -151,10 +163,12 @@ func resolveQualifiedUsage(res *Result, imports map[string]resolvedImport, scope
 // resolveDirectUsage handles bare identifier access.
 func resolveDirectUsage(res *Result, fe *fileExtract, u usageDef, imports map[string]resolvedImport, allEntities map[string][]entityLoc, scopeRef string) {
 	target := ""
+	viaImportAlias := false
 
 	// 1. Check import table.
 	if ri, ok := imports[u.name]; ok {
 		target = ri.target
+		viaImportAlias = ri.hasAliasBinding
 	}
 
 	// 2. For Go: check same-package entities in sibling files.
@@ -179,10 +193,11 @@ func resolveDirectUsage(res *Result, fe *fileExtract, u usageDef, imports map[st
 
 	if target != "" {
 		res.Relations = append(res.Relations, Relation{
-			Reference: scopeRef,
-			StartByte: u.startByte,
-			EndByte:   u.endByte,
-			Target:    target,
+			Reference:      scopeRef,
+			StartByte:      u.startByte,
+			EndByte:        u.endByte,
+			Target:         target,
+			ViaImportAlias: viaImportAlias,
 		})
 	}
 }

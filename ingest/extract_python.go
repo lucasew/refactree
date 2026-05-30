@@ -78,26 +78,43 @@ func extractPythonImportFrom(fe *fileExtract, n *grammar.Node, source []byte) {
 		}
 		child := n.Child(i)
 
-		var nameNode *grammar.Node
 		switch child.Type() {
-		case "dotted_name":
-			nameNode = childByType(child, "identifier")
-		case "identifier":
-			nameNode = child
-		}
+		case "aliased_import":
+			nameNode := childByField(child, "name")
+			aliasNode := childByField(child, "alias")
+			importedNode := pythonImportNameNode(nameNode)
+			if importedNode == nil || aliasNode == nil {
+				continue
+			}
+			importedName := nodeText(importedNode, source)
 
-		if nameNode == nil {
-			continue
-		}
-		importedName := nodeText(nameNode, source)
+			fe.imports = append(fe.imports, importDef{
+				localName:       nodeText(aliasNode, source),
+				sourcePath:      moduleName,
+				memberName:      importedName,
+				startByte:       aliasNode.StartByte(),
+				endByte:         aliasNode.EndByte(),
+				targetStartByte: importedNode.StartByte(),
+				targetEndByte:   importedNode.EndByte(),
+				hasAliasBinding: true,
+			})
+		default:
+			importedNode := pythonImportNameNode(child)
+			if importedNode == nil {
+				continue
+			}
+			importedName := nodeText(importedNode, source)
 
-		fe.imports = append(fe.imports, importDef{
-			localName:  importedName,
-			sourcePath: moduleName,
-			memberName: importedName,
-			startByte:  nameNode.StartByte(),
-			endByte:    nameNode.EndByte(),
-		})
+			fe.imports = append(fe.imports, importDef{
+				localName:       importedName,
+				sourcePath:      moduleName,
+				memberName:      importedName,
+				startByte:       importedNode.StartByte(),
+				endByte:         importedNode.EndByte(),
+				targetStartByte: importedNode.StartByte(),
+				targetEndByte:   importedNode.EndByte(),
+			})
+		}
 	}
 }
 
@@ -124,10 +141,11 @@ func extractPythonImport(fe *fileExtract, n *grammar.Node, source []byte) {
 			}
 
 			fe.imports = append(fe.imports, importDef{
-				localName:  nodeText(aliasNode, source),
-				sourcePath: moduleName,
-				startByte:  aliasNode.StartByte(),
-				endByte:    aliasNode.EndByte(),
+				localName:       nodeText(aliasNode, source),
+				sourcePath:      moduleName,
+				startByte:       aliasNode.StartByte(),
+				endByte:         aliasNode.EndByte(),
+				hasAliasBinding: true,
 			})
 
 		case "dotted_name":
@@ -142,6 +160,27 @@ func extractPythonImport(fe *fileExtract, n *grammar.Node, source []byte) {
 			}
 		}
 	}
+}
+
+func pythonImportNameNode(n *grammar.Node) *grammar.Node {
+	if n == nil {
+		return nil
+	}
+	if n.Type() == "identifier" {
+		return n
+	}
+	if n.Type() != "dotted_name" {
+		return nil
+	}
+
+	var last *grammar.Node
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		if child.Type() == "identifier" {
+			last = child
+		}
+	}
+	return last
 }
 
 // walkPythonUsages recursively finds call nodes inside a Python function body.

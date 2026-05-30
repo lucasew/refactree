@@ -19,6 +19,7 @@ type Edit struct {
 // Rename computes the edits needed to rename a symbol from sourceRef to destRef.
 // Both references must use the same provider and path; only the symbol changes.
 func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
+	src := ParseReference(sourceRef)
 	dst := ParseReference(destRef)
 
 	result, err := Ingest(dir)
@@ -44,6 +45,11 @@ func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 	// 2. Rename at every call site that targets this entity.
 	for _, rel := range result.Relations {
 		if rel.Target == sourceRef {
+			// Usage through explicit import alias bindings (`as`) should keep
+			// the local alias name unchanged when renaming the imported symbol.
+			if rel.ViaImportAlias {
+				continue
+			}
 			ref := ParseReference(rel.Reference)
 			edits = append(edits, Edit{
 				File:      strings.TrimPrefix(ref.Path, "./"),
@@ -69,6 +75,10 @@ func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 
 	if len(edits) == 0 {
 		return nil, fmt.Errorf("no entity found for reference %s", sourceRef)
+	}
+
+	if src.Symbol == "" || dst.Symbol == "" {
+		return nil, fmt.Errorf("source and destination references must include symbols")
 	}
 
 	return edits, nil
