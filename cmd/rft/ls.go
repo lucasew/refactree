@@ -17,9 +17,8 @@ func newLsCmd(root *rootOptions) *cobra.Command {
 		Short: "List symbols in a reference",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ref := ingest.ParseReference(args[0])
-			ref = coerceLocalPathRef(ref)
-			dir, ref := normalizeRefForCommandScope(ref)
+			scope := ingest.ResolveInputReferenceScope(".", args[0])
+			dir, ref := scope.Dir, scope.Reference
 
 			w := cmd.OutOrStdout()
 			err := ingest.WalkSymbols(dir, ref.String(), ingest.ListOptions{

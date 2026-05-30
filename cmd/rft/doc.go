@@ -13,13 +13,10 @@ func newDocCmd(root *rootOptions) *cobra.Command {
 		Short: "Show documentation for a reference",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			reference := args[0]
-			ref := ingest.ParseReference(reference)
-			ref = coerceLocalPathRef(ref)
-			dir, ref := normalizeRefForCommandScope(ref)
-			reference = ref.String()
+			scope := ingest.ResolveInputReferenceScope(".", args[0])
+			reference := scope.Reference.String()
 
-			doc, err := ingest.DocFor(dir, reference)
+			doc, err := ingest.DocFor(scope.Dir, reference)
 			if err != nil {
 				return err
 			}

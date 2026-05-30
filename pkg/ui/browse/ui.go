@@ -931,10 +931,7 @@ func (m *browseModel) currentSymbolScope() (string, string) {
 		return ".", m.currentScopeRef()
 	}
 
-	scope := ingest.ResolveReferenceScope(m.rootDir, ingest.Reference{
-		Provider: "path",
-		Path:     m.currentAbsPath(),
-	})
+	scope := ingest.ResolveInputReferenceScope(m.rootDir, m.currentAbsPath())
 	return scope.Dir, scope.Reference.String()
 }
 

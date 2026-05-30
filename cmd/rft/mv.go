@@ -22,13 +22,11 @@ func newMvCmd(root *rootOptions) *cobra.Command {
 			source := args[0]
 			destination := args[1]
 
-			srcRef := ingest.ParseReference(source)
-			srcRef = coerceLocalPathRef(srcRef)
-			dir, srcRef := normalizeRefForCommandScope(srcRef)
-			source = srcRef.String()
-			dstRef := ingest.ParseReference(destination)
-			dstRef = coerceLocalPathRef(dstRef)
-			destination = normalizeRefForIngestDir(dir, dstRef).String()
+			srcScope := ingest.ResolveInputReferenceScope(".", source)
+			dir := srcScope.Dir
+			source = srcScope.Reference.String()
+			dstRef := ingest.CoerceLocalPathReference(".", ingest.ParseReference(destination))
+			destination = ingest.NormalizeReferenceForScope(".", dir, dstRef).String()
 
 			edits, err := ingest.Rename(dir, source, destination)
 			if err != nil {

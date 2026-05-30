@@ -19,9 +19,8 @@ func newBrowseCmd(root *rootOptions) *cobra.Command {
 				refInput = args[0]
 			}
 
-			ref := coerceLocalPathRef(ingest.ParseReference(refInput))
-			dir, ref := normalizeRefForCommandScope(ref)
-			ref = resolvePathRefForBrowse(dir, ref)
+			scope := ingest.ResolveInputReferenceScope(".", refInput)
+			ref := ingest.AbsolutePathReferenceForScope(scope)
 			ui, err := browseui.New(browseui.Options{
 				Reference:     ref,
 				IncludeHidden: all,
