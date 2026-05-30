@@ -1,4 +1,4 @@
-package main
+package ingest
 
 import (
 	_ "github.com/lucasew/ccgo-tree-sitter/grammar/go"
