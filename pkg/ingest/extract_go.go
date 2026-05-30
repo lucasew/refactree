@@ -30,10 +30,11 @@ func (goLanguageDriver) AllowListSymbol(name string, opts SymbolListOptions) boo
 	if opts.IncludeHidden {
 		return true
 	}
-	if name == "" {
+	exportName := goSymbolExportName(name)
+	if exportName == "" {
 		return true
 	}
-	r, _ := utf8.DecodeRuneInString(name)
+	r, _ := utf8.DecodeRuneInString(exportName)
 	return unicode.IsUpper(r)
 }
 
@@ -78,17 +79,55 @@ func extractGoFunc(fe *fileExtract, n *grammar.Node, source []byte) {
 		return
 	}
 	name := nodeText(nameNode, source)
+	if receiver := goMethodReceiverType(n, source); receiver != "" {
+		name = receiver + "." + name
+	}
 
 	fe.entities = append(fe.entities, entityDef{
 		name:      name,
 		startByte: nameNode.StartByte(),
 		endByte:   nameNode.EndByte(),
-		exported:  len(name) > 0 && name[0] >= 'A' && name[0] <= 'Z',
+		exported:  goLanguageDriver{}.AllowListSymbol(name, SymbolListOptions{}),
 	})
 
 	if body := childByField(n, "body"); body != nil {
 		walkGoUsages(fe, body, source, name)
 	}
+}
+
+func goMethodReceiverType(n *grammar.Node, source []byte) string {
+	if n == nil || n.Type() != "method_declaration" {
+		return ""
+	}
+
+	receiver := childByField(n, "receiver")
+	if receiver == nil {
+		return ""
+	}
+
+	for i := uint32(0); i < receiver.ChildCount(); i++ {
+		child := receiver.Child(i)
+		if child.Type() != "parameter_declaration" {
+			continue
+		}
+		typ := childByField(child, "type")
+		if typ == nil {
+			continue
+		}
+		return strings.ReplaceAll(nodeText(typ, source), " ", "")
+	}
+
+	return ""
+}
+
+func goSymbolExportName(name string) string {
+	if name == "" {
+		return ""
+	}
+	if i := strings.LastIndex(name, "."); i >= 0 && i+1 < len(name) {
+		return name[i+1:]
+	}
+	return name
 }
 
 // extractGoImportDecl handles both single and grouped import declarations.

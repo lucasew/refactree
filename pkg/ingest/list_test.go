@@ -145,6 +145,23 @@ func TestWalkSymbols_GoProviderReferenceShape(t *testing.T) {
 	}
 }
 
+func TestWalkSymbols_GoMethodsIncludeReceiver(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "a.go"), "package main\n\ntype A struct{}\ntype B struct{}\n\nfunc (a A) Error() string { return \"\" }\nfunc (b *B) Error() string { return \"\" }\n")
+
+	refs, err := collectRefs(dir, "path:./", ingest.ListOptions{})
+	if err != nil {
+		t.Fatalf("walk symbols: %v", err)
+	}
+
+	if !containsRef(refs, "path:./a.go::A.Error") {
+		t.Fatalf("expected receiver-qualified method symbol, got %v", refs)
+	}
+	if !containsRef(refs, "path:./a.go::*B.Error") {
+		t.Fatalf("expected pointer receiver-qualified method symbol, got %v", refs)
+	}
+}
+
 func mustWrite(t *testing.T, file, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(file), 0755); err != nil {
