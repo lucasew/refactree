@@ -32,6 +32,7 @@ func newRootCmd() *cobra.Command {
 		newLsCmd(opts),
 		newMvCmd(opts),
 		newDocCmd(opts),
+		newIngestCmd(opts),
 	)
 
 	return cmd
