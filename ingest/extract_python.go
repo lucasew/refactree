@@ -23,8 +23,11 @@ func (pythonLanguageDriver) ResolveImport(sourcePath string, ctx ImportResolveCo
 	return "python:" + sourcePath
 }
 
-func (pythonLanguageDriver) IsHiddenSymbol(name string) bool {
-	return len(name) > 0 && name[0] == '_'
+func (pythonLanguageDriver) AllowListSymbol(name string, opts SymbolListOptions) bool {
+	if opts.IncludeHidden {
+		return true
+	}
+	return !(len(name) > 0 && name[0] == '_')
 }
 
 func (pythonLanguageDriver) DirectoryEntryFile(dirRel string) string {

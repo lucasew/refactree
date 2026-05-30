@@ -73,7 +73,9 @@ func WalkSymbols(dir, reference string, opts ListOptions, yield func(SymbolInfo)
 		if ref.Provider == "go" && language != "go" {
 			continue
 		}
-		if !opts.IncludeHidden && isHiddenSymbolByLanguage(entRef.Symbol, language) {
+		if !allowSymbolByLanguage(entRef.Symbol, language, SymbolListOptions{
+			IncludeHidden: opts.IncludeHidden,
+		}) {
 			continue
 		}
 
@@ -147,10 +149,10 @@ func matchesListPathScope(entPath, refPath string, refIsDir, recursive bool) boo
 	return entPath == refPath
 }
 
-func isHiddenSymbolByLanguage(name, language string) bool {
+func allowSymbolByLanguage(name, language string, opts SymbolListOptions) bool {
 	driver, ok := languageDriverForName(language)
 	if !ok {
-		return false
+		return true
 	}
-	return driver.IsHiddenSymbol(name)
+	return driver.AllowListSymbol(name, opts)
 }

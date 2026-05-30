@@ -2,13 +2,18 @@ package ingest
 
 import "github.com/lucasew/ccgo-tree-sitter/grammar"
 
+// SymbolListOptions controls per-language symbol visibility policy.
+type SymbolListOptions struct {
+	IncludeHidden bool
+}
+
 // LanguageDriver defines a consistent adapter interface for language-specific
 // ingestion and filesystem conventions used by refactoring.
 type LanguageDriver interface {
 	Language() string
 	Extract(root *grammar.Node, source []byte, relPath string) *fileExtract
 	ResolveImport(sourcePath string, ctx ImportResolveContext) string
-	IsHiddenSymbol(name string) bool
+	AllowListSymbol(name string, opts SymbolListOptions) bool
 
 	// DirectoryEntryFile returns the canonical file used when a directory is
 	// referenced as a symbol container (for example __init__.py or index.js).

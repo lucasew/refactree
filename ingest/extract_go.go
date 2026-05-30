@@ -26,12 +26,15 @@ func (goLanguageDriver) ResolveImport(sourcePath string, ctx ImportResolveContex
 	return "go:" + lastPathComponent(sourcePath)
 }
 
-func (goLanguageDriver) IsHiddenSymbol(name string) bool {
+func (goLanguageDriver) AllowListSymbol(name string, opts SymbolListOptions) bool {
+	if opts.IncludeHidden {
+		return true
+	}
 	if name == "" {
-		return false
+		return true
 	}
 	r, _ := utf8.DecodeRuneInString(name)
-	return !unicode.IsUpper(r)
+	return unicode.IsUpper(r)
 }
 
 func (goLanguageDriver) DirectoryEntryFile(string) string { return "" }
