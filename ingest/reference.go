@@ -12,25 +12,41 @@ type Reference struct {
 // ParseReference splits a "provider:path::symbol" string.
 func ParseReference(s string) Reference {
 	var r Reference
-	i := strings.Index(s, ":")
-	if i < 0 {
-		r.Path = s
+
+	base := s
+	if j := strings.Index(base, "::"); j >= 0 {
+		r.Symbol = base[j+2:]
+		base = base[:j]
+	}
+
+	if i := strings.Index(base, ":"); i >= 0 {
+		r.Provider = base[:i]
+		r.Path = base[i+1:]
 		return r
 	}
-	r.Provider = s[:i]
-	rest := s[i+1:]
-	if j := strings.Index(rest, "::"); j >= 0 {
-		r.Path = rest[:j]
-		r.Symbol = rest[j+2:]
-	} else {
-		r.Path = rest
+
+	// Shorthand reference: <path>::<symbol> or <path>
+	if r.Symbol != "" || strings.Contains(base, "/") || strings.HasPrefix(base, ".") {
+		r.Provider = "path"
+		if strings.HasPrefix(base, "./") || strings.HasPrefix(base, "../") || strings.HasPrefix(base, "/") {
+			r.Path = base
+		} else {
+			r.Path = "./" + base
+		}
+		return r
 	}
+
+	// Bare identifier (kept as-is).
+	r.Path = base
 	return r
 }
 
 // String formats the reference back to its canonical form.
 func (r Reference) String() string {
-	base := r.Provider + ":" + r.Path
+	base := r.Path
+	if r.Provider != "" {
+		base = r.Provider + ":" + r.Path
+	}
 	if r.Symbol != "" {
 		return base + "::" + r.Symbol
 	}

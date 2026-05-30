@@ -21,6 +21,8 @@ type Edit struct {
 func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 	src := ParseReference(sourceRef)
 	dst := ParseReference(destRef)
+	sourceRef = src.String()
+	destRef = dst.String()
 
 	result, err := Ingest(dir)
 	if err != nil {

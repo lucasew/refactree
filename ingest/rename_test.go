@@ -66,6 +66,24 @@ func TestRename_RenamesDefinitionAndCallsite(t *testing.T) {
 	}
 }
 
+func TestRename_ShorthandPathReferences(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "helper.py"), []byte("def helper():\n    pass\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte("from helper import helper\n\n\ndef main():\n    helper()\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	edits, err := ingest.Rename(dir, "helper.py::helper", "helper.py::renamed")
+	if err != nil {
+		t.Fatalf("rename failed: %v", err)
+	}
+	if len(edits) != 3 {
+		t.Fatalf("expected 3 edits (definition + import + callsite), got %d", len(edits))
+	}
+}
+
 func TestRename_PythonAliasedImport_RenamesImportedMemberOnly(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "helper.py"), []byte("def helper():\n    pass\n"), 0644); err != nil {

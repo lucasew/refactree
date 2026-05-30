@@ -33,6 +33,8 @@ func newMvCmd(root *rootOptions) *cobra.Command {
 					dir = filepath.Dir(p)
 				}
 			}
+			source = normalizeRefForIngestDir(dir, srcRef).String()
+			destination = normalizeRefForIngestDir(dir, ingest.ParseReference(destination)).String()
 
 			edits, err := ingest.Rename(dir, source, destination)
 			if err != nil {
@@ -95,4 +97,36 @@ func createBackups(dir string, edits []ingest.Edit) error {
 		}
 	}
 	return nil
+}
+
+func normalizeRefForIngestDir(dir string, ref ingest.Reference) ingest.Reference {
+	if ref.Provider != "path" || ref.Path == "" {
+		return ref
+	}
+
+	rootAbs, err := filepath.Abs(dir)
+	if err != nil {
+		return ref
+	}
+
+	var refAbs string
+	if filepath.IsAbs(ref.Path) {
+		refAbs = ref.Path
+	} else {
+		refAbs, err = filepath.Abs(ref.Path)
+		if err != nil {
+			return ref
+		}
+	}
+
+	rel, err := filepath.Rel(rootAbs, refAbs)
+	if err != nil {
+		return ref
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return ref
+	}
+
+	ref.Path = "./" + filepath.ToSlash(rel)
+	return ref
 }
