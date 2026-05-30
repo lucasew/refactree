@@ -3,7 +3,7 @@ package ingest_test
 import (
 	"testing"
 
-	"github.com/lucasew/refactree/ingest"
+	"github.com/lucasew/refactree/pkg/ingest"
 )
 
 func TestParseReference_ExplicitProvider(t *testing.T) {

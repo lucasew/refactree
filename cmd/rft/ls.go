@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/lucasew/refactree/ingest"
+	"github.com/lucasew/refactree/pkg/ingest"
 	"github.com/spf13/cobra"
 )
 

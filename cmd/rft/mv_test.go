@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/lucasew/refactree/ingest"
+	"github.com/lucasew/refactree/pkg/ingest"
 )
 
 func TestNormalizeRefForIngestDir_PathInsideDir(t *testing.T) {

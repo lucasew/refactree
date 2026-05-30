@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lucasew/refactree/ingest"
+	"github.com/lucasew/refactree/pkg/ingest"
 
 	_ "github.com/lucasew/ccgo-tree-sitter/grammar/go"
 )

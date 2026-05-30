@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/lucasew/refactree/ingest"
+	"github.com/lucasew/refactree/pkg/ingest"
 )
 
 func TestCoerceLocalPathRef_Directory(t *testing.T) {

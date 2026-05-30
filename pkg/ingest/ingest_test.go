@@ -7,7 +7,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/lucasew/refactree/ingest"
+	"github.com/lucasew/refactree/pkg/ingest"
 
 	_ "github.com/lucasew/ccgo-tree-sitter/grammar/go"
 	_ "github.com/lucasew/ccgo-tree-sitter/grammar/javascript"
@@ -15,7 +15,7 @@ import (
 )
 
 func TestIngest(t *testing.T) {
-	fixtureDir := filepath.Join("..", "testdata", "ingest")
+	fixtureDir := filepath.Join("..", "..", "testdata", "ingest")
 	entries, err := os.ReadDir(fixtureDir)
 	if err != nil {
 		t.Fatalf("reading fixture dir: %v", err)

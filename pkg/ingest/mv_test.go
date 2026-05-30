@@ -7,11 +7,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/lucasew/refactree/ingest"
+	"github.com/lucasew/refactree/pkg/ingest"
 )
 
 func TestMv(t *testing.T) {
-	fixtureDir := filepath.Join("..", "testdata", "mv")
+	fixtureDir := filepath.Join("..", "..", "testdata", "mv")
 	entries, err := os.ReadDir(fixtureDir)
 	if err != nil {
 		t.Fatalf("reading fixture dir: %v", err)
