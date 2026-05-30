@@ -287,7 +287,7 @@ func (m *browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedSymbolRef() == msg.ref {
 			m.updatePreviewForSelection()
 		}
-		return m, nil
+		return m, m.ensureSelectedDocLoadedCmd()
 	case tea.KeyMsg:
 		switch {
 		case key.Matches(msg, m.keys.Quit):
@@ -636,17 +636,24 @@ func (m *browseModel) symbolItems() ([]list.Item, error) {
 func (m *browseModel) updatePreviewForSelection() {
 	item, ok := m.list.SelectedItem().(browseItem)
 	if !ok {
-		m.preview.SetContent("No selection")
+		m.preview.SetContent(m.renderMarkdown("No selection"))
 		return
 	}
 
-	lines := []string{
-		fmt.Sprintf("scope: %s", m.currentScopeRef()),
-		fmt.Sprintf("root:  %s", m.scopeRoot()),
-		"",
-		fmt.Sprintf("entry: %s", item.title),
-		fmt.Sprintf("kind:  %s", item.kindName()),
+	var md strings.Builder
+	write := func(format string, args ...any) {
+		_, _ = fmt.Fprintf(&md, format, args...)
+		md.WriteByte('\n')
 	}
+
+	write("## Scope")
+	write("- **Reference:** `%s`", m.currentScopeRef())
+	write("- **Root:** `%s`", m.scopeRoot())
+	md.WriteByte('\n')
+
+	write("## Entry")
+	write("- **Name:** `%s`", item.title)
+	write("- **Kind:** `%s`", item.kindName())
 
 	switch item.kind {
 	case browseItemParent, browseItemDir, browseItemFile:
@@ -654,24 +661,29 @@ func (m *browseModel) updatePreviewForSelection() {
 		if item.targetRef != "" {
 			target = item.targetRef
 		}
-		lines = append(lines, fmt.Sprintf("target: %s", target))
+		write("- **Target:** `%s`", target)
+		md.WriteByte('\n')
 		if item.kind == browseItemFile {
-			lines = append(lines, "", "Press Enter to focus this file and list only its symbols.")
+			write("_Press Enter to focus this file and list only its symbols._")
 		} else {
-			lines = append(lines, "", "Press Enter to enter.")
+			write("_Press Enter to enter._")
 		}
 	case browseItemSymbol:
-		lines = append(lines, fmt.Sprintf("ref:   %s", item.symbolRef))
+		write("- **Reference:** `%s`", item.symbolRef)
+		md.WriteByte('\n')
 		if doc, ok := m.docCache[item.symbolRef]; ok {
-			lines = append(lines, "", m.renderMarkdown(doc))
+			md.WriteString(doc)
+			if !strings.HasSuffix(doc, "\n") {
+				md.WriteByte('\n')
+			}
 		} else if m.loadingDocs[item.symbolRef] {
-			lines = append(lines, "", "Loading documentation...")
+			write("_Loading documentation..._")
 		} else {
-			lines = append(lines, "", "Loading documentation...")
+			write("_Loading documentation..._")
 		}
 	}
 
-	m.preview.SetContent(strings.Join(lines, "\n"))
+	m.preview.SetContent(m.renderMarkdown(md.String()))
 	m.preview.GotoTop()
 }
 
@@ -816,6 +828,9 @@ func (m *browseModel) ensureSelectedDocLoadedCmd() tea.Cmd {
 		return nil
 	}
 	if _, ok := m.docCache[ref]; ok {
+		return nil
+	}
+	if len(m.loadingDocs) > 0 {
 		return nil
 	}
 	if m.loadingDocs[ref] {
@@ -977,14 +992,19 @@ func browseScopeFromReference(ref ingest.Reference) (rootDir string, currentRel 
 }
 
 func docToMarkdown(doc *ingest.DocResult) string {
-	lines := []string{fmt.Sprintf("# %s", doc.Name)}
+	var out strings.Builder
+	fmt.Fprintf(&out, "# %s\n", doc.Name)
 	if doc.Signature != "" {
-		lines = append(lines, "```")
-		lines = append(lines, doc.Signature)
-		lines = append(lines, "```")
+		out.WriteString("```\n")
+		out.WriteString(doc.Signature)
+		out.WriteString("\n```\n")
 	}
 	if doc.DocString != "" {
-		lines = append(lines, "", doc.DocString)
+		if out.Len() > 0 {
+			out.WriteByte('\n')
+		}
+		out.WriteString(doc.DocString)
+		out.WriteByte('\n')
 	}
-	return strings.Join(lines, "\n")
+	return strings.TrimRight(out.String(), "\n")
 }
