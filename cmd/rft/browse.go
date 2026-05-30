@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
@@ -96,6 +97,10 @@ func (i browseItem) FilterValue() string { return i.title + " " + i.desc }
 type docLoadedMsg struct {
 	ref      string
 	markdown string
+}
+
+type docDebounceMsg struct {
+	tag uint64
 }
 
 type browseKeys struct {
@@ -190,6 +195,10 @@ type browseModel struct {
 
 	docCache    map[string]string
 	loadingDocs map[string]bool
+	docDebounce uint64
+	renderCache map[string]string
+	renderWrap  int
+	renderer    *glamour.TermRenderer
 	err         error
 
 	width        int
@@ -247,6 +256,7 @@ func newBrowseModel(rootDir, currentRel string, includeHidden bool) (*browseMode
 		keys:          newBrowseKeys(),
 		docCache:      map[string]string{},
 		loadingDocs:   map[string]bool{},
+		renderCache:   map[string]string{},
 	}
 	model.help.ShowAll = false
 
@@ -270,7 +280,7 @@ func newBrowseModel(rootDir, currentRel string, includeHidden bool) (*browseMode
 }
 
 func (m *browseModel) Init() tea.Cmd {
-	return m.ensureSelectedDocLoadedCmd()
+	return m.scheduleDocLoadCmd()
 }
 
 func (m *browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -279,7 +289,13 @@ func (m *browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.resize()
+		m.renderCache = map[string]string{}
 		m.updatePreviewForSelection()
+		return m, m.scheduleDocLoadCmd()
+	case docDebounceMsg:
+		if msg.tag != m.docDebounce {
+			return m, nil
+		}
 		return m, m.ensureSelectedDocLoadedCmd()
 	case docLoadedMsg:
 		delete(m.loadingDocs, msg.ref)
@@ -287,7 +303,7 @@ func (m *browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedSymbolRef() == msg.ref {
 			m.updatePreviewForSelection()
 		}
-		return m, m.ensureSelectedDocLoadedCmd()
+		return m, m.scheduleDocLoadCmd()
 	case tea.KeyMsg:
 		switch {
 		case key.Matches(msg, m.keys.Quit):
@@ -297,26 +313,26 @@ func (m *browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.help.ShowAll = m.showFullHelp
 			m.resize()
 			m.updatePreviewForSelection()
-			return m, m.ensureSelectedDocLoadedCmd()
+			return m, m.scheduleDocLoadCmd()
 		case key.Matches(msg, m.keys.ToggleAll):
 			m.includeHidden = !m.includeHidden
 			if err := m.reload(); err != nil {
 				m.err = err
 				return m, tea.Quit
 			}
-			return m, m.ensureSelectedDocLoadedCmd()
+			return m, m.scheduleDocLoadCmd()
 		case key.Matches(msg, m.keys.Refresh):
 			if err := m.reload(); err != nil {
 				m.err = err
 				return m, tea.Quit
 			}
-			return m, m.ensureSelectedDocLoadedCmd()
+			return m, m.scheduleDocLoadCmd()
 		case key.Matches(msg, m.keys.Parent):
 			if err := m.goParent(); err != nil {
 				m.err = err
 				return m, tea.Quit
 			}
-			return m, m.ensureSelectedDocLoadedCmd()
+			return m, m.scheduleDocLoadCmd()
 		case key.Matches(msg, m.keys.ToggleFocus):
 			if m.focus == browseFocusList {
 				m.focus = browseFocusPreview
@@ -324,13 +340,13 @@ func (m *browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.focus = browseFocusList
 			}
 			m.updatePreviewForSelection()
-			return m, m.ensureSelectedDocLoadedCmd()
+			return m, m.scheduleDocLoadCmd()
 		case key.Matches(msg, m.keys.Open):
 			if err := m.activateSelection(); err != nil {
 				m.err = err
 				return m, tea.Quit
 			}
-			return m, m.ensureSelectedDocLoadedCmd()
+			return m, m.scheduleDocLoadCmd()
 		}
 
 		if m.focus == browseFocusPreview {
@@ -351,7 +367,7 @@ func (m *browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.list, cmd = m.list.Update(msg)
 		if m.list.Index() != prevIndex {
 			m.updatePreviewForSelection()
-			return m, tea.Batch(cmd, m.ensureSelectedDocLoadedCmd())
+			return m, tea.Batch(cmd, m.scheduleDocLoadCmd())
 		}
 		return m, cmd
 	}
@@ -672,10 +688,15 @@ func (m *browseModel) updatePreviewForSelection() {
 		write("- **Reference:** `%s`", item.symbolRef)
 		md.WriteByte('\n')
 		if doc, ok := m.docCache[item.symbolRef]; ok {
-			md.WriteString(doc)
-			if !strings.HasSuffix(doc, "\n") {
-				md.WriteByte('\n')
+			header := m.renderMarkdown(md.String())
+			body := m.renderDocMarkdown(item.symbolRef, doc)
+			combined := strings.TrimRight(header, "\n")
+			if body != "" {
+				combined += "\n\n" + strings.TrimLeft(body, "\n")
 			}
+			m.preview.SetContent(combined)
+			m.preview.GotoTop()
+			return
 		} else if m.loadingDocs[item.symbolRef] {
 			write("_Loading documentation..._")
 		} else {
@@ -854,11 +875,75 @@ func (m *browseModel) ensureSelectedDocLoadedCmd() tea.Cmd {
 	}
 }
 
+func (m *browseModel) scheduleDocLoadCmd() tea.Cmd {
+	ref := m.selectedSymbolRef()
+	if ref == "" {
+		return nil
+	}
+	if _, ok := m.docCache[ref]; ok {
+		return nil
+	}
+	if len(m.loadingDocs) > 0 {
+		return nil
+	}
+	if m.loadingDocs[ref] {
+		return nil
+	}
+
+	m.docDebounce++
+	tag := m.docDebounce
+	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
+		return docDebounceMsg{tag: tag}
+	})
+}
+
 func (m *browseModel) renderMarkdown(markdown string) string {
 	if markdown == "" {
 		return ""
 	}
 
+	wrap := m.markdownWrapWidth()
+	key := fmt.Sprintf("md:%d:%s", wrap, markdown)
+	if cached, ok := m.renderCache[key]; ok {
+		return cached
+	}
+	out := m.renderWithRenderer(wrap, markdown)
+	m.renderCache[key] = out
+	return out
+}
+
+func (m *browseModel) renderDocMarkdown(ref, markdown string) string {
+	wrap := m.markdownWrapWidth()
+	key := fmt.Sprintf("doc:%s:%d", ref, wrap)
+	if cached, ok := m.renderCache[key]; ok {
+		return cached
+	}
+	rendered := m.renderWithRenderer(wrap, markdown)
+	m.renderCache[key] = rendered
+	return rendered
+}
+
+func (m *browseModel) renderWithRenderer(wrap int, markdown string) string {
+	if m.renderer == nil || m.renderWrap != wrap {
+		renderer, err := glamour.NewTermRenderer(
+			glamour.WithAutoStyle(),
+			glamour.WithWordWrap(wrap),
+		)
+		if err != nil {
+			return markdown
+		}
+		m.renderer = renderer
+		m.renderWrap = wrap
+	}
+
+	out, err := m.renderer.Render(markdown)
+	if err != nil {
+		return markdown
+	}
+	return strings.TrimRight(out, "\n")
+}
+
+func (m *browseModel) markdownWrapWidth() int {
 	wrap := m.previewWidth
 	if wrap <= 0 {
 		wrap = 80
@@ -867,19 +952,7 @@ func (m *browseModel) renderMarkdown(markdown string) string {
 	if wrap > 4 {
 		wrap -= 2
 	}
-
-	renderer, err := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
-		glamour.WithWordWrap(wrap),
-	)
-	if err != nil {
-		return markdown
-	}
-	out, err := renderer.Render(markdown)
-	if err != nil {
-		return markdown
-	}
-	return strings.TrimRight(out, "\n")
+	return wrap
 }
 
 func (i browseItem) kindName() string {
