@@ -44,7 +44,7 @@ func WalkSymbols(dir, reference string, opts ListOptions, yield func(SymbolInfo)
 		refPath, refIsDir = listScopeForRef(ingestDir, ref)
 	}
 
-	result, err := IngestWithRecursion(ingestDir, opts.Recursive)
+	result, err := IngestWithRecursion(ingestDir, providerListIngestRecursive(ref, opts))
 	if err != nil {
 		return err
 	}
@@ -62,15 +62,12 @@ func WalkSymbols(dir, reference string, opts ListOptions, yield func(SymbolInfo)
 		}
 
 		entPath := strings.TrimPrefix(entRef.Path, "./")
-		if ref.Provider == "go" && strings.HasSuffix(entPath, "_test.go") {
-			continue
-		}
 		if !matchesListPathScope(entPath, refPath, refIsDir, opts.Recursive) {
 			continue
 		}
 
 		language := langOf[entPath]
-		if ref.Provider == "go" && language != "go" {
+		if !providerAllowListEntity(ref, entRef, entPath, language, opts) {
 			continue
 		}
 		if !allowSymbolByLanguage(entRef.Symbol, language, SymbolListOptions{
@@ -84,14 +81,8 @@ func WalkSymbols(dir, reference string, opts ListOptions, yield func(SymbolInfo)
 			Reference: entRef,
 			Language:  language,
 		}
-		if ref.Provider != "" && ref.Provider != "path" {
-			out.Reference = Reference{
-				Provider: ref.Provider,
-				Path:     ref.Path,
-				Symbol:   entRef.Symbol,
-			}
-			out.Entity.Reference = out.Reference.String()
-		}
+		out.Reference = providerListOutputReference(ref, entRef)
+		out.Entity.Reference = out.Reference.String()
 
 		if !yield(out) {
 			break

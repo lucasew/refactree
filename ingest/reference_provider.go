@@ -11,6 +11,17 @@ type ImportResolveContext = refpkg.ImportResolveContext
 type ProviderSymbolTarget = refpkg.SymbolTarget
 type ProviderScopeTarget = refpkg.ScopeTarget
 
+type providerListPolicy interface {
+	ListIngestRecursive(ref Reference, opts ListOptions) bool
+	AllowListEntity(ref Reference, entRef Reference, entPath, language string, opts ListOptions) bool
+	ListOutputReference(ref Reference, entRef Reference) Reference
+}
+
+type providerDocPolicy interface {
+	DocIngestRecursive(ref Reference) bool
+	AllowDocEntity(ref Reference, entRef Reference, entPath, language string) bool
+}
+
 func init() {
 	refpkg.RegisterProvider("path", pathReferenceProvider{})
 	refpkg.RegisterProvider("node", nodeReferenceProvider{})
@@ -28,6 +39,83 @@ func resolveProviderSymbolTarget(ref Reference) (ProviderSymbolTarget, bool, err
 
 func resolveProviderScopeTarget(ref Reference) (ProviderScopeTarget, bool, error) {
 	return refpkg.ResolveScopeTarget(ref)
+}
+
+func providerListIngestRecursive(ref Reference, opts ListOptions) bool {
+	if ref.Provider == "" || ref.Provider == "path" {
+		return opts.Recursive
+	}
+	provider, ok := referenceProviderForName(ref.Provider)
+	if !ok {
+		return opts.Recursive
+	}
+	policy, ok := provider.(providerListPolicy)
+	if !ok {
+		return opts.Recursive
+	}
+	return policy.ListIngestRecursive(ref, opts)
+}
+
+func providerAllowListEntity(ref Reference, entRef Reference, entPath, language string, opts ListOptions) bool {
+	if ref.Provider == "" || ref.Provider == "path" {
+		return true
+	}
+	provider, ok := referenceProviderForName(ref.Provider)
+	if !ok {
+		return true
+	}
+	policy, ok := provider.(providerListPolicy)
+	if !ok {
+		return true
+	}
+	return policy.AllowListEntity(ref, entRef, entPath, language, opts)
+}
+
+func providerListOutputReference(ref Reference, entRef Reference) Reference {
+	if ref.Provider == "" || ref.Provider == "path" {
+		return entRef
+	}
+	provider, ok := referenceProviderForName(ref.Provider)
+	if ok {
+		if policy, ok := provider.(providerListPolicy); ok {
+			return policy.ListOutputReference(ref, entRef)
+		}
+	}
+	return Reference{
+		Provider: ref.Provider,
+		Path:     ref.Path,
+		Symbol:   entRef.Symbol,
+	}
+}
+
+func providerDocIngestRecursive(ref Reference) bool {
+	if ref.Provider == "" || ref.Provider == "path" {
+		return true
+	}
+	provider, ok := referenceProviderForName(ref.Provider)
+	if !ok {
+		return true
+	}
+	policy, ok := provider.(providerDocPolicy)
+	if !ok {
+		return true
+	}
+	return policy.DocIngestRecursive(ref)
+}
+
+func providerAllowDocEntity(ref Reference, entRef Reference, entPath, language string) bool {
+	if ref.Provider == "" || ref.Provider == "path" {
+		return true
+	}
+	provider, ok := referenceProviderForName(ref.Provider)
+	if !ok {
+		return true
+	}
+	policy, ok := provider.(providerDocPolicy)
+	if !ok {
+		return true
+	}
+	return policy.AllowDocEntity(ref, entRef, entPath, language)
 }
 
 func pathRefForAbs(rootDir, absPath string) string {

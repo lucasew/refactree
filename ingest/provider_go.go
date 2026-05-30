@@ -1,5 +1,7 @@
 package ingest
 
+import "strings"
+
 import goref "github.com/lucasew/refactree/pkg/reference/go"
 
 type goReferenceProvider struct{}
@@ -30,4 +32,32 @@ func (goReferenceProvider) ResolveSymbolTarget(ref Reference) (ProviderSymbolTar
 		Dir:    target.Dir,
 		Symbol: target.Symbol,
 	}, true, nil
+}
+
+func (goReferenceProvider) ListIngestRecursive(_ Reference, opts ListOptions) bool {
+	return opts.Recursive
+}
+
+func (goReferenceProvider) AllowListEntity(_ Reference, _ Reference, entPath, language string, _ ListOptions) bool {
+	if language != "go" {
+		return false
+	}
+	return !strings.HasSuffix(entPath, "_test.go")
+}
+
+func (goReferenceProvider) ListOutputReference(ref Reference, entRef Reference) Reference {
+	return Reference{
+		Provider: ref.Provider,
+		Path:     ref.Path,
+		Symbol:   entRef.Symbol,
+	}
+}
+
+func (goReferenceProvider) DocIngestRecursive(Reference) bool { return false }
+
+func (goReferenceProvider) AllowDocEntity(_ Reference, _ Reference, entPath, language string) bool {
+	if language != "go" {
+		return false
+	}
+	return !strings.HasSuffix(entPath, "_test.go")
 }
