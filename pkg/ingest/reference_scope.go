@@ -22,7 +22,7 @@ func ResolveReferenceScope(baseDir string, ref Reference) ReferenceScope {
 	scopeDir := baseDir
 	if ref.Provider == "path" {
 		p := strings.TrimPrefix(ref.Path, "./")
-		targetAbs := pathAbsFromBase(baseDir, ref.Path)
+		targetAbs := absolutePathFromBase(baseDir, ref.Path)
 		if st, err := os.Stat(targetAbs); err == nil && st.IsDir() {
 			switch {
 			case filepath.IsAbs(ref.Path):
@@ -59,7 +59,7 @@ func NormalizeReferenceForScope(baseDir, scopeDir string, ref Reference) Referen
 		return ref
 	}
 
-	targetAbs := pathAbsFromBase(baseDir, ref.Path)
+	targetAbs := absolutePathFromBase(baseDir, ref.Path)
 	rel, err := filepath.Rel(scopeAbs, targetAbs)
 	if err != nil {
 		return ref
@@ -98,7 +98,7 @@ func AbsolutePathReferenceForScope(scope ReferenceScope) Reference {
 	return ref
 }
 
-func pathAbsFromBase(baseDir, p string) string {
+func absolutePathFromBase(baseDir, p string) string {
 	if filepath.IsAbs(p) {
 		return p
 	}

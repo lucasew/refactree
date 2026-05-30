@@ -656,7 +656,7 @@ func (m *browseModel) buildProviderItems() ([]list.Item, error) {
 }
 
 func (m *browseModel) symbolItems() ([]list.Item, error) {
-	dir, ref := m.currentSymbolScope()
+	dir, ref := m.currentListingScope()
 	options := ingest.ListOptions{IncludeHidden: m.includeHidden}
 	out := make([]list.Item, 0, 64)
 
@@ -921,12 +921,12 @@ func (m *browseModel) scopeRoot() string {
 	return m.rootDir
 }
 
-func (m *browseModel) docLookupDir() string {
-	dir, _ := m.currentSymbolScope()
+func (m *browseModel) currentDocScopeDir() string {
+	dir, _ := m.currentListingScope()
 	return dir
 }
 
-func (m *browseModel) currentSymbolScope() (string, string) {
+func (m *browseModel) currentListingScope() (string, string) {
 	if m.mode == "provider" {
 		return ".", m.currentScopeRef()
 	}
@@ -965,7 +965,7 @@ func (m *browseModel) ensureSelectedDocLoadedCmd() tea.Cmd {
 		return nil
 	}
 
-	dir := m.docLookupDir()
+	dir := m.currentDocScopeDir()
 	m.loadingDocs[ref] = true
 	return func() tea.Msg {
 		doc, err := ingest.DocFor(dir, ref)
