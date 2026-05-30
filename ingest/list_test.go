@@ -100,6 +100,26 @@ func TestWalkSymbols_StopEarly(t *testing.T) {
 	}
 }
 
+func TestWalkSymbols_GoProviderScope(t *testing.T) {
+	refs, err := collectRefs(".", "go:fmt", ingest.ListOptions{})
+	if err != nil {
+		t.Fatalf("walk symbols: %v", err)
+	}
+	if !containsSymbol(refs, "Printf") {
+		t.Fatalf("expected Printf in go:fmt listing, got %d refs", len(refs))
+	}
+}
+
+func TestWalkSymbols_UnsupportedProvider(t *testing.T) {
+	_, err := collectRefs(".", "node:react", ingest.ListOptions{})
+	if err == nil {
+		t.Fatal("expected error for unsupported provider listing")
+	}
+	if !strings.Contains(err.Error(), `listing not supported for provider "node"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func mustWrite(t *testing.T, file, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(file), 0755); err != nil {
@@ -122,6 +142,16 @@ func collectRefs(dir, ref string, opts ingest.ListOptions) ([]string, error) {
 func containsRef(refs []string, needle string) bool {
 	for _, r := range refs {
 		if strings.TrimSpace(r) == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func containsSymbol(refs []string, symbol string) bool {
+	for _, r := range refs {
+		ref := ingest.ParseReference(strings.TrimSpace(r))
+		if ref.Symbol == symbol {
 			return true
 		}
 	}

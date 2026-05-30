@@ -1,6 +1,7 @@
 package goref
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -35,5 +36,25 @@ func TestResolveSymbolTarget_StdlibPackage(t *testing.T) {
 	suffix := filepath.ToSlash(filepath.Join("src", "fmt"))
 	if !strings.HasSuffix(filepath.ToSlash(target.Dir), suffix) {
 		t.Fatalf("unexpected target dir: %q", target.Dir)
+	}
+}
+
+func TestResolvePackageDir_Stdlib(t *testing.T) {
+	dir, err := ResolvePackageDir("fmt")
+	if err != nil {
+		t.Fatalf("resolve package dir failed: %v", err)
+	}
+	if !strings.HasSuffix(filepath.ToSlash(dir), filepath.ToSlash(filepath.Join("src", "fmt"))) {
+		t.Fatalf("unexpected package dir: %q", dir)
+	}
+}
+
+func TestResolvePackageDir_ModulePackage(t *testing.T) {
+	dir, err := ResolvePackageDir("github.com/lucasew/ccgo-tree-sitter")
+	if err != nil {
+		t.Fatalf("resolve module package dir failed: %v", err)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("resolved directory not readable: %v", err)
 	}
 }

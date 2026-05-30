@@ -10,6 +10,17 @@ func (goReferenceProvider) Resolve(spec string, ctx ImportResolveContext) (strin
 	return goref.ResolveImport(spec, ctx.KnownDirs), true
 }
 
+func (goReferenceProvider) ResolveScopeTarget(ref Reference) (ProviderScopeTarget, bool, error) {
+	if ref.Path == "" {
+		return ProviderScopeTarget{}, false, nil
+	}
+	dir, err := goref.ResolvePackageDir(ref.Path)
+	if err != nil {
+		return ProviderScopeTarget{}, true, err
+	}
+	return ProviderScopeTarget{Dir: dir}, true, nil
+}
+
 func (goReferenceProvider) ResolveSymbolTarget(ref Reference) (ProviderSymbolTarget, bool, error) {
 	target, ok, err := goref.ResolveSymbolTarget(ref.Path, ref.Symbol)
 	if !ok || err != nil {

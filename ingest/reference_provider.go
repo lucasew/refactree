@@ -32,6 +32,17 @@ type SymbolTargetProvider interface {
 	ResolveSymbolTarget(ref Reference) (ProviderSymbolTarget, bool, error)
 }
 
+// ProviderScopeTarget points to a directory that can be ingested for provider
+// scope operations such as ls.
+type ProviderScopeTarget struct {
+	Dir string
+}
+
+// ScopeTargetProvider is an optional provider capability used by listing.
+type ScopeTargetProvider interface {
+	ResolveScopeTarget(ref Reference) (ProviderScopeTarget, bool, error)
+}
+
 func referenceProviderForName(name string) (ReferenceProvider, bool) {
 	p, ok := builtInReferenceProviders[name]
 	return p, ok
@@ -49,6 +60,20 @@ func resolveProviderSymbolTarget(ref Reference) (ProviderSymbolTarget, bool, err
 	}
 
 	return symbolProvider.ResolveSymbolTarget(ref)
+}
+
+func resolveProviderScopeTarget(ref Reference) (ProviderScopeTarget, bool, error) {
+	provider, ok := referenceProviderForName(ref.Provider)
+	if !ok {
+		return ProviderScopeTarget{}, false, nil
+	}
+
+	scopeProvider, ok := provider.(ScopeTargetProvider)
+	if !ok {
+		return ProviderScopeTarget{}, false, nil
+	}
+
+	return scopeProvider.ResolveScopeTarget(ref)
 }
 
 var builtInReferenceProviders = map[string]ReferenceProvider{

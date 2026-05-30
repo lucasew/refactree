@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"fmt"
 	"os"
 	"path"
 	"path/filepath"
@@ -24,13 +25,25 @@ type SymbolInfo struct {
 // matching symbol. Returning false from yield stops iteration early.
 func WalkSymbols(dir, reference string, opts ListOptions, yield func(SymbolInfo) bool) error {
 	ref := ParseReference(reference)
+	ingestDir := dir
 
-	result, err := Ingest(dir)
+	if ref.Provider != "" && ref.Provider != "path" {
+		scope, ok, err := resolveProviderScopeTarget(ref)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("listing not supported for provider %q", ref.Provider)
+		}
+		ingestDir = scope.Dir
+	}
+
+	result, err := Ingest(ingestDir)
 	if err != nil {
 		return err
 	}
 
-	refPath, refIsDir := listScopeForRef(dir, ref)
+	refPath, refIsDir := listScopeForRef(ingestDir, ref)
 
 	langOf := map[string]string{}
 	for _, f := range result.Files {
