@@ -6,6 +6,8 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // ListOptions controls symbol listing behavior.
@@ -150,7 +152,11 @@ func matchesListPathScope(entPath, refPath string, refIsDir, recursive bool) boo
 func isHiddenSymbol(name, language string) bool {
 	switch language {
 	case "go":
-		return len(name) > 0 && name[0] >= 'a' && name[0] <= 'z'
+		if name == "" {
+			return false
+		}
+		r, _ := utf8.DecodeRuneInString(name)
+		return !unicode.IsUpper(r)
 	case "python":
 		return strings.HasPrefix(name, "_")
 	}

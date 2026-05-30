@@ -46,7 +46,7 @@ func TestWalkSymbols_RecursiveDirectory(t *testing.T) {
 
 func TestWalkSymbols_HiddenFilter(t *testing.T) {
 	dir := t.TempDir()
-	mustWrite(t, filepath.Join(dir, "a.go"), "package main\n\nfunc visible() {}\nfunc Visible() {}\n")
+	mustWrite(t, filepath.Join(dir, "a.go"), "package main\n\nfunc visible() {}\nfunc _private() {}\nfunc Visible() {}\n")
 
 	refs, err := collectRefs(dir, "path:./", ingest.ListOptions{})
 	if err != nil {
@@ -54,6 +54,9 @@ func TestWalkSymbols_HiddenFilter(t *testing.T) {
 	}
 	if containsRef(refs, "path:./a.go::visible") {
 		t.Fatalf("did not expect hidden symbol without IncludeHidden, got %v", refs)
+	}
+	if containsRef(refs, "path:./a.go::_private") {
+		t.Fatalf("did not expect hidden underscore symbol without IncludeHidden, got %v", refs)
 	}
 	if !containsRef(refs, "path:./a.go::Visible") {
 		t.Fatalf("expected exported symbol, got %v", refs)
@@ -65,6 +68,9 @@ func TestWalkSymbols_HiddenFilter(t *testing.T) {
 	}
 	if !containsRef(refs, "path:./a.go::visible") {
 		t.Fatalf("expected hidden symbol with IncludeHidden, got %v", refs)
+	}
+	if !containsRef(refs, "path:./a.go::_private") {
+		t.Fatalf("expected hidden underscore symbol with IncludeHidden, got %v", refs)
 	}
 }
 
