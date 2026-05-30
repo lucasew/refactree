@@ -6,8 +6,6 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 )
 
 // ListOptions controls symbol listing behavior.
@@ -75,7 +73,7 @@ func WalkSymbols(dir, reference string, opts ListOptions, yield func(SymbolInfo)
 		if ref.Provider == "go" && language != "go" {
 			continue
 		}
-		if !opts.IncludeHidden && isHiddenSymbol(entRef.Symbol, language) {
+		if !opts.IncludeHidden && isHiddenSymbolByLanguage(entRef.Symbol, language) {
 			continue
 		}
 
@@ -149,16 +147,10 @@ func matchesListPathScope(entPath, refPath string, refIsDir, recursive bool) boo
 	return entPath == refPath
 }
 
-func isHiddenSymbol(name, language string) bool {
-	switch language {
-	case "go":
-		if name == "" {
-			return false
-		}
-		r, _ := utf8.DecodeRuneInString(name)
-		return !unicode.IsUpper(r)
-	case "python":
-		return strings.HasPrefix(name, "_")
+func isHiddenSymbolByLanguage(name, language string) bool {
+	driver, ok := languageDriverForName(language)
+	if !ok {
+		return false
 	}
-	return false
+	return driver.IsHiddenSymbol(name)
 }

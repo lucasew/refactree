@@ -3,6 +3,8 @@ package ingest
 import (
 	"path"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/lucasew/ccgo-tree-sitter/grammar"
 )
@@ -22,6 +24,14 @@ func (goLanguageDriver) ResolveImport(sourcePath string, ctx ImportResolveContex
 		}
 	}
 	return "go:" + lastPathComponent(sourcePath)
+}
+
+func (goLanguageDriver) IsHiddenSymbol(name string) bool {
+	if name == "" {
+		return false
+	}
+	r, _ := utf8.DecodeRuneInString(name)
+	return !unicode.IsUpper(r)
 }
 
 func (goLanguageDriver) DirectoryEntryFile(string) string { return "" }

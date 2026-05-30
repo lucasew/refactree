@@ -32,6 +32,8 @@ func (javascriptLanguageDriver) ResolveImport(sourcePath string, ctx ImportResol
 	return "node:" + sourcePath
 }
 
+func (javascriptLanguageDriver) IsHiddenSymbol(string) bool { return false }
+
 func (javascriptLanguageDriver) DirectoryEntryFile(dirRel string) string {
 	return path.Join(dirRel, "index.js")
 }

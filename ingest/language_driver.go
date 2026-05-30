@@ -8,6 +8,7 @@ type LanguageDriver interface {
 	Language() string
 	Extract(root *grammar.Node, source []byte, relPath string) *fileExtract
 	ResolveImport(sourcePath string, ctx ImportResolveContext) string
+	IsHiddenSymbol(name string) bool
 
 	// DirectoryEntryFile returns the canonical file used when a directory is
 	// referenced as a symbol container (for example __init__.py or index.js).
