@@ -29,6 +29,7 @@ func newRootCmd() *cobra.Command {
 
 	cmd.AddCommand(
 		newASTDumpCmd(opts),
+		newBrowseCmd(opts),
 		newLsCmd(opts),
 		newMvCmd(opts),
 		newDocCmd(opts),
