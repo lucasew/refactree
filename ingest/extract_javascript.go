@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"path"
+	"strings"
 
 	"github.com/lucasew/ccgo-tree-sitter/grammar"
 )
@@ -12,6 +13,23 @@ func (javascriptLanguageDriver) Language() string { return "javascript" }
 
 func (javascriptLanguageDriver) Extract(root *grammar.Node, source []byte, relPath string) *fileExtract {
 	return extractJavaScript(root, source, relPath)
+}
+
+func (javascriptLanguageDriver) ResolveImport(sourcePath string, ctx ImportResolveContext) string {
+	if p, ok := referenceProviderForName("path"); ok {
+		if ref, ok := p.Resolve(sourcePath, ctx); ok {
+			return ref
+		}
+	}
+	if p, ok := referenceProviderForName("node"); ok {
+		if ref, ok := p.Resolve(sourcePath, ctx); ok {
+			return ref
+		}
+	}
+	if strings.HasPrefix(sourcePath, "node:") {
+		return sourcePath
+	}
+	return "node:" + sourcePath
 }
 
 func (javascriptLanguageDriver) DirectoryEntryFile(dirRel string) string {

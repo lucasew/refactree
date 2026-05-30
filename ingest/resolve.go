@@ -1,6 +1,9 @@
 package ingest
 
-import "strings"
+import (
+	"path/filepath"
+	"strings"
+)
 
 // entityLoc pairs an entityDef with its file and language metadata.
 type entityLoc struct {
@@ -20,7 +23,12 @@ type resolvedImport struct {
 
 // resolve takes per-file extracts and produces the final Result by
 // mapping imports to references and resolving usages to relations.
-func resolve(extracts []*fileExtract) *Result {
+func resolve(rootDir string, extracts []*fileExtract) *Result {
+	rootAbs, err := filepath.Abs(rootDir)
+	if err != nil {
+		rootAbs = rootDir
+	}
+
 	res := &Result{
 		Files:     []File{},
 		Entities:  []Entity{},
@@ -56,8 +64,18 @@ func resolve(extracts []*fileExtract) *Result {
 
 	for _, fe := range extracts {
 		table := map[string]resolvedImport{}
+		driver, hasDriver := languageDriverForName(fe.language)
+		ctx := ImportResolveContext{
+			RootDir:      rootAbs,
+			ImporterPath: fe.path,
+			KnownFiles:   knownFiles,
+			KnownDirs:    knownDirs,
+		}
 		for _, imp := range fe.imports {
-			base := resolveImportPath(fe.language, imp.sourcePath, knownFiles, knownDirs)
+			base := imp.sourcePath
+			if hasDriver {
+				base = driver.ResolveImport(imp.sourcePath, ctx)
+			}
 			ri := resolvedImport{
 				target:          base,
 				hasAliasBinding: imp.hasAliasBinding,
@@ -200,46 +218,4 @@ func resolveDirectUsage(res *Result, fe *fileExtract, u usageDef, imports map[st
 			ViaImportAlias: viaImportAlias,
 		})
 	}
-}
-
-// --- import path resolution per language ---
-
-func resolveImportPath(language, sourcePath string, knownFiles, knownDirs map[string]bool) string {
-	switch language {
-	case "go":
-		return resolveGoImportPath(sourcePath, knownDirs)
-	case "python":
-		return resolvePythonImportPath(sourcePath, knownFiles)
-	case "javascript":
-		return resolveJSImportPath(sourcePath)
-	}
-	return sourcePath
-}
-
-func resolveGoImportPath(importPath string, knownDirs map[string]bool) string {
-	last := lastPathComponent(importPath)
-	if knownDirs[last] {
-		return FileRef("./" + last)
-	}
-	return "go:" + last
-}
-
-func resolvePythonImportPath(moduleName string, knownFiles map[string]bool) string {
-	if knownFiles[moduleName+".py"] {
-		return FileRef("./" + moduleName + ".py")
-	}
-	if knownFiles[moduleName+"/__init__.py"] {
-		return FileRef("./" + moduleName)
-	}
-	return "python:" + moduleName
-}
-
-func resolveJSImportPath(sourcePath string) string {
-	if strings.HasPrefix(sourcePath, "./") || strings.HasPrefix(sourcePath, "../") {
-		return FileRef(sourcePath)
-	}
-	if strings.HasPrefix(sourcePath, "node:") {
-		return sourcePath // already in provider:path form
-	}
-	return "node:" + sourcePath
 }

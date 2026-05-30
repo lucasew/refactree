@@ -34,7 +34,7 @@ func Ingest(dir string) (*Result, error) {
 		return nil, err
 	}
 
-	return resolve(extracts), nil
+	return resolve(dir, extracts), nil
 }
 
 // parseFile parses a single source file and returns its fileExtract.

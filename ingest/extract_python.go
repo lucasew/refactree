@@ -14,6 +14,15 @@ func (pythonLanguageDriver) Extract(root *grammar.Node, source []byte, relPath s
 	return extractPython(root, source, relPath)
 }
 
+func (pythonLanguageDriver) ResolveImport(sourcePath string, ctx ImportResolveContext) string {
+	if p, ok := referenceProviderForName("python"); ok {
+		if ref, ok := p.Resolve(sourcePath, ctx); ok {
+			return ref
+		}
+	}
+	return "python:" + sourcePath
+}
+
 func (pythonLanguageDriver) DirectoryEntryFile(dirRel string) string {
 	return path.Join(dirRel, "__init__.py")
 }

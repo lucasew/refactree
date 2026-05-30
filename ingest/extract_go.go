@@ -15,6 +15,15 @@ func (goLanguageDriver) Extract(root *grammar.Node, source []byte, relPath strin
 	return extractGo(root, source, relPath)
 }
 
+func (goLanguageDriver) ResolveImport(sourcePath string, ctx ImportResolveContext) string {
+	if p, ok := referenceProviderForName("go"); ok {
+		if ref, ok := p.Resolve(sourcePath, ctx); ok {
+			return ref
+		}
+	}
+	return "go:" + lastPathComponent(sourcePath)
+}
+
 func (goLanguageDriver) DirectoryEntryFile(string) string { return "" }
 
 func (goLanguageDriver) DestinationFileInDirectory(dstDirRel string, srcRef Reference) string {
