@@ -59,9 +59,19 @@ func DocFor(dir, reference string) (*DocResult, error) {
 }
 
 func docForProviderSymbol(ref Reference, target ProviderSymbolTarget) (*DocResult, error) {
-	result, err := Ingest(target.Dir)
+	recursive := true
+	if ref.Provider == "go" {
+		recursive = false
+	}
+
+	result, err := IngestWithRecursion(target.Dir, recursive)
 	if err != nil {
 		return nil, err
+	}
+
+	langOf := map[string]string{}
+	for _, f := range result.Files {
+		langOf[f.Path] = f.Language
 	}
 
 	symbol := target.Symbol
@@ -72,6 +82,10 @@ func docForProviderSymbol(ref Reference, target ProviderSymbolTarget) (*DocResul
 	matches := make([]int, 0, 1)
 	for i := range result.Entities {
 		entityRef := ParseReference(result.Entities[i].Reference)
+		entPath := strings.TrimPrefix(entityRef.Path, "./")
+		if ref.Provider == "go" && langOf[entPath] != "go" {
+			continue
+		}
 		if entityRef.Symbol == symbol {
 			matches = append(matches, i)
 		}

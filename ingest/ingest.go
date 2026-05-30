@@ -12,6 +12,16 @@ import (
 // Ingest discovers source files under dir, parses them with tree-sitter,
 // and resolves cross-file references.
 func Ingest(dir string) (*Result, error) {
+	return ingestDir(dir, true)
+}
+
+// IngestWithRecursion discovers source files under dir and optionally descends
+// into nested directories.
+func IngestWithRecursion(dir string, recursive bool) (*Result, error) {
+	return ingestDir(dir, recursive)
+}
+
+func ingestDir(dir string, recursive bool) (*Result, error) {
 	var extracts []*fileExtract
 
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
@@ -19,6 +29,9 @@ func Ingest(dir string) (*Result, error) {
 			return err
 		}
 		if info.IsDir() {
+			if !recursive && path != dir {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		fe, parseErr := parseFile(dir, path)

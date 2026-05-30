@@ -26,6 +26,8 @@ type SymbolInfo struct {
 func WalkSymbols(dir, reference string, opts ListOptions, yield func(SymbolInfo) bool) error {
 	ref := ParseReference(reference)
 	ingestDir := dir
+	refPath := ""
+	refIsDir := false
 
 	if ref.Provider != "" && ref.Provider != "path" {
 		scope, ok, err := resolveProviderScopeTarget(ref)
@@ -36,14 +38,16 @@ func WalkSymbols(dir, reference string, opts ListOptions, yield func(SymbolInfo)
 			return fmt.Errorf("listing not supported for provider %q", ref.Provider)
 		}
 		ingestDir = scope.Dir
+		refPath = ""
+		refIsDir = true
+	} else {
+		refPath, refIsDir = listScopeForRef(ingestDir, ref)
 	}
 
-	result, err := Ingest(ingestDir)
+	result, err := IngestWithRecursion(ingestDir, opts.Recursive)
 	if err != nil {
 		return err
 	}
-
-	refPath, refIsDir := listScopeForRef(ingestDir, ref)
 
 	langOf := map[string]string{}
 	for _, f := range result.Files {
@@ -58,20 +62,36 @@ func WalkSymbols(dir, reference string, opts ListOptions, yield func(SymbolInfo)
 		}
 
 		entPath := strings.TrimPrefix(entRef.Path, "./")
+		if ref.Provider == "go" && strings.HasSuffix(entPath, "_test.go") {
+			continue
+		}
 		if !matchesListPathScope(entPath, refPath, refIsDir, opts.Recursive) {
 			continue
 		}
 
 		language := langOf[entPath]
+		if ref.Provider == "go" && language != "go" {
+			continue
+		}
 		if !opts.IncludeHidden && isHiddenSymbol(entRef.Symbol, language) {
 			continue
 		}
 
-		if !yield(SymbolInfo{
+		out := SymbolInfo{
 			Entity:    ent,
 			Reference: entRef,
 			Language:  language,
-		}) {
+		}
+		if ref.Provider != "" && ref.Provider != "path" {
+			out.Reference = Reference{
+				Provider: ref.Provider,
+				Path:     ref.Path,
+				Symbol:   entRef.Symbol,
+			}
+			out.Entity.Reference = out.Reference.String()
+		}
+
+		if !yield(out) {
 			break
 		}
 	}

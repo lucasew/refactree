@@ -120,6 +120,25 @@ func TestWalkSymbols_UnsupportedProvider(t *testing.T) {
 	}
 }
 
+func TestWalkSymbols_GoProviderReferenceShape(t *testing.T) {
+	refs, err := collectRefs(".", "go:fmt", ingest.ListOptions{})
+	if err != nil {
+		t.Fatalf("walk symbols: %v", err)
+	}
+	if len(refs) == 0 {
+		t.Fatal("expected symbols")
+	}
+
+	for _, r := range refs {
+		if !strings.HasPrefix(r, "go:fmt::") {
+			t.Fatalf("unexpected provider reference: %q", r)
+		}
+		if strings.Contains(r, "::Test") || strings.Contains(r, "::Example") {
+			t.Fatalf("did not expect go test/example symbols in provider listing: %q", r)
+		}
+	}
+}
+
 func mustWrite(t *testing.T, file, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(file), 0755); err != nil {

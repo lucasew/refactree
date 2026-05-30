@@ -2,12 +2,15 @@ package goref
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
+	"time"
 )
 
 // SymbolTarget represents a provider-backed symbol location.
@@ -53,14 +56,14 @@ func ResolvePackageDir(pkgPath string) (string, error) {
 		return dir, nil
 	}
 
-	if dir, err := goListDir("list", "-f", "{{.Dir}}", pkgPath); err == nil {
+	if dir, ok := resolveModuleCachePackageDir(pkgPath); ok {
 		return dir, nil
 	}
 
-	if dir, err := goListDir("list", "-m", "-f", "{{.Dir}}", pkgPath); err == nil {
+	if dir, err := goListDir("list", "-f", "{{.Dir}}", pkgPath); err == nil {
 		return dir, nil
 	}
-	return "", fmt.Errorf("go package or module not found: %s", pkgPath)
+	return "", fmt.Errorf("go package not found: %s", pkgPath)
 }
 
 func resolveStdlibPackageDir(pkgPath string) (string, bool) {
@@ -77,11 +80,17 @@ func resolveStdlibPackageDir(pkgPath string) (string, bool) {
 }
 
 func goListDir(args ...string) (string, error) {
-	cmd := exec.Command("go", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "go", args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("go command timed out")
+		}
 		msg := strings.TrimSpace(stderr.String())
 		if msg != "" {
 			return "", fmt.Errorf("%s", msg)
@@ -98,6 +107,79 @@ func goListDir(args ...string) (string, error) {
 		return "", fmt.Errorf("go list directory is invalid: %s", dir)
 	}
 	return dir, nil
+}
+
+func resolveModuleCachePackageDir(pkgPath string) (string, bool) {
+	modCache, ok := moduleCacheDir()
+	if !ok {
+		return "", false
+	}
+
+	parts := strings.Split(pkgPath, "/")
+	for i := len(parts); i >= 1; i-- {
+		modPath := strings.Join(parts[:i], "/")
+		subPath := strings.Join(parts[i:], "/")
+
+		pattern := filepath.Join(modCache, escapeModulePath(modPath)+"@*")
+		matches, _ := filepath.Glob(pattern)
+		if len(matches) == 0 {
+			continue
+		}
+		sort.Strings(matches)
+		for j := len(matches) - 1; j >= 0; j-- {
+			candidate := matches[j]
+			if subPath != "" {
+				candidate = filepath.Join(candidate, filepath.FromSlash(subPath))
+			}
+			st, err := os.Stat(candidate)
+			if err == nil && st.IsDir() {
+				return candidate, true
+			}
+		}
+	}
+
+	return "", false
+}
+
+func moduleCacheDir() (string, bool) {
+	if v := strings.TrimSpace(os.Getenv("GOMODCACHE")); v != "" {
+		if st, err := os.Stat(v); err == nil && st.IsDir() {
+			return v, true
+		}
+	}
+
+	if v := strings.TrimSpace(os.Getenv("GOPATH")); v != "" {
+		for _, gp := range filepath.SplitList(v) {
+			if gp == "" {
+				continue
+			}
+			candidate := filepath.Join(gp, "pkg", "mod")
+			if st, err := os.Stat(candidate); err == nil && st.IsDir() {
+				return candidate, true
+			}
+		}
+	}
+
+	if v, err := goListDir("env", "GOMODCACHE"); err == nil {
+		return v, true
+	}
+
+	return "", false
+}
+
+func escapeModulePath(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			b.WriteByte('!')
+			b.WriteByte(c + ('a' - 'A'))
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }
 
 func lastPathComponent(s string) string {

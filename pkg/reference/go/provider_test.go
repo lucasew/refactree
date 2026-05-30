@@ -49,12 +49,34 @@ func TestResolvePackageDir_Stdlib(t *testing.T) {
 	}
 }
 
-func TestResolvePackageDir_ModulePackage(t *testing.T) {
-	dir, err := ResolvePackageDir("github.com/lucasew/ccgo-tree-sitter")
-	if err != nil {
-		t.Fatalf("resolve module package dir failed: %v", err)
+func TestResolveModuleCachePackageDir_Subpackage(t *testing.T) {
+	modCache := t.TempDir()
+	pkg := filepath.Join(modCache, "github.com", "example", "lib@v1.2.3", "sub", "pkg")
+	if err := os.MkdirAll(pkg, 0755); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(dir); err != nil {
-		t.Fatalf("resolved directory not readable: %v", err)
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Getenv("GOMODCACHE")
+	t.Cleanup(func() {
+		_ = os.Setenv("GOMODCACHE", old)
+		_ = os.Chdir(cwd)
+	})
+	if err := os.Setenv("GOMODCACHE", modCache); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := resolveModuleCachePackageDir("github.com/example/lib/sub/pkg")
+	if !ok {
+		t.Fatal("expected module-cache resolution")
+	}
+	if filepath.Clean(got) != filepath.Clean(pkg) {
+		t.Fatalf("unexpected package dir: %q", got)
 	}
 }
