@@ -22,7 +22,7 @@ func IngestWithRecursion(dir string, recursive bool) (*Result, error) {
 }
 
 func ingestDir(dir string, recursive bool) (*Result, error) {
-	var extracts []*fileExtract
+	var extracts []*FileExtract
 
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -50,9 +50,9 @@ func ingestDir(dir string, recursive bool) (*Result, error) {
 	return resolve(dir, extracts), nil
 }
 
-// parseFile parses a single source file and returns its fileExtract.
+// parseFile parses a single source file and returns its FileExtract.
 // Returns nil (no error) for unsupported file types.
-func parseFile(dir, absPath string) (*fileExtract, error) {
+func parseFile(dir, absPath string) (*FileExtract, error) {
 	lang, ok := grammar.GetByExtension(absPath)
 	if !ok {
 		return nil, nil

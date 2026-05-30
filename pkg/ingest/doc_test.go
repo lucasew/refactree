@@ -16,13 +16,13 @@ func TestDocFor_PythonFunction(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	doc, err := ingest.DocFor(dir, "path:./helper.py::helper")
+	doc, err := ingest.DocFor(dir, "Path:./helper.py::helper")
 	if err != nil {
 		t.Fatalf("doc lookup failed: %v", err)
 	}
 
 	if doc.Name != "helper" {
-		t.Fatalf("unexpected name: %q", doc.Name)
+		t.Fatalf("unexpected Name: %q", doc.Name)
 	}
 	if !strings.Contains(doc.Signature, "def helper(x)") {
 		t.Fatalf("unexpected signature: %q", doc.Signature)
@@ -39,13 +39,13 @@ func TestDocFor_PythonClass(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	doc, err := ingest.DocFor(dir, "path:./helper.py::Greeter")
+	doc, err := ingest.DocFor(dir, "Path:./helper.py::Greeter")
 	if err != nil {
 		t.Fatalf("doc lookup failed: %v", err)
 	}
 
 	if doc.Name != "Greeter" {
-		t.Fatalf("unexpected name: %q", doc.Name)
+		t.Fatalf("unexpected Name: %q", doc.Name)
 	}
 	if !strings.Contains(doc.Signature, "class Greeter") {
 		t.Fatalf("unexpected signature: %q", doc.Signature)
@@ -65,7 +65,7 @@ func TestDocFor_DirectoryReference_PythonInit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	doc, err := ingest.DocFor(dir, "path:./pkg::helper")
+	doc, err := ingest.DocFor(dir, "Path:./Package::helper")
 	if err != nil {
 		t.Fatalf("doc lookup failed: %v", err)
 	}
@@ -84,12 +84,12 @@ func TestDocFor_DirectoryReference_JSIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	doc, err := ingest.DocFor(dir, "path:./pkg::helper")
+	doc, err := ingest.DocFor(dir, "Path:./Package::helper")
 	if err != nil {
 		t.Fatalf("doc lookup failed: %v", err)
 	}
 	if doc.Name != "helper" {
-		t.Fatalf("unexpected name: %q", doc.Name)
+		t.Fatalf("unexpected Name: %q", doc.Name)
 	}
 	if !strings.Contains(doc.DocString, "helper docs") {
 		t.Fatalf("unexpected docstring: %q", doc.DocString)
@@ -105,12 +105,12 @@ func TestDocFor_DirectoryReference_GoFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	doc, err := ingest.DocFor(dir, "path:./pkg::helper")
+	doc, err := ingest.DocFor(dir, "Path:./Package::helper")
 	if err != nil {
 		t.Fatalf("doc lookup failed: %v", err)
 	}
 	if doc.Name != "helper" {
-		t.Fatalf("unexpected name: %q", doc.Name)
+		t.Fatalf("unexpected Name: %q", doc.Name)
 	}
 	if !strings.Contains(doc.DocString, "helper docs") {
 		t.Fatalf("unexpected docstring: %q", doc.DocString)
@@ -124,7 +124,7 @@ func TestDocFor_GoProviderStdlibFunction(t *testing.T) {
 	}
 
 	if doc.Name != "Printf" {
-		t.Fatalf("unexpected name: %q", doc.Name)
+		t.Fatalf("unexpected Name: %q", doc.Name)
 	}
 	if !strings.Contains(doc.Signature, "func Printf(") {
 		t.Fatalf("unexpected signature: %q", doc.Signature)

@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -22,11 +23,22 @@ type providerDocPolicy interface {
 	AllowDocEntity(ref Reference, entRef Reference, entPath, language string) bool
 }
 
-func init() {
-	refpkg.RegisterProvider("path", pathReferenceProvider{})
-	refpkg.RegisterProvider("node", nodeReferenceProvider{})
-	refpkg.RegisterProvider("go", goReferenceProvider{})
-	refpkg.RegisterProvider("python", pythonReferenceProvider{})
+// RegisterReferenceProvider registers a reference provider by name.
+// It panics on empty names, nil providers, or duplicate names.
+func RegisterReferenceProvider(name string, provider refpkg.Provider) {
+	if name == "" {
+		panic("ingest: RegisterReferenceProvider with empty name")
+	}
+	if provider == nil {
+		panic("ingest: RegisterReferenceProvider with nil provider")
+	}
+	if provider.Name() != "" && provider.Name() != name {
+		panic(fmt.Sprintf("ingest: RegisterReferenceProvider name mismatch: key=%q provider=%q", name, provider.Name()))
+	}
+	if _, exists := refpkg.ProviderForName(name); exists {
+		panic(fmt.Sprintf("ingest: reference provider %q already registered", name))
+	}
+	refpkg.RegisterProvider(name, provider)
 }
 
 func referenceProviderForName(name string) (refpkg.Provider, bool) {

@@ -5,25 +5,25 @@ import (
 	"strings"
 )
 
-// entityLoc pairs an entityDef with its file and language metadata.
+// entityLoc pairs an EntityDef with its file and language metadata.
 type entityLoc struct {
-	file     string
-	entity   entityDef
-	pkg      string
-	language string
+	File     string
+	Entity   EntityDef
+	Package  string
+	Language string
 }
 
 // resolvedImport is the result of mapping a raw import to a reference.
 type resolvedImport struct {
-	target     string // full reference string
-	memberName string // non-empty when a specific member was imported
+	Target     string // full reference string
+	MemberName string // non-empty when a specific member was imported
 	// True when the imported name is bound through explicit alias syntax.
-	hasAliasBinding bool
+	HasAliasBinding bool
 }
 
 // resolve takes per-file extracts and produces the final Result by
 // mapping imports to references and resolving usages to relations.
-func resolve(rootDir string, extracts []*fileExtract) *Result {
+func resolve(rootDir string, extracts []*FileExtract) *Result {
 	rootAbs, err := filepath.Abs(rootDir)
 	if err != nil {
 		rootAbs = rootDir
@@ -39,8 +39,8 @@ func resolve(rootDir string, extracts []*fileExtract) *Result {
 	knownFiles := map[string]bool{}
 	knownDirs := map[string]bool{}
 	for _, fe := range extracts {
-		knownFiles[fe.path] = true
-		parts := strings.Split(fe.path, "/")
+		knownFiles[fe.Path] = true
+		parts := strings.Split(fe.Path, "/")
 		if len(parts) > 1 {
 			knownDirs[parts[0]] = true
 		}
@@ -49,12 +49,12 @@ func resolve(rootDir string, extracts []*fileExtract) *Result {
 	// Index all entities by name for scope lookups.
 	allEntities := map[string][]entityLoc{}
 	for _, fe := range extracts {
-		for _, ent := range fe.entities {
-			allEntities[ent.name] = append(allEntities[ent.name], entityLoc{
-				file:     fe.path,
-				entity:   ent,
-				pkg:      fe.pkg,
-				language: fe.language,
+		for _, ent := range fe.Entities {
+			allEntities[ent.Name] = append(allEntities[ent.Name], entityLoc{
+				File:     fe.Path,
+				Entity:   ent,
+				Package:  fe.Package,
+				Language: fe.Language,
 			})
 		}
 	}
@@ -64,70 +64,70 @@ func resolve(rootDir string, extracts []*fileExtract) *Result {
 
 	for _, fe := range extracts {
 		table := map[string]resolvedImport{}
-		driver, hasDriver := languageDriverForName(fe.language)
+		driver, hasDriver := languageDriverForName(fe.Language)
 		ctx := ImportResolveContext{
 			RootDir:      rootAbs,
-			ImporterPath: fe.path,
+			ImporterPath: fe.Path,
 			KnownFiles:   knownFiles,
 			KnownDirs:    knownDirs,
 		}
-		for _, imp := range fe.imports {
-			base := imp.sourcePath
+		for _, imp := range fe.Imports {
+			base := imp.SourcePath
 			if hasDriver {
-				base = driver.ResolveImport(imp.sourcePath, ctx)
+				base = driver.ResolveImport(imp.SourcePath, ctx)
 			}
 			ri := resolvedImport{
-				target:          base,
-				hasAliasBinding: imp.hasAliasBinding,
+				Target:          base,
+				HasAliasBinding: imp.HasAliasBinding,
 			}
-			if imp.memberName != "" {
-				ri.target = base + "::" + imp.memberName
-				ri.memberName = imp.memberName
+			if imp.MemberName != "" {
+				ri.Target = base + "::" + imp.MemberName
+				ri.MemberName = imp.MemberName
 			}
-			table[imp.localName] = ri
+			table[imp.LocalName] = ri
 
-			startByte := imp.startByte
-			endByte := imp.endByte
-			if imp.targetStartByte != 0 || imp.targetEndByte != 0 {
-				startByte = imp.targetStartByte
-				endByte = imp.targetEndByte
+			startByte := imp.StartByte
+			endByte := imp.EndByte
+			if imp.TargetStartByte != 0 || imp.TargetEndByte != 0 {
+				startByte = imp.TargetStartByte
+				endByte = imp.TargetEndByte
 			}
 
 			res.Aliases = append(res.Aliases, Alias{
-				Reference: FileRef("./" + fe.path),
+				Reference: FileRef("./" + fe.Path),
 				StartByte: startByte,
 				EndByte:   endByte,
-				Target:    ri.target,
+				Target:    ri.Target,
 			})
 		}
-		importTables[fe.path] = table
+		importTables[fe.Path] = table
 	}
 
 	// Emit files and entities.
 	for _, fe := range extracts {
 		res.Files = append(res.Files, File{
-			Language: fe.language,
-			Path:     fe.path,
+			Language: fe.Language,
+			Path:     fe.Path,
 		})
-		for _, ent := range fe.entities {
+		for _, ent := range fe.Entities {
 			res.Entities = append(res.Entities, Entity{
-				Reference: SymbolRef("./"+fe.path, ent.name),
-				StartByte: ent.startByte,
-				EndByte:   ent.endByte,
+				Reference: SymbolRef("./"+fe.Path, ent.Name),
+				StartByte: ent.StartByte,
+				EndByte:   ent.EndByte,
 			})
 		}
 	}
 
 	// Resolve usages to relations.
 	for _, fe := range extracts {
-		imports := importTables[fe.path]
-		for _, u := range fe.usages {
-			scopeRef := SymbolRef("./"+fe.path, u.scope)
-			if u.scope == "" {
-				scopeRef = FileRef("./" + fe.path)
+		imports := importTables[fe.Path]
+		for _, u := range fe.Usages {
+			scopeRef := SymbolRef("./"+fe.Path, u.Scope)
+			if u.Scope == "" {
+				scopeRef = FileRef("./" + fe.Path)
 			}
 
-			if u.qualifier != "" {
+			if u.Qualifier != "" {
 				resolveQualifiedUsage(res, imports, scopeRef, u, allEntities)
 			} else {
 				resolveDirectUsage(res, fe, u, imports, allEntities, scopeRef)
@@ -139,32 +139,32 @@ func resolve(rootDir string, extracts []*fileExtract) *Result {
 }
 
 // resolveQualifiedUsage handles pkg.Member access: emits two relations.
-func resolveQualifiedUsage(res *Result, imports map[string]resolvedImport, scopeRef string, u usageDef, allEntities map[string][]entityLoc) {
-	ri, ok := imports[u.qualifier]
+func resolveQualifiedUsage(res *Result, imports map[string]resolvedImport, scopeRef string, u UsageDef, allEntities map[string][]entityLoc) {
+	ri, ok := imports[u.Qualifier]
 	if !ok {
 		return
 	}
-	baseTarget := ri.target
-	if ri.memberName != "" {
-		baseTarget = strings.TrimSuffix(baseTarget, "::"+ri.memberName)
+	baseTarget := ri.Target
+	if ri.MemberName != "" {
+		baseTarget = strings.TrimSuffix(baseTarget, "::"+ri.MemberName)
 	}
 
 	res.Relations = append(res.Relations, Relation{
 		Reference: scopeRef,
-		StartByte: u.qualStartByte,
-		EndByte:   u.qualEndByte,
+		StartByte: u.QualStartByte,
+		EndByte:   u.QualEndByte,
 		Target:    baseTarget,
 	})
 
-	// For local directory targets (path:./dir), resolve the member to
+	// For local directory targets (Path:./dir), resolve the member to
 	// the specific file that defines it.
-	memberTarget := baseTarget + "::" + u.name
+	memberTarget := baseTarget + "::" + u.Name
 	baseRef := ParseReference(baseTarget)
 	if baseRef.Provider == "path" && baseRef.Symbol == "" {
 		dirPrefix := strings.TrimPrefix(baseRef.Path, "./")
-		for _, loc := range allEntities[u.name] {
-			if strings.HasPrefix(loc.file, dirPrefix+"/") {
-				memberTarget = SymbolRef("./"+loc.file, loc.entity.name)
+		for _, loc := range allEntities[u.Name] {
+			if strings.HasPrefix(loc.File, dirPrefix+"/") {
+				memberTarget = SymbolRef("./"+loc.File, loc.Entity.Name)
 				break
 			}
 		}
@@ -172,28 +172,28 @@ func resolveQualifiedUsage(res *Result, imports map[string]resolvedImport, scope
 
 	res.Relations = append(res.Relations, Relation{
 		Reference: scopeRef,
-		StartByte: u.startByte,
-		EndByte:   u.endByte,
+		StartByte: u.StartByte,
+		EndByte:   u.EndByte,
 		Target:    memberTarget,
 	})
 }
 
 // resolveDirectUsage handles bare identifier access.
-func resolveDirectUsage(res *Result, fe *fileExtract, u usageDef, imports map[string]resolvedImport, allEntities map[string][]entityLoc, scopeRef string) {
+func resolveDirectUsage(res *Result, fe *FileExtract, u UsageDef, imports map[string]resolvedImport, allEntities map[string][]entityLoc, scopeRef string) {
 	target := ""
 	viaImportAlias := false
 
 	// 1. Check import table.
-	if ri, ok := imports[u.name]; ok {
-		target = ri.target
-		viaImportAlias = ri.hasAliasBinding
+	if ri, ok := imports[u.Name]; ok {
+		target = ri.Target
+		viaImportAlias = ri.HasAliasBinding
 	}
 
 	// 2. For Go: check same-package entities in sibling files.
-	if target == "" && fe.language == "go" {
-		for _, loc := range allEntities[u.name] {
-			if loc.file != fe.path && loc.pkg == fe.pkg && loc.language == "go" {
-				target = SymbolRef("./"+loc.file, loc.entity.name)
+	if target == "" && fe.Language == "go" {
+		for _, loc := range allEntities[u.Name] {
+			if loc.File != fe.Path && loc.Package == fe.Package && loc.Language == "go" {
+				target = SymbolRef("./"+loc.File, loc.Entity.Name)
 				break
 			}
 		}
@@ -201,9 +201,9 @@ func resolveDirectUsage(res *Result, fe *fileExtract, u usageDef, imports map[st
 
 	// 3. Check entities in the same file (self-references).
 	if target == "" {
-		for _, loc := range allEntities[u.name] {
-			if loc.file == fe.path {
-				target = SymbolRef("./"+loc.file, loc.entity.name)
+		for _, loc := range allEntities[u.Name] {
+			if loc.File == fe.Path {
+				target = SymbolRef("./"+loc.File, loc.Entity.Name)
 				break
 			}
 		}
@@ -212,8 +212,8 @@ func resolveDirectUsage(res *Result, fe *fileExtract, u usageDef, imports map[st
 	if target != "" {
 		res.Relations = append(res.Relations, Relation{
 			Reference:      scopeRef,
-			StartByte:      u.startByte,
-			EndByte:        u.endByte,
+			StartByte:      u.StartByte,
+			EndByte:        u.EndByte,
 			Target:         target,
 			ViaImportAlias: viaImportAlias,
 		})

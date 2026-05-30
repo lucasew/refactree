@@ -11,8 +11,8 @@ import (
 )
 
 type entityCandidate struct {
-	ref      Reference
-	language string
+	Ref      Reference
+	Language string
 }
 
 func normalizePathReference(ref Reference) Reference {
@@ -69,8 +69,8 @@ func canonicalSourceReference(dir string, result *Result, ref Reference) (Refere
 			}
 		}
 		candidates = append(candidates, entityCandidate{
-			ref:      entRef,
-			language: langByPath[entPath],
+			Ref:      entRef,
+			Language: langByPath[entPath],
 		})
 	}
 
@@ -78,7 +78,7 @@ func canonicalSourceReference(dir string, result *Result, ref Reference) (Refere
 		return ref, fmt.Errorf("no entity %q found under directory %q", ref.Symbol, ref.Path)
 	}
 	if len(candidates) == 1 {
-		return candidates[0].ref, nil
+		return candidates[0].Ref, nil
 	}
 
 	if picked, ok := pickPreferredDirectoryEntity(candidates, dirRel); ok {
@@ -87,7 +87,7 @@ func canonicalSourceReference(dir string, result *Result, ref Reference) (Refere
 
 	refs := make([]string, 0, len(candidates))
 	for _, c := range candidates {
-		refs = append(refs, c.ref.String())
+		refs = append(refs, c.Ref.String())
 	}
 	return ref, fmt.Errorf("ambiguous directory reference %q, matches: %s", ref.String(), strings.Join(refs, ", "))
 }
@@ -106,24 +106,24 @@ func pickPreferredDirectoryEntity(candidates []entityCandidate, dirRel string) (
 		}
 		preferred = path.Clean(preferred)
 		for _, c := range candidates {
-			if c.language != lang {
+			if c.Language != lang {
 				continue
 			}
-			candPath := path.Clean(strings.TrimPrefix(c.ref.Path, "./"))
+			candPath := path.Clean(strings.TrimPrefix(c.Ref.Path, "./"))
 			if candPath == preferred {
-				return c.ref, true
+				return c.Ref, true
 			}
 		}
 	}
 
 	goDirect := []Reference{}
 	for _, c := range candidates {
-		if c.language != "go" {
+		if c.Language != "go" {
 			continue
 		}
-		candPath := strings.TrimPrefix(c.ref.Path, "./")
+		candPath := strings.TrimPrefix(c.Ref.Path, "./")
 		if path.Dir(candPath) == dirRel {
-			goDirect = append(goDirect, c.ref)
+			goDirect = append(goDirect, c.Ref)
 		}
 	}
 	if len(goDirect) == 1 {

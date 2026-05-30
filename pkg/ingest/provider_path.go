@@ -1,12 +1,21 @@
 package ingest
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
+
+	refpkg "github.com/lucasew/refactree/pkg/reference"
 )
 
 type pathReferenceProvider struct{}
+
+func NewPathReferenceProvider() refpkg.Provider { return pathReferenceProvider{} }
+
+func init() {
+	RegisterReferenceProvider("path", NewPathReferenceProvider())
+}
 
 func (pathReferenceProvider) Name() string { return "path" }
 
@@ -86,4 +95,21 @@ func resolveJSFileOnDisk(baseAbs string, preferPackageMain bool) (string, bool) 
 	}
 
 	return "", false
+}
+
+func readPackageMain(packageJSONPath string) (string, bool) {
+	data, err := os.ReadFile(packageJSONPath)
+	if err != nil {
+		return "", false
+	}
+	var pkg struct {
+		Main string `json:"main"`
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		return "", false
+	}
+	if pkg.Main == "" {
+		return "", false
+	}
+	return filepath.ToSlash(pkg.Main), true
 }

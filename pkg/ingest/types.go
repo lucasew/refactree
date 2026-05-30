@@ -40,53 +40,53 @@ type Relation struct {
 
 // --- intermediate types produced by per-file extraction ---
 
-// fileExtract holds raw facts from parsing a single source file.
-type fileExtract struct {
-	language string
-	path     string
-	pkg      string // Go package name; empty for Python/JS
+// FileExtract holds raw facts from parsing a single source file.
+type FileExtract struct {
+	Language string
+	Path     string
+	Package  string // Go package name; empty for Python/JS
 
-	entities []entityDef
-	imports  []importDef
-	usages   []usageDef
+	Entities []EntityDef
+	Imports  []ImportDef
+	Usages   []UsageDef
 }
 
-// entityDef is a symbol definition found during extraction.
-type entityDef struct {
-	name      string
-	startByte uint32
-	endByte   uint32
-	exported  bool
+// EntityDef is a symbol definition found during extraction.
+type EntityDef struct {
+	Name      string
+	StartByte uint32
+	EndByte   uint32
+	Exported  bool
 }
 
-// importDef is an import declaration found during extraction.
-type importDef struct {
-	localName  string // name bound in local scope
-	sourcePath string // raw import path ("fmt", "./helper.js", "helpers")
-	memberName string // specific symbol imported; empty for module/package imports
-	startByte  uint32 // byte span of the local binding name
-	endByte    uint32
+// ImportDef is an import declaration found during extraction.
+type ImportDef struct {
+	LocalName  string // name bound in local scope
+	SourcePath string // raw import path ("fmt", "./helper.js", "helpers")
+	MemberName string // specific symbol imported; empty for module/package imports
+	StartByte  uint32 // byte span of the local binding name
+	EndByte    uint32
 
 	// Byte span of the token that names the referenced target symbol.
 	// For member imports this is the imported member token ("helper").
-	// For module/package imports this falls back to startByte/endByte.
-	targetStartByte uint32
-	targetEndByte   uint32
+	// For module/package imports this falls back to StartByte/EndByte.
+	TargetStartByte uint32
+	TargetEndByte   uint32
 
 	// True when import syntax used an explicit alias binding (`as`/import alias),
 	// even if alias text equals the imported symbol name.
-	hasAliasBinding bool
+	HasAliasBinding bool
 }
 
-// usageDef is a call-site identifier found during extraction.
-type usageDef struct {
-	scope     string // enclosing entity name; empty for file-level
-	name      string // identifier text
-	startByte uint32
-	endByte   uint32
+// UsageDef is a call-site identifier found during extraction.
+type UsageDef struct {
+	Scope     string // enclosing entity name; empty for file-level
+	Name      string // identifier text
+	StartByte uint32
+	EndByte   uint32
 
 	// For qualified access (obj.member):
-	qualifier     string
-	qualStartByte uint32
-	qualEndByte   uint32
+	Qualifier     string
+	QualStartByte uint32
+	QualEndByte   uint32
 }

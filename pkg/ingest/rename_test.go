@@ -16,7 +16,7 @@ func TestRename_MissingEntity(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := ingest.Rename(dir, "path:./main.go::doesNotExist", "path:./main.go::renamed")
+	_, err := ingest.Rename(dir, "Path:./main.go::doesNotExist", "Path:./main.go::renamed")
 	if err == nil {
 		t.Fatal("expected error for missing entity")
 	}
@@ -34,7 +34,7 @@ func TestRename_RenamesDefinitionAndCallsite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	edits, err := ingest.Rename(dir, "path:./helper.py::helper", "path:./helper.py::renamed")
+	edits, err := ingest.Rename(dir, "Path:./helper.py::helper", "Path:./helper.py::renamed")
 	if err != nil {
 		t.Fatalf("rename failed: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestRename_PythonAliasedImport_RenamesImportedMemberOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	edits, err := ingest.Rename(dir, "path:./helper.py::helper", "path:./helper.py::renamed")
+	edits, err := ingest.Rename(dir, "Path:./helper.py::helper", "Path:./helper.py::renamed")
 	if err != nil {
 		t.Fatalf("rename failed: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestRename_JSAliasedImport_RenamesImportedMemberOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	edits, err := ingest.Rename(dir, "path:./helper.js::helper", "path:./helper.js::doHelp")
+	edits, err := ingest.Rename(dir, "Path:./helper.js::helper", "Path:./helper.js::doHelp")
 	if err != nil {
 		t.Fatalf("rename failed: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestRename_ModuleAliasMemberCallsite_RenamesMemberAccess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	edits, err := ingest.Rename(dir, "path:./helpers.py::helper", "path:./helpers.py::renamed")
+	edits, err := ingest.Rename(dir, "Path:./helpers.py::helper", "Path:./helpers.py::renamed")
 	if err != nil {
 		t.Fatalf("rename failed: %v", err)
 	}

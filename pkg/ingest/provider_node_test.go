@@ -26,7 +26,7 @@ func TestNodeProvider_ResolveFromNodeModules(t *testing.T) {
 	if !ok {
 		t.Fatal("expected provider to resolve")
 	}
-	if ref != "path:./node_modules/react/index.js" {
+	if ref != "Path:./node_modules/react/index.js" {
 		t.Fatalf("unexpected reference: %q", ref)
 	}
 }
@@ -57,7 +57,7 @@ func TestNodeProvider_ResolveFromNODE_PATH(t *testing.T) {
 	}
 
 	expectedSuffix := filepath.ToSlash(moduleFile)
-	if !strings.HasPrefix(ref, "path:") || !strings.HasSuffix(ref, expectedSuffix) {
+	if !strings.HasPrefix(ref, "Path:") || !strings.HasSuffix(ref, expectedSuffix) {
 		t.Fatalf("expected absolute path reference ending with %q, got %q", expectedSuffix, ref)
 	}
 }
