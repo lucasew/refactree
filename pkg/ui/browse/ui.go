@@ -1011,7 +1011,7 @@ func (m *browseModel) ensureSelectedDocLoadedCmd() tea.Cmd {
 		}
 		return docLoadedMsg{
 			ref:      ref,
-			markdown: docToMarkdown(doc),
+			markdown: docToMarkdown(doc, markdownFenceLanguageForRef(ref)),
 		}
 	}
 }
@@ -1358,11 +1358,15 @@ func browseScopeFromReference(ref ingest.Reference) (rootDir string, currentRel 
 	return filepath.Dir(pathValue), filepath.Base(pathValue), nil
 }
 
-func docToMarkdown(doc *ingest.DocResult) string {
+func docToMarkdown(doc *ingest.DocResult, fenceLanguage string) string {
 	var out strings.Builder
 	fmt.Fprintf(&out, "# %s\n", doc.Name)
 	if doc.Signature != "" {
-		out.WriteString("```\n")
+		if fenceLanguage != "" {
+			out.WriteString("```" + fenceLanguage + "\n")
+		} else {
+			out.WriteString("```\n")
+		}
 		out.WriteString(doc.Signature)
 		out.WriteString("\n```\n")
 	}
@@ -1374,4 +1378,23 @@ func docToMarkdown(doc *ingest.DocResult) string {
 		out.WriteByte('\n')
 	}
 	return strings.TrimRight(out.String(), "\n")
+}
+
+func markdownFenceLanguageForRef(ref string) string {
+	parsed := ingest.ParseReference(ref)
+	if parsed.Provider == "path" {
+		if lang, ok := ingest.LanguageForFile(parsed.Path); ok {
+			return lang
+		}
+		return ""
+	}
+
+	switch parsed.Provider {
+	case "node":
+		return "javascript"
+	case "go", "python", "javascript":
+		return parsed.Provider
+	default:
+		return ""
+	}
 }

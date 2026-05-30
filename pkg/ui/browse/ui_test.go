@@ -119,15 +119,35 @@ func TestDocToMarkdown(t *testing.T) {
 		DocString: "Printf formats according to a format specifier.",
 	}
 
-	got := docToMarkdown(doc)
+	got := docToMarkdown(doc, "go")
 	if !strings.Contains(got, "# Printf") {
 		t.Fatalf("missing title in markdown: %q", got)
 	}
-	if !strings.Contains(got, "```") || !strings.Contains(got, "func Printf") {
+	if !strings.Contains(got, "```go") || !strings.Contains(got, "func Printf") {
 		t.Fatalf("missing fenced signature in markdown: %q", got)
 	}
 	if !strings.Contains(got, "Printf formats according to a format specifier.") {
 		t.Fatalf("missing doc string in markdown: %q", got)
+	}
+}
+
+func TestMarkdownFenceLanguageForRef(t *testing.T) {
+	cases := []struct {
+		ref  string
+		want string
+	}{
+		{ref: "path:./main.go::main", want: "go"},
+		{ref: "path:/tmp/main.py::main", want: "python"},
+		{ref: "python:os::makedirs", want: "python"},
+		{ref: "go:fmt::Printf", want: "go"},
+		{ref: "node:react::createElement", want: "javascript"},
+	}
+
+	for _, tc := range cases {
+		got := markdownFenceLanguageForRef(tc.ref)
+		if got != tc.want {
+			t.Fatalf("markdownFenceLanguageForRef(%q)=%q want %q", tc.ref, got, tc.want)
+		}
 	}
 }
 
