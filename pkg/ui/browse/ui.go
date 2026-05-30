@@ -663,6 +663,14 @@ func (m *browseModel) symbolItems() ([]list.Item, error) {
 	dir := m.rootDir
 	if m.mode == "provider" {
 		dir = "."
+	} else {
+		abs := m.currentAbsPath()
+		if st, err := os.Stat(abs); err == nil && st.IsDir() {
+			// Keep ls-like semantics for the current package directory:
+			// ingest from the current directory root and list path:./ scope.
+			dir = abs
+			ref = "path:./"
+		}
 	}
 	err := ingest.WalkSymbols(dir, ref, options, func(sym ingest.SymbolInfo) bool {
 		path := strings.TrimPrefix(sym.Reference.Path, "./")

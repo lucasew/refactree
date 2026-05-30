@@ -360,6 +360,49 @@ func TestBrowseSymbols_PathCmdRft_ContainsExecuteLikeLs(t *testing.T) {
 	}
 }
 
+func TestBrowseNavigateIntoDirectory_ShowsSymbols(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "pkg")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatalf("create subdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "main.go"), []byte("package pkg\nfunc Exported() {}\n"), 0644); err != nil {
+		t.Fatalf("write go file: %v", err)
+	}
+
+	model, err := newBrowseModel(dir, ".", false)
+	if err != nil {
+		t.Fatalf("new browse model: %v", err)
+	}
+
+	index := findBrowseItemIndex(model.list.Items(), func(it browseItem) bool {
+		return it.kind == browseItemDir && it.targetRel == "pkg"
+	})
+	if index < 0 {
+		t.Fatal("expected directory item for pkg/")
+	}
+	model.list.Select(index)
+
+	if err := model.activateSelection(); err != nil {
+		t.Fatalf("activate selection: %v", err)
+	}
+
+	found := false
+	for _, raw := range model.list.Items() {
+		item, ok := raw.(browseItem)
+		if !ok {
+			continue
+		}
+		if item.kind == browseItemSymbol && item.title == "Exported" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected Exported symbol after entering pkg/, got items: %+v", model.list.Items())
+	}
+}
+
 func findRepoRoot(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()
