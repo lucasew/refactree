@@ -24,6 +24,7 @@ func newMvCmd(root *rootOptions) *cobra.Command {
 			destination := args[1]
 
 			srcRef := ingest.ParseReference(source)
+			srcRef = coerceLocalPathRef(srcRef)
 			dir := "."
 			if srcRef.Provider == "path" {
 				p := strings.TrimPrefix(srcRef.Path, "./")
@@ -34,7 +35,9 @@ func newMvCmd(root *rootOptions) *cobra.Command {
 				}
 			}
 			source = normalizeRefForIngestDir(dir, srcRef).String()
-			destination = normalizeRefForIngestDir(dir, ingest.ParseReference(destination)).String()
+			dstRef := ingest.ParseReference(destination)
+			dstRef = coerceLocalPathRef(dstRef)
+			destination = normalizeRefForIngestDir(dir, dstRef).String()
 
 			edits, err := ingest.Rename(dir, source, destination)
 			if err != nil {

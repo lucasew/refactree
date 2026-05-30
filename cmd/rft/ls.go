@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -13,6 +14,7 @@ import (
 func newLsCmd(root *rootOptions) *cobra.Command {
 	var all bool
 	var long bool
+	var recursive bool
 
 	cmd := &cobra.Command{
 		Use:   "ls <reference>",
@@ -20,12 +22,15 @@ func newLsCmd(root *rootOptions) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ref := ingest.ParseReference(args[0])
+			ref = coerceLocalPathRef(ref)
+			refIsDir := false
 
 			dir := "."
 			if ref.Provider == "path" {
 				p := strings.TrimPrefix(ref.Path, "./")
 				if st, err := os.Stat(p); err == nil && st.IsDir() {
 					dir = p
+					refIsDir = true
 				} else if p != "" {
 					dir = filepath.Dir(p)
 				}
@@ -56,7 +61,7 @@ func newLsCmd(root *rootOptions) *cobra.Command {
 					refPath = ""
 				}
 				entPath := strings.TrimPrefix(entRef.Path, "./")
-				if refPath != "" && !strings.HasPrefix(entPath, refPath) {
+				if !matchesPathScope(entPath, refPath, refIsDir, recursive) {
 					continue
 				}
 
@@ -79,8 +84,37 @@ func newLsCmd(root *rootOptions) *cobra.Command {
 
 	cmd.Flags().BoolVarP(&all, "all", "a", false, "include normally hidden symbols")
 	cmd.Flags().BoolVarP(&long, "long", "l", false, "use long listing format")
+	cmd.Flags().BoolVarP(&recursive, "recursive", "R", false, "list symbols recursively for directory references")
 
 	return cmd
+}
+
+func matchesPathScope(entPath, refPath string, refIsDir, recursive bool) bool {
+	entPath = filepath.ToSlash(entPath)
+	refPath = filepath.ToSlash(refPath)
+	refPath = strings.TrimPrefix(refPath, "./")
+	if refPath == "." {
+		refPath = ""
+	}
+
+	if refIsDir {
+		if recursive {
+			if refPath == "" {
+				return true
+			}
+			return entPath == refPath || strings.HasPrefix(entPath, refPath+"/")
+		}
+		parent := filepath.ToSlash(path.Dir(entPath))
+		if parent == "." {
+			parent = ""
+		}
+		return parent == refPath
+	}
+
+	if refPath == "" {
+		return true
+	}
+	return entPath == refPath
 }
 
 func isHidden(name, language string) bool {

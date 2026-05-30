@@ -18,6 +18,7 @@ func newDocCmd(root *rootOptions) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			reference := args[0]
 			ref := ingest.ParseReference(reference)
+			ref = coerceLocalPathRef(ref)
 
 			dir := "."
 			if ref.Provider == "path" {
