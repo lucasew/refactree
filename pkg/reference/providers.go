@@ -31,6 +31,9 @@ type SymbolTarget struct {
 // scope operations such as listing.
 type ScopeTarget struct {
 	Dir string
+	// CanDescend controls whether provider browse UIs should offer child scope
+	// navigation from this target. Nil means unknown/default behavior.
+	CanDescend *bool
 }
 
 // SymbolTargetProvider is an optional provider capability used by doc lookup.

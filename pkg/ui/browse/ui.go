@@ -640,35 +640,41 @@ func (m *browseModel) buildProviderItems() ([]list.Item, error) {
 		})
 	}
 
-	entries, err := os.ReadDir(m.providerDir)
-	if err != nil {
-		return nil, err
+	allowChildren := true
+	if scope.CanDescend != nil {
+		allowChildren = *scope.CanDescend
 	}
+	if allowChildren {
+		entries, err := os.ReadDir(m.providerDir)
+		if err != nil {
+			return nil, err
+		}
 
-	packages := make([]browseItem, 0, len(entries))
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
+		packages := make([]browseItem, 0, len(entries))
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if !m.includeHidden && strings.HasPrefix(name, ".") {
+				continue
+			}
+			childDir := filepath.Join(m.providerDir, name)
+			if m.providerRef.Provider == "go" && !dirHasGoSources(childDir) {
+				continue
+			}
+			childPath := joinProviderPath(m.providerRef.Path, name)
+			packages = append(packages, browseItem{
+				kind:      browseItemDir,
+				title:     name + "/",
+				desc:      "subpackage",
+				targetRef: ingest.Reference{Provider: m.providerRef.Provider, Path: childPath}.String(),
+			})
 		}
-		name := entry.Name()
-		if !m.includeHidden && strings.HasPrefix(name, ".") {
-			continue
+		sort.Slice(packages, func(i, j int) bool { return packages[i].title < packages[j].title })
+		for _, pkg := range packages {
+			items = append(items, pkg)
 		}
-		childDir := filepath.Join(m.providerDir, name)
-		if m.providerRef.Provider == "go" && !dirHasGoSources(childDir) {
-			continue
-		}
-		childPath := joinProviderPath(m.providerRef.Path, name)
-		packages = append(packages, browseItem{
-			kind:      browseItemDir,
-			title:     name + "/",
-			desc:      "subpackage",
-			targetRef: ingest.Reference{Provider: m.providerRef.Provider, Path: childPath}.String(),
-		})
-	}
-	sort.Slice(packages, func(i, j int) bool { return packages[i].title < packages[j].title })
-	for _, pkg := range packages {
-		items = append(items, pkg)
 	}
 
 	symbols, err := m.symbolItems()

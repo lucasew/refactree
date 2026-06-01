@@ -14,8 +14,9 @@ import (
 )
 
 type ModuleTarget struct {
-	Dir  string
-	File string
+	Dir       string
+	File      string
+	IsPackage bool
 }
 
 type SymbolTarget struct {
@@ -171,7 +172,7 @@ func resolveModuleTarget(module string) (ModuleTarget, error) {
 				file = "__init__.py"
 			}
 		}
-		return ModuleTarget{Dir: dir, File: file}, nil
+		return ModuleTarget{Dir: dir, File: file, IsPackage: true}, nil
 	}
 
 	origin := strings.TrimSpace(result.Origin)
@@ -182,7 +183,7 @@ func resolveModuleTarget(module string) (ModuleTarget, error) {
 			}
 			st, err := os.Stat(candidate)
 			if err == nil && !st.IsDir() {
-				return ModuleTarget{Dir: filepath.Dir(candidate), File: filepath.Base(candidate)}, nil
+				return ModuleTarget{Dir: filepath.Dir(candidate), File: filepath.Base(candidate), IsPackage: false}, nil
 			}
 		}
 		return ModuleTarget{}, fmt.Errorf("python module %q has no filesystem source", module)
@@ -191,7 +192,7 @@ func resolveModuleTarget(module string) (ModuleTarget, error) {
 	if err != nil || st.IsDir() {
 		return ModuleTarget{}, fmt.Errorf("python module %q resolved to invalid source %q", module, origin)
 	}
-	return ModuleTarget{Dir: filepath.Dir(origin), File: filepath.Base(origin)}, nil
+	return ModuleTarget{Dir: filepath.Dir(origin), File: filepath.Base(origin), IsPackage: false}, nil
 }
 
 func pythonCommand() (string, error) {

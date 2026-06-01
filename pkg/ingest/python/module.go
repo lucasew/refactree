@@ -1,6 +1,8 @@
 package python
 
 import (
+	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/lucasew/ccgo-tree-sitter/grammar"
@@ -51,11 +53,8 @@ type referenceProvider struct{}
 func (referenceProvider) Name() string { return "python" }
 
 func (referenceProvider) Resolve(spec string, ctx ingest.ImportResolveContext) (string, bool) {
-	if ctx.KnownFiles[spec+".py"] {
-		return ingest.FileRef("./" + spec + ".py"), true
-	}
-	if ctx.KnownFiles[spec+"/__init__.py"] {
-		return ingest.FileRef("./" + spec), true
+	if ref, ok := resolvePythonImportSpec(spec, ctx); ok {
+		return ref, true
 	}
 	return "python:" + spec, true
 }
@@ -68,7 +67,8 @@ func (referenceProvider) ResolveScopeTarget(ref ingest.Reference) (ingest.Provid
 	if err != nil {
 		return ingest.ProviderScopeTarget{}, true, err
 	}
-	return ingest.ProviderScopeTarget{Dir: target.Dir}, true, nil
+	canDescend := target.IsPackage
+	return ingest.ProviderScopeTarget{Dir: target.Dir, CanDescend: &canDescend}, true, nil
 }
 
 func (referenceProvider) ResolveSymbolTarget(ref ingest.Reference) (ingest.ProviderSymbolTarget, bool, error) {
@@ -199,7 +199,7 @@ func extractPythonImportFrom(fe *ingest.FileExtract, n *grammar.Node, source []b
 	if modNode == nil {
 		return
 	}
-	moduleName := ingest.NodeText(modNode, source)
+	moduleName := pythonModuleSpec(modNode, source)
 
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		if n.FieldNameForChild(i) != "name" {
@@ -262,11 +262,6 @@ func extractPythonImport(fe *ingest.FileExtract, n *grammar.Node, source []byte)
 				continue
 			}
 			moduleName := ingest.NodeText(nameNode, source)
-			if nameNode.Type() == "dotted_name" {
-				if id := ingest.ChildByType(nameNode, "identifier"); id != nil {
-					moduleName = ingest.NodeText(id, source)
-				}
-			}
 
 			fe.Imports = append(fe.Imports, ingest.ImportDef{
 				LocalName:       ingest.NodeText(aliasNode, source),
@@ -358,4 +353,106 @@ func pythonVisibilityName(name string) string {
 		return name[i+1:]
 	}
 	return name
+}
+
+func resolvePythonImportSpec(spec string, ctx ingest.ImportResolveContext) (string, bool) {
+	if strings.HasPrefix(spec, ".") {
+		if ref, ok := resolvePythonRelativeImport(spec, ctx); ok {
+			return ref, true
+		}
+		return "", false
+	}
+	return resolvePythonAbsoluteImport(spec, ctx.KnownFiles)
+}
+
+func resolvePythonAbsoluteImport(spec string, knownFiles map[string]bool) (string, bool) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return "", false
+	}
+
+	candidates := []string{strings.ReplaceAll(spec, ".", "/")}
+	if !strings.Contains(spec, "/") {
+		candidates = append(candidates, spec)
+	}
+
+	for _, modulePath := range candidates {
+		if modulePath == "" {
+			continue
+		}
+		if knownFiles[modulePath+".py"] {
+			return ingest.FileRef("./" + modulePath + ".py"), true
+		}
+		if knownFiles[modulePath+"/__init__.py"] {
+			return ingest.FileRef("./" + modulePath), true
+		}
+	}
+	return "", false
+}
+
+func resolvePythonRelativeImport(spec string, ctx ingest.ImportResolveContext) (string, bool) {
+	level := 0
+	for level < len(spec) && spec[level] == '.' {
+		level++
+	}
+	if level == 0 {
+		return "", false
+	}
+
+	tail := strings.TrimPrefix(spec, strings.Repeat(".", level))
+	tail = strings.ReplaceAll(tail, ".", "/")
+
+	baseDir := filepath.ToSlash(filepath.Dir(ctx.ImporterPath))
+	if baseDir == "." {
+		baseDir = ""
+	}
+	for i := 1; i < level; i++ {
+		baseDir = path.Dir(baseDir)
+		if baseDir == "." {
+			baseDir = ""
+		}
+	}
+
+	modulePath := baseDir
+	if tail != "" {
+		if modulePath == "" {
+			modulePath = tail
+		} else {
+			modulePath = path.Join(modulePath, tail)
+		}
+	}
+	if modulePath == "" {
+		return "", false
+	}
+
+	if ctx.KnownFiles[modulePath+".py"] {
+		return ingest.FileRef("./" + modulePath + ".py"), true
+	}
+	if ctx.KnownFiles[modulePath+"/__init__.py"] {
+		return ingest.FileRef("./" + modulePath), true
+	}
+	return "", false
+}
+
+func pythonModuleSpec(n *grammar.Node, source []byte) string {
+	if n == nil {
+		return ""
+	}
+	if n.Type() != "relative_import" {
+		return ingest.NodeText(n, source)
+	}
+
+	prefix := ""
+	if p := ingest.ChildByType(n, "import_prefix"); p != nil {
+		for _, r := range ingest.NodeText(p, source) {
+			if r == '.' {
+				prefix += "."
+			}
+		}
+	}
+
+	if dotted := ingest.ChildByType(n, "dotted_name"); dotted != nil {
+		return prefix + ingest.NodeText(dotted, source)
+	}
+	return prefix
 }

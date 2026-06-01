@@ -112,6 +112,26 @@ func TestNewBrowseModelFromReference_PythonProvider(t *testing.T) {
 	}
 }
 
+func TestNewBrowseModelFromReference_PythonModule_HidesChildDirectories(t *testing.T) {
+	model, err := newBrowseModelFromReference(ingest.ParseReference("python:os"), false)
+	if err != nil {
+		if strings.Contains(err.Error(), "python executable not found") || strings.Contains(err.Error(), "has no filesystem source") {
+			t.Skip(err.Error())
+		}
+		t.Fatalf("new browse model from python reference: %v", err)
+	}
+
+	for _, raw := range model.list.Items() {
+		item, ok := raw.(browseItem)
+		if !ok {
+			continue
+		}
+		if item.kind == browseItemDir {
+			t.Fatalf("did not expect child directories for python module scope, got item: %+v", item)
+		}
+	}
+}
+
 func TestDocToMarkdown(t *testing.T) {
 	doc := &ingest.DocResult{
 		Name:      "Printf",
