@@ -132,6 +132,42 @@ func TestNewBrowseModelFromReference_PythonModule_HidesChildDirectories(t *testi
 	}
 }
 
+func TestNewBrowseModelFromReference_NixModule_HidesChildDirectories(t *testing.T) {
+	root := t.TempDir()
+	nixpkgsRoot := filepath.Join(root, "nixpkgs")
+	libDir := filepath.Join(nixpkgsRoot, "lib")
+	if err := os.MkdirAll(filepath.Join(libDir, "lists"), 0755); err != nil {
+		t.Fatalf("create nix fixture dirs: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(libDir, "default.nix"), []byte("{\n  id = x: x;\n}\n"), 0644); err != nil {
+		t.Fatalf("write default.nix: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(libDir, "lists", "default.nix"), []byte("{\n  head = xs: xs;\n}\n"), 0644); err != nil {
+		t.Fatalf("write child default.nix: %v", err)
+	}
+
+	old := os.Getenv("NIX_PATH")
+	t.Cleanup(func() { _ = os.Setenv("NIX_PATH", old) })
+	if err := os.Setenv("NIX_PATH", "nixpkgs="+nixpkgsRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	model, err := newBrowseModelFromReference(ingest.ParseReference("nix:nixpkgs/lib"), false)
+	if err != nil {
+		t.Fatalf("new browse model from nix reference: %v", err)
+	}
+
+	for _, raw := range model.list.Items() {
+		item, ok := raw.(browseItem)
+		if !ok {
+			continue
+		}
+		if item.kind == browseItemDir {
+			t.Fatalf("did not expect child directories for nix file-backed scope, got item: %+v", item)
+		}
+	}
+}
+
 func TestDocToMarkdown(t *testing.T) {
 	doc := &ingest.DocResult{
 		Name:      "Printf",
