@@ -645,51 +645,39 @@ func (m *browseModel) buildProviderItems() ([]list.Item, error) {
 		allowChildren = *scope.CanDescend
 	}
 	if allowChildren {
-		entries, err := os.ReadDir(m.providerDir)
-		if err != nil {
+		if children, ok, err := refpkg.ResolveScopeChildren(m.providerRef, m.includeHidden); err != nil {
 			return nil, err
-		}
+		} else if ok {
+			for _, child := range children {
+				items = append(items, browseItemForProviderChild(child))
+			}
+		} else {
+			entries, err := os.ReadDir(m.providerDir)
+			if err != nil {
+				return nil, err
+			}
 
-		packages := make([]browseItem, 0, len(entries))
-		files := make([]browseItem, 0, len(entries))
-		for _, entry := range entries {
-			name := entry.Name()
-			if !m.includeHidden && strings.HasPrefix(name, ".") {
-				continue
-			}
-			if !entry.IsDir() {
-				if m.providerRef.Provider == "nix" {
-					if lang, ok := ingest.LanguageForFile(name); ok && lang == "nix" {
-						childPath := joinProviderPath(m.providerRef.Path, name)
-						files = append(files, browseItem{
-							kind:      browseItemFile,
-							title:     name,
-							desc:      "nix module",
-							targetRef: ingest.Reference{Provider: m.providerRef.Provider, Path: childPath}.String(),
-						})
-					}
+			packages := make([]browseItem, 0, len(entries))
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					continue
 				}
-				continue
+				name := entry.Name()
+				if !m.includeHidden && strings.HasPrefix(name, ".") {
+					continue
+				}
+				childPath := joinProviderPath(m.providerRef.Path, name)
+				packages = append(packages, browseItem{
+					kind:      browseItemDir,
+					title:     name + "/",
+					desc:      "subpackage",
+					targetRef: ingest.Reference{Provider: m.providerRef.Provider, Path: childPath}.String(),
+				})
 			}
-			childDir := filepath.Join(m.providerDir, name)
-			if m.providerRef.Provider == "go" && !dirHasGoSources(childDir) {
-				continue
+			sort.Slice(packages, func(i, j int) bool { return packages[i].title < packages[j].title })
+			for _, pkg := range packages {
+				items = append(items, pkg)
 			}
-			childPath := joinProviderPath(m.providerRef.Path, name)
-			packages = append(packages, browseItem{
-				kind:      browseItemDir,
-				title:     name + "/",
-				desc:      "subpackage",
-				targetRef: ingest.Reference{Provider: m.providerRef.Provider, Path: childPath}.String(),
-			})
-		}
-		sort.Slice(packages, func(i, j int) bool { return packages[i].title < packages[j].title })
-		for _, pkg := range packages {
-			items = append(items, pkg)
-		}
-		sort.Slice(files, func(i, j int) bool { return files[i].title < files[j].title })
-		for _, file := range files {
-			items = append(items, file)
 		}
 	}
 
@@ -1335,21 +1323,25 @@ func joinProviderPath(base, name string) string {
 	return base + "/" + name
 }
 
-func dirHasGoSources(dir string) bool {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
+func browseItemForProviderChild(child refpkg.ScopeChild) browseItem {
+	ref := child.Ref.String()
+	name := filepath.Base(filepath.FromSlash(strings.Trim(child.Ref.Path, "/")))
+	switch child.Kind {
+	case refpkg.ScopeChildFile:
+		return browseItem{
+			kind:      browseItemFile,
+			title:     name,
+			desc:      "module",
+			targetRef: ref,
 		}
-		name := entry.Name()
-		if strings.HasSuffix(name, ".go") && !strings.HasSuffix(name, "_test.go") {
-			return true
+	default:
+		return browseItem{
+			kind:      browseItemDir,
+			title:     name + "/",
+			desc:      "subpackage",
+			targetRef: ref,
 		}
 	}
-	return false
 }
 
 func browseScopeFromReference(ref ingest.Reference) (rootDir string, currentRel string, err error) {

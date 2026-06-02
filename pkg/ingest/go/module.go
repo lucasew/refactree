@@ -1,7 +1,10 @@
 package ingestgo
 
 import (
+	"os"
 	"path"
+	"path/filepath"
+	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -9,6 +12,7 @@ import (
 	"github.com/lucasew/ccgo-tree-sitter/grammar"
 	_ "github.com/lucasew/ccgo-tree-sitter/grammar/go"
 	"github.com/lucasew/refactree/pkg/ingest"
+	refpkg "github.com/lucasew/refactree/pkg/reference"
 	goref "github.com/lucasew/refactree/pkg/reference/go"
 )
 
@@ -77,6 +81,43 @@ func (referenceProvider) ResolveSymbolTarget(ref ingest.Reference) (ingest.Provi
 	return ingest.ProviderSymbolTarget{Dir: target.Dir, Symbol: target.Symbol}, true, nil
 }
 
+func (referenceProvider) ListScopeChildren(ref ingest.Reference, includeHidden bool) ([]refpkg.ScopeChild, bool, error) {
+	if ref.Path == "" {
+		return nil, false, nil
+	}
+	dir, err := goref.ResolvePackageDir(ref.Path)
+	if err != nil {
+		return nil, true, err
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, true, err
+	}
+
+	children := make([]refpkg.ScopeChild, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !includeHidden && strings.HasPrefix(name, ".") {
+			continue
+		}
+		if !dirHasGoSources(filepath.Join(dir, name)) {
+			continue
+		}
+		children = append(children, refpkg.ScopeChild{
+			Ref:  ingest.Reference{Provider: "go", Path: joinProviderPath(ref.Path, name)},
+			Kind: refpkg.ScopeChildDir,
+		})
+	}
+	sort.Slice(children, func(i, j int) bool {
+		return children[i].Ref.Path < children[j].Ref.Path
+	})
+	return children, true, nil
+}
+
 func (referenceProvider) ListIngestRecursive(_ ingest.Reference, opts ingest.ListOptions) bool {
 	return opts.Recursive
 }
@@ -99,6 +140,35 @@ func (referenceProvider) AllowDocEntity(_ ingest.Reference, _ ingest.Reference, 
 		return false
 	}
 	return !strings.HasSuffix(entPath, "_test.go")
+}
+
+func joinProviderPath(base, name string) string {
+	base = strings.Trim(base, "/")
+	name = strings.Trim(name, "/")
+	if base == "" {
+		return name
+	}
+	if name == "" {
+		return base
+	}
+	return base + "/" + name
+}
+
+func dirHasGoSources(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasSuffix(name, ".go") && !strings.HasSuffix(name, "_test.go") {
+			return true
+		}
+	}
+	return false
 }
 
 func extractGo(root *grammar.Node, source []byte, path string) *ingest.FileExtract {

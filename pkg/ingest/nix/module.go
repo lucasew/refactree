@@ -4,11 +4,13 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/lucasew/ccgo-tree-sitter/grammar"
 	_ "github.com/lucasew/ccgo-tree-sitter/grammar/nix"
 	"github.com/lucasew/refactree/pkg/ingest"
+	refpkg "github.com/lucasew/refactree/pkg/reference"
 	nixref "github.com/lucasew/refactree/pkg/reference/nix"
 )
 
@@ -83,6 +85,56 @@ func (referenceProvider) ResolveSymbolTarget(ref ingest.Reference) (ingest.Provi
 		return ingest.ProviderSymbolTarget{}, ok, err
 	}
 	return ingest.ProviderSymbolTarget{Dir: target.Dir, Symbol: target.Symbol}, true, nil
+}
+
+func (referenceProvider) ListScopeChildren(ref ingest.Reference, includeHidden bool) ([]refpkg.ScopeChild, bool, error) {
+	if ref.Path == "" {
+		return nil, false, nil
+	}
+	target, err := nixref.ResolveTarget(ref.Path)
+	if err != nil {
+		return nil, true, err
+	}
+	if !target.IsDir {
+		return nil, true, nil
+	}
+
+	entries, err := os.ReadDir(target.Dir)
+	if err != nil {
+		return nil, true, err
+	}
+
+	children := make([]refpkg.ScopeChild, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if !includeHidden && strings.HasPrefix(name, ".") {
+			continue
+		}
+
+		childRef := ingest.Reference{Provider: "nix", Path: joinProviderPath(ref.Path, name)}
+		if entry.IsDir() {
+			children = append(children, refpkg.ScopeChild{
+				Ref:  childRef,
+				Kind: refpkg.ScopeChildDir,
+			})
+			continue
+		}
+		if !isNixSourceFile(name) {
+			continue
+		}
+		children = append(children, refpkg.ScopeChild{
+			Ref:  childRef,
+			Kind: refpkg.ScopeChildFile,
+		})
+	}
+
+	sort.Slice(children, func(i, j int) bool {
+		if children[i].Kind != children[j].Kind {
+			return children[i].Kind < children[j].Kind
+		}
+		return children[i].Ref.Path < children[j].Ref.Path
+	})
+	return children, true, nil
 }
 
 func (referenceProvider) ListIngestRecursive(_ ingest.Reference, opts ingest.ListOptions) bool {
@@ -412,4 +464,20 @@ func normalizeProviderSpec(spec string) string {
 func nixProviderRootScope(spec string) bool {
 	spec = normalizeProviderSpec(spec)
 	return spec != "" && !strings.Contains(spec, "/")
+}
+
+func joinProviderPath(base, name string) string {
+	base = strings.Trim(base, "/")
+	name = strings.Trim(name, "/")
+	if base == "" {
+		return name
+	}
+	if name == "" {
+		return base
+	}
+	return base + "/" + name
+}
+
+func isNixSourceFile(name string) bool {
+	return strings.HasSuffix(name, ".nix")
 }

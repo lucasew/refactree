@@ -36,6 +36,19 @@ type ScopeTarget struct {
 	CanDescend *bool
 }
 
+type ScopeChildKind int
+
+const (
+	ScopeChildDir ScopeChildKind = iota
+	ScopeChildFile
+)
+
+// ScopeChild is a provider-backed child scope exposed to browse UIs.
+type ScopeChild struct {
+	Ref  Reference
+	Kind ScopeChildKind
+}
+
 // SymbolTargetProvider is an optional provider capability used by doc lookup.
 type SymbolTargetProvider interface {
 	ResolveSymbolTarget(ref Reference) (SymbolTarget, bool, error)
@@ -44,6 +57,11 @@ type SymbolTargetProvider interface {
 // ScopeTargetProvider is an optional provider capability used by listing.
 type ScopeTargetProvider interface {
 	ResolveScopeTarget(ref Reference) (ScopeTarget, bool, error)
+}
+
+// ScopeChildrenProvider is an optional provider capability used by browse UIs.
+type ScopeChildrenProvider interface {
+	ListScopeChildren(ref Reference, includeHidden bool) ([]ScopeChild, bool, error)
 }
 
 var (
@@ -96,4 +114,19 @@ func ResolveScopeTarget(ref Reference) (ScopeTarget, bool, error) {
 	}
 
 	return scopeProvider.ResolveScopeTarget(ref)
+}
+
+// ResolveScopeChildren tries to enumerate provider-backed browse children.
+func ResolveScopeChildren(ref Reference, includeHidden bool) ([]ScopeChild, bool, error) {
+	provider, ok := ProviderForName(ref.Provider)
+	if !ok {
+		return nil, false, nil
+	}
+
+	childrenProvider, ok := provider.(ScopeChildrenProvider)
+	if !ok {
+		return nil, false, nil
+	}
+
+	return childrenProvider.ListScopeChildren(ref, includeHidden)
 }
