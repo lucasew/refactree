@@ -651,12 +651,24 @@ func (m *browseModel) buildProviderItems() ([]list.Item, error) {
 		}
 
 		packages := make([]browseItem, 0, len(entries))
+		files := make([]browseItem, 0, len(entries))
 		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
 			name := entry.Name()
 			if !m.includeHidden && strings.HasPrefix(name, ".") {
+				continue
+			}
+			if !entry.IsDir() {
+				if m.providerRef.Provider == "nix" {
+					if lang, ok := ingest.LanguageForFile(name); ok && lang == "nix" {
+						childPath := joinProviderPath(m.providerRef.Path, name)
+						files = append(files, browseItem{
+							kind:      browseItemFile,
+							title:     name,
+							desc:      "nix module",
+							targetRef: ingest.Reference{Provider: m.providerRef.Provider, Path: childPath}.String(),
+						})
+					}
+				}
 				continue
 			}
 			childDir := filepath.Join(m.providerDir, name)
@@ -674,6 +686,10 @@ func (m *browseModel) buildProviderItems() ([]list.Item, error) {
 		sort.Slice(packages, func(i, j int) bool { return packages[i].title < packages[j].title })
 		for _, pkg := range packages {
 			items = append(items, pkg)
+		}
+		sort.Slice(files, func(i, j int) bool { return files[i].title < files[j].title })
+		for _, file := range files {
+			items = append(items, file)
 		}
 	}
 

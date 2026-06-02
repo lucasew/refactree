@@ -37,6 +37,8 @@ func ResolveTarget(spec string) (Target, error) {
 
 	if st.IsDir() {
 		target := Target{Dir: resolved, IsDir: true}
+		// `default.nix` is the backing module file for a Nix directory scope,
+		// analogous to `__init__.py` or `index.js` in other ecosystems.
 		if initFile := filepath.Join(resolved, "default.nix"); fileExists(initFile) {
 			target.File = "default.nix"
 		}

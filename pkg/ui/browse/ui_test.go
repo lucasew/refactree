@@ -168,6 +168,49 @@ func TestNewBrowseModelFromReference_NixModule_HidesChildDirectories(t *testing.
 	}
 }
 
+func TestNewBrowseModelFromReference_NixRoot_ShowsChildDirectories(t *testing.T) {
+	root := t.TempDir()
+	nixpkgsRoot := filepath.Join(root, "nixpkgs")
+	libDir := filepath.Join(nixpkgsRoot, "lib")
+	if err := os.MkdirAll(libDir, 0755); err != nil {
+		t.Fatalf("create nix fixture dirs: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nixpkgsRoot, "default.nix"), []byte("import ./lib/default.nix\n"), 0644); err != nil {
+		t.Fatalf("write root default.nix: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nixpkgsRoot, "release.nix"), []byte("{\n  version = 1;\n}\n"), 0644); err != nil {
+		t.Fatalf("write release.nix: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(libDir, "default.nix"), []byte("{\n  id = x: x;\n}\n"), 0644); err != nil {
+		t.Fatalf("write lib default.nix: %v", err)
+	}
+
+	old := os.Getenv("NIX_PATH")
+	t.Cleanup(func() { _ = os.Setenv("NIX_PATH", old) })
+	if err := os.Setenv("NIX_PATH", "nixpkgs="+nixpkgsRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	model, err := newBrowseModelFromReference(ingest.ParseReference("nix:nixpkgs"), false)
+	if err != nil {
+		t.Fatalf("new browse model from nix reference: %v", err)
+	}
+
+	index := findBrowseItemIndex(model.list.Items(), func(it browseItem) bool {
+		return it.kind == browseItemDir && it.targetRef == "nix:nixpkgs/lib"
+	})
+	if index < 0 {
+		t.Fatalf("expected child directory item for nix root, got items: %+v", model.list.Items())
+	}
+
+	fileIndex := findBrowseItemIndex(model.list.Items(), func(it browseItem) bool {
+		return it.kind == browseItemFile && it.targetRef == "nix:nixpkgs/release.nix"
+	})
+	if fileIndex < 0 {
+		t.Fatalf("expected nix file item for root scope, got items: %+v", model.list.Items())
+	}
+}
+
 func TestDocToMarkdown(t *testing.T) {
 	doc := &ingest.DocResult{
 		Name:      "Printf",

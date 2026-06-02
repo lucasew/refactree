@@ -73,7 +73,7 @@ func (referenceProvider) ResolveScopeTarget(ref ingest.Reference) (ingest.Provid
 	if err != nil {
 		return ingest.ProviderScopeTarget{}, true, err
 	}
-	canDescend := target.IsDir && target.File == ""
+	canDescend := target.IsDir && (target.File == "" || nixProviderRootScope(ref.Path))
 	return ingest.ProviderScopeTarget{Dir: target.Dir, CanDescend: &canDescend}, true, nil
 }
 
@@ -407,4 +407,9 @@ func normalizeProviderSpec(spec string) string {
 		spec = strings.TrimPrefix(strings.TrimSuffix(spec, ">"), "<")
 	}
 	return strings.Trim(spec, "/")
+}
+
+func nixProviderRootScope(spec string) bool {
+	spec = normalizeProviderSpec(spec)
+	return spec != "" && !strings.Contains(spec, "/")
 }
