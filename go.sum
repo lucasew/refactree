@@ -61,6 +61,8 @@ github.com/lucasb-eyer/go-colorful v1.3.0 h1:2/yBRLdWBZKrf7gB40FoiKfAWYQ0lqNcbuQ
 github.com/lucasb-eyer/go-colorful v1.3.0/go.mod h1:R4dSotOR9KMtayYi1e77YzuveK+i7ruzyGqttikkLy0=
 github.com/lucasew/ccgo-tree-sitter v0.0.0-20260222180738-87d6c0f0e271 h1:pPC5nfnG9Q8pa2skMRSijZaWP63UULPYrvm3/VXHRJ4=
 github.com/lucasew/ccgo-tree-sitter v0.0.0-20260222180738-87d6c0f0e271/go.mod h1:PX70XHG75OmMlC2eRuKdPFKgajSH6ge/fcLETsAWNEA=
+github.com/lucasew/ccgo-tree-sitter v0.0.0-20260601225045-2c2126bd0d19 h1:Khdsd9ExmF8UvSy6kkaDA/7/VrVDnhU92WfCjeVArOU=
+github.com/lucasew/ccgo-tree-sitter v0.0.0-20260601225045-2c2126bd0d19/go.mod h1:PX70XHG75OmMlC2eRuKdPFKgajSH6ge/fcLETsAWNEA=
 github.com/mattn/go-isatty v0.0.20 h1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWEY=
 github.com/mattn/go-isatty v0.0.20/go.mod h1:W+V8PltTTMOvKvAeJH7IuucS94S2C6jfK/D7dTCTo3Y=
 github.com/mattn/go-localereader v0.0.1 h1:ygSAOl7ZXTx4RdPYinUpg6W99U8jWvWi9Ye2JC/oIi4=
