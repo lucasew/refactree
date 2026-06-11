@@ -333,6 +333,7 @@ func walkGoUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope 
 	}
 }
 
+
 func lastPathComponent(s string) string {
 	if i := strings.LastIndex(s, "/"); i >= 0 {
 		return s[i+1:]
