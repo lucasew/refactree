@@ -1,4 +1,4 @@
-package pythonref
+package python
 
 import (
 	"os"

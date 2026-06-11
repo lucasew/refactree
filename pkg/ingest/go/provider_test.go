@@ -1,4 +1,4 @@
-package goref
+package ingestgo
 
 import (
 	"os"

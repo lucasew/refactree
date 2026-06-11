@@ -11,7 +11,6 @@ import (
 	_ "github.com/lucasew/ccgo-tree-sitter/grammar/nix"
 	"github.com/lucasew/refactree/pkg/ingest"
 	refpkg "github.com/lucasew/refactree/pkg/reference"
-	nixref "github.com/lucasew/refactree/pkg/reference/nix"
 )
 
 func init() {
@@ -71,7 +70,7 @@ func (referenceProvider) ResolveScopeTarget(ref ingest.Reference) (ingest.Provid
 	if ref.Path == "" {
 		return ingest.ProviderScopeTarget{}, false, nil
 	}
-	target, err := nixref.ResolveTarget(ref.Path)
+	target, err := ResolveTarget(ref.Path)
 	if err != nil {
 		return ingest.ProviderScopeTarget{}, true, err
 	}
@@ -80,7 +79,7 @@ func (referenceProvider) ResolveScopeTarget(ref ingest.Reference) (ingest.Provid
 }
 
 func (referenceProvider) ResolveSymbolTarget(ref ingest.Reference) (ingest.ProviderSymbolTarget, bool, error) {
-	target, ok, err := nixref.ResolveSymbolTarget(ref.Path, ref.Symbol)
+	target, ok, err := ResolveSymbolTarget(ref.Path, ref.Symbol)
 	if !ok || err != nil {
 		return ingest.ProviderSymbolTarget{}, ok, err
 	}
@@ -91,7 +90,7 @@ func (referenceProvider) ListScopeChildren(ref ingest.Reference, includeHidden b
 	if ref.Path == "" {
 		return nil, false, nil
 	}
-	target, err := nixref.ResolveTarget(ref.Path)
+	target, err := ResolveTarget(ref.Path)
 	if err != nil {
 		return nil, true, err
 	}
@@ -145,11 +144,11 @@ func (referenceProvider) AllowListEntity(ref ingest.Reference, _ ingest.Referenc
 	if language != "nix" {
 		return false
 	}
-	target, err := nixref.ResolveTarget(ref.Path)
+	target, err := ResolveTarget(ref.Path)
 	if err != nil {
 		return false
 	}
-	return nixref.MatchesEntityPath(target, entPath)
+	return MatchesEntityPath(target, entPath)
 }
 
 func (referenceProvider) ListOutputReference(ref ingest.Reference, entRef ingest.Reference) ingest.Reference {
@@ -162,11 +161,11 @@ func (referenceProvider) AllowDocEntity(ref ingest.Reference, _ ingest.Reference
 	if language != "nix" {
 		return false
 	}
-	target, err := nixref.ResolveTarget(ref.Path)
+	target, err := ResolveTarget(ref.Path)
 	if err != nil {
 		return false
 	}
-	return nixref.MatchesEntityPath(target, entPath)
+	return MatchesEntityPath(target, entPath)
 }
 
 func extractNix(root *grammar.Node, source []byte, filePath string) *ingest.FileExtract {

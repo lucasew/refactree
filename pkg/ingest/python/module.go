@@ -8,7 +8,6 @@ import (
 	"github.com/lucasew/ccgo-tree-sitter/grammar"
 	_ "github.com/lucasew/ccgo-tree-sitter/grammar/python"
 	"github.com/lucasew/refactree/pkg/ingest"
-	pythonref "github.com/lucasew/refactree/pkg/reference/python"
 )
 
 func init() {
@@ -63,7 +62,7 @@ func (referenceProvider) ResolveScopeTarget(ref ingest.Reference) (ingest.Provid
 	if ref.Path == "" {
 		return ingest.ProviderScopeTarget{}, false, nil
 	}
-	target, err := pythonref.ResolveModuleTarget(ref.Path)
+	target, err := ResolveModuleTarget(ref.Path)
 	if err != nil {
 		return ingest.ProviderScopeTarget{}, true, err
 	}
@@ -72,7 +71,7 @@ func (referenceProvider) ResolveScopeTarget(ref ingest.Reference) (ingest.Provid
 }
 
 func (referenceProvider) ResolveSymbolTarget(ref ingest.Reference) (ingest.ProviderSymbolTarget, bool, error) {
-	target, ok, err := pythonref.ResolveSymbolTarget(ref.Path, ref.Symbol)
+	target, ok, err := ResolveSymbolTarget(ref.Path, ref.Symbol)
 	if !ok || err != nil {
 		return ingest.ProviderSymbolTarget{}, ok, err
 	}
@@ -87,11 +86,11 @@ func (referenceProvider) AllowListEntity(ref ingest.Reference, _ ingest.Referenc
 	if language != "python" {
 		return false
 	}
-	target, err := pythonref.ResolveModuleTarget(ref.Path)
+	target, err := ResolveModuleTarget(ref.Path)
 	if err != nil {
 		return false
 	}
-	return pythonref.MatchesEntityPath(target, entPath)
+	return MatchesEntityPath(target, entPath)
 }
 
 func (referenceProvider) ListOutputReference(ref ingest.Reference, entRef ingest.Reference) ingest.Reference {
@@ -104,11 +103,11 @@ func (referenceProvider) AllowDocEntity(ref ingest.Reference, _ ingest.Reference
 	if language != "python" {
 		return false
 	}
-	target, err := pythonref.ResolveModuleTarget(ref.Path)
+	target, err := ResolveModuleTarget(ref.Path)
 	if err != nil {
 		return false
 	}
-	return pythonref.MatchesEntityPath(target, entPath)
+	return MatchesEntityPath(target, entPath)
 }
 
 func extractPython(root *grammar.Node, source []byte, path string) *ingest.FileExtract {

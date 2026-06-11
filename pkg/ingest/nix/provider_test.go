@@ -1,4 +1,4 @@
-package nixref
+package nix
 
 import (
 	"os"

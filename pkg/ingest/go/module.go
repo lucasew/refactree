@@ -13,7 +13,6 @@ import (
 	_ "github.com/lucasew/ccgo-tree-sitter/grammar/go"
 	"github.com/lucasew/refactree/pkg/ingest"
 	refpkg "github.com/lucasew/refactree/pkg/reference"
-	goref "github.com/lucasew/refactree/pkg/reference/go"
 )
 
 func init() {
@@ -34,7 +33,7 @@ func (languageDriver) Extract(root *grammar.Node, source []byte, relPath string)
 }
 
 func (languageDriver) ResolveImport(sourcePath string, ctx ingest.ImportResolveContext) string {
-	return goref.ResolveImport(sourcePath, ctx.KnownDirs)
+	return ResolveImport(sourcePath, ctx.KnownDirs)
 }
 
 func (languageDriver) AllowListSymbol(name string, opts ingest.SymbolListOptions) bool {
@@ -59,14 +58,14 @@ type referenceProvider struct{}
 func (referenceProvider) Name() string { return "go" }
 
 func (referenceProvider) Resolve(spec string, ctx ingest.ImportResolveContext) (string, bool) {
-	return goref.ResolveImport(spec, ctx.KnownDirs), true
+	return ResolveImport(spec, ctx.KnownDirs), true
 }
 
 func (referenceProvider) ResolveScopeTarget(ref ingest.Reference) (ingest.ProviderScopeTarget, bool, error) {
 	if ref.Path == "" {
 		return ingest.ProviderScopeTarget{}, false, nil
 	}
-	dir, err := goref.ResolvePackageDir(ref.Path)
+	dir, err := ResolvePackageDir(ref.Path)
 	if err != nil {
 		return ingest.ProviderScopeTarget{}, true, err
 	}
@@ -74,7 +73,7 @@ func (referenceProvider) ResolveScopeTarget(ref ingest.Reference) (ingest.Provid
 }
 
 func (referenceProvider) ResolveSymbolTarget(ref ingest.Reference) (ingest.ProviderSymbolTarget, bool, error) {
-	target, ok, err := goref.ResolveSymbolTarget(ref.Path, ref.Symbol)
+	target, ok, err := ResolveSymbolTarget(ref.Path, ref.Symbol)
 	if !ok || err != nil {
 		return ingest.ProviderSymbolTarget{}, ok, err
 	}
@@ -85,7 +84,7 @@ func (referenceProvider) ListScopeChildren(ref ingest.Reference, includeHidden b
 	if ref.Path == "" {
 		return nil, false, nil
 	}
-	dir, err := goref.ResolvePackageDir(ref.Path)
+	dir, err := ResolvePackageDir(ref.Path)
 	if err != nil {
 		return nil, true, err
 	}

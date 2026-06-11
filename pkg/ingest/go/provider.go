@@ -1,4 +1,4 @@
-package goref
+package ingestgo
 
 import (
 	"bytes"
@@ -182,9 +182,3 @@ func escapeModulePath(s string) string {
 	return b.String()
 }
 
-func lastPathComponent(s string) string {
-	if i := strings.LastIndex(s, "/"); i >= 0 {
-		return s[i+1:]
-	}
-	return s
-}
