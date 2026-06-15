@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/lucasew/refactree/pkg/version"
 	"github.com/spf13/cobra"
 )
 
@@ -21,6 +22,7 @@ func newRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "rft",
 		Short:         "Query symbols and plan refactorings",
+		Version:       version.GetBuildID(),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
