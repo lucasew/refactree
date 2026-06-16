@@ -1,0 +1,4 @@
+{
+  "source": "cmd/codegen",
+  "destination": "cmd/gen"
+}
