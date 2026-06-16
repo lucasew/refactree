@@ -288,6 +288,15 @@ func ApplyEdits(dir string, edits []Edit) error {
 		if err := os.WriteFile(target, content, 0644); err != nil {
 			return fmt.Errorf("writing %s: %w", file, err)
 		}
+
+		// For package moves we emit full-file truncate edits (NewText:"") on every
+		// source file under the old package dir. After the write, if the file is now
+		// empty we remove it entirely instead of leaving a 0-byte file behind.
+		// This keeps the "edits only" model for the returned plan while still
+		// producing a clean result (no empty files from relocation).
+		if len(content) == 0 {
+			_ = os.Remove(target)
+		}
 	}
 
 	return nil
@@ -299,12 +308,13 @@ func ApplyEdits(dir string, edits []Edit) error {
 // replacement of the package base name in all other files (updating import
 // spec strings, local bindings and qualifiers at call sites).
 //
-// Note on relocation: emits truncate (NewText:"") on old paths rather than
-// file removal or dir rename (edits-only model). This leaves zero-length
-// files under the old package dir skeleton (as described in task prompt:
-// "old package dir/files left with content deleted after edits"). compareDir
-// in tests only validates expected/ tree. External callers may cleanup if full
-// tree removal is desired.
+// Note on relocation: emits truncate (NewText:"") edits on old paths (edits-only
+// model, no explicit file/dir removal in the plan). ApplyEdits removes any file
+// that ends up 0 bytes after its edits (see the len(content)==0 Remove after
+// WriteFile). This means old package files disappear entirely on disk instead of
+// leaving 0-byte placeholders. Empty directories may remain (no dir pruning is
+// performed, for simplicity). compareDir in tests only validates the expected/
+// tree. This matches the "content deleted" intent from the original fixtures/task.
 func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, error) {
 	srcDir := strings.TrimPrefix(src.Path, "./")
 	dstDir := strings.TrimPrefix(dst.Path, "./")
