@@ -1,0 +1,4 @@
+package helperpkg
+
+func Helper() {
+}

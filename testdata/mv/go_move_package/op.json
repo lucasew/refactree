@@ -1,0 +1,4 @@
+{
+  "source": "path:./helperpkg",
+  "destination": "path:./newpkg"
+}
