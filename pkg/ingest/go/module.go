@@ -183,12 +183,40 @@ func extractGo(root *grammar.Node, source []byte, path string) *ingest.FileExtra
 			}
 		case "function_declaration", "method_declaration":
 			extractGoFunc(fe, child, source)
+		case "type_declaration":
+			extractGoTypeDecl(fe, child, source)
 		case "import_declaration":
 			extractGoImportDecl(fe, child, source)
 		}
 	}
 
 	return fe
+}
+
+func extractGoTypeDecl(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
+	// A type_declaration may contain a single type_spec or multiple inside
+	// a parenthesised group: type ( A struct{} ; B int ).
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		if child.Type() == "type_spec" {
+			extractGoTypeSpec(fe, child, source)
+		}
+	}
+}
+
+func extractGoTypeSpec(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
+	nameNode := ingest.ChildByType(n, "type_identifier")
+	if nameNode == nil {
+		return
+	}
+	name := ingest.NodeText(nameNode, source)
+
+	fe.Entities = append(fe.Entities, ingest.EntityDef{
+		Name:      name,
+		StartByte: nameNode.StartByte(),
+		EndByte:   nameNode.EndByte(),
+		Exported:  languageDriver{}.AllowListSymbol(name, ingest.SymbolListOptions{}),
+	})
 }
 
 func extractGoFunc(fe *ingest.FileExtract, n *grammar.Node, source []byte) {

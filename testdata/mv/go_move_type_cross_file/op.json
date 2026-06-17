@@ -1,0 +1,4 @@
+{
+  "source": "path:./types.go::Config",
+  "destination": "path:./config.go::Config"
+}

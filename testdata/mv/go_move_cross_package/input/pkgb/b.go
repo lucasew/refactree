@@ -1,0 +1,4 @@
+package pkgb
+
+func Existing() {
+}

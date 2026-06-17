@@ -12,9 +12,19 @@
       "end_byte": 98
     },
     {
+      "reference": "path:./main.go::A",
+      "start_byte": 19,
+      "end_byte": 20
+    },
+    {
       "reference": "path:./main.go::A.Run",
       "start_byte": 58,
       "end_byte": 61
+    },
+    {
+      "reference": "path:./main.go::B",
+      "start_byte": 35,
+      "end_byte": 36
     }
   ],
   "relations": []

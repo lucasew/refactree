@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-
-	"github.com/lucasew/ccgo-tree-sitter/grammar"
 )
 
 // Edit describes a text replacement in a source file.
@@ -65,7 +63,7 @@ func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 		if !ok {
 			return nil, fmt.Errorf("cross-file move is not supported for language %q", srcLang)
 		}
-		return driver.PlanCrossFileMove(dir, result, src, dst, sourceEntity)
+		return planCrossFileMove(dir, result, src, dst, sourceEntity, driver)
 	}
 
 	return planSymbolRename(result, sourceRef, dst.Symbol)
@@ -134,109 +132,174 @@ func planSymbolRename(result *Result, sourceRef, destSymbol string) ([]Edit, err
 	return edits, nil
 }
 
-func planGoCrossFileMove(dir string, result *Result, src, dst Reference, sourceEntity Entity) ([]Edit, error) {
+// planCrossFileMove orchestrates a cross-file move using the MoveDriver interface.
+// It extracts the declaration, inserts it at the destination, and if the source
+// and destination are in different directories, rewrites imports in consumer files.
+func planCrossFileMove(dir string, result *Result, src, dst Reference, sourceEntity Entity, driver MoveDriver) ([]Edit, error) {
 	srcRel := strings.TrimPrefix(src.Path, "./")
 	dstRel := strings.TrimPrefix(dst.Path, "./")
-	if path.Dir(srcRel) != path.Dir(dstRel) {
-		return nil, fmt.Errorf("cross-directory Go move is not supported yet")
-	}
 
-	pkg, declText, removeStart, removeEnd, err := extractGoDeclFromEntity(filepath.Join(dir, srcRel), sourceEntity.StartByte)
+	decl, err := driver.ExtractDecl(filepath.Join(dir, srcRel), sourceEntity)
 	if err != nil {
 		return nil, err
 	}
 
 	dstPath := filepath.Join(dir, dstRel)
 	dstContent, err := os.ReadFile(dstPath)
-	dstExists := true
 	if err != nil {
 		if os.IsNotExist(err) {
-			dstExists = false
+			dstContent = nil
 		} else {
 			return nil, fmt.Errorf("reading %s: %w", dstRel, err)
 		}
 	}
 
-	insertAt := uint32(0)
-	insertText := ""
-	if dstExists {
-		insertAt = uint32(len(dstContent))
-		if len(dstContent) > 0 && dstContent[len(dstContent)-1] != '\n' {
-			insertText += "\n"
-		}
-		if len(dstContent) > 0 {
-			insertText += "\n"
-		}
-		insertText += declText + "\n"
-	} else {
-		insertText = fmt.Sprintf("package %s\n\n%s\n", pkg, declText)
-	}
+	insertEdit := driver.InsertDecl(dstRel, dstContent, decl)
 
-	return []Edit{
+	edits := []Edit{
 		{
 			File:      srcRel,
-			StartByte: removeStart,
-			EndByte:   removeEnd,
+			StartByte: decl.RemoveStart,
+			EndByte:   decl.RemoveEnd,
 			NewText:   "",
 		},
-		{
-			File:      dstRel,
-			StartByte: insertAt,
-			EndByte:   insertAt,
-			NewText:   insertText,
-		},
-	}, nil
+		insertEdit,
+	}
+
+	// Rewrite imports in consumer files that reference the moved symbol.
+	// For same-directory moves, only rewrite if the source file itself
+	// appears in import targets (e.g. Python relative imports, JS path imports).
+	if srcRel != dstRel {
+		importEdits, err := planCrossFileMoveImportRewrites(dir, result, src, dst, driver)
+		if err != nil {
+			return nil, err
+		}
+		edits = append(edits, importEdits...)
+	}
+
+	return edits, nil
 }
 
-func extractGoDeclFromEntity(filePath string, nameStart uint32) (pkg, declText string, start, end uint32, err error) {
-	source, err := os.ReadFile(filePath)
-	if err != nil {
-		return "", "", 0, 0, err
+// planCrossFileMoveImportRewrites finds all consumer files that import the
+// source module/package and rewrites them to point to the destination.
+func planCrossFileMoveImportRewrites(dir string, result *Result, src, dst Reference, driver MoveDriver) ([]Edit, error) {
+	// Build the set of reference strings that all point at the source entity/file.
+	// Different languages resolve imports to different provider namespaces
+	// (e.g. path:./utils.py vs python:fastapi.utils), so we need to match
+	// against every form the source might appear as in alias/relation targets.
+	srcTargets := buildSourceTargetSet(result, src)
+
+	// Find files that have aliases targeting the source symbol or source module.
+	consumerFiles := map[string]bool{}
+	for _, alias := range result.Aliases {
+		if srcTargets[alias.Target] {
+			ref := ParseReference(alias.Reference)
+			consumerFile := strings.TrimPrefix(ref.Path, "./")
+			consumerFiles[consumerFile] = true
+		}
+	}
+	// Also check relations targeting the source.
+	for _, rel := range result.Relations {
+		if srcTargets[rel.Target] {
+			ref := ParseReference(rel.Reference)
+			consumerFile := strings.TrimPrefix(ref.Path, "./")
+			consumerFiles[consumerFile] = true
+		}
 	}
 
-	lang, ok := grammar.GetByExtension(filePath)
-	if !ok {
-		return "", "", 0, 0, fmt.Errorf("unsupported language for %s", filePath)
+	var edits []Edit
+	for consumerFile := range consumerFiles {
+		// Don't rewrite the source or destination files themselves.
+		srcRel := strings.TrimPrefix(src.Path, "./")
+		dstRel := strings.TrimPrefix(dst.Path, "./")
+		if consumerFile == srcRel || consumerFile == dstRel {
+			continue
+		}
+
+		content, err := os.ReadFile(filepath.Join(dir, consumerFile))
+		if err != nil {
+			continue
+		}
+
+		occs := driver.RewriteImports(consumerFile, content, result, src, dst)
+		edits = append(edits, occs...)
 	}
 
-	parser := grammar.NewParser()
-	defer parser.Delete()
-	if !parser.SetLanguage(lang) {
-		return "", "", 0, 0, fmt.Errorf("failed to set language for %s", filePath)
+	return edits, nil
+}
+
+// buildSourceTargetSet builds a set of reference strings that might appear as
+// alias or relation targets for the given source reference. Because different
+// languages resolve imports into different provider namespaces (e.g.
+// "path:./utils.py::X" vs "python:fastapi.utils::X"), we scan the existing
+// result for any target that points at the same file, with or without the
+// symbol qualifier.
+func buildSourceTargetSet(result *Result, src Reference) map[string]bool {
+	srcRef := src.String()
+	srcFileRef := FileRef(src.Path)
+	srcDirRef := FileRef("./" + path.Dir(strings.TrimPrefix(src.Path, "./")))
+	srcRel := strings.TrimPrefix(src.Path, "./")
+
+	targets := map[string]bool{
+		srcRef:     true,
+		srcFileRef: true,
+		srcDirRef:  true,
 	}
 
-	tree := parser.ParseString(string(source))
-	defer tree.Delete()
-	root := tree.RootNode()
+	// Scan all aliases and relations to find targets that reference the same
+	// file (by any provider namespace). We match on file path suffix to
+	// catch e.g. "python:fastapi.utils" mapping to file "utils.py".
+	for _, alias := range result.Aliases {
+		ref := ParseReference(alias.Target)
+		if ref.Provider == "path" {
+			continue // already covered by the direct matches above
+		}
+		if aliasTargetMatchesFile(result, alias.Target, ref, srcRel, src.Symbol) {
+			targets[alias.Target] = true
+		}
+	}
+	for _, rel := range result.Relations {
+		ref := ParseReference(rel.Target)
+		if ref.Provider == "path" {
+			continue
+		}
+		if aliasTargetMatchesFile(result, rel.Target, ref, srcRel, src.Symbol) {
+			targets[rel.Target] = true
+		}
+	}
 
-	for i := uint32(0); i < root.ChildCount(); i++ {
-		child := root.Child(i)
-		if child.Type() == "package_clause" {
-			if id := childByType(child, "package_identifier"); id != nil {
-				pkg = nodeText(id, source)
+	return targets
+}
+
+// aliasTargetMatchesFile checks if a non-path target reference actually points
+// at the given source file. It does this by checking if the target entity
+// exists among the entities declared in the source file.
+func aliasTargetMatchesFile(result *Result, targetStr string, targetRef Reference, srcFileRel, srcSymbol string) bool {
+	if srcSymbol != "" {
+		// For symbol-level matches, check if there's an entity in the source
+		// file with matching symbol name.
+		wantEntRef := SymbolRef("./"+srcFileRel, srcSymbol)
+		for _, ent := range result.Entities {
+			if ent.Reference == wantEntRef {
+				// Now check: does targetRef reference the same symbol?
+				if targetRef.Symbol == srcSymbol {
+					return true
+				}
 			}
 		}
+		return false
 	}
 
-	declNode := findDeclContaining(root, nameStart, "go")
-	if declNode == nil {
-		return "", "", 0, 0, fmt.Errorf("declaration not found in %s", filePath)
-	}
-
-	start = declNode.StartByte()
-	end = declNode.EndByte()
-	declText = string(source[start:end])
-
-	// Also remove up to two trailing newlines to avoid leaving extra gaps.
-	removeEnd := end
-	for removeEnd < uint32(len(source)) && (source[removeEnd] == '\n' || source[removeEnd] == '\r') {
-		removeEnd++
-		if removeEnd-end >= 2 {
-			break
+	// For file/dir level matches, check if any alias or entity from the
+	// source file has a target that resolves to this reference.
+	srcFilePath := "./" + srcFileRel
+	for _, alias := range result.Aliases {
+		ref := ParseReference(alias.Reference)
+		if ref.Path == srcFilePath && alias.Target == targetStr {
+			return true
 		}
 	}
-
-	return pkg, declText, start, removeEnd, nil
+	return false
 }
 
 // ApplyEdits applies text replacements to files under dir.
@@ -327,32 +390,6 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 	oldDirBase := lastPathComponent(srcDir)
 	newDirBase := lastPathComponent(dstDir)
 
-	// Determine the name used as the "package symbol" brought into other packages
-	// (the qualifier in foo.Bar(), the binding in import foo "...", etc.).
-	// Harmonious with the rest of the system: this comes from the `package`
-	// directive inside the moved Go files (see FileExtract.Package populated
-	// by the Go language driver + extractGo), not from the directory basename.
-	// We read one of the sources under srcDir (we're reading them for relocation
-	// anyway) and extract the clause with a tiny scanner. Falls back to the
-	// dir last segment (preserving old convention for non-Go and when no
-	// explicit package clause is present).
-	declaredName := oldDirBase
-	for _, ff := range result.Files {
-		if isUnderDir(ff.Path, srcDir) {
-			if b, err := os.ReadFile(filepath.Join(dir, ff.Path)); err == nil {
-				if n := extractPackageClauseName(b); n != "" {
-					declaredName = n
-					break
-				}
-			}
-		}
-	}
-	// Because relocation copies the original file contents verbatim (including
-	// the package clause), the declared name does not change just because the
-	// directory moved. Therefore the qualifier / binding name that consumers
-	// use for this package also stays the same.
-	newDeclaredName := declaredName
-
 	var edits []Edit
 
 	// Relocate package contents: for every file listed under the source dir,
@@ -388,25 +425,10 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 		})
 	}
 
-	// Update in all non-package (consumer) files.
-	// Path updates (for import strings) use the directory last-segment tokens.
-	//   - Go: the replace is scoped to string literals only. This updates the
-	//     import path location without touching bare identifiers. The qualifier
-	//     / binding name used by consumers is taken from the package directive
-	//     (see declaredName computation + FileExtract.Package in the Go driver).
-	//     This is the harmonious part requested: the "symbol brought up to the
-	//     other packages" comes from `package foo`, not the dir basename.
-	//   - JS/Python: the module name *is* the path last segment, so we do the
-	//     previous global replace (updates the literal *and* the local bindings
-	//     / uses like "import * as helpers", "helpers.xxx"). This keeps the
-	//     py/js move_package fixtures working.
-	//
-	// For hierarchy moves the path-in-string replacement for Go substitutes the
-	// old leaf with the new subpath (relative to common ancestor) so that a
-	// tail ".../executil" becomes the correct new location inside the import.
-	//
-	// The declared-name pass (Go only) is usually a no-op on a pure directory
-	// move (sources copied verbatim → package clause unchanged).
+	// Update import references in all consumer files (files not under srcDir).
+	// Dispatches to the per-language MoveDriver.RewriteImports when available;
+	// falls back to global leaf-based string replacement for languages without
+	// a registered move driver.
 	for _, f := range result.Files {
 		if isUnderDir(f.Path, srcDir) {
 			continue
@@ -416,55 +438,25 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 			return nil, fmt.Errorf("reading %s: %w", f.Path, err)
 		}
 
-		if f.Language == "go" {
-			// For Go consumers, do full old subdir -> full new subdir replace inside import strings
-			// when the consumer content contains the fuller path (e.g. "pkg/executil").
-			// This inserts the "util/" level etc. instead of the replacement assuming/skip ping it.
-			fullOld := srcDir
-			fullNew := dstDir
-			didFull := false
-			if fullOld != fullNew {
-				if strings.Contains(string(fcontent), fullOld) {
-					occs := findAllOccurrencesInStrings(f.Path, fcontent, fullOld, fullNew)
-					edits = append(edits, occs...)
-					didFull = true
-				}
-			}
-
-			// Leaf path (for bare leaf imports or as additional) inside strings for Go, guarded
-			// by didFull to avoid overlap with the full subdir edit on the same file.
-			pathOld := oldDirBase
-			pathNew := newDirBase
-			if cp := commonPathPrefix(srcDir, dstDir); cp != "" {
-				if rel := strings.Trim(strings.TrimPrefix(dstDir, cp), "/"); rel != "" {
-					pathNew = rel
-				}
-			}
-			if pathOld != pathNew && !didFull {
-				occs := findAllOccurrencesInStrings(f.Path, fcontent, pathOld, pathNew)
-				edits = append(edits, occs...)
-			}
+		if driver, ok := moveDriverForLanguage(f.Language); ok {
+			occs := driver.RewriteImports(f.Path, fcontent, result, src, dst)
+			edits = append(edits, occs...)
 		} else {
-			// non-Go: always the global leaf-based path token replace. This updates both the
-			// import literal *and* the bindings/uses (as before for py/js fixtures).
+			// Fallback: whole-word leaf-based path token replace.
 			pathOld := oldDirBase
 			pathNew := newDirBase
-			if cp := commonPathPrefix(srcDir, dstDir); cp != "" {
+			if cp := CommonPathPrefix(srcDir, dstDir); cp != "" {
 				if rel := strings.Trim(strings.TrimPrefix(dstDir, cp), "/"); rel != "" {
 					pathNew = rel
 				}
 			}
 			if pathOld != pathNew {
-				occs := findAllOccurrences(f.Path, fcontent, pathOld, pathNew)
+				occs := FindAllWholeWordOccurrences(f.Path, fcontent, pathOld, pathNew)
 				edits = append(edits, occs...)
 			}
 		}
 
-		// Go qualifier/binding name from the package directive (not dir last seg).
-		if f.Language == "go" && declaredName != newDeclaredName {
-			occs := findAllOccurrences(f.Path, fcontent, declaredName, newDeclaredName)
-			edits = append(edits, occs...)
-		}
+
 	}
 
 	return edits, nil
@@ -481,7 +473,52 @@ func isUnderDir(p, dir string) bool {
 	return false
 }
 
-func findAllOccurrences(file string, content []byte, oldBase, newBase string) []Edit {
+// FindAllWholeWordOccurrences finds all whole-word occurrences of oldBase in
+// content and returns edits to replace them with newBase. A "whole word" match
+// means the match is not preceded or followed by a letter, digit or underscore.
+func FindAllWholeWordOccurrences(file string, content []byte, oldBase, newBase string) []Edit {
+	if oldBase == "" || oldBase == newBase {
+		return nil
+	}
+	text := string(content)
+	var edits []Edit
+	off := 0
+	for {
+		idx := strings.Index(text[off:], oldBase)
+		if idx < 0 {
+			break
+		}
+		pos := off + idx
+		endPos := pos + len(oldBase)
+
+		// Check word boundaries.
+		if pos > 0 && isWordChar(text[pos-1]) {
+			off = endPos
+			continue
+		}
+		if endPos < len(text) && isWordChar(text[endPos]) {
+			off = endPos
+			continue
+		}
+
+		edits = append(edits, Edit{
+			File:      file,
+			StartByte: uint32(pos),
+			EndByte:   uint32(endPos),
+			NewText:   newBase,
+		})
+		off = endPos
+	}
+	return edits
+}
+
+func isWordChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+}
+
+// FindAllOccurrences finds all occurrences of oldBase in content and returns
+// edits to replace them with newBase.
+func FindAllOccurrences(file string, content []byte, oldBase, newBase string) []Edit {
 	if oldBase == "" || oldBase == newBase {
 		return nil
 	}
@@ -505,12 +542,12 @@ func findAllOccurrences(file string, content []byte, oldBase, newBase string) []
 	return edits
 }
 
-// findAllOccurrencesInStrings is like findAllOccurrences but only produces
+// FindAllOccurrencesInStrings is like findAllOccurrences but only produces
 // edits for matches that occur inside Go string literals ("..." or `...`).
 // Used for updating import path strings (the location part) using directory
 // names without touching bare identifiers (which may be qualifiers whose
 // name comes from the package directive).
-func findAllOccurrencesInStrings(file string, content []byte, oldBase, newBase string) []Edit {
+func FindAllOccurrencesInStrings(file string, content []byte, oldBase, newBase string) []Edit {
 	if oldBase == "" || oldBase == newBase {
 		return nil
 	}
@@ -579,7 +616,8 @@ func findAllOccurrencesInStrings(file string, content []byte, oldBase, newBase s
 	return edits
 }
 
-func commonPathPrefix(a, b string) string {
+// CommonPathPrefix returns the common directory prefix of two paths.
+func CommonPathPrefix(a, b string) string {
 	aa := strings.Split(strings.Trim(a, "/"), "/")
 	bb := strings.Split(strings.Trim(b, "/"), "/")
 	n := len(aa)
@@ -599,20 +637,4 @@ func commonPathPrefix(a, b string) string {
 	return strings.Join(p, "/") + "/"
 }
 
-func extractPackageClauseName(src []byte) string {
-	s := string(src)
-	i := strings.Index(s, "package ")
-	if i == -1 {
-		return ""
-	}
-	rest := s[i+len("package "):]
-	for j, r := range rest {
-		if r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '/' || r == ';' {
-			if j > 0 {
-				return rest[:j]
-			}
-			return ""
-		}
-	}
-	return strings.TrimSpace(rest)
-}
+

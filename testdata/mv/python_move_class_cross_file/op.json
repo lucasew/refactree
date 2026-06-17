@@ -1,0 +1,4 @@
+{
+  "source": "path:./models.py::Config",
+  "destination": "path:./types.py::Config"
+}
