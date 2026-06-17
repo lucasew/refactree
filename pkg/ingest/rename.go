@@ -416,19 +416,45 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 			return nil, fmt.Errorf("reading %s: %w", f.Path, err)
 		}
 
-		pathOld := oldDirBase
-		pathNew := newDirBase
-		if cp := commonPathPrefix(srcDir, dstDir); cp != "" {
-			if rel := strings.Trim(strings.TrimPrefix(dstDir, cp), "/"); rel != "" {
-				pathNew = rel
+		if f.Language == "go" {
+			// For Go consumers, do full old subdir -> full new subdir replace inside import strings
+			// when the consumer content contains the fuller path (e.g. "pkg/executil").
+			// This inserts the "util/" level etc. instead of the replacement assuming/skip ping it.
+			fullOld := srcDir
+			fullNew := dstDir
+			didFull := false
+			if fullOld != fullNew {
+				if strings.Contains(string(fcontent), fullOld) {
+					occs := findAllOccurrencesInStrings(f.Path, fcontent, fullOld, fullNew)
+					edits = append(edits, occs...)
+					didFull = true
+				}
 			}
-		}
-		if pathOld != pathNew {
-			if f.Language == "go" {
+
+			// Leaf path (for bare leaf imports or as additional) inside strings for Go, guarded
+			// by didFull to avoid overlap with the full subdir edit on the same file.
+			pathOld := oldDirBase
+			pathNew := newDirBase
+			if cp := commonPathPrefix(srcDir, dstDir); cp != "" {
+				if rel := strings.Trim(strings.TrimPrefix(dstDir, cp), "/"); rel != "" {
+					pathNew = rel
+				}
+			}
+			if pathOld != pathNew && !didFull {
 				occs := findAllOccurrencesInStrings(f.Path, fcontent, pathOld, pathNew)
 				edits = append(edits, occs...)
-			} else {
-				// non-Go: global (path + binding/use names) as before
+			}
+		} else {
+			// non-Go: always the global leaf-based path token replace. This updates both the
+			// import literal *and* the bindings/uses (as before for py/js fixtures).
+			pathOld := oldDirBase
+			pathNew := newDirBase
+			if cp := commonPathPrefix(srcDir, dstDir); cp != "" {
+				if rel := strings.Trim(strings.TrimPrefix(dstDir, cp), "/"); rel != "" {
+					pathNew = rel
+				}
+			}
+			if pathOld != pathNew {
 				occs := findAllOccurrences(f.Path, fcontent, pathOld, pathNew)
 				edits = append(edits, occs...)
 			}
