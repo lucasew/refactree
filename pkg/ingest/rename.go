@@ -324,8 +324,34 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 	if srcDir == dstDir {
 		return nil, nil // no-op; avoids pointless I/O + self-overwrite edits
 	}
-	oldBase := lastPathComponent(srcDir)
-	newBase := lastPathComponent(dstDir)
+	oldDirBase := lastPathComponent(srcDir)
+	newDirBase := lastPathComponent(dstDir)
+
+	// Determine the name used as the "package symbol" brought into other packages
+	// (the qualifier in foo.Bar(), the binding in import foo "...", etc.).
+	// Harmonious with the rest of the system: this comes from the `package`
+	// directive inside the moved Go files (see FileExtract.Package populated
+	// by the Go language driver + extractGo), not from the directory basename.
+	// We read one of the sources under srcDir (we're reading them for relocation
+	// anyway) and extract the clause with a tiny scanner. Falls back to the
+	// dir last segment (preserving old convention for non-Go and when no
+	// explicit package clause is present).
+	declaredName := oldDirBase
+	for _, ff := range result.Files {
+		if isUnderDir(ff.Path, srcDir) {
+			if b, err := os.ReadFile(filepath.Join(dir, ff.Path)); err == nil {
+				if n := extractPackageClauseName(b); n != "" {
+					declaredName = n
+					break
+				}
+			}
+		}
+	}
+	// Because relocation copies the original file contents verbatim (including
+	// the package clause), the declared name does not change just because the
+	// directory moved. Therefore the qualifier / binding name that consumers
+	// use for this package also stays the same.
+	newDeclaredName := declaredName
 
 	var edits []Edit
 
@@ -362,20 +388,25 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 		})
 	}
 
-	// Update package base name occurrences (last path segment) in all non-package files.
-	// This covers bare module names in imports, import path literals (e.g. "./helpers/..." or "example/helperpkg"),
-	// and qualifier identifiers at use sites.
+	// Update in all non-package (consumer) files.
+	// Path updates (for import strings) use the directory last-segment tokens.
+	//   - Go: the replace is scoped to string literals only. This updates the
+	//     import path location without touching bare identifiers. The qualifier
+	//     / binding name used by consumers is taken from the package directive
+	//     (see declaredName computation + FileExtract.Package in the Go driver).
+	//     This is the harmonious part requested: the "symbol brought up to the
+	//     other packages" comes from `package foo`, not the dir basename.
+	//   - JS/Python: the module name *is* the path last segment, so we do the
+	//     previous global replace (updates the literal *and* the local bindings
+	//     / uses like "import * as helpers", "helpers.xxx"). This keeps the
+	//     py/js move_package fixtures working.
 	//
-	// Limitation (textual approach for smallest change): this is an
-	// unconditional substring search for oldBase (no token/AST/span context from
-	// Aliases/Relations). It works precisely for the three *_move_package fixtures
-	// (all occurrences needing update are bare last-segment matches, no collisions
-	// in fixture sources). In general it can over-rewrite (comments, strings,
-	// other same-suffix import paths, substrings). See review Issue 3.
+	// For hierarchy moves the path-in-string replacement for Go substitutes the
+	// old leaf with the new subpath (relative to common ancestor) so that a
+	// tail ".../executil" becomes the correct new location inside the import.
 	//
-	// Two passes over result.Files (package files then consumers) is the
-	// simplest/minimal approach per task; no partitioning abstraction requested
-	// (see review Issue 9).
+	// The declared-name pass (Go only) is usually a no-op on a pure directory
+	// move (sources copied verbatim → package clause unchanged).
 	for _, f := range result.Files {
 		if isUnderDir(f.Path, srcDir) {
 			continue
@@ -384,8 +415,30 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 		if err != nil {
 			return nil, fmt.Errorf("reading %s: %w", f.Path, err)
 		}
-		occs := findAllOccurrences(f.Path, fcontent, oldBase, newBase)
-		edits = append(edits, occs...)
+
+		pathOld := oldDirBase
+		pathNew := newDirBase
+		if cp := commonPathPrefix(srcDir, dstDir); cp != "" {
+			if rel := strings.Trim(strings.TrimPrefix(dstDir, cp), "/"); rel != "" {
+				pathNew = rel
+			}
+		}
+		if pathOld != pathNew {
+			if f.Language == "go" {
+				occs := findAllOccurrencesInStrings(f.Path, fcontent, pathOld, pathNew)
+				edits = append(edits, occs...)
+			} else {
+				// non-Go: global (path + binding/use names) as before
+				occs := findAllOccurrences(f.Path, fcontent, pathOld, pathNew)
+				edits = append(edits, occs...)
+			}
+		}
+
+		// Go qualifier/binding name from the package directive (not dir last seg).
+		if f.Language == "go" && declaredName != newDeclaredName {
+			occs := findAllOccurrences(f.Path, fcontent, declaredName, newDeclaredName)
+			edits = append(edits, occs...)
+		}
 	}
 
 	return edits, nil
@@ -424,4 +477,116 @@ func findAllOccurrences(file string, content []byte, oldBase, newBase string) []
 		off = pos + len(oldBase)
 	}
 	return edits
+}
+
+// findAllOccurrencesInStrings is like findAllOccurrences but only produces
+// edits for matches that occur inside Go string literals ("..." or `...`).
+// Used for updating import path strings (the location part) using directory
+// names without touching bare identifiers (which may be qualifiers whose
+// name comes from the package directive).
+func findAllOccurrencesInStrings(file string, content []byte, oldBase, newBase string) []Edit {
+	if oldBase == "" || oldBase == newBase {
+		return nil
+	}
+	text := string(content)
+	var edits []Edit
+	off := 0
+	for off < len(text) {
+		// find next string literal start
+		dq := strings.IndexByte(text[off:], '"')
+		rq := strings.IndexByte(text[off:], '`')
+		start := -1
+		isRaw := false
+		if dq >= 0 && (rq < 0 || dq < rq) {
+			start = off + dq
+		} else if rq >= 0 {
+			start = off + rq
+			isRaw = true
+		}
+		if start < 0 {
+			break
+		}
+		// find matching end
+		end := -1
+		if isRaw {
+			e := strings.IndexByte(text[start+1:], '`')
+			if e >= 0 {
+				end = start + 1 + e
+			}
+		} else {
+			// double-quoted, skip escapes
+			i := start + 1
+			for i < len(text) {
+				if text[i] == '\\' && i+1 < len(text) {
+					i += 2
+					continue
+				}
+				if text[i] == '"' {
+					end = i
+					break
+				}
+				i++
+			}
+		}
+		if end < 0 {
+			break // unterminated; give up on this file
+		}
+		// search inside the literal [start:end+1]
+		seg := text[start : end+1]
+		sOff := 0
+		for {
+			idx := strings.Index(seg[sOff:], oldBase)
+			if idx < 0 {
+				break
+			}
+			pos := start + sOff + idx
+			edits = append(edits, Edit{
+				File:      file,
+				StartByte: uint32(pos),
+				EndByte:   uint32(pos + len(oldBase)),
+				NewText:   newBase,
+			})
+			sOff += idx + len(oldBase)
+		}
+		off = end + 1
+	}
+	return edits
+}
+
+func commonPathPrefix(a, b string) string {
+	aa := strings.Split(strings.Trim(a, "/"), "/")
+	bb := strings.Split(strings.Trim(b, "/"), "/")
+	n := len(aa)
+	if len(bb) < n {
+		n = len(bb)
+	}
+	var p []string
+	for i := 0; i < n; i++ {
+		if aa[i] != bb[i] {
+			break
+		}
+		p = append(p, aa[i])
+	}
+	if len(p) == 0 {
+		return ""
+	}
+	return strings.Join(p, "/") + "/"
+}
+
+func extractPackageClauseName(src []byte) string {
+	s := string(src)
+	i := strings.Index(s, "package ")
+	if i == -1 {
+		return ""
+	}
+	rest := s[i+len("package "):]
+	for j, r := range rest {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '/' || r == ';' {
+			if j > 0 {
+				return rest[:j]
+			}
+			return ""
+		}
+	}
+	return strings.TrimSpace(rest)
 }
