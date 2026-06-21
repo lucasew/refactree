@@ -160,25 +160,3 @@ func relImportPath(importerPath, spec string) string {
 	joined = strings.TrimPrefix(joined, "./")
 	return joined
 }
-
-func splitNodePackageSpecifier(spec string) (pkgName, subpath string) {
-	parts := strings.Split(spec, "/")
-	if spec == "" {
-		return "", ""
-	}
-	if strings.HasPrefix(spec, "@") {
-		if len(parts) < 2 {
-			return spec, ""
-		}
-		pkgName = parts[0] + "/" + parts[1]
-		if len(parts) > 2 {
-			subpath = strings.Join(parts[2:], "/")
-		}
-		return pkgName, subpath
-	}
-	pkgName = parts[0]
-	if len(parts) > 1 {
-		subpath = strings.Join(parts[1:], "/")
-	}
-	return pkgName, subpath
-}

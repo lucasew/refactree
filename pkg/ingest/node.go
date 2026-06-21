@@ -42,7 +42,3 @@ func nodeText(n *grammar.Node, source []byte) string {
 func childByField(n *grammar.Node, field string) *grammar.Node {
 	return ChildByField(n, field)
 }
-
-func childByType(n *grammar.Node, typ string) *grammar.Node {
-	return ChildByType(n, typ)
-}

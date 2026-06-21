@@ -42,7 +42,6 @@ func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 	}
 
 	sourceRef = src.String()
-	destRef = dst.String()
 
 	if src.Symbol == "" && dst.Symbol == "" {
 		// package/dir move (no symbol); canonical* already short-circuit+normalize for Symbol==""

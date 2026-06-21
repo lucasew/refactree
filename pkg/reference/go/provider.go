@@ -7,9 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -66,12 +66,31 @@ func ResolvePackageDir(pkgPath string) (string, error) {
 	return "", fmt.Errorf("go package not found: %s", pkgPath)
 }
 
+var (
+	goRootOnce sync.Once
+	goRoot     string
+)
+
+func goEnvGOROOT() string {
+	goRootOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "go", "env", "GOROOT")
+		out, err := cmd.Output()
+		if err != nil {
+			return
+		}
+		goRoot = strings.TrimSpace(string(out))
+	})
+	return goRoot
+}
+
 func resolveStdlibPackageDir(pkgPath string) (string, bool) {
-	goRoot := runtime.GOROOT()
-	if goRoot == "" {
+	root := goEnvGOROOT()
+	if root == "" {
 		return "", false
 	}
-	pkgDir := filepath.Join(goRoot, "src", filepath.FromSlash(pkgPath))
+	pkgDir := filepath.Join(root, "src", filepath.FromSlash(pkgPath))
 	st, err := os.Stat(pkgDir)
 	if err != nil || !st.IsDir() {
 		return "", false

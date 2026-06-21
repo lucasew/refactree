@@ -380,10 +380,10 @@ func (m *browseModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.focus == browseFocusPreview {
 			switch {
 			case key.Matches(msg, m.keys.PreviewUp):
-				m.preview.LineUp(1)
+				m.preview.ScrollUp(1)
 				return m, nil
 			case key.Matches(msg, m.keys.PreviewDown):
-				m.preview.LineDown(1)
+				m.preview.ScrollDown(1)
 				return m, nil
 			}
 		}
@@ -605,9 +605,7 @@ func (m *browseModel) buildItems() ([]list.Item, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, sym := range symbols {
-		items = append(items, sym)
-	}
+	items = append(items, symbols...)
 
 	if len(items) == 0 {
 		items = append(items, browseItem{
@@ -685,9 +683,7 @@ func (m *browseModel) buildProviderItems() ([]list.Item, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, sym := range symbols {
-		items = append(items, sym)
-	}
+	items = append(items, symbols...)
 
 	if len(items) == 0 {
 		items = append(items, browseItem{

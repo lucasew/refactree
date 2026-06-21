@@ -1,9 +1,6 @@
 package main
 
 import (
-	"fmt"
-	"io"
-
 	"github.com/lucasew/refactree/pkg/version"
 	"github.com/spf13/cobra"
 )
@@ -39,8 +36,4 @@ func newRootCmd() *cobra.Command {
 	)
 
 	return cmd
-}
-
-func stubf(w io.Writer, format string, args ...any) {
-	_, _ = fmt.Fprintf(w, format, args...)
 }
