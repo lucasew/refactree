@@ -4,12 +4,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/lucasew/ccgo-tree-sitter/grammar"
 )
 
 // Ingest discovers source files under dir, parses them with tree-sitter,
 // and resolves cross-file references.
+//
+// Per-file extraction is cached by absolute path + ingest root + mtime so
+// repeated walks (e.g. web serve) skip tree-sitter when sources are unchanged.
+// resolve() still runs over the full extract set because relations depend on
+// other files' entities and imports.
 func Ingest(dir string) (*Result, error) {
 	return ingestDir(dir, true)
 }
@@ -21,19 +27,24 @@ func IngestWithRecursion(dir string, recursive bool) (*Result, error) {
 }
 
 func ingestDir(dir string, recursive bool) (*Result, error) {
+	rootAbs, err := filepath.Abs(dir)
+	if err != nil {
+		rootAbs = dir
+	}
+
 	var extracts []*FileExtract
 
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	err = filepath.Walk(rootAbs, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 		if info.IsDir() {
-			if !recursive && path != dir {
+			if !recursive && path != rootAbs {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		fe, parseErr := parseFile(dir, path)
+		fe, parseErr := parseFileCached(rootAbs, path, info)
 		if parseErr != nil {
 			return parseErr
 		}
@@ -46,7 +57,60 @@ func ingestDir(dir string, recursive bool) (*Result, error) {
 		return nil, err
 	}
 
-	return resolve(dir, extracts), nil
+	return resolve(rootAbs, extracts), nil
+}
+
+type extractCacheKey struct {
+	rootAbs string
+	absPath string
+}
+
+type extractCacheEntry struct {
+	modTime int64
+	extract *FileExtract
+}
+
+var extractCache sync.Map // extractCacheKey -> extractCacheEntry
+
+// parseFileCached returns a cached FileExtract when the file's mtime matches a
+// previous parse for the same ingest root; otherwise parses and stores.
+func parseFileCached(rootAbs, absPath string, info os.FileInfo) (*FileExtract, error) {
+	if info == nil {
+		var err error
+		info, err = os.Stat(absPath)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	key := extractCacheKey{rootAbs: rootAbs, absPath: absPath}
+	modTime := info.ModTime().UnixNano()
+
+	if v, ok := extractCache.Load(key); ok {
+		ent := v.(extractCacheEntry)
+		if ent.modTime == modTime {
+			return ent.extract, nil
+		}
+	}
+
+	fe, err := parseFile(rootAbs, absPath)
+	if err != nil || fe == nil {
+		return fe, err
+	}
+
+	extractCache.Store(key, extractCacheEntry{
+		modTime: modTime,
+		extract: fe,
+	})
+	return fe, nil
+}
+
+// ClearExtractCache drops all cached per-file extracts. Intended for tests.
+func ClearExtractCache() {
+	extractCache.Range(func(key, _ any) bool {
+		extractCache.Delete(key)
+		return true
+	})
 }
 
 // parseFile parses a single source file and returns its FileExtract.
