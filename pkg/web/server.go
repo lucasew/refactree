@@ -78,11 +78,9 @@ func (s *Server) handleCode(w http.ResponseWriter, r *http.Request) {
 		ref = q
 	}
 
-	v := s.loader.LoadFile(ref)
-	// Directory views reuse index template layout via code.html with no segments.
-	if v.Error != "" && v.Segments == nil && len(v.Siblings) == 0 {
-		// keep error display
-	}
+	v := s.loader.LoadFileWithOptions(ref, LoadOptions{
+		File: r.URL.Query().Get("file"),
+	})
 	s.render(w, "code.html", v)
 }
 

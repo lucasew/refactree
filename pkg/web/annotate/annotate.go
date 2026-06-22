@@ -32,12 +32,29 @@ type Span struct {
 	Priority  int // higher wins on overlap
 }
 
+// Options controls how Build maps references (e.g. provider-scoped rewrite).
+type Options struct {
+	// MapRef rewrites an ingest reference before anchors/links are built.
+	// Nil keeps references as ingest produced them (path:./file::sym).
+	MapRef func(ref string) string
+}
+
 // Build produces segments for one file's source using ingest facts for that path.
 // filePath is the ingest-relative path (e.g. "main.go").
 // codeURL builds a browser URL for a reference string.
 func Build(source []byte, filePath string, result *ingest.Result, codeURL func(ref string) string) []Segment {
+	return BuildWithOptions(source, filePath, result, codeURL, Options{})
+}
+
+// BuildWithOptions is Build plus optional reference remapping for provider views.
+func BuildWithOptions(source []byte, filePath string, result *ingest.Result, codeURL func(ref string) string, opts Options) []Segment {
 	if result == nil || len(source) == 0 {
 		return []Segment{{Text: string(source)}}
+	}
+
+	mapRef := opts.MapRef
+	if mapRef == nil {
+		mapRef = func(ref string) string { return ref }
 	}
 
 	normPath := normalizePath(filePath)
@@ -51,12 +68,13 @@ func Build(source []byte, filePath string, result *ingest.Result, codeURL func(r
 		if ent.StartByte >= ent.EndByte || int(ent.EndByte) > len(source) {
 			continue
 		}
+		displayRef := mapRef(ent.Reference)
 		spans = append(spans, Span{
 			Start:     ent.StartByte,
 			End:       ent.EndByte,
-			ID:        AnchorID(ent.Reference),
+			ID:        symbolAnchorID(displayRef),
 			IsDef:     true,
-			Reference: ent.Reference,
+			Reference: displayRef,
 			Priority:  2,
 		})
 	}
@@ -69,18 +87,29 @@ func Build(source []byte, filePath string, result *ingest.Result, codeURL func(r
 		if alias.StartByte >= alias.EndByte || int(alias.EndByte) > len(source) {
 			continue
 		}
+		displayRef := mapRef(alias.Reference)
+		target := alias.Target
+		if target != "" {
+			target = mapRef(target)
+		}
 		href := ""
-		if alias.Target != "" && codeURL != nil {
-			href = codeURL(alias.Target)
+		if target != "" && codeURL != nil {
+			href = codeURL(target)
+		}
+		// Import aliases are defs for display, but only anchor when they name a symbol
+		// (avoids every import sharing path:./file as the same element id).
+		titleRef := displayRef
+		if target != "" {
+			titleRef = target
 		}
 		spans = append(spans, Span{
 			Start:     alias.StartByte,
 			End:       alias.EndByte,
 			Href:      href,
-			ID:        AnchorID(alias.Reference),
+			ID:        symbolAnchorID(displayRef),
 			IsLink:    href != "",
 			IsDef:     true,
-			Reference: alias.Reference,
+			Reference: titleRef,
 			Priority:  2,
 		})
 	}
@@ -93,16 +122,20 @@ func Build(source []byte, filePath string, result *ingest.Result, codeURL func(r
 		if rel.StartByte >= rel.EndByte || int(rel.EndByte) > len(source) {
 			continue
 		}
+		target := rel.Target
+		if target != "" {
+			target = mapRef(target)
+		}
 		href := ""
-		if rel.Target != "" && codeURL != nil {
-			href = codeURL(rel.Target)
+		if target != "" && codeURL != nil {
+			href = codeURL(target)
 		}
 		spans = append(spans, Span{
 			Start:     rel.StartByte,
 			End:       rel.EndByte,
 			Href:      href,
 			IsLink:    href != "",
-			Reference: rel.Target,
+			Reference: target,
 			Priority:  1,
 		})
 	}
@@ -179,6 +212,14 @@ func AnchorID(ref string) string {
 		}
 	}
 	return b.String()
+}
+
+// symbolAnchorID only emits an id for symbol refs (provider:path::symbol).
+func symbolAnchorID(ref string) string {
+	if !strings.Contains(ref, "::") {
+		return ""
+	}
+	return AnchorID(ref)
 }
 
 // Escape segments for direct template use when not using html/template auto-escape on fields.

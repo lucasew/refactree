@@ -56,3 +56,35 @@ func TestAnchorID_Sanitizes(t *testing.T) {
 		t.Fatalf("id should not contain : or /, got %q", id)
 	}
 }
+
+func TestBuildWithOptions_RemapsProviderRefs(t *testing.T) {
+	source := []byte("package main\n\nfunc main() {\n\thelper()\n}\n")
+	result := &ingest.Result{
+		Entities: []ingest.Entity{
+			{Reference: "path:./main.go::main", StartByte: 19, EndByte: 23},
+		},
+		Relations: []ingest.Relation{
+			{Reference: "path:./main.go::main", StartByte: 29, EndByte: 35, Target: "path:./helper.go::helper"},
+		},
+	}
+	remap := func(ref string) string {
+		r := ingest.ParseReference(ref)
+		return ingest.Reference{Provider: "go", Path: "example", Symbol: r.Symbol}.String()
+	}
+	segs := BuildWithOptions(source, "main.go", result, func(ref string) string {
+		return "/code/" + ref
+	}, Options{MapRef: remap})
+
+	var sawDef, sawLink bool
+	for _, s := range segs {
+		if s.IsDef && s.Reference == "go:example::main" {
+			sawDef = true
+		}
+		if s.IsLink && s.Reference == "go:example::helper" && strings.Contains(s.Href, "go:example::helper") {
+			sawLink = true
+		}
+	}
+	if !sawDef || !sawLink {
+		t.Fatalf("remap failed: def=%v link=%v", sawDef, sawLink)
+	}
+}

@@ -8,6 +8,7 @@
   <header class="topbar">
     <a class="brand" href="/">refactree</a>
     <span class="crumb"><code>{{.Reference}}</code></span>
+    {{if .Provider}}<span class="badge">{{.Provider}}</span>{{end}}
     {{if .Language}}<span class="badge">{{.Language}}</span>{{end}}
   </header>
   <main class="shell">
@@ -36,7 +37,7 @@
         <pre class="code" tabindex="0"><code>{{range .Segments}}{{if .IsLink}}<a href="{{.Href}}" class="sym-link{{if .IsDef}} sym-def{{end}}"{{if .ID}} id="{{.ID}}"{{end}} title="{{.Reference}}">{{.Text}}</a>{{else if .IsDef}}<span class="sym-def"{{if .ID}} id="{{.ID}}"{{end}} title="{{.Reference}}">{{.Text}}</span>{{else}}{{.Text}}{{end}}{{end}}</code></pre>
       </div>
       {{else if .Siblings}}
-      <p class="lede">Directory <code>{{.Reference}}</code>. Open a file from the rail.</p>
+      <p class="lede">{{if .Provider}}Provider scope{{else}}Directory{{end}} <code>{{.Reference}}</code>. Open a file or child scope from the rail.{{if .Provider}} Symbol links resolve as <code>{{.Provider}}:…::symbol</code>.{{end}}</p>
       {{else}}
       <p class="muted">Nothing to show.</p>
       {{end}}

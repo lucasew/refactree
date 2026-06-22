@@ -71,3 +71,17 @@ func FileReferenceForView(ref string) ingest.Reference {
 	}
 	return r
 }
+
+// EncodeProviderFileURL links to a source file inside a provider package scope.
+// Uses ?file= because provider refs address packages/modules, not individual files.
+func EncodeProviderFileURL(scopeRef ingest.Reference, fileName string) string {
+	scopeRef.Symbol = ""
+	base := EncodeCodeURL(scopeRef.String())
+	// Strip any accidental fragment from EncodeCodeURL (none without symbol).
+	if i := strings.Index(base, "#"); i >= 0 {
+		base = base[:i]
+	}
+	q := url.Values{}
+	q.Set("file", fileName)
+	return base + "?" + q.Encode()
+}
