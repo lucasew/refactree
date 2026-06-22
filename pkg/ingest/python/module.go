@@ -59,7 +59,7 @@ func (referenceProvider) Resolve(spec string, ctx ingest.ImportResolveContext) (
 	return "python:" + spec, true
 }
 
-func (referenceProvider) ResolveScopeTarget(ref ingest.Reference) (ingest.ProviderScopeTarget, bool, error) {
+func (referenceProvider) ResolveScopeTarget(ref ingest.Reference, _ string) (ingest.ProviderScopeTarget, bool, error) {
 	if ref.Path == "" {
 		return ingest.ProviderScopeTarget{}, false, nil
 	}
@@ -71,7 +71,7 @@ func (referenceProvider) ResolveScopeTarget(ref ingest.Reference) (ingest.Provid
 	return ingest.ProviderScopeTarget{Dir: target.Dir, CanDescend: &canDescend}, true, nil
 }
 
-func (referenceProvider) ResolveSymbolTarget(ref ingest.Reference) (ingest.ProviderSymbolTarget, bool, error) {
+func (referenceProvider) ResolveSymbolTarget(ref ingest.Reference, _ string) (ingest.ProviderSymbolTarget, bool, error) {
 	target, ok, err := pythonref.ResolveSymbolTarget(ref.Path, ref.Symbol)
 	if !ok || err != nil {
 		return ingest.ProviderSymbolTarget{}, ok, err

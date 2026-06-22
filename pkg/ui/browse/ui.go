@@ -189,6 +189,7 @@ func (k browseKeys) FullHelp() [][]key.Binding {
 
 type browseModel struct {
 	rootDir       string
+	resolver      *ingest.Resolver
 	currentRel    string
 	mode          string
 	providerRef   ingest.Reference
@@ -220,6 +221,13 @@ type browseModel struct {
 	bodyHeight   int
 }
 
+func (m *browseModel) refs() *ingest.Resolver {
+	if m != nil && m.resolver != nil {
+		return m.resolver
+	}
+	return ingest.NewResolver("")
+}
+
 func newBrowseModelFromReference(ref ingest.Reference, includeHidden bool) (*browseModel, error) {
 	if ref.Provider == "path" {
 		rootDir, currentRel, err := browseScopeFromReference(ref)
@@ -229,7 +237,7 @@ func newBrowseModelFromReference(ref ingest.Reference, includeHidden bool) (*bro
 		return newBrowseModel(rootDir, currentRel, includeHidden)
 	}
 
-	scope, ok, err := refpkg.ResolveScopeTarget(ref)
+	scope, ok, err := ingest.NewResolver(".").ResolveScopeTarget(ref)
 	if err != nil {
 		return nil, err
 	}
@@ -261,6 +269,7 @@ func newBrowseModel(rootDir, currentRel string, includeHidden bool) (*browseMode
 	}
 	model := &browseModel{
 		rootDir:       absRoot,
+		resolver:      ingest.NewResolver(absRoot),
 		currentRel:    currentRel,
 		mode:          "path",
 		includeHidden: includeHidden,
@@ -618,7 +627,7 @@ func (m *browseModel) buildItems() ([]list.Item, error) {
 }
 
 func (m *browseModel) buildProviderItems() ([]list.Item, error) {
-	scope, ok, err := refpkg.ResolveScopeTarget(m.providerRef)
+	scope, ok, err := m.refs().ResolveScopeTarget(m.providerRef)
 	if err != nil {
 		return nil, err
 	}
@@ -643,7 +652,7 @@ func (m *browseModel) buildProviderItems() ([]list.Item, error) {
 		allowChildren = *scope.CanDescend
 	}
 	if allowChildren {
-		if children, ok, err := refpkg.ResolveScopeChildren(m.providerRef, m.includeHidden); err != nil {
+		if children, ok, err := m.refs().ResolveScopeChildren(m.providerRef, m.includeHidden); err != nil {
 			return nil, err
 		} else if ok {
 			for _, child := range children {
@@ -837,7 +846,7 @@ func (m *browseModel) activateSelection() error {
 			}
 			ref := ingest.ParseReference(item.targetRef)
 			ref.Symbol = ""
-			scope, ok, err := refpkg.ResolveScopeTarget(ref)
+			scope, ok, err := m.refs().ResolveScopeTarget(ref)
 			if err != nil {
 				return err
 			}
@@ -882,7 +891,7 @@ func (m *browseModel) goParent() error {
 		}
 		ref := m.providerRef
 		ref.Path = parent
-		scope, ok, err := refpkg.ResolveScopeTarget(ref)
+		scope, ok, err := m.refs().ResolveScopeTarget(ref)
 		if err != nil {
 			return err
 		}

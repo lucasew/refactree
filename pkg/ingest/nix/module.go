@@ -67,7 +67,7 @@ func (referenceProvider) Resolve(spec string, _ ingest.ImportResolveContext) (st
 	return "nix:" + spec, true
 }
 
-func (referenceProvider) ResolveScopeTarget(ref ingest.Reference) (ingest.ProviderScopeTarget, bool, error) {
+func (referenceProvider) ResolveScopeTarget(ref ingest.Reference, _ string) (ingest.ProviderScopeTarget, bool, error) {
 	if ref.Path == "" {
 		return ingest.ProviderScopeTarget{}, false, nil
 	}
@@ -79,7 +79,7 @@ func (referenceProvider) ResolveScopeTarget(ref ingest.Reference) (ingest.Provid
 	return ingest.ProviderScopeTarget{Dir: target.Dir, CanDescend: &canDescend}, true, nil
 }
 
-func (referenceProvider) ResolveSymbolTarget(ref ingest.Reference) (ingest.ProviderSymbolTarget, bool, error) {
+func (referenceProvider) ResolveSymbolTarget(ref ingest.Reference, _ string) (ingest.ProviderSymbolTarget, bool, error) {
 	target, ok, err := nixref.ResolveSymbolTarget(ref.Path, ref.Symbol)
 	if !ok || err != nil {
 		return ingest.ProviderSymbolTarget{}, ok, err
@@ -87,7 +87,7 @@ func (referenceProvider) ResolveSymbolTarget(ref ingest.Reference) (ingest.Provi
 	return ingest.ProviderSymbolTarget{Dir: target.Dir, Symbol: target.Symbol}, true, nil
 }
 
-func (referenceProvider) ListScopeChildren(ref ingest.Reference, includeHidden bool) ([]refpkg.ScopeChild, bool, error) {
+func (referenceProvider) ListScopeChildren(ref ingest.Reference, _ string, includeHidden bool) ([]refpkg.ScopeChild, bool, error) {
 	if ref.Path == "" {
 		return nil, false, nil
 	}

@@ -44,10 +44,12 @@ type IndexView struct {
 
 // Loader resolves source + ingest data for HTTP handlers.
 type Loader struct {
-	RootDir string
+	RootDir  string
+	resolver *ingest.Resolver // project-scoped; dispatches to go/python/nix/…
 }
 
-// NewLoader resolves root to an absolute path.
+// NewLoader resolves root to an absolute path and builds a provider Resolver
+// for that project tree (so go:workspaced resolves via go list in --dir).
 func NewLoader(rootDir string) (*Loader, error) {
 	abs, err := filepath.Abs(rootDir)
 	if err != nil {
@@ -60,7 +62,17 @@ func NewLoader(rootDir string) (*Loader, error) {
 	if !st.IsDir() {
 		return nil, fmt.Errorf("root is not a directory: %s", abs)
 	}
-	return &Loader{RootDir: abs}, nil
+	return &Loader{
+		RootDir:  abs,
+		resolver: ingest.NewResolver(abs),
+	}, nil
+}
+
+func (l *Loader) refs() *ingest.Resolver {
+	if l != nil && l.resolver != nil {
+		return l.resolver
+	}
+	return ingest.NewResolver("")
 }
 
 // LoadIndex builds the root index listing.
@@ -173,7 +185,7 @@ func (l *Loader) loadPathView(v FileView, scopeRef ingest.Reference, parsed inge
 }
 
 func (l *Loader) loadProviderView(v FileView, scopeRef ingest.Reference, focusRef string, parsed ingest.Reference) FileView {
-	scope, ok, err := refpkg.ResolveScopeTarget(scopeRef)
+	scope, ok, err := l.refs().ResolveScopeTarget(scopeRef)
 	if err != nil {
 		v.Error = err.Error()
 		return v
@@ -312,7 +324,7 @@ func (l *Loader) listProviderScope(scopeRef ingest.Reference, scope refpkg.Scope
 	}
 
 	if allowChildren {
-		if children, ok, err := refpkg.ResolveScopeChildren(scopeRef, false); err == nil && ok {
+		if children, ok, err := l.refs().ResolveScopeChildren(scopeRef, false); err == nil && ok {
 			for _, child := range children {
 				name := filepath.Base(filepath.FromSlash(strings.Trim(child.Ref.Path, "/")))
 				if name == "" || name == "." {

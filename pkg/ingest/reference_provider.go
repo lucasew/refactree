@@ -46,12 +46,20 @@ func referenceProviderForName(name string) (refpkg.Provider, bool) {
 	return refpkg.ProviderForName(name)
 }
 
+// Resolver is a project-scoped reference resolver (see reference.Resolver).
+type Resolver = refpkg.Resolver
+
+// NewResolver constructs a resolver rooted at the project directory.
+func NewResolver(rootDir string) *Resolver {
+	return refpkg.NewResolver(rootDir)
+}
+
 func resolveProviderSymbolTarget(ref Reference) (ProviderSymbolTarget, bool, error) {
-	return refpkg.ResolveSymbolTarget(ref)
+	return NewResolver("").ResolveSymbolTarget(ref)
 }
 
 func resolveProviderScopeTarget(ref Reference) (ProviderScopeTarget, bool, error) {
-	return refpkg.ResolveScopeTarget(ref)
+	return NewResolver("").ResolveScopeTarget(ref)
 }
 
 func providerListIngestRecursive(ref Reference, opts ListOptions) bool {

@@ -62,30 +62,30 @@ func (referenceProvider) Resolve(spec string, ctx ingest.ImportResolveContext) (
 	return goref.ResolveImport(spec, ctx.KnownDirs), true
 }
 
-func (referenceProvider) ResolveScopeTarget(ref ingest.Reference) (ingest.ProviderScopeTarget, bool, error) {
+func (referenceProvider) ResolveScopeTarget(ref ingest.Reference, rootDir string) (ingest.ProviderScopeTarget, bool, error) {
 	if ref.Path == "" {
 		return ingest.ProviderScopeTarget{}, false, nil
 	}
-	dir, err := goref.ResolvePackageDir(ref.Path)
+	dir, err := goref.ResolvePackageDir(ref.Path, rootDir)
 	if err != nil {
 		return ingest.ProviderScopeTarget{}, true, err
 	}
 	return ingest.ProviderScopeTarget{Dir: dir}, true, nil
 }
 
-func (referenceProvider) ResolveSymbolTarget(ref ingest.Reference) (ingest.ProviderSymbolTarget, bool, error) {
-	target, ok, err := goref.ResolveSymbolTarget(ref.Path, ref.Symbol)
+func (referenceProvider) ResolveSymbolTarget(ref ingest.Reference, rootDir string) (ingest.ProviderSymbolTarget, bool, error) {
+	target, ok, err := goref.ResolveSymbolTarget(ref.Path, ref.Symbol, rootDir)
 	if !ok || err != nil {
 		return ingest.ProviderSymbolTarget{}, ok, err
 	}
 	return ingest.ProviderSymbolTarget{Dir: target.Dir, Symbol: target.Symbol}, true, nil
 }
 
-func (referenceProvider) ListScopeChildren(ref ingest.Reference, includeHidden bool) ([]refpkg.ScopeChild, bool, error) {
+func (referenceProvider) ListScopeChildren(ref ingest.Reference, rootDir string, includeHidden bool) ([]refpkg.ScopeChild, bool, error) {
 	if ref.Path == "" {
 		return nil, false, nil
 	}
-	dir, err := goref.ResolvePackageDir(ref.Path)
+	dir, err := goref.ResolvePackageDir(ref.Path, rootDir)
 	if err != nil {
 		return nil, true, err
 	}

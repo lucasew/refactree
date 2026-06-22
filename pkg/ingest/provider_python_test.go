@@ -84,8 +84,7 @@ func TestPythonProvider_ResolveRelativeImport_ParentPackage(t *testing.T) {
 }
 
 func TestPythonProvider_ResolveScopeTarget_CanDescendByModuleKind(t *testing.T) {
-	provider, ok := referenceProviderForName("python")
-	if !ok {
+	if _, ok := referenceProviderForName("python"); !ok {
 		t.Fatal("expected python provider to be registered")
 	}
 
@@ -115,14 +114,8 @@ func TestPythonProvider_ResolveScopeTarget_CanDescendByModuleKind(t *testing.T) 
 		_ = os.Setenv("PYTHONPATH", oldPath)
 	})
 
-	scopeProvider, ok := provider.(interface {
-		ResolveScopeTarget(ref Reference) (ProviderScopeTarget, bool, error)
-	})
-	if !ok {
-		t.Fatal("python provider does not implement ResolveScopeTarget")
-	}
-
-	moduleTarget, ok, err := scopeProvider.ResolveScopeTarget(ParseReference("python:" + moduleName))
+	r := NewResolver("")
+	moduleTarget, ok, err := r.ResolveScopeTarget(ParseReference("python:" + moduleName))
 	if err != nil {
 		if strings.Contains(err.Error(), "python executable not found") {
 			t.Skip(err.Error())
@@ -136,7 +129,7 @@ func TestPythonProvider_ResolveScopeTarget_CanDescendByModuleKind(t *testing.T) 
 		t.Fatalf("expected module scope to disable child navigation, got %+v", moduleTarget)
 	}
 
-	packageTarget, ok, err := scopeProvider.ResolveScopeTarget(ParseReference("python:" + packageName))
+	packageTarget, ok, err := r.ResolveScopeTarget(ParseReference("python:" + packageName))
 	if err != nil {
 		t.Fatalf("resolve package scope failed: %v", err)
 	}

@@ -29,12 +29,12 @@ func ResolveImport(spec string, knownDirs map[string]bool) string {
 }
 
 // ResolveSymbolTarget resolves a go:<pkg>::<symbol> reference to a concrete
-// package directory in the installed Go standard library.
-func ResolveSymbolTarget(pkgPath, symbol string) (SymbolTarget, bool, error) {
+// package directory. workDir is the module context (project root) for `go list`.
+func ResolveSymbolTarget(pkgPath, symbol, workDir string) (SymbolTarget, bool, error) {
 	if symbol == "" {
 		return SymbolTarget{}, false, nil
 	}
-	pkgDir, err := ResolvePackageDir(pkgPath)
+	pkgDir, err := ResolvePackageDir(pkgPath, workDir)
 	if err != nil {
 		return SymbolTarget{}, true, err
 	}
@@ -46,7 +46,9 @@ func ResolveSymbolTarget(pkgPath, symbol string) (SymbolTarget, bool, error) {
 }
 
 // ResolvePackageDir resolves a Go import path to a concrete package directory.
-func ResolvePackageDir(pkgPath string) (string, error) {
+// workDir is the directory used as cwd for `go list` so local modules in the
+// served/browsed project resolve (e.g. go:workspaced from --dir workspaced).
+func ResolvePackageDir(pkgPath, workDir string) (string, error) {
 	pkgPath = strings.Trim(pkgPath, "/")
 	if pkgPath == "" {
 		return "", fmt.Errorf("go provider package path is empty")
@@ -56,13 +58,16 @@ func ResolvePackageDir(pkgPath string) (string, error) {
 		return dir, nil
 	}
 
+	// Prefer go list from the project root so the current module and its
+	// replace/workspace deps win over a random module-cache hit.
+	if dir, err := goListDir(workDir, "list", "-f", "{{.Dir}}", pkgPath); err == nil {
+		return dir, nil
+	}
+
 	if dir, ok := resolveModuleCachePackageDir(pkgPath); ok {
 		return dir, nil
 	}
 
-	if dir, err := goListDir("list", "-f", "{{.Dir}}", pkgPath); err == nil {
-		return dir, nil
-	}
 	return "", fmt.Errorf("go package not found: %s", pkgPath)
 }
 
@@ -98,11 +103,14 @@ func resolveStdlibPackageDir(pkgPath string) (string, bool) {
 	return pkgDir, true
 }
 
-func goListDir(args ...string) (string, error) {
+func goListDir(workDir string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "go", args...)
+	if workDir != "" {
+		cmd.Dir = workDir
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -179,7 +187,7 @@ func moduleCacheDir() (string, bool) {
 		}
 	}
 
-	if v, err := goListDir("env", "GOMODCACHE"); err == nil {
+	if v, err := goListDir("", "env", "GOMODCACHE"); err == nil {
 		return v, true
 	}
 

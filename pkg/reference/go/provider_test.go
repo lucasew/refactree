@@ -22,7 +22,7 @@ func TestResolveImport_StdlibPathKeepsSlashes(t *testing.T) {
 }
 
 func TestResolveSymbolTarget_StdlibPackage(t *testing.T) {
-	target, ok, err := ResolveSymbolTarget("fmt", "Printf")
+	target, ok, err := ResolveSymbolTarget("fmt", "Printf", "")
 	if err != nil {
 		t.Fatalf("resolve symbol target failed: %v", err)
 	}
@@ -40,12 +40,31 @@ func TestResolveSymbolTarget_StdlibPackage(t *testing.T) {
 }
 
 func TestResolvePackageDir_Stdlib(t *testing.T) {
-	dir, err := ResolvePackageDir("fmt")
+	dir, err := ResolvePackageDir("fmt", "")
 	if err != nil {
 		t.Fatalf("resolve package dir failed: %v", err)
 	}
 	if !strings.HasSuffix(filepath.ToSlash(dir), filepath.ToSlash(filepath.Join("src", "fmt"))) {
 		t.Fatalf("unexpected package dir: %q", dir)
+	}
+}
+
+func TestResolvePackageDir_LocalModuleWithWorkDir(t *testing.T) {
+	dir := t.TempDir()
+	modName := "example.com/localmod"
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module "+modName+"\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ResolvePackageDir(modName, dir)
+	if err != nil {
+		t.Fatalf("expected local module via workDir: %v", err)
+	}
+	if filepath.Clean(got) != filepath.Clean(dir) {
+		t.Fatalf("got %q want %q", got, dir)
 	}
 }
 

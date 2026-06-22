@@ -34,7 +34,7 @@ func TestReferenceProvider_ListScopeChildren_FiltersNonPackages(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	children, ok, err := (referenceProvider{}).ListScopeChildren(ingest.ParseReference("go:github.com/example/lib"), false)
+	children, ok, err := (referenceProvider{}).ListScopeChildren(ingest.ParseReference("go:github.com/example/lib"), "", false)
 	if err != nil {
 		t.Fatalf("list scope children failed: %v", err)
 	}

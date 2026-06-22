@@ -50,18 +50,19 @@ type ScopeChild struct {
 }
 
 // SymbolTargetProvider is an optional provider capability used by doc lookup.
+// rootDir is injected by Resolver (project/module context for go list, etc.).
 type SymbolTargetProvider interface {
-	ResolveSymbolTarget(ref Reference) (SymbolTarget, bool, error)
+	ResolveSymbolTarget(ref Reference, rootDir string) (SymbolTarget, bool, error)
 }
 
 // ScopeTargetProvider is an optional provider capability used by listing.
 type ScopeTargetProvider interface {
-	ResolveScopeTarget(ref Reference) (ScopeTarget, bool, error)
+	ResolveScopeTarget(ref Reference, rootDir string) (ScopeTarget, bool, error)
 }
 
 // ScopeChildrenProvider is an optional provider capability used by browse UIs.
 type ScopeChildrenProvider interface {
-	ListScopeChildren(ref Reference, includeHidden bool) ([]ScopeChild, bool, error)
+	ListScopeChildren(ref Reference, rootDir string, includeHidden bool) ([]ScopeChild, bool, error)
 }
 
 var (
@@ -84,49 +85,4 @@ func ProviderForName(name string) (Provider, bool) {
 	defer providersMu.RUnlock()
 	p, ok := providers[name]
 	return p, ok
-}
-
-// ResolveSymbolTarget tries to resolve provider-backed symbol lookup target.
-func ResolveSymbolTarget(ref Reference) (SymbolTarget, bool, error) {
-	provider, ok := ProviderForName(ref.Provider)
-	if !ok {
-		return SymbolTarget{}, false, nil
-	}
-
-	symbolProvider, ok := provider.(SymbolTargetProvider)
-	if !ok {
-		return SymbolTarget{}, false, nil
-	}
-
-	return symbolProvider.ResolveSymbolTarget(ref)
-}
-
-// ResolveScopeTarget tries to resolve provider-backed listing scope.
-func ResolveScopeTarget(ref Reference) (ScopeTarget, bool, error) {
-	provider, ok := ProviderForName(ref.Provider)
-	if !ok {
-		return ScopeTarget{}, false, nil
-	}
-
-	scopeProvider, ok := provider.(ScopeTargetProvider)
-	if !ok {
-		return ScopeTarget{}, false, nil
-	}
-
-	return scopeProvider.ResolveScopeTarget(ref)
-}
-
-// ResolveScopeChildren tries to enumerate provider-backed browse children.
-func ResolveScopeChildren(ref Reference, includeHidden bool) ([]ScopeChild, bool, error) {
-	provider, ok := ProviderForName(ref.Provider)
-	if !ok {
-		return nil, false, nil
-	}
-
-	childrenProvider, ok := provider.(ScopeChildrenProvider)
-	if !ok {
-		return nil, false, nil
-	}
-
-	return childrenProvider.ListScopeChildren(ref, includeHidden)
 }
