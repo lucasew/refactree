@@ -29,6 +29,13 @@ type languageDriver struct{}
 
 func (languageDriver) Language() string { return "go" }
 
+func (languageDriver) TreeSitterGrammar(filename string) (grammar.Language, bool) {
+	if lang, ok := grammar.GetByExtension(filename); ok {
+		return lang, true
+	}
+	return grammar.Get("go")
+}
+
 func (languageDriver) Extract(root *grammar.Node, source []byte, relPath string) *ingest.FileExtract {
 	return extractGo(root, source, relPath)
 }

@@ -119,7 +119,11 @@ func docForEntity(dir string, result *Result, ref Reference, entity *Entity) (*D
 		}
 	}
 
-	lang, ok := grammar.GetByExtension(filePath)
+	driver, ok := languageDriverForFile(filePath)
+	if !ok {
+		return nil, fmt.Errorf("unsupported language for %s", filePath)
+	}
+	lang, ok := driver.TreeSitterGrammar(filePath)
 	if !ok {
 		return nil, fmt.Errorf("unsupported language for %s", filePath)
 	}

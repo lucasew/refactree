@@ -16,6 +16,9 @@ type SymbolListOptions struct {
 // ingestion and filesystem conventions used by refactoring.
 type LanguageDriver interface {
 	Language() string
+	// TreeSitterGrammar returns the grammar used to parse filename for this
+	// language (extension aliases like .mjs → javascript live here, not in core).
+	TreeSitterGrammar(filename string) (grammar.Language, bool)
 	Extract(root *grammar.Node, source []byte, relPath string) *FileExtract
 	ResolveImport(sourcePath string, ctx ImportResolveContext) string
 	AllowListSymbol(name string, opts SymbolListOptions) bool

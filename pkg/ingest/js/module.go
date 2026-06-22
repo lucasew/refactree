@@ -24,6 +24,15 @@ type languageDriver struct{}
 
 func (languageDriver) Language() string { return "javascript" }
 
+// TreeSitterGrammar maps .js/.mjs/.cjs (and grammar.GetByExtension misses) to
+// the registered "javascript" grammar.
+func (languageDriver) TreeSitterGrammar(filename string) (grammar.Language, bool) {
+	if lang, ok := grammar.GetByExtension(filename); ok {
+		return lang, true
+	}
+	return grammar.Get("javascript")
+}
+
 func (languageDriver) Extract(root *grammar.Node, source []byte, relPath string) *ingest.FileExtract {
 	return extractJavaScript(root, source, relPath)
 }
@@ -143,28 +152,71 @@ func extractJavaScript(root *grammar.Node, source []byte, path string) *ingest.F
 	fe := &ingest.FileExtract{Language: "javascript", Path: path}
 
 	for i := uint32(0); i < root.ChildCount(); i++ {
-		child := root.Child(i)
-		switch child.Type() {
-		case "function_declaration":
-			extractJSFunc(fe, child, source)
-		case "class_declaration":
-			extractJSClass(fe, child, source)
-		case "export_statement":
-			for j := uint32(0); j < child.ChildCount(); j++ {
-				inner := child.Child(j)
-				if inner.Type() == "function_declaration" {
-					extractJSFunc(fe, inner, source)
-				}
-				if inner.Type() == "class_declaration" {
-					extractJSClass(fe, inner, source)
-				}
-			}
-		case "import_statement":
-			extractJSImport(fe, child, source)
-		}
+		extractJSTopLevel(fe, root.Child(i), source)
 	}
 
 	return fe
+}
+
+func extractJSTopLevel(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
+	if n == nil {
+		return
+	}
+	switch n.Type() {
+	case "function_declaration":
+		extractJSFunc(fe, n, source)
+	case "class_declaration":
+		extractJSClass(fe, n, source)
+	case "lexical_declaration", "variable_declaration":
+		extractJSVarDecl(fe, n, source, "")
+	case "expression_statement":
+		walkJSUsages(fe, n, source, "")
+	case "export_statement":
+		extractJSExport(fe, n, source)
+	case "import_statement":
+		extractJSImport(fe, n, source)
+	}
+}
+
+func extractJSExport(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
+	for j := uint32(0); j < n.ChildCount(); j++ {
+		inner := n.Child(j)
+		switch inner.Type() {
+		case "function_declaration":
+			extractJSFunc(fe, inner, source)
+		case "class_declaration":
+			extractJSClass(fe, inner, source)
+		case "lexical_declaration", "variable_declaration":
+			extractJSVarDecl(fe, inner, source, "")
+		default:
+			// export default defineConfig({...}) — usages inside the expression.
+			if inner.IsNamed() {
+				walkJSUsages(fe, inner, source, "")
+			}
+		}
+	}
+}
+
+func extractJSVarDecl(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		if child.Type() != "variable_declarator" {
+			continue
+		}
+		nameNode := ingest.ChildByField(child, "name")
+		if nameNode != nil && nameNode.Type() == "identifier" {
+			name := ingest.NodeText(nameNode, source)
+			fe.Entities = append(fe.Entities, ingest.EntityDef{
+				Name:      name,
+				StartByte: nameNode.StartByte(),
+				EndByte:   nameNode.EndByte(),
+				Exported:  true,
+			})
+		}
+		if value := ingest.ChildByField(child, "value"); value != nil {
+			walkJSUsages(fe, value, source, scope)
+		}
+	}
 }
 
 func extractJSFunc(fe *ingest.FileExtract, n *grammar.Node, source []byte) {

@@ -25,6 +25,13 @@ type languageDriver struct{}
 
 func (languageDriver) Language() string { return "python" }
 
+func (languageDriver) TreeSitterGrammar(filename string) (grammar.Language, bool) {
+	if lang, ok := grammar.GetByExtension(filename); ok {
+		return lang, true
+	}
+	return grammar.Get("python")
+}
+
 func (languageDriver) Extract(root *grammar.Node, source []byte, relPath string) *ingest.FileExtract {
 	return extractPython(root, source, relPath)
 }

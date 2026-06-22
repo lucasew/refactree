@@ -27,6 +27,13 @@ type languageDriver struct{}
 
 func (languageDriver) Language() string { return "nix" }
 
+func (languageDriver) TreeSitterGrammar(filename string) (grammar.Language, bool) {
+	if lang, ok := grammar.GetByExtension(filename); ok {
+		return lang, true
+	}
+	return grammar.Get("nix")
+}
+
 func (languageDriver) Extract(root *grammar.Node, source []byte, relPath string) *ingest.FileExtract {
 	return extractNix(root, source, relPath)
 }

@@ -150,9 +150,6 @@ func listSourceFilesInDir(absDir string) []string {
 			continue
 		}
 		name := e.Name()
-		if _, ok := grammar.GetByExtension(name); !ok {
-			continue
-		}
 		if _, ok := languageDriverForFile(name); !ok {
 			continue
 		}
@@ -209,10 +206,8 @@ func probeImportTargets(rootAbs, importerDirRel, sourcePath string) []string {
 			out = append(out, listSourceFilesInDir(abs)...)
 			return
 		}
-		if _, ok := grammar.GetByExtension(abs); ok {
-			if _, ok := languageDriverForFile(abs); ok {
-				out = append(out, abs)
-			}
+		if _, ok := languageDriverForFile(abs); ok {
+			out = append(out, abs)
 		}
 	}
 
@@ -288,11 +283,11 @@ func ClearExtractCache() {
 // parseFile parses a single source file and returns its FileExtract.
 // Returns nil (no error) for unsupported file types.
 func parseFile(dir, absPath string) (*FileExtract, error) {
-	lang, ok := grammar.GetByExtension(absPath)
+	driver, ok := languageDriverForFile(absPath)
 	if !ok {
 		return nil, nil
 	}
-	driver, ok := languageDriverForFile(absPath)
+	lang, ok := driver.TreeSitterGrammar(absPath)
 	if !ok {
 		return nil, nil
 	}
