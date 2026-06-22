@@ -130,14 +130,21 @@ func resolveNodeImport(spec string, ctx ingest.ImportResolveContext) (string, bo
 	importerAbs := filepath.Join(rootAbs, filepath.FromSlash(filepath.Dir(ctx.ImporterPath)))
 
 	for _, pkgRoot := range nodeModuleCandidates(importerAbs, pkgName) {
-		targetBase := pkgRoot
-		preferPackageMain := subpath == ""
-		if subpath != "" {
-			targetBase = filepath.Join(pkgRoot, filepath.FromSlash(subpath))
-			preferPackageMain = false
+		if st, err := os.Stat(pkgRoot); err != nil || !st.IsDir() {
+			continue
 		}
 
-		if resolved, ok := resolveJSFileOnDisk(targetBase, preferPackageMain); ok {
+		// Prefer package.json entrypoints (exports / module / main) — same order Node uses.
+		if resolved, ok := resolvePackageEntrypoint(pkgRoot, subpath); ok {
+			return pathRefForAbs(rootAbs, resolved), true
+		}
+
+		// Fallback when there is no package.json (or no usable entry): treat as a plain path.
+		targetBase := pkgRoot
+		if subpath != "" {
+			targetBase = filepath.Join(pkgRoot, filepath.FromSlash(subpath))
+		}
+		if resolved, ok := resolveJSFileOnDisk(targetBase, false); ok {
 			return pathRefForAbs(rootAbs, resolved), true
 		}
 		if st, err := os.Stat(targetBase); err == nil && st.IsDir() {
@@ -463,11 +470,8 @@ func resolveJSFileOnDisk(baseAbs string, preferPackageMain bool) (string, bool) 
 		}
 
 		if preferPackageMain {
-			if mainEntry, ok := readPackageMain(filepath.Join(baseAbs, "package.json")); ok {
-				mainAbs := filepath.Join(baseAbs, filepath.FromSlash(mainEntry))
-				if resolved, ok := resolveJSFileOnDisk(mainAbs, false); ok {
-					return resolved, true
-				}
+			if resolved, ok := resolvePackageEntrypoint(baseAbs, ""); ok {
+				return resolved, true
 			}
 		}
 
@@ -489,21 +493,199 @@ func resolveJSFileOnDisk(baseAbs string, preferPackageMain bool) (string, bool) 
 	return "", false
 }
 
-func readPackageMain(packageJSONPath string) (string, bool) {
-	data, err := os.ReadFile(packageJSONPath)
+// packageJSON mirrors the fields Node consults when resolving a package entrypoint.
+type packageJSON struct {
+	Main    string          `json:"main"`
+	Module  string          `json:"module"`
+	Browser json.RawMessage `json:"browser"`
+	Exports json.RawMessage `json:"exports"`
+}
+
+// resolvePackageEntrypoint resolves a Node package root (or subpath within it) using
+// package.json conventions: exports (preferred), then module, then main, then index.*.
+// subpath is without a leading "./" (e.g. "" for the package root, "config" for astro/config).
+func resolvePackageEntrypoint(pkgRoot, subpath string) (string, bool) {
+	pkgPath := filepath.Join(pkgRoot, "package.json")
+	data, err := os.ReadFile(pkgPath)
 	if err != nil {
 		return "", false
 	}
-	var pkg struct {
-		Main string `json:"main"`
-	}
+	var pkg packageJSON
 	if err := json.Unmarshal(data, &pkg); err != nil {
 		return "", false
 	}
-	if pkg.Main == "" {
+
+	// 1. exports field — modern Node resolution (takes precedence when present; main/module ignored).
+	if len(pkg.Exports) > 0 {
+		if entry, ok := resolveExportsEntry(pkg.Exports, subpath); ok {
+			return resolvePackageRelative(pkgRoot, entry)
+		}
+		// exports is authoritative: unexported subpaths (and missing ".") fail, no main/module fallback.
 		return "", false
 	}
-	return filepath.ToSlash(pkg.Main), true
+
+	// Subpaths without exports: fall back to filesystem (legacy packages).
+	if subpath != "" {
+		target := filepath.Join(pkgRoot, filepath.FromSlash(subpath))
+		return resolveJSFileOnDisk(target, false)
+	}
+
+	// 2. module (ESM entry; common in browser/bundler packages).
+	if pkg.Module != "" {
+		if resolved, ok := resolvePackageRelative(pkgRoot, pkg.Module); ok {
+			return resolved, true
+		}
+	}
+
+	// 3. main (CommonJS / Node classic entry).
+	if pkg.Main != "" {
+		if resolved, ok := resolvePackageRelative(pkgRoot, pkg.Main); ok {
+			return resolved, true
+		}
+	}
+
+	// 4. browser field as a string (simple redirect; object form is ignored).
+	if len(pkg.Browser) > 0 {
+		var browserStr string
+		if err := json.Unmarshal(pkg.Browser, &browserStr); err == nil && browserStr != "" {
+			if resolved, ok := resolvePackageRelative(pkgRoot, browserStr); ok {
+				return resolved, true
+			}
+		}
+	}
+
+	// 5. index.* convention.
+	for _, indexName := range []string{"index.js", "index.mjs", "index.cjs"} {
+		candidate := filepath.Join(pkgRoot, indexName)
+		if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
+			return candidate, true
+		}
+	}
+
+	return "", false
+}
+
+func resolvePackageRelative(pkgRoot, entry string) (string, bool) {
+	entry = strings.TrimSpace(entry)
+	if entry == "" {
+		return "", false
+	}
+	// package.json entries are package-relative; strip optional "./".
+	entry = strings.TrimPrefix(entry, "./")
+	abs := filepath.Join(pkgRoot, filepath.FromSlash(entry))
+	return resolveJSFileOnDisk(abs, false)
+}
+
+// resolveExportsEntry picks a target string from package.json "exports" for the given
+// import subpath ("" means package root / ".").
+func resolveExportsEntry(exportsRaw json.RawMessage, subpath string) (string, bool) {
+	// exports can be a string: "." only.
+	var asString string
+	if err := json.Unmarshal(exportsRaw, &asString); err == nil {
+		if subpath == "" && asString != "" {
+			return asString, true
+		}
+		return "", false
+	}
+
+	// exports as a map keyed by subpath (".", "./config", ...) or condition object for root.
+	var asMap map[string]json.RawMessage
+	if err := json.Unmarshal(exportsRaw, &asMap); err != nil {
+		return "", false
+	}
+
+	key := "."
+	if subpath != "" {
+		key = "./" + subpath
+	}
+
+	// Direct key match.
+	if raw, ok := asMap[key]; ok {
+		return pickExportTarget(raw)
+	}
+
+	// Root request with a condition-only exports object (no "." key, keys are conditions).
+	if subpath == "" {
+		if target, ok := pickExportTarget(exportsRaw); ok {
+			return target, true
+		}
+	}
+
+	// Pattern keys like "./tsconfigs/*.json" — support a single "*" segment.
+	for pattern, raw := range asMap {
+		if !strings.Contains(pattern, "*") {
+			continue
+		}
+		matched, ok := matchExportPattern(pattern, key)
+		if !ok {
+			continue
+		}
+		target, ok := pickExportTarget(raw)
+		if !ok {
+			continue
+		}
+		if strings.Contains(target, "*") {
+			target = strings.Replace(target, "*", matched, 1)
+		}
+		return target, true
+	}
+
+	return "", false
+}
+
+// pickExportTarget resolves an exports value which may be a string or a conditions object.
+// Prefers ESM-oriented conditions for static import analysis.
+func pickExportTarget(raw json.RawMessage) (string, bool) {
+	var asString string
+	if err := json.Unmarshal(raw, &asString); err == nil && asString != "" {
+		return asString, true
+	}
+
+	var asMap map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &asMap); err != nil {
+		return "", false
+	}
+
+	// Condition priority for import/static analysis (skip types — we want runtime JS).
+	for _, cond := range []string{"import", "default", "node", "require", "module", "browser", "worker"} {
+		if nested, ok := asMap[cond]; ok {
+			if target, ok := pickExportTarget(nested); ok {
+				return target, true
+			}
+		}
+	}
+
+	// Last resort: any non-types string value in the map (depth-1).
+	for k, nested := range asMap {
+		if k == "types" {
+			continue
+		}
+		var s string
+		if err := json.Unmarshal(nested, &s); err == nil && s != "" {
+			return s, true
+		}
+	}
+
+	return "", false
+}
+
+// matchExportPattern matches an exports key pattern (single "*") against a request key.
+// Returns the substring captured by "*" when it matches.
+func matchExportPattern(pattern, request string) (string, bool) {
+	star := strings.Index(pattern, "*")
+	if star < 0 {
+		return "", false
+	}
+	prefix := pattern[:star]
+	suffix := pattern[star+1:]
+	if !strings.HasPrefix(request, prefix) || !strings.HasSuffix(request, suffix) {
+		return "", false
+	}
+	mid := request[len(prefix) : len(request)-len(suffix)]
+	if mid == "" && !strings.HasSuffix(prefix, "/") {
+		// Empty capture is only valid when the pattern explicitly allows it.
+	}
+	return mid, true
 }
 
 func splitNodePackageSpecifier(spec string) (pkgName, subpath string) {

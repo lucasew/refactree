@@ -35,6 +35,146 @@ func TestNodeProvider_ResolveFromNodeModules(t *testing.T) {
 	}
 }
 
+func TestNodeProvider_ResolveExportsField(t *testing.T) {
+	root := t.TempDir()
+	pkgDir := filepath.Join(root, "node_modules", "@astrojs", "svelte")
+	if err := os.MkdirAll(filepath.Join(pkgDir, "dist"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "dist", "index.js"), []byte("export default function svelte() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "package.json"), []byte(`{
+		"type": "module",
+		"exports": { ".": "./dist/index.js", "./editor": "./dist/editor.cjs" }
+	}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	provider, ok := referenceProviderForName("node")
+	if !ok {
+		t.Fatal("expected node provider to be registered")
+	}
+	ref, ok := provider.Resolve("@astrojs/svelte", ImportResolveContext{
+		RootDir:      root,
+		ImporterPath: "astro.config.mjs",
+	})
+	if !ok {
+		t.Fatal("expected provider to resolve")
+	}
+	if ref != "path:./node_modules/@astrojs/svelte/dist/index.js" {
+		t.Fatalf("unexpected reference: %q", ref)
+	}
+}
+
+func TestNodeProvider_ResolveExportsSubpath(t *testing.T) {
+	root := t.TempDir()
+	pkgDir := filepath.Join(root, "node_modules", "astro")
+	if err := os.MkdirAll(filepath.Join(pkgDir, "dist"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "dist", "config.js"), []byte("export function defineConfig() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "package.json"), []byte(`{
+		"type": "module",
+		"exports": { ".": "./dist/index.js", "./config": "./dist/config.js" }
+	}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	provider, ok := referenceProviderForName("node")
+	if !ok {
+		t.Fatal("expected node provider to be registered")
+	}
+	ref, ok := provider.Resolve("astro/config", ImportResolveContext{
+		RootDir:      root,
+		ImporterPath: "astro.config.mjs",
+	})
+	if !ok {
+		t.Fatal("expected provider to resolve")
+	}
+	if ref != "path:./node_modules/astro/dist/config.js" {
+		t.Fatalf("unexpected reference: %q", ref)
+	}
+}
+
+func TestNodeProvider_ResolveExportsConditions(t *testing.T) {
+	root := t.TempDir()
+	pkgDir := filepath.Join(root, "node_modules", "zod")
+	if err := os.MkdirAll(pkgDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "index.js"), []byte("export const z = {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "index.cjs"), []byte("module.exports = {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "package.json"), []byte(`{
+		"type": "module",
+		"main": "./index.cjs",
+		"module": "./index.js",
+		"exports": {
+			".": { "types": "./index.d.ts", "import": "./index.js", "require": "./index.cjs" }
+		}
+	}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	provider, ok := referenceProviderForName("node")
+	if !ok {
+		t.Fatal("expected node provider to be registered")
+	}
+	ref, ok := provider.Resolve("zod", ImportResolveContext{
+		RootDir:      root,
+		ImporterPath: "src/main.js",
+	})
+	if !ok {
+		t.Fatal("expected provider to resolve")
+	}
+	// Prefer "import" condition over main/require.
+	if ref != "path:./node_modules/zod/index.js" {
+		t.Fatalf("unexpected reference: %q", ref)
+	}
+}
+
+func TestNodeProvider_ResolveModuleField(t *testing.T) {
+	root := t.TempDir()
+	pkgDir := filepath.Join(root, "node_modules", "legacy-esm")
+	if err := os.MkdirAll(pkgDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "esm.js"), []byte("export default 1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "cjs.js"), []byte("module.exports = 1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// No exports field: module preferred over main.
+	if err := os.WriteFile(filepath.Join(pkgDir, "package.json"), []byte(`{
+		"main": "cjs.js",
+		"module": "esm.js"
+	}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	provider, ok := referenceProviderForName("node")
+	if !ok {
+		t.Fatal("expected node provider to be registered")
+	}
+	ref, ok := provider.Resolve("legacy-esm", ImportResolveContext{
+		RootDir:      root,
+		ImporterPath: "src/main.js",
+	})
+	if !ok {
+		t.Fatal("expected provider to resolve")
+	}
+	if ref != "path:./node_modules/legacy-esm/esm.js" {
+		t.Fatalf("unexpected reference: %q", ref)
+	}
+}
+
 func TestNodeProvider_ResolveFromNODE_PATH(t *testing.T) {
 	root := t.TempDir()
 	nodePath := t.TempDir()
