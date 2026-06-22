@@ -136,6 +136,9 @@ func bfsNeighbors(rootAbs string, fe *FileExtract) []string {
 	for _, imp := range fe.Imports {
 		out = append(out, probeImportTargets(rootAbs, importerDir, imp.SourcePath)...)
 	}
+	for _, re := range fe.Reexports {
+		out = append(out, probeImportTargets(rootAbs, importerDir, re.SourcePath)...)
+	}
 	return out
 }
 

@@ -113,12 +113,12 @@ func (l *Loader) LoadIndex() IndexView {
 
 // LoadFile builds a FileView for the given full reference (file, scope, or symbol).
 // Symbol refs open the source file where that symbol is defined.
+// Serve redirects via ingest.CanonicalizeReference before calling LoadFile when the
+// requested ref is not already canonical.
 func (l *Loader) LoadFile(refStr string) FileView {
 	parsed := ingest.ParseReference(refStr)
-	if parsed.Provider == "" || parsed.Provider == "path" {
-		parsed = ingest.CanonicalizePathReference(l.RootDir, parsed)
-		refStr = parsed.String()
-	}
+	parsed = ingest.CanonicalizeReference(l.RootDir, parsed)
+	refStr = parsed.String()
 
 	focusRef := refStr
 	scopeRef := ScopeReferenceForView(refStr)

@@ -101,6 +101,29 @@ func resolve(rootDir string, extracts []*FileExtract) *Result {
 			})
 		}
 		importTables[fe.Path] = table
+
+		// Re-exports / barrels: record as Aliases (zero span) so CanonicalizeInResult
+		// can follow hops using only the provider-agnostic Result graph.
+		for _, re := range fe.Reexports {
+			base := re.SourcePath
+			if hasDriver {
+				base = driver.ResolveImport(re.SourcePath, ctx)
+			}
+			target := base
+			if !re.Star {
+				name := re.SourceName
+				if name == "" {
+					name = re.ExportName
+				}
+				if name != "" {
+					target = base + "::" + name
+				}
+			}
+			res.Aliases = append(res.Aliases, Alias{
+				Reference: FileRef("./" + fe.Path),
+				Target:    target,
+			})
+		}
 	}
 
 	// Emit files and entities.

@@ -46,9 +46,23 @@ type FileExtract struct {
 	Path     string
 	Package  string // Go package name; empty for Python/JS
 
-	Entities []EntityDef
-	Imports  []ImportDef
-	Usages   []UsageDef
+	Entities  []EntityDef
+	Imports   []ImportDef
+	Usages    []UsageDef
+	Reexports []ReexportDef // language-neutral forwarding hops (barrels / re-exports)
+	// DefaultExport is the primary/default symbol name this module exposes when
+	// imported as a whole (e.g. JS `export default function Foo`). Empty if unknown.
+	DefaultExport string
+}
+
+// ReexportDef is a language-neutral "this module forwards X from Y" fact.
+// Language drivers fill it from their syntax (JS export … from, Python from … import re-export, etc.).
+// Resolved into Result.Aliases (zero-span) for CanonicalizeInResult; not language-specific at the walk.
+type ReexportDef struct {
+	ExportName string // name this module exposes; empty for star/wildcard forward
+	SourceName string // name in the source module; empty for star or when same as ExportName
+	SourcePath string // module specifier ("./foo", "pkg", …)
+	Star       bool   // true for wildcard forward (export * / from … import *)
 }
 
 // EntityDef is a symbol definition found during extraction.

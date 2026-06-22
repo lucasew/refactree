@@ -6,6 +6,8 @@ import (
 	"io/fs"
 	"net/http"
 	"strings"
+
+	"github.com/lucasew/refactree/pkg/ingest"
 )
 
 //go:embed templates/*.html static/*
@@ -76,6 +78,16 @@ func (s *Server) handleCode(w http.ResponseWriter, r *http.Request) {
 	// Honour ?ref= as an alternate entry (useful for debugging).
 	if q := r.URL.Query().Get("ref"); q != "" {
 		ref = q
+	}
+
+	// Core canonicalization over the ingest graph (any provider); redirect if changed.
+	if s.loader != nil {
+		parsed := ingest.ParseReference(ref)
+		canon := ingest.CanonicalizeReference(s.loader.RootDir, parsed).String()
+		if canon != "" && canon != ref {
+			http.Redirect(w, r, EncodeCodeURL(canon), http.StatusFound)
+			return
+		}
 	}
 
 	v := s.loader.LoadFile(ref)

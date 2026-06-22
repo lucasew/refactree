@@ -21,17 +21,15 @@ func EncodeCodeURL(ref string) string {
 	return encodeCodeURLRef(ref)
 }
 
-// EncodeCodeURLInRoot is EncodeCodeURL after CanonicalizePathReference(rootDir, …).
+// EncodeCodeURLInRoot is EncodeCodeURL after ingest.CanonicalizeReference(rootDir, …).
 func EncodeCodeURLInRoot(rootDir, ref string) string {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return CodePathPrefix
 	}
 	parsed := ingest.ParseReference(ref)
-	if parsed.Provider == "" || parsed.Provider == "path" {
-		parsed = ingest.CanonicalizePathReference(rootDir, parsed)
-		ref = parsed.String()
-	}
+	parsed = ingest.CanonicalizeReference(rootDir, parsed)
+	ref = parsed.String()
 	return encodeCodeURLRef(ref)
 }
 

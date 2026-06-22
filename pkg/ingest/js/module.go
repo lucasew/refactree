@@ -192,21 +192,93 @@ func extractJSTopLevel(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 }
 
 func extractJSExport(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
+	// export … from "…" / export * from "…" — barrel hop; source field is on the export_statement.
+	if srcNode := ingest.ChildByField(n, "source"); srcNode != nil {
+		if fragment := ingest.ChildByType(srcNode, "string_fragment"); fragment != nil {
+			sourcePath := ingest.NodeText(fragment, source)
+			extractJSReexport(fe, n, source, sourcePath)
+		}
+		return
+	}
+
+	isDefault := false
+	for j := uint32(0); j < n.ChildCount(); j++ {
+		if n.Child(j).Type() == "default" {
+			isDefault = true
+			break
+		}
+	}
+
 	for j := uint32(0); j < n.ChildCount(); j++ {
 		inner := n.Child(j)
 		switch inner.Type() {
 		case "function_declaration":
 			extractJSFunc(fe, inner, source)
+			if isDefault {
+				if nameNode := ingest.ChildByField(inner, "name"); nameNode != nil {
+					fe.DefaultExport = ingest.NodeText(nameNode, source)
+				}
+			}
 		case "class_declaration":
 			extractJSClass(fe, inner, source)
+			if isDefault {
+				if nameNode := ingest.ChildByField(inner, "name"); nameNode != nil {
+					fe.DefaultExport = ingest.NodeText(nameNode, source)
+				}
+			}
 		case "lexical_declaration", "variable_declaration":
 			extractJSVarDecl(fe, inner, source, "")
+		case "identifier":
+			// export default someName
+			if isDefault {
+				fe.DefaultExport = ingest.NodeText(inner, source)
+			}
 		default:
 			// export default defineConfig({...}) — usages inside the expression.
 			if inner.IsNamed() {
 				walkJSUsages(fe, inner, source, "")
 			}
 		}
+	}
+}
+
+func extractJSReexport(fe *ingest.FileExtract, n *grammar.Node, source []byte, sourcePath string) {
+	// export * from "mod"
+	for j := uint32(0); j < n.ChildCount(); j++ {
+		if n.Child(j).Type() == "*" {
+			fe.Reexports = append(fe.Reexports, ingest.ReexportDef{
+				SourcePath: sourcePath,
+				Star:       true,
+			})
+			return
+		}
+	}
+
+	// export { a, b as c } from "mod"
+	clause := ingest.ChildByType(n, "export_clause")
+	if clause == nil {
+		// export default from is rare; treat whole default as star-like hop not supported.
+		return
+	}
+	for i := uint32(0); i < clause.ChildCount(); i++ {
+		spec := clause.Child(i)
+		if spec.Type() != "export_specifier" {
+			continue
+		}
+		nameNode := ingest.ChildByField(spec, "name")
+		if nameNode == nil {
+			continue
+		}
+		sourceName := ingest.NodeText(nameNode, source)
+		exportName := sourceName
+		if aliasNode := ingest.ChildByField(spec, "alias"); aliasNode != nil {
+			exportName = ingest.NodeText(aliasNode, source)
+		}
+		fe.Reexports = append(fe.Reexports, ingest.ReexportDef{
+			ExportName: exportName,
+			SourceName: sourceName,
+			SourcePath: sourcePath,
+		})
 	}
 }
 
