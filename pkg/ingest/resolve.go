@@ -128,7 +128,7 @@ func resolve(rootDir string, extracts []*FileExtract) *Result {
 			}
 
 			if u.Qualifier != "" {
-				resolveQualifiedUsage(res, imports, scopeRef, u, allEntities)
+				resolveQualifiedUsage(res, imports, scopeRef, u, allEntities, fe)
 			} else {
 				resolveDirectUsage(res, fe, u, imports, allEntities, scopeRef)
 			}
@@ -139,14 +139,21 @@ func resolve(rootDir string, extracts []*FileExtract) *Result {
 }
 
 // resolveQualifiedUsage handles pkg.Member access: emits two relations.
-func resolveQualifiedUsage(res *Result, imports map[string]resolvedImport, scopeRef string, u UsageDef, allEntities map[string][]entityLoc) {
-	ri, ok := imports[u.Qualifier]
-	if !ok {
-		return
+// Qualifier may be an import alias (cobra) or a same-package/local entity (Registry).
+func resolveQualifiedUsage(res *Result, imports map[string]resolvedImport, scopeRef string, u UsageDef, allEntities map[string][]entityLoc, fe *FileExtract) {
+	var baseTarget string
+
+	if ri, ok := imports[u.Qualifier]; ok {
+		baseTarget = ri.Target
+		if ri.MemberName != "" {
+			baseTarget = strings.TrimSuffix(baseTarget, "::"+ri.MemberName)
+		}
+	} else {
+		// Qualifier is a local/package entity (var, type, func), not an import.
+		baseTarget = resolveEntityName(fe, u.Qualifier, allEntities)
 	}
-	baseTarget := ri.Target
-	if ri.MemberName != "" {
-		baseTarget = strings.TrimSuffix(baseTarget, "::"+ri.MemberName)
+	if baseTarget == "" {
+		return
 	}
 
 	res.Relations = append(res.Relations, Relation{
@@ -163,12 +170,14 @@ func resolveQualifiedUsage(res *Result, imports map[string]resolvedImport, scope
 	if baseRef.Provider == "path" && baseRef.Symbol == "" {
 		dirPrefix := strings.TrimPrefix(baseRef.Path, "./")
 		for _, loc := range allEntities[u.Name] {
-			if strings.HasPrefix(loc.File, dirPrefix+"/") {
+			if strings.HasPrefix(loc.File, dirPrefix+"/") || loc.File == dirPrefix {
 				memberTarget = SymbolRef("./"+loc.File, loc.Entity.Name)
 				break
 			}
 		}
 	}
+	// Local entity qualifier: method/field member stays as entity::Name only when
+	// we have no better file-level target; go:pkg::Member is fine for external pkgs.
 
 	res.Relations = append(res.Relations, Relation{
 		Reference: scopeRef,
@@ -176,6 +185,23 @@ func resolveQualifiedUsage(res *Result, imports map[string]resolvedImport, scope
 		EndByte:   u.EndByte,
 		Target:    memberTarget,
 	})
+}
+
+// resolveEntityName finds a symbol reference for a bare name in Go/file scope.
+func resolveEntityName(fe *FileExtract, name string, allEntities map[string][]entityLoc) string {
+	if fe != nil && fe.Language == "go" {
+		for _, loc := range allEntities[name] {
+			if loc.File != fe.Path && loc.Package == fe.Package && loc.Language == "go" {
+				return SymbolRef("./"+loc.File, loc.Entity.Name)
+			}
+		}
+	}
+	for _, loc := range allEntities[name] {
+		if fe == nil || loc.File == fe.Path {
+			return SymbolRef("./"+loc.File, loc.Entity.Name)
+		}
+	}
+	return ""
 }
 
 // resolveDirectUsage handles bare identifier access.
@@ -189,24 +215,9 @@ func resolveDirectUsage(res *Result, fe *FileExtract, u UsageDef, imports map[st
 		viaImportAlias = ri.HasAliasBinding
 	}
 
-	// 2. For Go: check same-package entities in sibling files.
-	if target == "" && fe.Language == "go" {
-		for _, loc := range allEntities[u.Name] {
-			if loc.File != fe.Path && loc.Package == fe.Package && loc.Language == "go" {
-				target = SymbolRef("./"+loc.File, loc.Entity.Name)
-				break
-			}
-		}
-	}
-
-	// 3. Check entities in the same file (self-references).
+	// 2–3. Same-package / same-file entities (vars, funcs, types).
 	if target == "" {
-		for _, loc := range allEntities[u.Name] {
-			if loc.File == fe.Path {
-				target = SymbolRef("./"+loc.File, loc.Entity.Name)
-				break
-			}
-		}
+		target = resolveEntityName(fe, u.Name, allEntities)
 	}
 
 	if target != "" {

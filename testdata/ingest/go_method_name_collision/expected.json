@@ -7,14 +7,14 @@
   ],
   "entities": [
     {
-      "reference": "path:./main.go::*B.Run",
-      "start_byte": 95,
-      "end_byte": 98
-    },
-    {
       "reference": "path:./main.go::A",
       "start_byte": 19,
       "end_byte": 20
+    },
+    {
+      "reference": "path:./main.go::B",
+      "start_byte": 35,
+      "end_byte": 36
     },
     {
       "reference": "path:./main.go::A.Run",
@@ -22,10 +22,23 @@
       "end_byte": 61
     },
     {
-      "reference": "path:./main.go::B",
-      "start_byte": 35,
-      "end_byte": 36
+      "reference": "path:./main.go::*B.Run",
+      "start_byte": 95,
+      "end_byte": 98
     }
   ],
-  "relations": []
+  "relations": [
+    {
+      "reference": "path:./main.go::A.Run",
+      "start_byte": 55,
+      "end_byte": 56,
+      "target": "path:./main.go::A"
+    },
+    {
+      "reference": "path:./main.go::*B.Run",
+      "start_byte": 92,
+      "end_byte": 93,
+      "target": "path:./main.go::B"
+    }
+  ]
 }

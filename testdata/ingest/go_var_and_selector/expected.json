@@ -1,0 +1,60 @@
+{
+  "files": [
+    {
+      "language": "go",
+      "path": "root.go"
+    }
+  ],
+  "entities": [
+    {
+      "reference": "path:./root.go::Registry",
+      "start_byte": 51,
+      "end_byte": 59
+    },
+    {
+      "reference": "path:./root.go::GetCommand",
+      "start_byte": 70,
+      "end_byte": 80
+    }
+  ],
+  "aliases": [
+    {
+      "reference": "path:./root.go",
+      "start_byte": 22,
+      "end_byte": 44,
+      "target": "go:github.com/spf13/cobra"
+    }
+  ],
+  "relations": [
+    {
+      "reference": "path:./root.go::GetCommand",
+      "start_byte": 84,
+      "end_byte": 89,
+      "target": "go:github.com/spf13/cobra"
+    },
+    {
+      "reference": "path:./root.go::GetCommand",
+      "start_byte": 90,
+      "end_byte": 97,
+      "target": "go:github.com/spf13/cobra::Command"
+    },
+    {
+      "reference": "path:./root.go::GetCommand",
+      "start_byte": 105,
+      "end_byte": 113,
+      "target": "path:./root.go::Registry"
+    },
+    {
+      "reference": "path:./root.go::GetCommand",
+      "start_byte": 123,
+      "end_byte": 128,
+      "target": "go:github.com/spf13/cobra"
+    },
+    {
+      "reference": "path:./root.go::GetCommand",
+      "start_byte": 129,
+      "end_byte": 136,
+      "target": "go:github.com/spf13/cobra::Command"
+    }
+  ]
+}
