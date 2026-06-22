@@ -44,10 +44,7 @@ func (languageDriver) ResolveImport(sourcePath string, ctx ingest.ImportResolveC
 	if ref, ok := resolveNodeImport(sourcePath, ctx); ok {
 		return ref
 	}
-	if strings.HasPrefix(sourcePath, "node:") {
-		return sourcePath
-	}
-	return "node:" + sourcePath
+	return nodeSymbolicRef(sourcePath)
 }
 
 func (languageDriver) AllowListSymbol(string, ingest.SymbolListOptions) bool { return true }
@@ -110,9 +107,18 @@ func resolvePathImport(spec string, ctx ingest.ImportResolveContext) (string, bo
 	return ingest.FileRef("./" + rel), true
 }
 
+// nodeSymbolicRef builds a node-provider reference for an unresolved import.
+// Always prefixes with the provider ("node:"). Specifiers that already use the
+// Node builtin protocol (e.g. "node:url") therefore become "node:node:url"
+// (provider=node, path=node:url), not "node:url" (provider=node, path=url).
+func nodeSymbolicRef(spec string) string {
+	return "node:" + spec
+}
+
 func resolveNodeImport(spec string, ctx ingest.ImportResolveContext) (string, bool) {
 	if strings.HasPrefix(spec, "node:") {
-		return spec, true
+		// Node builtin / explicit protocol — keep full "node:..." as the path.
+		return nodeSymbolicRef(spec), true
 	}
 	if strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../") || strings.HasPrefix(spec, "/") {
 		return "", false
@@ -120,7 +126,7 @@ func resolveNodeImport(spec string, ctx ingest.ImportResolveContext) (string, bo
 
 	pkgName, subpath := splitNodePackageSpecifier(spec)
 	if pkgName == "" {
-		return "node:" + spec, true
+		return nodeSymbolicRef(spec), true
 	}
 
 	rootAbs, err := filepath.Abs(ctx.RootDir)
@@ -152,7 +158,7 @@ func resolveNodeImport(spec string, ctx ingest.ImportResolveContext) (string, bo
 		}
 	}
 
-	return "node:" + spec, true
+	return nodeSymbolicRef(spec), true
 }
 
 func extractJavaScript(root *grammar.Node, source []byte, path string) *ingest.FileExtract {

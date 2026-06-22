@@ -17,7 +17,7 @@
       "reference": "path:./main.js",
       "start_byte": 7,
       "end_byte": 11,
-      "target": "node:path"
+      "target": "node:node:path"
     }
   ],
   "relations": [
@@ -25,13 +25,13 @@
       "reference": "path:./main.js::main",
       "start_byte": 51,
       "end_byte": 55,
-      "target": "node:path"
+      "target": "node:node:path"
     },
     {
       "reference": "path:./main.js::main",
       "start_byte": 56,
       "end_byte": 60,
-      "target": "node:path::join"
+      "target": "node:node:path::join"
     }
   ]
 }

@@ -227,3 +227,28 @@ func TestNodeProvider_FallbackSymbolic(t *testing.T) {
 		t.Fatalf("unexpected fallback ref: %q", ref)
 	}
 }
+
+func TestNodeProvider_BuiltinNodeProtocol(t *testing.T) {
+	root := t.TempDir()
+	provider, ok := referenceProviderForName("node")
+	if !ok {
+		t.Fatal("expected node provider to be registered")
+	}
+	// Import specifier is the Node builtin protocol ("node:url"). The provider is
+	// also "node", so the path must retain "node:url" → full ref "node:node:url".
+	ref, ok := provider.Resolve("node:url", ImportResolveContext{
+		RootDir:      root,
+		ImporterPath: "astro.config.mjs",
+	})
+	if !ok {
+		t.Fatal("expected provider result")
+	}
+	if ref != "node:node:url" {
+		t.Fatalf("unexpected builtin ref: %q, want node:node:url", ref)
+	}
+
+	parsed := ParseReference(ref)
+	if parsed.Provider != "node" || parsed.Path != "node:url" {
+		t.Fatalf("parsed ref = provider=%q path=%q, want provider=node path=node:url", parsed.Provider, parsed.Path)
+	}
+}
