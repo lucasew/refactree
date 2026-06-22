@@ -1,6 +1,7 @@
 package python
 
 import (
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -46,6 +47,16 @@ func (languageDriver) AllowListSymbol(name string, opts ingest.SymbolListOptions
 func (languageDriver) DestinationFileInDirectory(dstDirRel string, _ ingest.Reference) string {
 	_ = dstDirRel
 	return ""
+}
+
+// ResolveDirectoryModule maps a Python package directory to __init__.py.
+func (languageDriver) ResolveDirectoryModule(absDir string) (string, bool) {
+	initPy := filepath.Join(absDir, "__init__.py")
+	st, err := os.Stat(initPy)
+	if err != nil || st.IsDir() {
+		return "", false
+	}
+	return "__init__.py", true
 }
 
 type referenceProvider struct{}
@@ -468,7 +479,8 @@ func resolvePythonAbsoluteImport(spec string, knownFiles map[string]bool) (strin
 			return ingest.FileRef("./" + modulePath + ".py"), true
 		}
 		if knownFiles[modulePath+"/__init__.py"] {
-			return ingest.FileRef("./" + modulePath), true
+			// Point at the package file, not the directory (web/annotate need a file path).
+			return ingest.FileRef("./" + modulePath + "/__init__.py"), true
 		}
 	}
 	return "", false
@@ -513,7 +525,7 @@ func resolvePythonRelativeImport(spec string, ctx ingest.ImportResolveContext) (
 		return ingest.FileRef("./" + modulePath + ".py"), true
 	}
 	if ctx.KnownFiles[modulePath+"/__init__.py"] {
-		return ingest.FileRef("./" + modulePath), true
+		return ingest.FileRef("./" + modulePath + "/__init__.py"), true
 	}
 	return "", false
 }

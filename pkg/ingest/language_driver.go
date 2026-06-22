@@ -25,6 +25,34 @@ type LanguageDriver interface {
 	DestinationFileInDirectory(dstDirRel string, srcRef Reference) string
 }
 
+// DirectoryModuleResolver is an optional LanguageDriver capability: map a
+// directory on disk to the source file that backs it as a module (e.g. Python
+// __init__.py, JS index.js / package.json main).
+type DirectoryModuleResolver interface {
+	// ResolveDirectoryModule returns a path relative to absDir (forward slashes
+	// ok; typically a basename) for the backing file, or ok=false if this
+	// language does not treat absDir as its directory module.
+	ResolveDirectoryModule(absDir string) (entryRel string, ok bool)
+}
+
+// ResolveDirectoryModuleFile asks registered drivers for a directory-module
+// entry under absDir. First successful resolver wins (registration order is
+// not guaranteed; languages should not claim foreign dirs).
+func ResolveDirectoryModuleFile(absDir string) (entryRel string, ok bool) {
+	languageDriversMu.RLock()
+	defer languageDriversMu.RUnlock()
+	for _, driver := range languageDrivers {
+		resolver, has := driver.(DirectoryModuleResolver)
+		if !has {
+			continue
+		}
+		if entry, ok := resolver.ResolveDirectoryModule(absDir); ok && entry != "" {
+			return entry, true
+		}
+	}
+	return "", false
+}
+
 func languageDriverForName(name string) (LanguageDriver, bool) {
 	languageDriversMu.RLock()
 	defer languageDriversMu.RUnlock()

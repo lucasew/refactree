@@ -48,6 +48,24 @@ func (languageDriver) DestinationFileInDirectory(dstDirRel string, _ ingest.Refe
 	return ""
 }
 
+// ResolveDirectoryModule maps a JS/Node package directory to package.json main
+// or index.{js,mjs,cjs} (same convention as import resolution).
+func (languageDriver) ResolveDirectoryModule(absDir string) (string, bool) {
+	resolved, ok := resolveJSFileOnDisk(absDir, true)
+	if !ok {
+		return "", false
+	}
+	st, err := os.Stat(absDir)
+	if err != nil || !st.IsDir() {
+		return "", false
+	}
+	rel, err := filepath.Rel(absDir, resolved)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return "", false
+	}
+	return filepath.ToSlash(rel), true
+}
+
 type referenceProvider struct{}
 
 func (referenceProvider) Name() string { return "node" }

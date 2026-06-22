@@ -52,6 +52,16 @@ func (languageDriver) DestinationFileInDirectory(string, ingest.Reference) strin
 	return ""
 }
 
+// ResolveDirectoryModule maps a Nix directory scope to default.nix when present.
+func (languageDriver) ResolveDirectoryModule(absDir string) (string, bool) {
+	def := filepath.Join(absDir, "default.nix")
+	st, err := os.Stat(def)
+	if err != nil || st.IsDir() {
+		return "", false
+	}
+	return "default.nix", true
+}
+
 type referenceProvider struct{}
 
 func (referenceProvider) Name() string { return "nix" }

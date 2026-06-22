@@ -114,9 +114,14 @@ func (l *Loader) LoadIndex() IndexView {
 // LoadFile builds a FileView for the given full reference (file, scope, or symbol).
 // Symbol refs open the source file where that symbol is defined.
 func (l *Loader) LoadFile(refStr string) FileView {
+	parsed := ingest.ParseReference(refStr)
+	if parsed.Provider == "" || parsed.Provider == "path" {
+		parsed = ingest.CanonicalizePathReference(l.RootDir, parsed)
+		refStr = parsed.String()
+	}
+
 	focusRef := refStr
 	scopeRef := ScopeReferenceForView(refStr)
-	parsed := ingest.ParseReference(refStr)
 
 	v := FileView{
 		Title:     focusRef,
@@ -177,7 +182,9 @@ func (l *Loader) loadPathView(v FileView, scopeRef ingest.Reference, parsed inge
 		return v
 	}
 
-	v.Segments = annotate.Build(source, rel, result, EncodeCodeURL)
+	v.Segments = annotate.Build(source, rel, result, func(r string) string {
+		return EncodeCodeURLInRoot(l.RootDir, r)
+	})
 	v.Siblings = l.listPathDir(filepath.Dir(abs), filepath.Dir(rel))
 	markActive(&v.Siblings, filepath.Base(rel))
 	v.ParentHref = l.pathParentHref(filepath.Dir(rel))

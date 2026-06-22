@@ -14,7 +14,28 @@ const CodePathPrefix = "/code/"
 // EncodeCodeURL builds /code/<url-encoded-full-reference>[#anchor].
 // The reference itself uniquely identifies the code unit via the path system.
 // Symbol refs keep the ::symbol in the path; the fragment scrolls to the definition.
+//
+// Callers that know the project root should prefer EncodeCodeURLInRoot so
+// package directories canonicalize to __init__.py / index.js (etc.) in the link.
 func EncodeCodeURL(ref string) string {
+	return encodeCodeURLRef(ref)
+}
+
+// EncodeCodeURLInRoot is EncodeCodeURL after CanonicalizePathReference(rootDir, …).
+func EncodeCodeURLInRoot(rootDir, ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return CodePathPrefix
+	}
+	parsed := ingest.ParseReference(ref)
+	if parsed.Provider == "" || parsed.Provider == "path" {
+		parsed = ingest.CanonicalizePathReference(rootDir, parsed)
+		ref = parsed.String()
+	}
+	return encodeCodeURLRef(ref)
+}
+
+func encodeCodeURLRef(ref string) string {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return CodePathPrefix
