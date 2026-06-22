@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  {{template "head" .}}
+  <title>{{.Title}} · refactree</title>
+</head>
+<body{{if .FocusID}} data-focus="{{.FocusID}}"{{end}}>
+  <header class="topbar">
+    <a class="brand" href="/">refactree</a>
+    <span class="crumb"><code>{{.Reference}}</code></span>
+    {{if .Language}}<span class="badge">{{.Language}}</span>{{end}}
+  </header>
+  <main class="shell">
+    <aside class="rail" aria-label="Nearby files">
+      {{if .ParentHref}}
+      <a class="parent-link" href="{{.ParentHref}}">↑ parent</a>
+      {{end}}
+      <h1 class="rail-title">Nearby</h1>
+      {{if .Siblings}}
+      <ul class="file-list">
+        {{range .Siblings}}
+        <li>
+          <a href="{{.Href}}" class="file-link{{if .IsDir}} is-dir{{end}}{{if .Active}} is-active{{end}}">{{.Name}}</a>
+        </li>
+        {{end}}
+      </ul>
+      {{else}}
+      <p class="muted">—</p>
+      {{end}}
+    </aside>
+    <section class="panel">
+      {{if .Error}}
+      <p class="error">{{.Error}}</p>
+      {{else if .Segments}}
+      <div class="code-wrap">
+        <pre class="code" tabindex="0"><code>{{range .Segments}}{{if .IsLink}}<a href="{{.Href}}" class="sym-link{{if .IsDef}} sym-def{{end}}"{{if .ID}} id="{{.ID}}"{{end}} title="{{.Reference}}">{{.Text}}</a>{{else if .IsDef}}<span class="sym-def"{{if .ID}} id="{{.ID}}"{{end}} title="{{.Reference}}">{{.Text}}</span>{{else}}{{.Text}}{{end}}{{end}}</code></pre>
+      </div>
+      {{else if .Siblings}}
+      <p class="lede">Directory <code>{{.Reference}}</code>. Open a file from the rail.</p>
+      {{else}}
+      <p class="muted">Nothing to show.</p>
+      {{end}}
+    </section>
+  </main>
+  <script>
+    (function () {
+      var id = document.body.getAttribute('data-focus');
+      if (!id) return;
+      var el = document.getElementById(id);
+      if (!el) return;
+      el.classList.add('sym-focus');
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    })();
+  </script>
+</body>
+</html>
