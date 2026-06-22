@@ -78,9 +78,7 @@ func (s *Server) handleCode(w http.ResponseWriter, r *http.Request) {
 		ref = q
 	}
 
-	v := s.loader.LoadFileWithOptions(ref, LoadOptions{
-		File: r.URL.Query().Get("file"),
-	})
+	v := s.loader.LoadFile(ref)
 	s.render(w, "code.html", v)
 }
 

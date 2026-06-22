@@ -23,6 +23,12 @@ func TestLoadFile_GoProviderScope(t *testing.T) {
 	if len(v.Siblings) == 0 {
 		t.Fatal("expected siblings in fmt package")
 	}
+	// Scope rail lists symbols via full refs, not ?file=.
+	for _, s := range v.Siblings {
+		if strings.Contains(s.Href, "file=") {
+			t.Fatalf("unexpected file query in rail: %s", s.Href)
+		}
+	}
 
 	// Symbol deep-link should open the file that defines Println.
 	v2 := l.LoadFile("go:fmt::Println")
@@ -35,21 +41,15 @@ func TestLoadFile_GoProviderScope(t *testing.T) {
 	if v2.FocusID == "" {
 		t.Fatal("expected focus id for symbol")
 	}
+	if v2.Reference != "go:fmt::Println" {
+		t.Fatalf("reference=%q", v2.Reference)
+	}
 
 	var sawDef bool
 	for _, seg := range v2.Segments {
-		if seg.IsDef && strings.Contains(seg.Reference, "go:fmt") && seg.Text == "Println" {
+		if seg.IsDef && seg.Reference == "go:fmt::Println" {
 			sawDef = true
 			break
-		}
-	}
-	if !sawDef {
-		// Println might be split across segments; accept any go:fmt def with Println text nearby by scanning all defs
-		for _, seg := range v2.Segments {
-			if seg.IsDef && seg.Reference == "go:fmt::Println" {
-				sawDef = true
-				break
-			}
 		}
 	}
 	if !sawDef {
@@ -76,12 +76,16 @@ func TestLoadFile_PathStillWorks(t *testing.T) {
 	}
 }
 
-func TestEncodeProviderFileURL(t *testing.T) {
-	u := EncodeProviderFileURL(FileReferenceForView("go:fmt"), "print.go")
-	if !strings.Contains(u, "file=print.go") {
-		t.Fatalf("missing file query: %s", u)
+func TestEncodeCodeURL_FullReference(t *testing.T) {
+	u := EncodeCodeURL("go:fmt::Println")
+	if !strings.Contains(u, "go:fmt") || !strings.Contains(u, "Println") {
+		t.Fatalf("expected full ref in URL path, got %q", u)
 	}
-	if !strings.Contains(u, CodePathPrefix) {
-		t.Fatalf("missing code prefix: %s", u)
+	if strings.Contains(u, "file=") {
+		t.Fatalf("should not use file query: %q", u)
+	}
+	got, ok := DecodeCodePath(strings.Split(u, "#")[0])
+	if !ok || got != "go:fmt::Println" {
+		t.Fatalf("decode: ok=%v got=%q", ok, got)
 	}
 }

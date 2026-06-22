@@ -11,18 +11,16 @@ import (
 // CodePathPrefix is the route prefix for code views: /code/<reference>
 const CodePathPrefix = "/code/"
 
-// EncodeCodeURL builds /code/<url-encoded-reference>[#anchor].
+// EncodeCodeURL builds /code/<url-encoded-full-reference>[#anchor].
 // The reference itself uniquely identifies the code unit via the path system.
+// Symbol refs keep the ::symbol in the path; the fragment scrolls to the definition.
 func EncodeCodeURL(ref string) string {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return CodePathPrefix
 	}
+	path := CodePathPrefix + url.PathEscape(ref)
 	parsed := ingest.ParseReference(ref)
-	base := parsed
-	base.Symbol = ""
-	fileRef := base.String()
-	path := CodePathPrefix + url.PathEscape(fileRef)
 	if parsed.Symbol != "" {
 		path += "#" + annotate.AnchorID(ref)
 	}
@@ -40,7 +38,7 @@ func DecodeCodePath(requestPath string) (string, bool) {
 	if rest == "" {
 		return "", false
 	}
-	// Single segment is URL-encoded reference.
+	// Single segment is URL-encoded reference (may include ::symbol).
 	if !strings.Contains(rest, "/") {
 		decoded, err := url.PathUnescape(rest)
 		if err != nil {
@@ -59,8 +57,8 @@ func DecodeCodePath(requestPath string) (string, bool) {
 	return decoded, true
 }
 
-// FileReferenceForView returns the file-level reference (symbol stripped) for loading source.
-func FileReferenceForView(ref string) ingest.Reference {
+// ScopeReferenceForView returns the scope-level reference (symbol stripped).
+func ScopeReferenceForView(ref string) ingest.Reference {
 	r := ingest.ParseReference(ref)
 	r.Symbol = ""
 	if r.Provider == "" {
@@ -72,16 +70,7 @@ func FileReferenceForView(ref string) ingest.Reference {
 	return r
 }
 
-// EncodeProviderFileURL links to a source file inside a provider package scope.
-// Uses ?file= because provider refs address packages/modules, not individual files.
-func EncodeProviderFileURL(scopeRef ingest.Reference, fileName string) string {
-	scopeRef.Symbol = ""
-	base := EncodeCodeURL(scopeRef.String())
-	// Strip any accidental fragment from EncodeCodeURL (none without symbol).
-	if i := strings.Index(base, "#"); i >= 0 {
-		base = base[:i]
-	}
-	q := url.Values{}
-	q.Set("file", fileName)
-	return base + "?" + q.Encode()
+// FileReferenceForView is an alias kept for older call sites.
+func FileReferenceForView(ref string) ingest.Reference {
+	return ScopeReferenceForView(ref)
 }

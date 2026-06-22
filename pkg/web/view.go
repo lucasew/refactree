@@ -15,7 +15,7 @@ import (
 // FileView is the template model for a single source file page.
 type FileView struct {
 	Title      string
-	Reference  string
+	Reference  string // full reference as requested (may include ::symbol)
 	RootDir    string
 	Language   string
 	Segments   []annotate.Segment
@@ -26,7 +26,7 @@ type FileView struct {
 	Provider   string // non-empty when viewing a non-path provider scope
 }
 
-// NavItem is a link in the file/dir sidebar.
+// NavItem is a link in the rail (scopes, files, or symbols — always full references).
 type NavItem struct {
 	Name   string
 	Href   string
@@ -40,12 +40,6 @@ type IndexView struct {
 	RootDir string
 	Items   []NavItem
 	Error   string
-}
-
-// LoadOptions carries optional request context (query params).
-type LoadOptions struct {
-	// File picks a source file inside a provider package scope (basename or rel path).
-	File string
 }
 
 // Loader resolves source + ingest data for HTTP handlers.
@@ -101,43 +95,35 @@ func (l *Loader) LoadIndex() IndexView {
 			Href: EncodeCodeURL("path:./" + name),
 		})
 	}
-	sort.Slice(v.Items, func(i, j int) bool {
-		if v.Items[i].IsDir != v.Items[j].IsDir {
-			return v.Items[i].IsDir
-		}
-		return v.Items[i].Name < v.Items[j].Name
-	})
+	sortNav(v.Items)
 	return v
 }
 
-// LoadFile builds a FileView for the given reference (file or symbol).
+// LoadFile builds a FileView for the given full reference (file, scope, or symbol).
+// Symbol refs open the source file where that symbol is defined.
 func (l *Loader) LoadFile(refStr string) FileView {
-	return l.LoadFileWithOptions(refStr, LoadOptions{})
-}
-
-// LoadFileWithOptions is LoadFile plus optional provider file selection.
-func (l *Loader) LoadFileWithOptions(refStr string, opts LoadOptions) FileView {
 	focusRef := refStr
-	scopeRef := FileReferenceForView(refStr)
+	scopeRef := ScopeReferenceForView(refStr)
+	parsed := ingest.ParseReference(refStr)
+
 	v := FileView{
-		Title:     scopeRef.String(),
-		Reference: scopeRef.String(),
+		Title:     focusRef,
+		Reference: focusRef,
 		RootDir:   l.RootDir,
 		Provider:  scopeRef.Provider,
 	}
-	if focusRef != scopeRef.String() {
+	if parsed.Symbol != "" {
 		v.FocusID = annotate.AnchorID(focusRef)
 	}
 
 	if scopeRef.Provider == "" || scopeRef.Provider == "path" {
 		v.Provider = ""
-		return l.loadPathView(v, scopeRef, opts)
+		return l.loadPathView(v, scopeRef, parsed)
 	}
-	return l.loadProviderView(v, scopeRef, focusRef, opts)
+	return l.loadProviderView(v, scopeRef, focusRef, parsed)
 }
 
-func (l *Loader) loadPathView(v FileView, scopeRef ingest.Reference, opts LoadOptions) FileView {
-	_ = opts
+func (l *Loader) loadPathView(v FileView, scopeRef ingest.Reference, parsed ingest.Reference) FileView {
 	rel := strings.TrimPrefix(scopeRef.Path, "./")
 	if rel == "" || rel == "." {
 		idx := l.LoadIndex()
@@ -155,11 +141,13 @@ func (l *Loader) loadPathView(v FileView, scopeRef ingest.Reference, opts LoadOp
 	}
 
 	if st.IsDir() {
+		// Directory scope: if a symbol was requested, it doesn't apply at dir level.
 		v.Siblings = l.listPathDir(abs, rel)
 		v.ParentHref = l.pathParentHref(rel)
 		return v
 	}
 
+	// File view. Symbol (if any) is only for focus within this file.
 	source, err := os.ReadFile(abs)
 	if err != nil {
 		v.Error = err.Error()
@@ -180,10 +168,11 @@ func (l *Loader) loadPathView(v FileView, scopeRef ingest.Reference, opts LoadOp
 	v.Siblings = l.listPathDir(filepath.Dir(abs), filepath.Dir(rel))
 	markActive(&v.Siblings, filepath.Base(rel))
 	v.ParentHref = l.pathParentHref(filepath.Dir(rel))
+	_ = parsed
 	return v
 }
 
-func (l *Loader) loadProviderView(v FileView, scopeRef ingest.Reference, focusRef string, opts LoadOptions) FileView {
+func (l *Loader) loadProviderView(v FileView, scopeRef ingest.Reference, focusRef string, parsed ingest.Reference) FileView {
 	scope, ok, err := refpkg.ResolveScopeTarget(scopeRef)
 	if err != nil {
 		v.Error = err.Error()
@@ -195,8 +184,6 @@ func (l *Loader) loadProviderView(v FileView, scopeRef ingest.Reference, focusRe
 	}
 
 	v.RootDir = scope.Dir
-	v.Siblings = l.listProviderScope(scopeRef, scope)
-	v.ParentHref = providerParentHref(scopeRef)
 
 	result, err := ingest.IngestWithRecursion(scope.Dir, false)
 	if err != nil {
@@ -204,14 +191,19 @@ func (l *Loader) loadProviderView(v FileView, scopeRef ingest.Reference, focusRe
 		return v
 	}
 
-	fileRel := opts.File
-	focusParsed := ingest.ParseReference(focusRef)
-	if fileRel == "" && focusParsed.Symbol != "" {
-		fileRel = findEntityFile(result, focusParsed.Symbol)
+	v.Siblings = l.listProviderScope(scopeRef, scope, result)
+	v.ParentHref = providerParentHref(scopeRef)
+	markActiveHref(&v.Siblings, EncodeCodeURL(focusRef))
+
+	// Scope-only ref (no symbol): overview, no source pane.
+	if parsed.Symbol == "" {
+		return v
 	}
 
+	// Symbol ref: open the file that defines it.
+	fileRel := findEntityFile(result, parsed.Symbol)
 	if fileRel == "" {
-		// Package/module overview: rail only, no source pane.
+		v.Error = fmt.Sprintf("symbol %q not found in %s", parsed.Symbol, scopeRef.String())
 		return v
 	}
 
@@ -231,13 +223,12 @@ func (l *Loader) loadProviderView(v FileView, scopeRef ingest.Reference, focusRe
 	v.Segments = annotate.BuildWithOptions(source, fileRel, result, EncodeCodeURL, annotate.Options{
 		MapRef: mapRef,
 	})
-	v.Title = scopeRef.String() + " · " + fileRel
-	markActiveProviderFile(&v.Siblings, fileRel, scopeRef)
+	v.Title = focusRef
+	v.Reference = focusRef
 	return v
 }
 
 func providerRefMapper(scopeRef ingest.Reference, result *ingest.Result) func(string) string {
-	// Paths inside this ingest dir that belong to the provider scope.
 	local := map[string]bool{}
 	if result != nil {
 		for _, f := range result.Files {
@@ -249,9 +240,6 @@ func providerRefMapper(scopeRef ingest.Reference, result *ingest.Result) func(st
 		if r.Provider != "" && r.Provider != "path" {
 			return ref
 		}
-		// Only rewrite symbol refs so definitions/usages become go:pkg::Sym.
-		// File-level / import-span refs without a symbol stay as ingest produced them
-		// (avoids collapsing every import alias to the same go:pkg id).
 		if r.Symbol == "" {
 			return ref
 		}
@@ -315,13 +303,8 @@ func (l *Loader) listPathDir(absDir, relDir string) []NavItem {
 	return items
 }
 
-func (l *Loader) listProviderScope(scopeRef ingest.Reference, scope refpkg.ScopeTarget) []NavItem {
+func (l *Loader) listProviderScope(scopeRef ingest.Reference, scope refpkg.ScopeTarget, result *ingest.Result) []NavItem {
 	var items []NavItem
-
-	parent := parentProviderPath(scopeRef.Path)
-	if parent != scopeRef.Path {
-		// parent link is handled via ParentHref; children only here
-	}
 
 	allowChildren := true
 	if scope.CanDescend != nil {
@@ -346,7 +329,6 @@ func (l *Loader) listProviderScope(scopeRef ingest.Reference, scope refpkg.Scope
 				})
 			}
 		} else if allowChildren {
-			// Fallback: subdirs with sources on disk.
 			entries, err := os.ReadDir(scope.Dir)
 			if err == nil {
 				for _, e := range entries {
@@ -368,25 +350,24 @@ func (l *Loader) listProviderScope(scopeRef ingest.Reference, scope refpkg.Scope
 		}
 	}
 
-	// Source files in this package/module scope.
-	entries, err := os.ReadDir(scope.Dir)
-	if err == nil {
-		for _, e := range entries {
-			if e.IsDir() {
+	// Symbols in this scope — full provider:path::symbol references (no ?file=).
+	if result != nil {
+		seen := map[string]bool{}
+		var syms []NavItem
+		for _, ent := range result.Entities {
+			r := ingest.ParseReference(ent.Reference)
+			if r.Symbol == "" || seen[r.Symbol] {
 				continue
 			}
-			name := e.Name()
-			if strings.HasPrefix(name, ".") {
-				continue
-			}
-			if _, ok := ingest.LanguageForFile(name); !ok {
-				continue
-			}
-			items = append(items, NavItem{
-				Name: name,
-				Href: EncodeProviderFileURL(scopeRef, name),
+			seen[r.Symbol] = true
+			full := ingest.Reference{Provider: scopeRef.Provider, Path: scopeRef.Path, Symbol: r.Symbol}.String()
+			syms = append(syms, NavItem{
+				Name: r.Symbol,
+				Href: EncodeCodeURL(full),
 			})
 		}
+		sort.Slice(syms, func(i, j int) bool { return syms[i].Name < syms[j].Name })
+		items = append(items, syms...)
 	}
 
 	sortNav(items)
@@ -407,10 +388,7 @@ func (l *Loader) pathParentHref(rel string) string {
 
 func providerParentHref(scopeRef ingest.Reference) string {
 	parent := parentProviderPath(scopeRef.Path)
-	if parent == scopeRef.Path {
-		return "/"
-	}
-	if parent == "" {
+	if parent == scopeRef.Path || parent == "" {
 		return "/"
 	}
 	return EncodeCodeURL(ingest.Reference{Provider: scopeRef.Provider, Path: parent}.String())
@@ -457,11 +435,18 @@ func markActive(items *[]NavItem, baseName string) {
 	}
 }
 
-func markActiveProviderFile(items *[]NavItem, fileRel string, scopeRef ingest.Reference) {
-	base := filepath.Base(fileRel)
-	want := EncodeProviderFileURL(scopeRef, base)
+func markActiveHref(items *[]NavItem, href string) {
+	// Compare without fragment.
+	base := href
+	if i := strings.Index(base, "#"); i >= 0 {
+		base = base[:i]
+	}
 	for i := range *items {
-		if (*items)[i].Href == want || (*items)[i].Name == base {
+		h := (*items)[i].Href
+		if j := strings.Index(h, "#"); j >= 0 {
+			h = h[:j]
+		}
+		if h == base {
 			(*items)[i].Active = true
 		}
 	}

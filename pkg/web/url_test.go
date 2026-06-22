@@ -25,7 +25,12 @@ func TestEncodeCodeURL_SymbolAddsAnchor(t *testing.T) {
 	if !strings.Contains(u, "#sym-") {
 		t.Fatalf("expected anchor fragment, got %q", u)
 	}
-	if !strings.Contains(u, "path") {
-		t.Fatalf("expected encoded path ref in URL, got %q", u)
+	if !strings.Contains(u, "helper") {
+		t.Fatalf("expected symbol in URL path, got %q", u)
+	}
+	base := strings.Split(u, "#")[0]
+	got, ok := DecodeCodePath(base)
+	if !ok || got != "path:./helper.go::helper" {
+		t.Fatalf("decode: ok=%v got=%q", ok, got)
 	}
 }
