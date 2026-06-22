@@ -170,7 +170,8 @@ func (l *Loader) loadPathView(v FileView, scopeRef ingest.Reference, parsed inge
 		v.Language = lang
 	}
 
-	result, err := ingest.Ingest(l.RootDir)
+	// Inspection only: BFS from this file (peers + import targets), not whole-tree walk.
+	result, err := ingest.IngestForFile(l.RootDir, abs)
 	if err != nil {
 		v.Error = err.Error()
 		return v
@@ -225,6 +226,12 @@ func (l *Loader) loadProviderView(v FileView, scopeRef ingest.Reference, focusRe
 	if err != nil {
 		v.Error = err.Error()
 		return v
+	}
+
+	// Re-ingest from the concrete file so annotate gets peer/import neighbors,
+	// not only the non-recursive package dir listing pass above.
+	if focused, err := ingest.IngestForFile(scope.Dir, abs); err == nil {
+		result = focused
 	}
 
 	if lang, ok := ingest.LanguageForFile(abs); ok {
