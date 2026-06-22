@@ -37,7 +37,7 @@ func TestResolveModuleTarget_FromPYTHONPATH(t *testing.T) {
 		_ = os.Setenv("PYTHONPATH", oldPath)
 	})
 
-	modTarget, err := ResolveModuleTarget(moduleName)
+	modTarget, err := ResolveModuleTarget(moduleName, "")
 	if err != nil {
 		if strings.Contains(err.Error(), "python executable not found") {
 			t.Skip(err.Error())
@@ -51,7 +51,7 @@ func TestResolveModuleTarget_FromPYTHONPATH(t *testing.T) {
 		t.Fatalf("unexpected module file: got %q want %q", modTarget.File, moduleName+".py")
 	}
 
-	pkgTarget, err := ResolveModuleTarget(packageName)
+	pkgTarget, err := ResolveModuleTarget(packageName, "")
 	if err != nil {
 		t.Fatalf("resolve package target failed: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestResolveModuleTarget_FromPYTHONPATH(t *testing.T) {
 }
 
 func TestResolveSymbolTarget(t *testing.T) {
-	target, ok, err := ResolveSymbolTarget("os", "path")
+	target, ok, err := ResolveSymbolTarget("os", "path", "")
 	if err != nil {
 		if strings.Contains(err.Error(), "python executable not found") {
 			t.Skip(err.Error())
@@ -79,5 +79,22 @@ func TestResolveSymbolTarget(t *testing.T) {
 	}
 	if target.Dir == "" {
 		t.Fatal("expected non-empty target dir")
+	}
+}
+
+func TestResolveModuleTarget_UsesProjectVenv(t *testing.T) {
+	// ritm_annotation ships a real .venv with torch; skip if absent.
+	work := "/home/lucasew/WORKSPACE/OPENSOURCE-own/ritm_annotation"
+	venvPy := filepath.Join(work, ".venv", "bin", "python")
+	if st, err := os.Stat(venvPy); err != nil || st.IsDir() {
+		t.Skip("ritm_annotation .venv not available")
+	}
+	target, err := ResolveModuleTarget("torch", work)
+	if err != nil {
+		t.Fatalf("resolve torch via project venv: %v", err)
+	}
+	if !strings.Contains(filepath.ToSlash(target.Dir), "site-packages") &&
+		!strings.Contains(filepath.ToSlash(target.Dir), "torch") {
+		t.Fatalf("expected venv/site-packages path, got %q", target.Dir)
 	}
 }

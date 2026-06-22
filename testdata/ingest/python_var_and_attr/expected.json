@@ -1,0 +1,60 @@
+{
+  "files": [
+    {
+      "language": "python",
+      "path": "app.py"
+    }
+  ],
+  "entities": [
+    {
+      "reference": "path:./app.py::logger",
+      "start_byte": 16,
+      "end_byte": 22
+    },
+    {
+      "reference": "path:./app.py::main",
+      "start_byte": 58,
+      "end_byte": 62
+    }
+  ],
+  "aliases": [
+    {
+      "reference": "path:./app.py",
+      "start_byte": 7,
+      "end_byte": 14,
+      "target": "python:logging"
+    }
+  ],
+  "relations": [
+    {
+      "reference": "path:./app.py",
+      "start_byte": 25,
+      "end_byte": 32,
+      "target": "python:logging"
+    },
+    {
+      "reference": "path:./app.py",
+      "start_byte": 33,
+      "end_byte": 42,
+      "target": "python:logging::getLogger"
+    },
+    {
+      "reference": "path:./app.py::main",
+      "start_byte": 70,
+      "end_byte": 76,
+      "target": "path:./app.py::logger"
+    },
+    {
+      "reference": "path:./app.py::main",
+      "start_byte": 77,
+      "end_byte": 81,
+      "target": "path:./app.py::logger::info"
+    },
+    {
+      "reference": "path:./app.py::main",
+      "start_byte": 99,
+      "end_byte": 105,
+      "target": "path:./app.py::logger"
+    }
+  ]
+}

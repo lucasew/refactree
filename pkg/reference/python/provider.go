@@ -70,31 +70,34 @@ print(json.dumps({
 
 // ResolveModuleTarget resolves a python:<module> spec into a concrete ingest
 // scope directory plus the module file name used for symbol/doc filtering.
-func ResolveModuleTarget(spec string) (ModuleTarget, error) {
+// workDir is the project root (serve/browse --dir); when set, resolution uses
+// that tree's .venv/bin/python if present so site-packages match the project.
+func ResolveModuleTarget(spec, workDir string) (ModuleTarget, error) {
 	module := normalizeModuleSpec(spec)
 	if module == "" {
 		return ModuleTarget{}, fmt.Errorf("python provider module path is empty")
 	}
 
-	if cached, ok := moduleTargetCache.Load(module); ok {
+	cacheKey := workDir + "\x00" + module
+	if cached, ok := moduleTargetCache.Load(cacheKey); ok {
 		return cached.(ModuleTarget), nil
 	}
 
-	target, err := resolveModuleTarget(module)
+	target, err := resolveModuleTarget(module, workDir)
 	if err != nil {
 		return ModuleTarget{}, err
 	}
 
-	moduleTargetCache.Store(module, target)
+	moduleTargetCache.Store(cacheKey, target)
 	return target, nil
 }
 
 // ResolveSymbolTarget resolves python:<module>::<symbol> to an ingest target.
-func ResolveSymbolTarget(spec, symbol string) (SymbolTarget, bool, error) {
+func ResolveSymbolTarget(spec, symbol, workDir string) (SymbolTarget, bool, error) {
 	if symbol == "" {
 		return SymbolTarget{}, false, nil
 	}
-	target, err := ResolveModuleTarget(spec)
+	target, err := ResolveModuleTarget(spec, workDir)
 	if err != nil {
 		return SymbolTarget{}, true, err
 	}
@@ -111,17 +114,20 @@ func MatchesEntityPath(target ModuleTarget, entPath string) bool {
 	return rel == filepath.ToSlash(target.File)
 }
 
-func resolveModuleTarget(module string) (ModuleTarget, error) {
-	cmdPath, err := pythonCommand()
+func resolveModuleTarget(module, workDir string) (ModuleTarget, error) {
+	cmdPath, err := pythonCommand(workDir)
 	if err != nil {
 		return ModuleTarget{}, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, cmdPath, "-c", moduleResolveScript, module)
-	cmd.Env = pythonCommandEnv()
+	if workDir != "" {
+		cmd.Dir = workDir
+	}
+	cmd.Env = pythonCommandEnv(workDir)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -195,16 +201,29 @@ func resolveModuleTarget(module string) (ModuleTarget, error) {
 	return ModuleTarget{Dir: filepath.Dir(origin), File: filepath.Base(origin), IsPackage: false}, nil
 }
 
-func pythonCommand() (string, error) {
+func pythonCommand(workDir string) (string, error) {
+	if workDir != "" {
+		for _, rel := range []string{
+			filepath.Join(".venv", "bin", "python"),
+			filepath.Join(".venv", "bin", "python3"),
+			filepath.Join("venv", "bin", "python"),
+			filepath.Join("venv", "bin", "python3"),
+		} {
+			candidate := filepath.Join(workDir, rel)
+			if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
+				return candidate, nil
+			}
+		}
+	}
 	for _, name := range []string{"python3", "python"} {
 		if path, err := exec.LookPath(name); err == nil {
 			return path, nil
 		}
 	}
-	return "", fmt.Errorf("python executable not found (tried python3 and python)")
+	return "", fmt.Errorf("python executable not found (tried project .venv and python3/python on PATH)")
 }
 
-func pythonCommandEnv() []string {
+func pythonCommandEnv(workDir string) []string {
 	env := os.Environ()
 	base := filepath.Join(os.TempDir(), "refactree-python")
 	uvCache := filepath.Join(base, "uv-cache")
@@ -213,6 +232,23 @@ func pythonCommandEnv() []string {
 	_ = os.MkdirAll(xdgCache, 0755)
 	env = append(env, "UV_CACHE_DIR="+uvCache)
 	env = append(env, "XDG_CACHE_HOME="+xdgCache)
+	// Prefer project-local imports when resolving inside workDir.
+	if workDir != "" {
+		pyPath := workDir
+		if existing := os.Getenv("PYTHONPATH"); existing != "" {
+			pyPath = workDir + string(os.PathListSeparator) + existing
+		}
+		env = append(env, "PYTHONPATH="+pyPath)
+		// Ensure venv site-packages are used when we invoke venv python (automatic);
+		// VIRTUAL_ENV helps some tools that inspect it.
+		for _, name := range []string{".venv", "venv"} {
+			v := filepath.Join(workDir, name)
+			if st, err := os.Stat(v); err == nil && st.IsDir() {
+				env = append(env, "VIRTUAL_ENV="+v)
+				break
+			}
+		}
+	}
 	return env
 }
 

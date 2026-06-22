@@ -59,11 +59,11 @@ func (referenceProvider) Resolve(spec string, ctx ingest.ImportResolveContext) (
 	return "python:" + spec, true
 }
 
-func (referenceProvider) ResolveScopeTarget(ref ingest.Reference, _ string) (ingest.ProviderScopeTarget, bool, error) {
+func (referenceProvider) ResolveScopeTarget(ref ingest.Reference, rootDir string) (ingest.ProviderScopeTarget, bool, error) {
 	if ref.Path == "" {
 		return ingest.ProviderScopeTarget{}, false, nil
 	}
-	target, err := pythonref.ResolveModuleTarget(ref.Path)
+	target, err := pythonref.ResolveModuleTarget(ref.Path, rootDir)
 	if err != nil {
 		return ingest.ProviderScopeTarget{}, true, err
 	}
@@ -71,8 +71,8 @@ func (referenceProvider) ResolveScopeTarget(ref ingest.Reference, _ string) (ing
 	return ingest.ProviderScopeTarget{Dir: target.Dir, CanDescend: &canDescend}, true, nil
 }
 
-func (referenceProvider) ResolveSymbolTarget(ref ingest.Reference, _ string) (ingest.ProviderSymbolTarget, bool, error) {
-	target, ok, err := pythonref.ResolveSymbolTarget(ref.Path, ref.Symbol)
+func (referenceProvider) ResolveSymbolTarget(ref ingest.Reference, rootDir string) (ingest.ProviderSymbolTarget, bool, error) {
+	target, ok, err := pythonref.ResolveSymbolTarget(ref.Path, ref.Symbol, rootDir)
 	if !ok || err != nil {
 		return ingest.ProviderSymbolTarget{}, ok, err
 	}
@@ -87,7 +87,9 @@ func (referenceProvider) AllowListEntity(ref ingest.Reference, _ ingest.Referenc
 	if language != "python" {
 		return false
 	}
-	target, err := pythonref.ResolveModuleTarget(ref.Path)
+	// Listing/doc filter without workDir still works for stdlib; callers with
+	// project context go through Resolver which passes rootDir at scope resolve.
+	target, err := pythonref.ResolveModuleTarget(ref.Path, "")
 	if err != nil {
 		return false
 	}
@@ -104,7 +106,7 @@ func (referenceProvider) AllowDocEntity(ref ingest.Reference, _ ingest.Reference
 	if language != "python" {
 		return false
 	}
-	target, err := pythonref.ResolveModuleTarget(ref.Path)
+	target, err := pythonref.ResolveModuleTarget(ref.Path, "")
 	if err != nil {
 		return false
 	}
@@ -125,10 +127,47 @@ func extractPython(root *grammar.Node, source []byte, path string) *ingest.FileE
 			extractPythonImportFrom(fe, child, source)
 		case "import_statement":
 			extractPythonImport(fe, child, source)
+		case "assignment", "augmented_assignment":
+			extractPythonAssign(fe, child, source, "")
+		case "expression_statement":
+			// Sometimes assignments are wrapped; accept either shape.
+			if child.ChildCount() > 0 {
+				inner := child.Child(0)
+				if inner.Type() == "assignment" || inner.Type() == "augmented_assignment" {
+					extractPythonAssign(fe, inner, source, "")
+				}
+			}
 		}
 	}
 
 	return fe
+}
+
+func extractPythonAssign(fe *ingest.FileExtract, assign *grammar.Node, source []byte, scope string) {
+	if assign == nil {
+		return
+	}
+	left := ingest.ChildByField(assign, "left")
+	if left != nil && left.Type() == "identifier" {
+		appendPythonEntity(fe, left, source)
+	}
+	// Type/value sides may reference imports (logger = logging.getLogger(...)).
+	if right := ingest.ChildByField(assign, "right"); right != nil {
+		walkPythonUsages(fe, right, source, scope)
+	}
+	if typ := ingest.ChildByField(assign, "type"); typ != nil {
+		walkPythonUsages(fe, typ, source, scope)
+	}
+}
+
+func appendPythonEntity(fe *ingest.FileExtract, nameNode *grammar.Node, source []byte) {
+	name := ingest.NodeText(nameNode, source)
+	fe.Entities = append(fe.Entities, ingest.EntityDef{
+		Name:      name,
+		StartByte: nameNode.StartByte(),
+		EndByte:   nameNode.EndByte(),
+		Exported:  len(name) == 0 || name[0] != '_',
+	})
 }
 
 func extractPythonFunc(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
@@ -145,6 +184,15 @@ func extractPythonFunc(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 		Exported:  len(name) == 0 || name[0] != '_',
 	})
 
+	// Decorators, params, return type — not the function name itself.
+	if dec := ingest.ChildByField(n, "superclasses"); dec != nil {
+		walkPythonUsages(fe, dec, source, name)
+	}
+	for _, field := range []string{"parameters", "return_type"} {
+		if part := ingest.ChildByField(n, field); part != nil {
+			walkPythonUsages(fe, part, source, name)
+		}
+	}
 	if body := ingest.ChildByField(n, "body"); body != nil {
 		walkPythonUsages(fe, body, source, name)
 	}
@@ -164,10 +212,23 @@ func extractPythonClass(fe *ingest.FileExtract, n *grammar.Node, source []byte) 
 		Exported:  len(className) == 0 || className[0] != '_',
 	})
 
+	if bases := ingest.ChildByField(n, "superclasses"); bases != nil {
+		walkPythonUsages(fe, bases, source, className)
+	}
+
 	if body := ingest.ChildByField(n, "body"); body != nil {
 		for i := uint32(0); i < body.ChildCount(); i++ {
 			child := body.Child(i)
 			if child.Type() != "function_definition" {
+				// Class-level assignments / attributes.
+				if child.Type() == "assignment" || child.Type() == "augmented_assignment" {
+					extractPythonAssign(fe, child, source, className)
+				} else if child.Type() == "expression_statement" && child.ChildCount() > 0 {
+					inner := child.Child(0)
+					if inner.Type() == "assignment" || inner.Type() == "augmented_assignment" {
+						extractPythonAssign(fe, inner, source, className)
+					}
+				}
 				continue
 			}
 
@@ -185,12 +246,15 @@ func extractPythonClass(fe *ingest.FileExtract, n *grammar.Node, source []byte) 
 				Exported:  len(methodShort) == 0 || methodShort[0] != '_',
 			})
 
+			for _, field := range []string{"parameters", "return_type"} {
+				if part := ingest.ChildByField(child, field); part != nil {
+					walkPythonUsages(fe, part, source, methodName)
+				}
+			}
 			if methodBody := ingest.ChildByField(child, "body"); methodBody != nil {
 				walkPythonUsages(fe, methodBody, source, methodName)
 			}
 		}
-
-		walkPythonUsages(fe, body, source, className)
 	}
 }
 
@@ -272,17 +336,37 @@ func extractPythonImport(fe *ingest.FileExtract, n *grammar.Node, source []byte)
 			})
 
 		case "dotted_name":
-			if id := ingest.ChildByType(child, "identifier"); id != nil {
-				name := ingest.NodeText(id, source)
-				fe.Imports = append(fe.Imports, ingest.ImportDef{
-					LocalName:  name,
-					SourcePath: name,
-					StartByte:  id.StartByte(),
-					EndByte:    id.EndByte(),
-				})
+			// import os.path → local name is the first segment ("os"), full module is dotted text.
+			first := pythonFirstIdentifier(child)
+			if first == nil {
+				continue
 			}
+			full := ingest.NodeText(child, source)
+			local := ingest.NodeText(first, source)
+			fe.Imports = append(fe.Imports, ingest.ImportDef{
+				LocalName:  local,
+				SourcePath: full,
+				StartByte:  first.StartByte(),
+				EndByte:    first.EndByte(),
+			})
 		}
 	}
+}
+
+func pythonFirstIdentifier(n *grammar.Node) *grammar.Node {
+	if n == nil {
+		return nil
+	}
+	if n.Type() == "identifier" {
+		return n
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		if child.Type() == "identifier" {
+			return child
+		}
+	}
+	return nil
 }
 
 func pythonImportNameNode(n *grammar.Node) *grammar.Node {
@@ -307,36 +391,36 @@ func pythonImportNameNode(n *grammar.Node) *grammar.Node {
 }
 
 func walkPythonUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
-	if n.Type() == "call" {
-		funcNode := ingest.ChildByField(n, "function")
-		if funcNode != nil {
-			switch funcNode.Type() {
-			case "identifier":
-				fe.Usages = append(fe.Usages, ingest.UsageDef{
-					Scope:     scope,
-					Name:      ingest.NodeText(funcNode, source),
-					StartByte: funcNode.StartByte(),
-					EndByte:   funcNode.EndByte(),
-				})
-			case "attribute":
-				obj := ingest.ChildByField(funcNode, "object")
-				attr := ingest.ChildByField(funcNode, "attribute")
-				if obj != nil && attr != nil {
-					fe.Usages = append(fe.Usages, ingest.UsageDef{
-						Scope:         scope,
-						Name:          ingest.NodeText(attr, source),
-						StartByte:     attr.StartByte(),
-						EndByte:       attr.EndByte(),
-						Qualifier:     ingest.NodeText(obj, source),
-						QualStartByte: obj.StartByte(),
-						QualEndByte:   obj.EndByte(),
-					})
-				}
-			}
+	if n == nil || n.IsNull() {
+		return
+	}
+
+	switch n.Type() {
+	case "attribute":
+		obj := ingest.ChildByField(n, "object")
+		attr := ingest.ChildByField(n, "attribute")
+		// Only simple obj.attr (obj is identifier) — matches import/local entity resolution.
+		if obj != nil && attr != nil && obj.Type() == "identifier" {
+			fe.Usages = append(fe.Usages, ingest.UsageDef{
+				Scope:         scope,
+				Name:          ingest.NodeText(attr, source),
+				StartByte:     attr.StartByte(),
+				EndByte:       attr.EndByte(),
+				Qualifier:     ingest.NodeText(obj, source),
+				QualStartByte: obj.StartByte(),
+				QualEndByte:   obj.EndByte(),
+			})
+			return
 		}
-		for i := uint32(0); i < n.ChildCount(); i++ {
-			walkPythonUsages(fe, n.Child(i), source, scope)
-		}
+	case "identifier":
+		fe.Usages = append(fe.Usages, ingest.UsageDef{
+			Scope:     scope,
+			Name:      ingest.NodeText(n, source),
+			StartByte: n.StartByte(),
+			EndByte:   n.EndByte(),
+		})
+		return
+	case "string", "integer", "float", "true", "false", "none", "comment":
 		return
 	}
 
