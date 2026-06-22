@@ -50,8 +50,10 @@ type FileExtract struct {
 	Imports   []ImportDef
 	Usages    []UsageDef
 	Reexports []ReexportDef // language-neutral forwarding hops (barrels / re-exports)
-	// DefaultExport is the primary/default symbol name this module exposes when
-	// imported as a whole (e.g. JS `export default function Foo`). Empty if unknown.
+	// DefaultExport is the primary symbol this module exposes when imported as a
+	// whole (no member). Language drivers set it from their syntax; core only
+	// materializes it as a file→file::symbol Alias for CanonicalizeInResult.
+	// Empty if the driver did not identify a single primary export.
 	DefaultExport string
 }
 

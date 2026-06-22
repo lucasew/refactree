@@ -57,6 +57,20 @@ func TestCanonicalizeReference_DefaultExportSoleEntity(t *testing.T) {
 	}
 }
 
+func TestCanonicalizeReference_ExportAsDefaultAmongMany(t *testing.T) {
+	// Compiled ESM: export { createIntegration as default } with other helpers in-file.
+	root := t.TempDir()
+	p := filepath.Join(root, "mod.js")
+	body := "function helper() {}\nfunction createIntegration() {}\nexport {\n  createIntegration as default\n};\n"
+	if err := os.WriteFile(p, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got := CanonicalizeReference(root, ParseReference("path:./mod.js"))
+	if got.String() != "path:./mod.js::createIntegration" {
+		t.Fatalf("got %q want path:./mod.js::createIntegration", got.String())
+	}
+}
+
 func TestCanonicalizeReference_PesquisarrParaglide(t *testing.T) {
 	root := "/home/lucasew/WORKSPACE/OPENSOURCE-own/pesquisarr"
 	if _, err := os.Stat(root); err != nil {

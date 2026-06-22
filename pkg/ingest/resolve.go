@@ -124,6 +124,15 @@ func resolve(rootDir string, extracts []*FileExtract) *Result {
 				Target:    target,
 			})
 		}
+
+		// Primary/module export (driver-supplied DefaultExport): file scope → symbol
+		// in the same file so CanonicalizeInResult can refine module-only refs.
+		if fe.DefaultExport != "" {
+			res.Aliases = append(res.Aliases, Alias{
+				Reference: FileRef("./" + fe.Path),
+				Target:    SymbolRef("./"+fe.Path, fe.DefaultExport),
+			})
+		}
 	}
 
 	// Emit files and entities.

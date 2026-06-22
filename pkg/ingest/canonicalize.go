@@ -83,6 +83,12 @@ func CanonicalizeInResult(result *Result, ref Reference) Reference {
 		}
 
 		if ref.Symbol == "" {
+			// Module/file ref: prefer an alias hop to a same-scope symbol (drivers
+			// record primary/default export this way). Sole entity is fallback only.
+			if next, ok := followSameScopeSymbolAlias(result, ref); ok {
+				ref = next
+				continue
+			}
 			if next, ok := soleEntityInScope(result, ref); ok {
 				ref = next
 				continue
@@ -240,6 +246,26 @@ func soleEntityNamed(result *Result, symbol string) (Entity, bool) {
 		return matches[0], true
 	}
 	return Entity{}, false
+}
+
+// followSameScopeSymbolAlias finds an alias on this scope whose target is a
+// symbol still in the same path/provider (module primary export), not a re-export
+// to another module.
+func followSameScopeSymbolAlias(result *Result, ref Reference) (Reference, bool) {
+	for _, a := range result.Aliases {
+		ar := ParseReference(a.Reference)
+		if !sameScopePath(ref, ar) {
+			continue
+		}
+		tr := ParseReference(a.Target)
+		if tr.Symbol == "" {
+			continue
+		}
+		if sameScopePath(ref, tr) {
+			return tr, true
+		}
+	}
+	return Reference{}, false
 }
 
 // followAliasForward uses Alias targets as provider-agnostic hops (imports and

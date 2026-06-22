@@ -201,6 +201,12 @@ func extractJSExport(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 		return
 	}
 
+	// Local export list (JS-specific shapes, including compiled `export { x as default }`).
+	if clause := ingest.ChildByType(n, "export_clause"); clause != nil {
+		extractJSLocalExportClause(fe, clause, source)
+		return
+	}
+
 	isDefault := false
 	for j := uint32(0); j < n.ChildCount(); j++ {
 		if n.Child(j).Type() == "default" {
@@ -238,6 +244,30 @@ func extractJSExport(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 			if inner.IsNamed() {
 				walkJSUsages(fe, inner, source, "")
 			}
+		}
+	}
+}
+
+// extractJSLocalExportClause is JS-only: `export { a, b as c }` and the common
+// bundler form `export { createIntegration as default }` (sets DefaultExport for core).
+func extractJSLocalExportClause(fe *ingest.FileExtract, clause *grammar.Node, source []byte) {
+	for i := uint32(0); i < clause.ChildCount(); i++ {
+		spec := clause.Child(i)
+		if spec.Type() != "export_specifier" {
+			continue
+		}
+		nameNode := ingest.ChildByField(spec, "name")
+		if nameNode == nil {
+			continue
+		}
+		sourceName := ingest.NodeText(nameNode, source)
+		exportName := sourceName
+		if aliasNode := ingest.ChildByField(spec, "alias"); aliasNode != nil {
+			exportName = ingest.NodeText(aliasNode, source)
+		}
+		// ESM default export via alias — only this branch sets the neutral DefaultExport field.
+		if exportName == "default" {
+			fe.DefaultExport = sourceName
 		}
 	}
 }
