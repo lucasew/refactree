@@ -1,0 +1,27 @@
+[
+  {
+    "name": "python_explicit_file_reference",
+    "fixture": "python_file_module_refs",
+    "reference": "path:./pkg/helper.py::helper",
+    "expect_name": "helper",
+    "expect_doc_contains": "from helper file"
+  },
+  {
+    "name": "python_directory_reference_rejected",
+    "fixture": "python_file_module_refs",
+    "reference": "path:./pkg::helper",
+    "expect_error": true
+  },
+  {
+    "name": "javascript_explicit_file_reference",
+    "fixture": "javascript_file_module_refs",
+    "reference": "path:./pkg/helper.js::helper",
+    "expect_name": "helper"
+  },
+  {
+    "name": "javascript_directory_reference_rejected",
+    "fixture": "javascript_file_module_refs",
+    "reference": "path:./pkg::helper",
+    "expect_error": true
+  }
+]

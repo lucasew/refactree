@@ -1,0 +1,4 @@
+{
+  "source": "path:./lib/helpers.js::formatName",
+  "destination": "path:./utils/format.js::formatName"
+}

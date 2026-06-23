@@ -1,0 +1,32 @@
+{
+  "files": [
+    {
+      "language": "go",
+      "path": "helper.go"
+    },
+    {
+      "language": "go",
+      "path": "main.go"
+    }
+  ],
+  "entities": [
+    {
+      "reference": "path:./helper.go::helper",
+      "start_byte": 19,
+      "end_byte": 25
+    },
+    {
+      "reference": "path:./main.go::main",
+      "start_byte": 19,
+      "end_byte": 23
+    }
+  ],
+  "relations": [
+    {
+      "reference": "path:./main.go::main",
+      "start_byte": 29,
+      "end_byte": 35,
+      "target": "path:./helper.go::helper"
+    }
+  ]
+}

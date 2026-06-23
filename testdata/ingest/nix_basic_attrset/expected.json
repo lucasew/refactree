@@ -1,0 +1,28 @@
+{
+  "files": [
+    {
+      "language": "nix",
+      "path": "default.nix"
+    }
+  ],
+  "entities": [
+    {
+      "reference": "path:./default.nix::id",
+      "start_byte": 4,
+      "end_byte": 6
+    },
+    {
+      "reference": "path:./default.nix::main",
+      "start_byte": 17,
+      "end_byte": 21
+    }
+  ],
+  "relations": [
+    {
+      "reference": "path:./default.nix::main",
+      "start_byte": 24,
+      "end_byte": 26,
+      "target": "path:./default.nix::id"
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+{
+  "source": "path:./src.go::helper",
+  "destination": "path:./dst.go::helper"
+}

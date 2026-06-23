@@ -1,0 +1,31 @@
+# Warning: Do not unify this file with others. Keep tool definitions localized.
+[tools]
+go = "1.26.4"
+goreleaser = "2.16.0"
+svu = "3.3.0"
+
+[tasks.codegen]
+description = "No-op (refactree has no codegen step)"
+run = "echo 'codegen: nothing to do'"
+
+[tasks.format]
+description = "Format source"
+run = "gofmt -w ."
+
+[tasks.ci]
+description = "CI checks and tests"
+run = "go test ./..."
+
+[tasks.release]
+description = "Run a release"
+depends = ["ci"]
+usage = '''
+arg "<version>" help="New version" {
+  choices "next" "major" "minor" "patch"
+  default "next"
+}
+'''
+run = '''
+git tag $(svu ${usage_version})
+goreleaser release --clean
+'''

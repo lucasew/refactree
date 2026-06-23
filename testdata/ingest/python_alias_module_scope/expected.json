@@ -1,0 +1,46 @@
+{
+  "files": [
+    {
+      "language": "python",
+      "path": "app.py"
+    },
+    {
+      "language": "python",
+      "path": "helpers.py"
+    }
+  ],
+  "entities": [
+    {
+      "reference": "path:./app.py::main",
+      "start_byte": 26,
+      "end_byte": 30
+    },
+    {
+      "reference": "path:./helpers.py::helper",
+      "start_byte": 4,
+      "end_byte": 10
+    }
+  ],
+  "aliases": [
+    {
+      "reference": "path:./app.py",
+      "start_byte": 18,
+      "end_byte": 19,
+      "target": "path:./helpers.py"
+    }
+  ],
+  "relations": [
+    {
+      "reference": "path:./app.py::main",
+      "start_byte": 38,
+      "end_byte": 39,
+      "target": "path:./helpers.py"
+    },
+    {
+      "reference": "path:./app.py::main",
+      "start_byte": 40,
+      "end_byte": 46,
+      "target": "path:./helpers.py::helper"
+    }
+  ]
+}

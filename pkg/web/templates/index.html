@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  {{template "head" .}}
+  <title>{{.Title}}</title>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">refactree</a>
+    <span class="crumb">{{.RootDir}}</span>
+  </header>
+  <main class="shell">
+    <aside class="rail" aria-label="Files">
+      <h1 class="rail-title">Browse</h1>
+      {{if .Error}}
+      <p class="error">{{.Error}}</p>
+      {{else if not .Items}}
+      <p class="muted">No source files here.</p>
+      {{else}}
+      <ul class="file-list">
+        {{range .Items}}
+        <li>
+          <a href="{{.Href}}" class="file-link{{if .IsDir}} is-dir{{end}}">{{.Name}}</a>
+        </li>
+        {{end}}
+      </ul>
+      {{end}}
+    </aside>
+    <section class="panel empty-panel">
+      <p class="lede">Pick a local file, or open any full reference — e.g. <code>/code/go:fmt</code>, <code>/code/go:fmt::Println</code>, <code>/code/python:os.path::join</code>. A symbol reference opens the file where it is defined.</p>
+    </section>
+  </main>
+</body>
+</html>

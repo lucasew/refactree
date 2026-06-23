@@ -1,0 +1,2 @@
+def renamed():
+    pass

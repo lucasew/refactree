@@ -1,0 +1,4 @@
+{
+  "source": "path:./models.js::Config",
+  "destination": "path:./types.js::Config"
+}

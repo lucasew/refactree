@@ -1,0 +1,92 @@
+package ingest
+
+// Result is the output of ingesting a directory of source files.
+type Result struct {
+	Files     []File     `json:"files"`
+	Entities  []Entity   `json:"entities"`
+	Aliases   []Alias    `json:"aliases,omitempty"`
+	Relations []Relation `json:"relations"`
+}
+
+// File records a source file and its language.
+type File struct {
+	Language string `json:"language"`
+	Path     string `json:"path"`
+}
+
+// Entity is a named symbol definition (function, class, type).
+type Entity struct {
+	Reference string `json:"reference"`
+	StartByte uint32 `json:"start_byte"`
+	EndByte   uint32 `json:"end_byte"`
+}
+
+// Alias is an import binding that introduces a name in file scope.
+type Alias struct {
+	Reference string `json:"reference"`
+	StartByte uint32 `json:"start_byte"`
+	EndByte   uint32 `json:"end_byte"`
+	Target    string `json:"target"`
+}
+
+// Relation is a usage of a symbol at a specific source location.
+type Relation struct {
+	Reference      string `json:"reference"`
+	StartByte      uint32 `json:"start_byte"`
+	EndByte        uint32 `json:"end_byte"`
+	Target         string `json:"target"`
+	ViaImportAlias bool   `json:"via_import_alias,omitempty"`
+}
+
+// --- intermediate types produced by per-file extraction ---
+
+// FileExtract holds raw facts from parsing a single source file.
+type FileExtract struct {
+	Language string
+	Path     string
+	Package  string // Go package name; empty for Python/JS
+
+	Entities []EntityDef
+	Imports  []ImportDef
+	Usages   []UsageDef
+}
+
+// EntityDef is a symbol definition found during extraction.
+type EntityDef struct {
+	Name      string
+	StartByte uint32
+	EndByte   uint32
+	Exported  bool
+}
+
+// ImportDef is an import declaration found during extraction.
+type ImportDef struct {
+	LocalName  string // name bound in local scope
+	SourcePath string // raw import path ("fmt", "./helper.js", "helpers")
+	MemberName string // specific symbol imported; empty for module/package imports
+	StartByte  uint32 // byte span of the local binding name
+	EndByte    uint32
+
+	// Byte span of the token that names the referenced target symbol.
+	// For member imports this is the imported member token ("helper").
+	// For module/package imports this falls back to StartByte/EndByte.
+	TargetStartByte uint32
+	TargetEndByte   uint32
+
+	// True when import syntax used an explicit alias binding (`as`/import alias),
+	// even if alias text equals the imported symbol name.
+	HasAliasBinding bool
+}
+
+// UsageDef is a call-site identifier found during extraction.
+type UsageDef struct {
+	Scope     string // enclosing entity name; empty for file-level
+	Name      string // identifier text
+	StartByte uint32
+	EndByte   uint32
+
+	// For qualified access (obj.member):
+	Qualifier     string
+	QualStartByte uint32
+	QualEndByte   uint32
+}

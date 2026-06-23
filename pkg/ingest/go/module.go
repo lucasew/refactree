@@ -1,0 +1,517 @@
+package ingestgo
+
+import (
+	"os"
+	"path"
+	"path/filepath"
+	"sort"
+	"strings"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/lucasew/ccgo-tree-sitter/grammar"
+	_ "github.com/lucasew/ccgo-tree-sitter/grammar/go"
+	"github.com/lucasew/refactree/pkg/ingest"
+	refpkg "github.com/lucasew/refactree/pkg/reference"
+	goref "github.com/lucasew/refactree/pkg/reference/go"
+)
+
+func init() {
+	ingest.RegisterLanguageDriver("go", languageDriver{})
+	ingest.RegisterLanguageRules("go", ingest.LanguageRules{
+		Extensions:      []string{".go"},
+		DirectoryModule: true,
+	})
+	ingest.RegisterReferenceProvider("go", referenceProvider{})
+}
+
+type languageDriver struct{}
+
+func (languageDriver) Language() string { return "go" }
+
+func (languageDriver) Extract(root *grammar.Node, source []byte, relPath string) *ingest.FileExtract {
+	return extractGo(root, source, relPath)
+}
+
+func (languageDriver) ResolveImport(sourcePath string, ctx ingest.ImportResolveContext) string {
+	return goref.ResolveImport(sourcePath, ctx.KnownDirs)
+}
+
+func (languageDriver) AllowListSymbol(name string, opts ingest.SymbolListOptions) bool {
+	if opts.IncludeHidden {
+		return true
+	}
+	exportName := goSymbolExportName(name)
+	if exportName == "" {
+		return true
+	}
+	r, _ := utf8.DecodeRuneInString(exportName)
+	return unicode.IsUpper(r)
+}
+
+func (languageDriver) DestinationFileInDirectory(dstDirRel string, srcRef ingest.Reference) string {
+	srcPath := strings.TrimPrefix(srcRef.Path, "./")
+	return path.Join(dstDirRel, path.Base(srcPath))
+}
+
+type referenceProvider struct{}
+
+func (referenceProvider) Name() string { return "go" }
+
+func (referenceProvider) Resolve(spec string, ctx ingest.ImportResolveContext) (string, bool) {
+	return goref.ResolveImport(spec, ctx.KnownDirs), true
+}
+
+func (referenceProvider) ResolveScopeTarget(ref ingest.Reference, rootDir string) (ingest.ProviderScopeTarget, bool, error) {
+	if ref.Path == "" {
+		return ingest.ProviderScopeTarget{}, false, nil
+	}
+	dir, err := goref.ResolvePackageDir(ref.Path, rootDir)
+	if err != nil {
+		return ingest.ProviderScopeTarget{}, true, err
+	}
+	return ingest.ProviderScopeTarget{Dir: dir}, true, nil
+}
+
+func (referenceProvider) ResolveSymbolTarget(ref ingest.Reference, rootDir string) (ingest.ProviderSymbolTarget, bool, error) {
+	target, ok, err := goref.ResolveSymbolTarget(ref.Path, ref.Symbol, rootDir)
+	if !ok || err != nil {
+		return ingest.ProviderSymbolTarget{}, ok, err
+	}
+	return ingest.ProviderSymbolTarget{Dir: target.Dir, Symbol: target.Symbol}, true, nil
+}
+
+func (referenceProvider) ListScopeChildren(ref ingest.Reference, rootDir string, includeHidden bool) ([]refpkg.ScopeChild, bool, error) {
+	if ref.Path == "" {
+		return nil, false, nil
+	}
+	dir, err := goref.ResolvePackageDir(ref.Path, rootDir)
+	if err != nil {
+		return nil, true, err
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, true, err
+	}
+
+	children := make([]refpkg.ScopeChild, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !includeHidden && strings.HasPrefix(name, ".") {
+			continue
+		}
+		if !dirHasGoSources(filepath.Join(dir, name)) {
+			continue
+		}
+		children = append(children, refpkg.ScopeChild{
+			Ref:  ingest.Reference{Provider: "go", Path: joinProviderPath(ref.Path, name)},
+			Kind: refpkg.ScopeChildDir,
+		})
+	}
+	sort.Slice(children, func(i, j int) bool {
+		return children[i].Ref.Path < children[j].Ref.Path
+	})
+	return children, true, nil
+}
+
+func (referenceProvider) ListIngestRecursive(_ ingest.Reference, opts ingest.ListOptions) bool {
+	return opts.Recursive
+}
+
+func (referenceProvider) AllowListEntity(_ ingest.Reference, _ ingest.Reference, entPath, language string, _ ingest.ListOptions) bool {
+	if language != "go" {
+		return false
+	}
+	return !strings.HasSuffix(entPath, "_test.go")
+}
+
+func (referenceProvider) ListOutputReference(ref ingest.Reference, entRef ingest.Reference) ingest.Reference {
+	return ingest.Reference{Provider: ref.Provider, Path: ref.Path, Symbol: entRef.Symbol}
+}
+
+func (referenceProvider) DocIngestRecursive(ingest.Reference) bool { return false }
+
+func (referenceProvider) AllowDocEntity(_ ingest.Reference, _ ingest.Reference, entPath, language string) bool {
+	if language != "go" {
+		return false
+	}
+	return !strings.HasSuffix(entPath, "_test.go")
+}
+
+func joinProviderPath(base, name string) string {
+	base = strings.Trim(base, "/")
+	name = strings.Trim(name, "/")
+	if base == "" {
+		return name
+	}
+	if name == "" {
+		return base
+	}
+	return base + "/" + name
+}
+
+func dirHasGoSources(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasSuffix(name, ".go") && !strings.HasSuffix(name, "_test.go") {
+			return true
+		}
+	}
+	return false
+}
+
+func extractGo(root *grammar.Node, source []byte, path string) *ingest.FileExtract {
+	fe := &ingest.FileExtract{Language: "go", Path: path}
+
+	for i := uint32(0); i < root.ChildCount(); i++ {
+		child := root.Child(i)
+		switch child.Type() {
+		case "package_clause":
+			if id := ingest.ChildByType(child, "package_identifier"); id != nil {
+				fe.Package = ingest.NodeText(id, source)
+			}
+		case "function_declaration", "method_declaration":
+			extractGoFunc(fe, child, source)
+		case "type_declaration":
+			extractGoTypeDecl(fe, child, source)
+		case "var_declaration":
+			extractGoVarDecl(fe, child, source, "")
+		case "const_declaration":
+			extractGoConstDecl(fe, child, source, "")
+		case "import_declaration":
+			extractGoImportDecl(fe, child, source)
+		}
+	}
+
+	return fe
+}
+
+func extractGoTypeDecl(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
+	// A type_declaration may contain a single type_spec or multiple inside
+	// a parenthesised group: type ( A struct{} ; B int ).
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		if child.Type() == "type_spec" {
+			extractGoTypeSpec(fe, child, source)
+		}
+	}
+}
+
+func extractGoTypeSpec(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
+	nameNode := ingest.ChildByType(n, "type_identifier")
+	if nameNode == nil {
+		return
+	}
+	name := ingest.NodeText(nameNode, source)
+
+	fe.Entities = append(fe.Entities, ingest.EntityDef{
+		Name:      name,
+		StartByte: nameNode.StartByte(),
+		EndByte:   nameNode.EndByte(),
+		Exported:  languageDriver{}.AllowListSymbol(name, ingest.SymbolListOptions{}),
+	})
+}
+
+func extractGoFunc(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
+	nameNode := ingest.ChildByField(n, "name")
+	if nameNode == nil {
+		return
+	}
+	name := ingest.NodeText(nameNode, source)
+	if receiver := goMethodReceiverType(n, source); receiver != "" {
+		name = receiver + "." + name
+	}
+
+	fe.Entities = append(fe.Entities, ingest.EntityDef{
+		Name:      name,
+		StartByte: nameNode.StartByte(),
+		EndByte:   nameNode.EndByte(),
+		Exported:  languageDriver{}.AllowListSymbol(name, ingest.SymbolListOptions{}),
+	})
+
+	// Signature types (params/results/receiver) carry package.Type refs.
+	// Skip the function/method name itself so we don't emit a self-usage.
+	for _, field := range []string{"receiver", "parameters", "result", "type_parameters"} {
+		if part := ingest.ChildByField(n, field); part != nil {
+			walkGoUsages(fe, part, source, name)
+		}
+	}
+	if body := ingest.ChildByField(n, "body"); body != nil {
+		walkGoUsages(fe, body, source, name)
+	}
+}
+
+func extractGoVarDecl(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		switch child.Type() {
+		case "var_spec":
+			extractGoVarSpec(fe, child, source, scope)
+		case "var_spec_list":
+			for j := uint32(0); j < child.ChildCount(); j++ {
+				spec := child.Child(j)
+				if spec.Type() == "var_spec" {
+					extractGoVarSpec(fe, spec, source, scope)
+				}
+			}
+		}
+	}
+}
+
+func extractGoVarSpec(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
+	// Names may be a single identifier or a list.
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		switch child.Type() {
+		case "identifier":
+			// Only the name field(s), not identifiers inside the type/value.
+			// var_spec structure: name(s), type?, value?
+			// tree-sitter-go uses field "name" for the identifier.
+		}
+	}
+	if nameNode := ingest.ChildByField(n, "name"); nameNode != nil {
+		if nameNode.Type() == "identifier" {
+			appendGoNamedEntity(fe, nameNode, source)
+		} else {
+			// identifier_list
+			for i := uint32(0); i < nameNode.ChildCount(); i++ {
+				c := nameNode.Child(i)
+				if c.Type() == "identifier" {
+					appendGoNamedEntity(fe, c, source)
+				}
+			}
+		}
+	}
+	// Type and value sides are usages (cobra.Command, etc.).
+	if typ := ingest.ChildByField(n, "type"); typ != nil {
+		walkGoUsages(fe, typ, source, scope)
+	}
+	if val := ingest.ChildByField(n, "value"); val != nil {
+		walkGoUsages(fe, val, source, scope)
+	}
+}
+
+func extractGoConstDecl(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		switch child.Type() {
+		case "const_spec":
+			extractGoConstSpec(fe, child, source, scope)
+		case "const_spec_list":
+			for j := uint32(0); j < child.ChildCount(); j++ {
+				spec := child.Child(j)
+				if spec.Type() == "const_spec" {
+					extractGoConstSpec(fe, spec, source, scope)
+				}
+			}
+		}
+	}
+}
+
+func extractGoConstSpec(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
+	if nameNode := ingest.ChildByField(n, "name"); nameNode != nil {
+		if nameNode.Type() == "identifier" {
+			appendGoNamedEntity(fe, nameNode, source)
+		} else {
+			for i := uint32(0); i < nameNode.ChildCount(); i++ {
+				c := nameNode.Child(i)
+				if c.Type() == "identifier" {
+					appendGoNamedEntity(fe, c, source)
+				}
+			}
+		}
+	}
+	if typ := ingest.ChildByField(n, "type"); typ != nil {
+		walkGoUsages(fe, typ, source, scope)
+	}
+	if val := ingest.ChildByField(n, "value"); val != nil {
+		walkGoUsages(fe, val, source, scope)
+	}
+}
+
+func appendGoNamedEntity(fe *ingest.FileExtract, nameNode *grammar.Node, source []byte) {
+	name := ingest.NodeText(nameNode, source)
+	fe.Entities = append(fe.Entities, ingest.EntityDef{
+		Name:      name,
+		StartByte: nameNode.StartByte(),
+		EndByte:   nameNode.EndByte(),
+		Exported:  languageDriver{}.AllowListSymbol(name, ingest.SymbolListOptions{}),
+	})
+}
+
+func goMethodReceiverType(n *grammar.Node, source []byte) string {
+	if n == nil || n.Type() != "method_declaration" {
+		return ""
+	}
+	receiver := ingest.ChildByField(n, "receiver")
+	if receiver == nil {
+		return ""
+	}
+	for i := uint32(0); i < receiver.ChildCount(); i++ {
+		child := receiver.Child(i)
+		if child.Type() != "parameter_declaration" {
+			continue
+		}
+		typ := ingest.ChildByField(child, "type")
+		if typ == nil {
+			continue
+		}
+		return strings.ReplaceAll(ingest.NodeText(typ, source), " ", "")
+	}
+	return ""
+}
+
+func goSymbolExportName(name string) string {
+	if name == "" {
+		return ""
+	}
+	if i := strings.LastIndex(name, "."); i >= 0 && i+1 < len(name) {
+		return name[i+1:]
+	}
+	return name
+}
+
+func extractGoImportDecl(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		switch child.Type() {
+		case "import_spec":
+			extractGoImportSpec(fe, child, source)
+		case "import_spec_list":
+			for j := uint32(0); j < child.ChildCount(); j++ {
+				spec := child.Child(j)
+				if spec.Type() == "import_spec" {
+					extractGoImportSpec(fe, spec, source)
+				}
+			}
+		}
+	}
+}
+
+func extractGoImportSpec(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
+	pathNode := ingest.ChildByField(n, "path")
+	if pathNode == nil {
+		return
+	}
+	pathContent := ingest.ChildByType(pathNode, "interpreted_string_literal_content")
+	if pathContent == nil {
+		return
+	}
+	importPath := ingest.NodeText(pathContent, source)
+
+	aliasNode := ingest.ChildByField(n, "name")
+	localName := ""
+	startByte := uint32(0)
+	endByte := uint32(0)
+	if aliasNode != nil {
+		localName = ingest.NodeText(aliasNode, source)
+		startByte = aliasNode.StartByte()
+		endByte = aliasNode.EndByte()
+	} else {
+		localName = lastPathComponent(importPath)
+		startByte = pathContent.StartByte()
+		endByte = pathContent.EndByte()
+	}
+
+	fe.Imports = append(fe.Imports, ingest.ImportDef{
+		LocalName:  localName,
+		SourcePath: importPath,
+		StartByte:  startByte,
+		EndByte:    endByte,
+	})
+}
+
+func walkGoUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
+	if n == nil || n.IsNull() {
+		return
+	}
+
+	switch n.Type() {
+	case "selector_expression":
+		// pkg.Member, obj.Field, cobra.Command (type or value).
+		operand := ingest.ChildByField(n, "operand")
+		field := ingest.ChildByField(n, "field")
+		if operand != nil && field != nil && operand.Type() == "identifier" {
+			fe.Usages = append(fe.Usages, ingest.UsageDef{
+				Scope:         scope,
+				Name:          ingest.NodeText(field, source),
+				StartByte:     field.StartByte(),
+				EndByte:       field.EndByte(),
+				Qualifier:     ingest.NodeText(operand, source),
+				QualStartByte: operand.StartByte(),
+				QualEndByte:   operand.EndByte(),
+			})
+			// Do not recurse into operand/field — already recorded.
+			return
+		}
+		// Nested selectors (a.b.c): walk children normally.
+	case "qualified_type":
+		// Some grammars expose package.Type as qualified_type.
+		pkg := ingest.ChildByField(n, "package")
+		name := ingest.ChildByField(n, "name")
+		if pkg == nil {
+			pkg = ingest.ChildByType(n, "package_identifier")
+		}
+		if name == nil {
+			name = ingest.ChildByType(n, "type_identifier")
+		}
+		if pkg != nil && name != nil {
+			fe.Usages = append(fe.Usages, ingest.UsageDef{
+				Scope:         scope,
+				Name:          ingest.NodeText(name, source),
+				StartByte:     name.StartByte(),
+				EndByte:       name.EndByte(),
+				Qualifier:     ingest.NodeText(pkg, source),
+				QualStartByte: pkg.StartByte(),
+				QualEndByte:   pkg.EndByte(),
+			})
+			return
+		}
+	case "type_identifier":
+		// Bare type name (same-package or builtin) — treat as direct usage.
+		fe.Usages = append(fe.Usages, ingest.UsageDef{
+			Scope:     scope,
+			Name:      ingest.NodeText(n, source),
+			StartByte: n.StartByte(),
+			EndByte:   n.EndByte(),
+		})
+		return
+	case "identifier":
+		// Direct identifier uses outside of selectors (var refs, func refs).
+		// Definitions are walked separately; this may include some noise (range vars)
+		// which resolve only when they match an entity/import.
+		fe.Usages = append(fe.Usages, ingest.UsageDef{
+			Scope:     scope,
+			Name:      ingest.NodeText(n, source),
+			StartByte: n.StartByte(),
+			EndByte:   n.EndByte(),
+		})
+		return
+	case "interpreted_string_literal", "raw_string_literal", "rune_literal",
+		"int_literal", "float_literal", "imaginary_literal", "nil", "true", "false",
+		"comment", "package_identifier":
+		return
+	}
+
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		walkGoUsages(fe, n.Child(i), source, scope)
+	}
+}
+
+func lastPathComponent(s string) string {
+	if i := strings.LastIndex(s, "/"); i >= 0 {
+		return s[i+1:]
+	}
+	return s
+}

@@ -1,0 +1,46 @@
+{
+  "files": [
+    {
+      "language": "go",
+      "path": "helperpkg/helper.go"
+    },
+    {
+      "language": "go",
+      "path": "main.go"
+    }
+  ],
+  "entities": [
+    {
+      "reference": "path:./helperpkg/helper.go::Helper",
+      "start_byte": 24,
+      "end_byte": 30
+    },
+    {
+      "reference": "path:./main.go::main",
+      "start_byte": 49,
+      "end_byte": 53
+    }
+  ],
+  "aliases": [
+    {
+      "reference": "path:./main.go",
+      "start_byte": 21,
+      "end_byte": 22,
+      "target": "path:./helperpkg"
+    }
+  ],
+  "relations": [
+    {
+      "reference": "path:./main.go::main",
+      "start_byte": 59,
+      "end_byte": 60,
+      "target": "path:./helperpkg"
+    },
+    {
+      "reference": "path:./main.go::main",
+      "start_byte": 61,
+      "end_byte": 67,
+      "target": "path:./helperpkg/helper.go::Helper"
+    }
+  ]
+}

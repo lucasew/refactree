@@ -1,0 +1,72 @@
+[
+  {
+    "name": "python_explicit_file_reference",
+    "fixture": "python_file_module_refs",
+    "source": "path:./pkg/helper.py::helper",
+    "destination": "path:./pkg/helper.py::renamed",
+    "expect_edit_count_at_least": 2,
+    "apply_edits": true,
+    "contains": [
+      {
+        "file": "pkg/helper.py",
+        "text": "def renamed():"
+      },
+      {
+        "file": "pkg/helper.py",
+        "text": "return renamed()"
+      }
+    ],
+    "not_contains": [
+      {
+        "file": "pkg/helper.py",
+        "text": "def helper():"
+      },
+      {
+        "file": "pkg/helper.py",
+        "text": "return helper()"
+      }
+    ]
+  },
+  {
+    "name": "python_directory_reference_rejected",
+    "fixture": "python_file_module_refs",
+    "source": "path:./pkg::helper",
+    "destination": "path:./pkg::renamed",
+    "expect_error": true
+  },
+  {
+    "name": "javascript_explicit_file_reference",
+    "fixture": "javascript_file_module_refs",
+    "source": "path:./pkg/helper.js::helper",
+    "destination": "path:./pkg/helper.js::renamed",
+    "expect_edit_count_at_least": 2,
+    "apply_edits": true,
+    "contains": [
+      {
+        "file": "pkg/helper.js",
+        "text": "function renamed()"
+      },
+      {
+        "file": "pkg/helper.js",
+        "text": "return renamed();"
+      }
+    ],
+    "not_contains": [
+      {
+        "file": "pkg/helper.js",
+        "text": "function helper()"
+      },
+      {
+        "file": "pkg/helper.js",
+        "text": "return helper();"
+      }
+    ]
+  },
+  {
+    "name": "javascript_directory_reference_rejected",
+    "fixture": "javascript_file_module_refs",
+    "source": "path:./pkg::helper",
+    "destination": "path:./pkg::renamed",
+    "expect_error": true
+  }
+]
