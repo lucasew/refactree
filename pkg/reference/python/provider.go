@@ -13,12 +13,15 @@ import (
 	"time"
 )
 
+// ModuleTarget represents a resolved python module or package on the filesystem.
+// It tracks both the containing directory and the specific file for symbol/doc filtering.
 type ModuleTarget struct {
 	Dir       string
 	File      string
 	IsPackage bool
 }
 
+// SymbolTarget represents a resolved python symbol targeting an ingest directory.
 type SymbolTarget struct {
 	Dir    string
 	Symbol string
@@ -68,10 +71,10 @@ print(json.dumps({
 }))
 `
 
-// ResolveModuleTarget resolves a python:<module> spec into a concrete ingest
-// scope directory plus the module file name used for symbol/doc filtering.
-// workDir is the project root (serve/browse --dir); when set, resolution uses
-// that tree's .venv/bin/python if present so site-packages match the project.
+// ResolveModuleTarget resolves a "python:<module>" string into a physical path target.
+// It executes a python subprocess relying on `importlib` to accurately pinpoint
+// the module on disk. When workDir is provided, it attempts to use a project-local
+// virtual environment (e.g., .venv) to capture the correct site-packages.
 func ResolveModuleTarget(spec, workDir string) (ModuleTarget, error) {
 	module := normalizeModuleSpec(spec)
 	if module == "" {
@@ -92,7 +95,8 @@ func ResolveModuleTarget(spec, workDir string) (ModuleTarget, error) {
 	return target, nil
 }
 
-// ResolveSymbolTarget resolves python:<module>::<symbol> to an ingest target.
+// ResolveSymbolTarget delegates to ResolveModuleTarget and wraps the result
+// to include the target symbol, verifying the module exists.
 func ResolveSymbolTarget(spec, symbol, workDir string) (SymbolTarget, bool, error) {
 	if symbol == "" {
 		return SymbolTarget{}, false, nil
@@ -104,8 +108,9 @@ func ResolveSymbolTarget(spec, symbol, workDir string) (SymbolTarget, bool, erro
 	return SymbolTarget{Dir: target.Dir, Symbol: symbol}, true, nil
 }
 
-// MatchesEntityPath reports whether entPath (relative to target.Dir) belongs to
-// the resolved module target.
+// MatchesEntityPath checks if a specific file (entPath) logically belongs to the
+// resolved ModuleTarget, ignoring sibling files in the same directory unless
+// the target explicitly represents the whole package.
 func MatchesEntityPath(target ModuleTarget, entPath string) bool {
 	rel := filepath.ToSlash(entPath)
 	if target.File == "" {

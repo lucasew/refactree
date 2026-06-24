@@ -7,18 +7,23 @@ import (
 	"strings"
 )
 
+// Target represents a resolved nix path, tracking whether it points
+// to a specific nix file or an entire directory of expressions.
 type Target struct {
 	Dir   string
 	File  string
 	IsDir bool
 }
 
+// SymbolTarget represents a resolved nix symbol targeting a specific directory.
 type SymbolTarget struct {
 	Dir    string
 	Symbol string
 }
 
-// ResolveTarget resolves a nix:<spec> path through NIX_PATH.
+// ResolveTarget resolves a "nix:<spec>" reference by searching the environment's NIX_PATH.
+// It maps the abstract nix path (e.g. "nixpkgs/lib") to an absolute filesystem target,
+// explicitly handling the directory-level "default.nix" fallback pattern.
 func ResolveTarget(spec string) (Target, error) {
 	spec = normalizeSpec(spec)
 	if spec == "" {
@@ -51,7 +56,8 @@ func ResolveTarget(spec string) (Target, error) {
 	}, nil
 }
 
-// ResolveSymbolTarget resolves nix:<spec>::<symbol> to an ingest target.
+// ResolveSymbolTarget delegates to ResolveTarget, attaching the target symbol
+// to the output after verifying the root path resolves successfully.
 func ResolveSymbolTarget(spec, symbol string) (SymbolTarget, bool, error) {
 	if strings.TrimSpace(symbol) == "" {
 		return SymbolTarget{}, false, nil
@@ -68,7 +74,9 @@ func ResolveSymbolTarget(spec, symbol string) (SymbolTarget, bool, error) {
 	}, true, nil
 }
 
-// MatchesEntityPath reports whether entPath belongs to the resolved target.
+// MatchesEntityPath checks if a specific file (entPath) logically belongs to the
+// resolved nix Target. It allows filtering out unrelated siblings when the target
+// resolves to a single file inside a shared directory.
 func MatchesEntityPath(target Target, entPath string) bool {
 	if target.File == "" {
 		return true

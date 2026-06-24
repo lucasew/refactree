@@ -2,14 +2,18 @@ package reference
 
 import "strings"
 
-// Reference is a parsed provider:path::symbol string.
+// Reference represents a fully qualified, parsed target entity within the system.
+// It is the standard unified format used to identify files, packages, or specific
+// symbols across all supported languages and providers (e.g., go, python, nix).
 type Reference struct {
 	Provider string // e.g. "path", "go", "python", "node"
 	Path     string // e.g. "./main.go", "fmt"
 	Symbol   string // e.g. "main", "Println"; empty for file/package refs
 }
 
-// Parse splits a "provider:path::symbol" string.
+// Parse splits a "provider:path::symbol" string into a structural Reference.
+// If the provider prefix is missing but the string looks like a relative file path,
+// it automatically defaults to the "path" provider.
 func Parse(s string) Reference {
 	var r Reference
 
@@ -41,7 +45,8 @@ func Parse(s string) Reference {
 	return r
 }
 
-// String formats the reference back to its canonical form.
+// String formats the reference back to its canonical string representation,
+// ensuring the provider and double-colon symbol separators are correctly placed.
 func (r Reference) String() string {
 	base := r.Path
 	if r.Provider != "" {
@@ -53,18 +58,21 @@ func (r Reference) String() string {
 	return base
 }
 
-// FileRef builds a path-provider file reference: path:./file
+// FileRef is a convenience helper that builds a "path" provider file reference.
+// It generates a string in the format "path:<path>".
 func FileRef(path string) string {
 	return "path:" + path
 }
 
-// SymbolRef builds a path-provider symbol reference: path:./file::symbol
+// SymbolRef is a convenience helper that builds a "path" provider symbol reference.
+// It generates a string in the format "path:<path>::<symbol>".
 func SymbolRef(path, symbol string) string {
 	return "path:" + path + "::" + symbol
 }
 
-// NormalizePathReference normalizes path-provider references so relative paths
-// are consistently prefixed.
+// NormalizePathReference normalizes local "path" provider references, ensuring
+// that relative paths are consistently prefixed with "./" for predictable matching.
+// Non-path providers are returned completely unmodified.
 func NormalizePathReference(ref Reference) Reference {
 	if strings.ToLower(ref.Provider) != "path" {
 		return ref

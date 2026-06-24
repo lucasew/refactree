@@ -13,13 +13,16 @@ import (
 	"time"
 )
 
-// SymbolTarget represents a provider-backed symbol location.
+// SymbolTarget represents the physical directory mapped to a Go package,
+// used for symbol ingestion and documentation generation.
 type SymbolTarget struct {
 	Dir    string
 	Symbol string
 }
 
-// ResolveImport resolves a Go import path into a canonical reference string.
+// ResolveImport translates a Go-native import statement (e.g. "fmt" or "github.com/org/repo")
+// into a standardized reference string (e.g. "go:fmt"). If the target corresponds
+// to a known local directory, it resolves as a local "path" reference instead.
 func ResolveImport(spec string, knownDirs map[string]bool) string {
 	last := lastPathComponent(spec)
 	if knownDirs[last] {
@@ -28,8 +31,9 @@ func ResolveImport(spec string, knownDirs map[string]bool) string {
 	return "go:" + spec
 }
 
-// ResolveSymbolTarget resolves a go:<pkg>::<symbol> reference to a concrete
-// package directory. workDir is the module context (project root) for `go list`.
+// ResolveSymbolTarget resolves a "go:<pkg>::<symbol>" reference down to a concrete
+// physical directory on disk. The workDir parameter provides the module context
+// (e.g. the project root) for the underlying `go list` toolchain invocation.
 func ResolveSymbolTarget(pkgPath, symbol, workDir string) (SymbolTarget, bool, error) {
 	if symbol == "" {
 		return SymbolTarget{}, false, nil
@@ -45,9 +49,10 @@ func ResolveSymbolTarget(pkgPath, symbol, workDir string) (SymbolTarget, bool, e
 	}, true, nil
 }
 
-// ResolvePackageDir resolves a Go import path to a concrete package directory.
-// workDir is the directory used as cwd for `go list` so local modules in the
-// served/browsed project resolve (e.g. go:workspaced from --dir workspaced).
+// ResolvePackageDir translates a Go package path into its absolute filesystem location.
+// It prioritizes the local module context (workDir) to ensure workspace or replaced
+// dependencies are correctly identified via `go list`, falling back to the standard
+// library or the global module cache.
 func ResolvePackageDir(pkgPath, workDir string) (string, error) {
 	pkgPath = strings.Trim(pkgPath, "/")
 	if pkgPath == "" {
