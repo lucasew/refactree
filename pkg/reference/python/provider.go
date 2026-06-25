@@ -26,6 +26,43 @@ type SymbolTarget struct {
 
 var moduleTargetCache sync.Map
 
+// defaultProjectRoot is the serve/browse --dir (or last non-empty resolver root).
+// Used when a call site passes workDir "" so we still resolve with the project venv,
+// not the process cwd / system python.
+var (
+	defaultProjectRootMu sync.RWMutex
+	defaultProjectRoot   string
+)
+
+// SetDefaultProjectRoot records the project tree used for python resolution when
+// workDir is omitted (list/doc filters, etc.). Safe to call from NewResolver/serve.
+func SetDefaultProjectRoot(root string) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return
+	}
+	if abs, err := filepath.Abs(root); err == nil {
+		root = abs
+	}
+	defaultProjectRootMu.Lock()
+	defaultProjectRoot = root
+	defaultProjectRootMu.Unlock()
+}
+
+func effectiveWorkDir(workDir string) string {
+	workDir = strings.TrimSpace(workDir)
+	if workDir != "" {
+		if abs, err := filepath.Abs(workDir); err == nil {
+			return abs
+		}
+		return workDir
+	}
+	defaultProjectRootMu.RLock()
+	root := defaultProjectRoot
+	defaultProjectRootMu.RUnlock()
+	return root
+}
+
 type moduleResolveResult struct {
 	Origin     string   `json:"origin"`
 	Locations  []string `json:"locations"`
@@ -70,13 +107,16 @@ print(json.dumps({
 
 // ResolveModuleTarget resolves a python:<module> spec into a concrete ingest
 // scope directory plus the module file name used for symbol/doc filtering.
-// workDir is the project root (serve/browse --dir); when set, resolution uses
-// that tree's .venv/bin/python if present so site-packages match the project.
+// workDir is the project root (serve/browse --dir); empty falls back to
+// SetDefaultProjectRoot (not process cwd). Resolution prefers that tree's
+// .venv/bin/python so site-packages match the project.
 func ResolveModuleTarget(spec, workDir string) (ModuleTarget, error) {
 	module := normalizeModuleSpec(spec)
 	if module == "" {
 		return ModuleTarget{}, fmt.Errorf("python provider module path is empty")
 	}
+
+	workDir = effectiveWorkDir(workDir)
 
 	cacheKey := workDir + "\x00" + module
 	if cached, ok := moduleTargetCache.Load(cacheKey); ok {
@@ -201,26 +241,60 @@ func resolveModuleTarget(module, workDir string) (ModuleTarget, error) {
 	return ModuleTarget{Dir: filepath.Dir(origin), File: filepath.Base(origin), IsPackage: false}, nil
 }
 
+// pythonCommand returns an interpreter to run for module resolution.
+// Prefers project virtualenv python under workDir (walk parents); PATH is last resort.
+// Does not consult process cwd when workDir is set — serve --dir is authoritative.
 func pythonCommand(workDir string) (string, error) {
-	if workDir != "" {
-		for _, rel := range []string{
-			filepath.Join(".venv", "bin", "python"),
-			filepath.Join(".venv", "bin", "python3"),
-			filepath.Join("venv", "bin", "python"),
-			filepath.Join("venv", "bin", "python3"),
-		} {
-			candidate := filepath.Join(workDir, rel)
-			if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
-				return candidate, nil
-			}
-		}
+	workDir = effectiveWorkDir(workDir)
+	if py, ok := findVenvPython(workDir); ok {
+		return py, nil
 	}
 	for _, name := range []string{"python3", "python"} {
 		if path, err := exec.LookPath(name); err == nil {
 			return path, nil
 		}
 	}
-	return "", fmt.Errorf("python executable not found (tried project .venv and python3/python on PATH)")
+	return "", fmt.Errorf("python executable not found (tried .venv/venv under project root and python3/python on PATH)")
+}
+
+// findVenvPython looks for .venv|venv/bin/python{,3} starting at projectRoot,
+// walking parents (monorepo layouts). Empty projectRoot returns false (no cwd fallback).
+func findVenvPython(projectRoot string) (string, bool) {
+	if projectRoot == "" {
+		return "", false
+	}
+	if abs, err := filepath.Abs(projectRoot); err == nil {
+		projectRoot = abs
+	}
+	for dir := projectRoot; ; {
+		for _, rel := range []string{
+			filepath.Join(".venv", "bin", "python"),
+			filepath.Join(".venv", "bin", "python3"),
+			filepath.Join("venv", "bin", "python"),
+			filepath.Join("venv", "bin", "python3"),
+		} {
+			candidate := filepath.Join(dir, rel)
+			if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
+				return candidate, true
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return "", false
+}
+
+// venvRootForPython returns the venv directory (…/.venv) given …/.venv/bin/python, or "".
+func venvRootForPython(pyPath string) string {
+	// …/bin/python → …/
+	bin := filepath.Dir(pyPath)
+	if filepath.Base(bin) != "bin" {
+		return ""
+	}
+	return filepath.Dir(bin)
 }
 
 func pythonCommandEnv(workDir string) []string {
@@ -232,21 +306,20 @@ func pythonCommandEnv(workDir string) []string {
 	_ = os.MkdirAll(xdgCache, 0755)
 	env = append(env, "UV_CACHE_DIR="+uvCache)
 	env = append(env, "XDG_CACHE_HOME="+xdgCache)
-	// Prefer project-local imports when resolving inside workDir.
-	if workDir != "" {
-		pyPath := workDir
+
+	proj := effectiveWorkDir(workDir)
+	if proj != "" {
+		pyPath := proj
 		if existing := os.Getenv("PYTHONPATH"); existing != "" {
-			pyPath = workDir + string(os.PathListSeparator) + existing
+			pyPath = proj + string(os.PathListSeparator) + existing
 		}
 		env = append(env, "PYTHONPATH="+pyPath)
-		// Ensure venv site-packages are used when we invoke venv python (automatic);
-		// VIRTUAL_ENV helps some tools that inspect it.
-		for _, name := range []string{".venv", "venv"} {
-			v := filepath.Join(workDir, name)
-			if st, err := os.Stat(v); err == nil && st.IsDir() {
-				env = append(env, "VIRTUAL_ENV="+v)
-				break
-			}
+	}
+
+	// VIRTUAL_ENV from the venv we run; site-packages come from that python binary.
+	if py, ok := findVenvPython(proj); ok {
+		if v := venvRootForPython(py); v != "" {
+			env = append(env, "VIRTUAL_ENV="+v)
 		}
 	}
 	return env

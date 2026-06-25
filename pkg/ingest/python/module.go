@@ -464,7 +464,14 @@ func resolvePythonImportSpec(spec string, ctx ingest.ImportResolveContext) (stri
 		}
 		return "", false
 	}
-	return resolvePythonAbsoluteImport(spec, ctx.KnownFiles)
+	if ref, ok := resolvePythonAbsoluteImport(spec, ctx.KnownFiles); ok {
+		return ref, true
+	}
+	// Outside the ingest slice: resolve via project .venv / importlib (ctx.RootDir = serve --dir).
+	if _, err := pythonref.ResolveModuleTarget(spec, ctx.RootDir); err == nil {
+		return "python:" + spec, true
+	}
+	return "", false
 }
 
 func resolvePythonAbsoluteImport(spec string, knownFiles map[string]bool) (string, bool) {
