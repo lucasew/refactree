@@ -63,6 +63,8 @@ github.com/lucasew/ccgo-tree-sitter v0.0.0-20260222180738-87d6c0f0e271 h1:pPC5nf
 github.com/lucasew/ccgo-tree-sitter v0.0.0-20260222180738-87d6c0f0e271/go.mod h1:PX70XHG75OmMlC2eRuKdPFKgajSH6ge/fcLETsAWNEA=
 github.com/lucasew/ccgo-tree-sitter v0.0.0-20260601225045-2c2126bd0d19 h1:Khdsd9ExmF8UvSy6kkaDA/7/VrVDnhU92WfCjeVArOU=
 github.com/lucasew/ccgo-tree-sitter v0.0.0-20260601225045-2c2126bd0d19/go.mod h1:PX70XHG75OmMlC2eRuKdPFKgajSH6ge/fcLETsAWNEA=
+github.com/lucasew/ccgo-tree-sitter v0.0.0-20260626005224-7dc673d0041b h1:xbAucKIaPNN5QF0eXT+mGEzB4CijTf/X3633g+vKHqc=
+github.com/lucasew/ccgo-tree-sitter v0.0.0-20260626005224-7dc673d0041b/go.mod h1:PX70XHG75OmMlC2eRuKdPFKgajSH6ge/fcLETsAWNEA=
 github.com/mattn/go-isatty v0.0.20 h1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWEY=
 github.com/mattn/go-isatty v0.0.20/go.mod h1:W+V8PltTTMOvKvAeJH7IuucS94S2C6jfK/D7dTCTo3Y=
 github.com/mattn/go-localereader v0.0.1 h1:ygSAOl7ZXTx4RdPYinUpg6W99U8jWvWi9Ye2JC/oIi4=
