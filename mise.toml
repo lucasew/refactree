@@ -10,7 +10,7 @@ run = "echo 'codegen: nothing to do'"
 
 [tasks.format]
 description = "Format source"
-run = "gofmt -w ."
+run = "find . -name '*.go' -not -path './testdata/*' -exec gofmt -w {} +"
 
 [tasks.ci]
 description = "CI checks and tests"
