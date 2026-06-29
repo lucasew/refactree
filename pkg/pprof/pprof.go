@@ -28,8 +28,8 @@ type Profiler struct {
 	// Dir is the output directory. Empty means profiling is disabled.
 	Dir string
 
-	cpuFile *os.File
-	active  bool
+	cpuFile  *os.File
+	active   bool
 	stopOnce sync.Once
 	sigStop  func()
 }
