@@ -5,7 +5,7 @@ go 1.26.3
 require (
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
-	github.com/charmbracelet/glamour v1.0.0
+	github.com/charmbracelet/glamour/v2 v2.0.1
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
 	github.com/lucasew/ccgo-tree-sitter v0.0.0-20260626005224-7dc673d0041b
 	github.com/spf13/cobra v1.10.2
