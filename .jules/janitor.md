@@ -1,0 +1,1 @@
+- 2026-06-29: The Go standard library `errors` package should not be shadowed by local `errors` packages to avoid import conflicts; prefer `errutil` or similar for centralized error handling.

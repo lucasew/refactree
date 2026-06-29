@@ -92,10 +92,11 @@ try:
     module_file = getattr(mod, "__file__", None)
     try:
         source_file = inspect.getsourcefile(mod)
-    except Exception:
+    except Exception as e:
+        print(f"Failed to get source file: {e}", file=sys.stderr)
         source_file = None
-except Exception:
-    pass
+except Exception as e:
+    print(f"Failed to import module: {e}", file=sys.stderr)
 
 print(json.dumps({
     "origin": origin,
