@@ -7,7 +7,7 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/glamour v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
-	github.com/lucasew/ccgo-tree-sitter v0.0.0-20260626005224-7dc673d0041b
+	github.com/lucasew/ccgo-tree-sitter v0.0.0-20260626011913-a0a55798c96e
 	github.com/spf13/cobra v1.10.2
 )
 
