@@ -9,3 +9,7 @@
 
 # Requirements
 - Language specific logic on language specific package. Use interfaces to standardize behavior.
+
+# Suggestions
+## For Janitor
+Focus on the `rft-fuzzy-*` skills and in keeping things sane.
