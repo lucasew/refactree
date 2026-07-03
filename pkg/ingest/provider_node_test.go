@@ -175,6 +175,38 @@ func TestNodeProvider_ResolveModuleField(t *testing.T) {
 	}
 }
 
+func TestNodeProvider_ResolveExportsPattern(t *testing.T) {
+	root := t.TempDir()
+	pkgDir := filepath.Join(root, "node_modules", "pkg")
+	configsDir := filepath.Join(pkgDir, "configs")
+	if err := os.MkdirAll(configsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configsDir, "base.json"), []byte("{}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "package.json"), []byte(`{
+		"exports": { "./tsconfigs/*.json": "./configs/*.json" }
+	}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	provider, ok := referenceProviderForName("node")
+	if !ok {
+		t.Fatal("expected node provider to be registered")
+	}
+	ref, ok := provider.Resolve("pkg/tsconfigs/base.json", ImportResolveContext{
+		RootDir:      root,
+		ImporterPath: "src/main.js",
+	})
+	if !ok {
+		t.Fatal("expected provider to resolve patterned export")
+	}
+	if ref != "path:./node_modules/pkg/configs/base.json" {
+		t.Fatalf("unexpected reference: %q", ref)
+	}
+}
+
 func TestNodeProvider_ResolveFromNODE_PATH(t *testing.T) {
 	root := t.TempDir()
 	nodePath := t.TempDir()

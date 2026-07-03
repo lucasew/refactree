@@ -455,7 +455,6 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 			}
 		}
 
-
 	}
 
 	return edits, nil
@@ -635,5 +634,3 @@ func CommonPathPrefix(a, b string) string {
 	}
 	return strings.Join(p, "/") + "/"
 }
-
-

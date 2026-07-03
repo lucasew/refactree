@@ -732,9 +732,7 @@ func resolveExportsEntry(exportsRaw json.RawMessage, subpath string) (string, bo
 		if !ok {
 			continue
 		}
-		if strings.Contains(target, "*") {
-			target = strings.Replace(target, "*", matched, 1)
-		}
+		target = strings.Replace(target, "*", matched, 1)
 		return target, true
 	}
 
@@ -790,8 +788,9 @@ func matchExportPattern(pattern, request string) (string, bool) {
 		return "", false
 	}
 	mid := request[len(prefix) : len(request)-len(suffix)]
+	// Empty capture is only valid when the pattern explicitly allows it (prefix ends with "/").
 	if mid == "" && !strings.HasSuffix(prefix, "/") {
-		// Empty capture is only valid when the pattern explicitly allows it.
+		return "", false
 	}
 	return mid, true
 }
