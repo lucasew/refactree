@@ -17,6 +17,7 @@ func TestLanguageForFile(t *testing.T) {
 		{file: "main.js", lang: "javascript", ok: true},
 		{file: "main.mjs", lang: "javascript", ok: true},
 		{file: "main.cjs", lang: "javascript", ok: true},
+		{file: "Main.java", lang: "java", ok: true},
 		{file: "README.md", lang: "", ok: false},
 	}
 
@@ -34,6 +35,9 @@ func TestLanguageForFile(t *testing.T) {
 func TestLanguageUsesDirectoryModule(t *testing.T) {
 	if !ingest.LanguageUsesDirectoryModule("go") {
 		t.Fatal("expected go to use directory module semantics")
+	}
+	if !ingest.LanguageUsesDirectoryModule("java") {
+		t.Fatal("expected java to use directory module semantics")
 	}
 	if ingest.LanguageUsesDirectoryModule("python") {
 		t.Fatal("expected python to use file module semantics")

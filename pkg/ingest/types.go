@@ -19,6 +19,9 @@ type Entity struct {
 	Reference string `json:"reference"`
 	StartByte uint32 `json:"start_byte"`
 	EndByte   uint32 `json:"end_byte"`
+	// Exported is omitted from fixture JSON; used by listing when a language
+	// driver opts into explicit export flags (see UseExportedFlag).
+	Exported bool `json:"-"`
 }
 
 // Alias is an import binding that introduces a name in file scope.

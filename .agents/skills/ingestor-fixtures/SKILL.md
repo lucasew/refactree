@@ -43,7 +43,7 @@ testdata/ingest/go_basic_cross_file/
 
 ## Naming Rules
 
-- Start each fixture name with the language name: `go_...`, `python_...`, `javascript_...`
+- Start each fixture name with the language name: `go_...`, `python_...`, `javascript_...`, `java_...`
 - Prefer short names that describe one behavior
 - Prefer minimal multi-file fixtures that isolate one resolution case
 

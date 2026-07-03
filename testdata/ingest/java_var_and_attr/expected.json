@@ -1,0 +1,39 @@
+{
+  "files": [
+    {
+      "language": "java",
+      "path": "Main.java"
+    }
+  ],
+  "entities": [
+    {
+      "reference": "path:./Main.java::Main",
+      "start_byte": 28,
+      "end_byte": 32
+    },
+    {
+      "reference": "path:./Main.java::Main.NAME",
+      "start_byte": 66,
+      "end_byte": 70
+    },
+    {
+      "reference": "path:./Main.java::Main.main",
+      "start_byte": 102,
+      "end_byte": 106
+    }
+  ],
+  "relations": [
+    {
+      "reference": "path:./Main.java::Main.main",
+      "start_byte": 147,
+      "end_byte": 151,
+      "target": "path:./Main.java::Main"
+    },
+    {
+      "reference": "path:./Main.java::Main.main",
+      "start_byte": 152,
+      "end_byte": 156,
+      "target": "path:./Main.java::Main.NAME"
+    }
+  ]
+}

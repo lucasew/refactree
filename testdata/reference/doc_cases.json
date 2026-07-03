@@ -23,5 +23,19 @@
     "fixture": "javascript_file_module_refs",
     "reference": "path:./pkg::helper",
     "expect_error": true
+  },
+  {
+    "name": "java_explicit_file_reference",
+    "fixture": "java_file_module_refs",
+    "reference": "path:./pkg/Helper.java::Helper",
+    "expect_name": "Helper",
+    "expect_doc_contains": "from helper file"
+  },
+  {
+    "name": "java_method_reference",
+    "fixture": "java_file_module_refs",
+    "reference": "path:./pkg/Helper.java::Helper.help",
+    "expect_name": "Helper.help",
+    "expect_doc_contains": "does help"
   }
 ]

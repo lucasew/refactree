@@ -237,8 +237,10 @@ func TestMarkdownFenceLanguageForRef(t *testing.T) {
 	}{
 		{ref: "path:./main.go::main", want: "go"},
 		{ref: "path:/tmp/main.py::main", want: "python"},
+		{ref: "path:./Main.java::Main", want: "java"},
 		{ref: "python:os::makedirs", want: "python"},
 		{ref: "go:fmt::Printf", want: "go"},
+		{ref: "java:java.util.List::size", want: "java"},
 		{ref: "node:react::createElement", want: "javascript"},
 	}
 

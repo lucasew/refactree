@@ -1411,7 +1411,7 @@ func markdownFenceLanguageForRef(ref string) string {
 	switch parsed.Provider {
 	case "node":
 		return "javascript"
-	case "go", "python", "javascript":
+	case "go", "python", "javascript", "java":
 		return parsed.Provider
 	default:
 		return ""

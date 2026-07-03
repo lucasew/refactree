@@ -1,0 +1,56 @@
+{
+  "files": [
+    {
+      "language": "java",
+      "path": "app/Main.java"
+    },
+    {
+      "language": "java",
+      "path": "lib/Helper.java"
+    }
+  ],
+  "entities": [
+    {
+      "reference": "path:./app/Main.java::Main",
+      "start_byte": 47,
+      "end_byte": 51
+    },
+    {
+      "reference": "path:./app/Main.java::Main.main",
+      "start_byte": 77,
+      "end_byte": 81
+    },
+    {
+      "reference": "path:./lib/Helper.java::Helper",
+      "start_byte": 27,
+      "end_byte": 33
+    },
+    {
+      "reference": "path:./lib/Helper.java::Helper.help",
+      "start_byte": 59,
+      "end_byte": 63
+    }
+  ],
+  "aliases": [
+    {
+      "reference": "path:./app/Main.java",
+      "start_byte": 25,
+      "end_byte": 31,
+      "target": "path:./lib/Helper.java::Helper"
+    }
+  ],
+  "relations": [
+    {
+      "reference": "path:./app/Main.java::Main.main",
+      "start_byte": 107,
+      "end_byte": 113,
+      "target": "path:./lib/Helper.java"
+    },
+    {
+      "reference": "path:./app/Main.java::Main.main",
+      "start_byte": 114,
+      "end_byte": 118,
+      "target": "path:./lib/Helper.java::Helper.help"
+    }
+  ]
+}

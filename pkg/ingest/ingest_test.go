@@ -10,8 +10,15 @@ import (
 	"github.com/lucasew/refactree/pkg/ingest"
 
 	_ "github.com/lucasew/ccgo-tree-sitter/grammar/go"
+	_ "github.com/lucasew/ccgo-tree-sitter/grammar/java"
 	_ "github.com/lucasew/ccgo-tree-sitter/grammar/javascript"
 	_ "github.com/lucasew/ccgo-tree-sitter/grammar/python"
+
+	_ "github.com/lucasew/refactree/pkg/ingest/go"
+	_ "github.com/lucasew/refactree/pkg/ingest/java"
+	_ "github.com/lucasew/refactree/pkg/ingest/js"
+	_ "github.com/lucasew/refactree/pkg/ingest/nix"
+	_ "github.com/lucasew/refactree/pkg/ingest/python"
 )
 
 func TestIngest(t *testing.T) {

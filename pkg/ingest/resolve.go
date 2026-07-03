@@ -146,6 +146,7 @@ func resolve(rootDir string, extracts []*FileExtract) *Result {
 				Reference: SymbolRef("./"+fe.Path, ent.Name),
 				StartByte: ent.StartByte,
 				EndByte:   ent.EndByte,
+				Exported:  ent.Exported,
 			})
 		}
 	}
@@ -174,9 +175,11 @@ func resolve(rootDir string, extracts []*FileExtract) *Result {
 // Qualifier may be an import alias (cobra) or a same-package/local entity (Registry).
 func resolveQualifiedUsage(res *Result, imports map[string]resolvedImport, scopeRef string, u UsageDef, allEntities map[string][]entityLoc, fe *FileExtract) {
 	var baseTarget string
+	var importMember string
 
 	if ri, ok := imports[u.Qualifier]; ok {
 		baseTarget = ri.Target
+		importMember = ri.MemberName
 		if ri.MemberName != "" {
 			baseTarget = strings.TrimSuffix(baseTarget, "::"+ri.MemberName)
 		}
@@ -195,21 +198,7 @@ func resolveQualifiedUsage(res *Result, imports map[string]resolvedImport, scope
 		Target:    baseTarget,
 	})
 
-	// For local directory targets (path:./dir), resolve the member to
-	// the specific file that defines it.
-	memberTarget := baseTarget + "::" + u.Name
-	baseRef := ParseReference(baseTarget)
-	if baseRef.Provider == "path" && baseRef.Symbol == "" {
-		dirPrefix := strings.TrimPrefix(baseRef.Path, "./")
-		for _, loc := range allEntities[u.Name] {
-			if strings.HasPrefix(loc.File, dirPrefix+"/") || loc.File == dirPrefix {
-				memberTarget = SymbolRef("./"+loc.File, loc.Entity.Name)
-				break
-			}
-		}
-	}
-	// Local entity qualifier: method/field member stays as entity::Name only when
-	// we have no better file-level target; go:pkg::Member is fine for external pkgs.
+	memberTarget := resolveQualifiedMemberTarget(baseTarget, importMember, u.Name, allEntities)
 
 	res.Relations = append(res.Relations, Relation{
 		Reference: scopeRef,
@@ -219,11 +208,72 @@ func resolveQualifiedUsage(res *Result, imports map[string]resolvedImport, scope
 	})
 }
 
-// resolveEntityName finds a symbol reference for a bare name in Go/file scope.
+func resolveQualifiedMemberTarget(baseTarget, importMember, member string, allEntities map[string][]entityLoc) string {
+	baseRef := ParseReference(baseTarget)
+	memberTarget := baseTarget + "::" + member
+	file := strings.TrimPrefix(baseRef.Path, "./")
+
+	if baseRef.Symbol != "" {
+		qualified := baseRef.Symbol + "." + member
+		if baseRef.Provider == "path" {
+			if target, ok := entityInFile(allEntities, qualified, file); ok {
+				return target
+			}
+		}
+		return memberTarget
+	}
+
+	if importMember != "" {
+		qualified := importMember + "." + member
+		if baseRef.Provider == "path" {
+			if target, ok := entityInFile(allEntities, qualified, file); ok {
+				return target
+			}
+			if target, ok := entityInFile(allEntities, member, file); ok {
+				return target
+			}
+		}
+		return memberTarget
+	}
+
+	if baseRef.Provider != "path" {
+		return memberTarget
+	}
+
+	dirPrefix := file
+	for _, loc := range allEntities[member] {
+		if strings.HasPrefix(loc.File, dirPrefix+"/") || loc.File == dirPrefix {
+			return SymbolRef("./"+loc.File, loc.Entity.Name)
+		}
+	}
+	suffix := "." + member
+	for name, locs := range allEntities {
+		if !strings.HasSuffix(name, suffix) {
+			continue
+		}
+		for _, loc := range locs {
+			if loc.File == dirPrefix || strings.HasPrefix(loc.File, dirPrefix+"/") {
+				return SymbolRef("./"+loc.File, loc.Entity.Name)
+			}
+		}
+	}
+	return memberTarget
+}
+
+func entityInFile(allEntities map[string][]entityLoc, name, file string) (string, bool) {
+	for _, loc := range allEntities[name] {
+		if loc.File == file {
+			return SymbolRef("./"+loc.File, loc.Entity.Name), true
+		}
+	}
+	return "", false
+}
+
+// resolveEntityName finds a symbol reference for a bare name in package/file scope.
 func resolveEntityName(fe *FileExtract, name string, allEntities map[string][]entityLoc) string {
-	if fe != nil && fe.Language == "go" {
+	if fe != nil && (fe.Language == "go" || fe.Language == "java") && fe.Package != "" {
 		for _, loc := range allEntities[name] {
-			if loc.File != fe.Path && loc.Package == fe.Package && loc.Language == "go" {
+			if loc.File != fe.Path && loc.Package == fe.Package && loc.Language == fe.Language {
 				return SymbolRef("./"+loc.File, loc.Entity.Name)
 			}
 		}
@@ -250,6 +300,20 @@ func resolveDirectUsage(res *Result, fe *FileExtract, u UsageDef, imports map[st
 	// 2–3. Same-package / same-file entities (vars, funcs, types).
 	if target == "" {
 		target = resolveEntityName(fe, u.Name, allEntities)
+	}
+	// 4. Nested members referenced unqualified inside a type scope (Java fields).
+	if target == "" && fe != nil && fe.Language == "java" && u.Scope != "" {
+		typeName := u.Scope
+		if i := strings.Index(typeName, "."); i >= 0 {
+			typeName = typeName[:i]
+		}
+		qualified := typeName + "." + u.Name
+		for _, loc := range allEntities[qualified] {
+			if loc.File == fe.Path {
+				target = SymbolRef("./"+loc.File, loc.Entity.Name)
+				break
+			}
+		}
 	}
 
 	if target != "" {

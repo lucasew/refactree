@@ -28,6 +28,13 @@ type LanguageDriver interface {
 	DestinationFileInDirectory(dstDirRel string, srcRef Reference) string
 }
 
+// ExportedFlagFilter is an optional LanguageDriver capability. When implemented
+// and UseExportedFlag reports true, symbol listing hides entities with
+// Exported=false unless IncludeHidden is set (e.g. Java public modifiers).
+type ExportedFlagFilter interface {
+	UseExportedFlag() bool
+}
+
 // DirectoryModuleResolver is an optional LanguageDriver capability: map a
 // directory on disk to the source file that backs it as a module (e.g. Python
 // __init__.py, JS index.js / package.json main).

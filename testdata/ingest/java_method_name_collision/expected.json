@@ -1,0 +1,31 @@
+{
+  "files": [
+    {
+      "language": "java",
+      "path": "Types.java"
+    }
+  ],
+  "entities": [
+    {
+      "reference": "path:./Types.java::A",
+      "start_byte": 28,
+      "end_byte": 29
+    },
+    {
+      "reference": "path:./Types.java::A.run",
+      "start_byte": 48,
+      "end_byte": 51
+    },
+    {
+      "reference": "path:./Types.java::B",
+      "start_byte": 66,
+      "end_byte": 67
+    },
+    {
+      "reference": "path:./Types.java::B.run",
+      "start_byte": 86,
+      "end_byte": 89
+    }
+  ],
+  "relations": []
+}

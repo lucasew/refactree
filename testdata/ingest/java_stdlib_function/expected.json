@@ -1,0 +1,36 @@
+{
+  "files": [
+    {
+      "language": "java",
+      "path": "Main.java"
+    }
+  ],
+  "entities": [
+    {
+      "reference": "path:./Main.java::Main",
+      "start_byte": 52,
+      "end_byte": 56
+    },
+    {
+      "reference": "path:./Main.java::Main.main",
+      "start_byte": 82,
+      "end_byte": 86
+    }
+  ],
+  "aliases": [
+    {
+      "reference": "path:./Main.java",
+      "start_byte": 32,
+      "end_byte": 36,
+      "target": "java:java.util.List::List"
+    }
+  ],
+  "relations": [
+    {
+      "reference": "path:./Main.java::Main.main",
+      "start_byte": 112,
+      "end_byte": 116,
+      "target": "java:java.util.List::List"
+    }
+  ]
+}

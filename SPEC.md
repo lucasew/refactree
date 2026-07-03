@@ -44,4 +44,5 @@ Tool to do queries on symbols and some refactorings like move and rename items i
   - `node`: looks up node_modules
   - `python`: looks up site_packages
   - `go`: looks up GOPATH and vendor
+  - `java`: looks up package path under source roots (`src/main/java`, `src/test/java`, `src`, project root)
   - `rust`: looks up some rust cache somehow

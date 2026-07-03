@@ -10,8 +10,15 @@ import (
 	"github.com/lucasew/refactree/pkg/ingest"
 
 	_ "github.com/lucasew/ccgo-tree-sitter/grammar/go"
+	_ "github.com/lucasew/ccgo-tree-sitter/grammar/java"
 	_ "github.com/lucasew/ccgo-tree-sitter/grammar/javascript"
 	_ "github.com/lucasew/ccgo-tree-sitter/grammar/python"
+
+	_ "github.com/lucasew/refactree/pkg/ingest/go"
+	_ "github.com/lucasew/refactree/pkg/ingest/java"
+	_ "github.com/lucasew/refactree/pkg/ingest/js"
+	_ "github.com/lucasew/refactree/pkg/ingest/nix"
+	_ "github.com/lucasew/refactree/pkg/ingest/python"
 )
 
 func TestWalkSymbols_NonRecursiveDirectory(t *testing.T) {
@@ -233,4 +240,44 @@ func containsSymbol(refs []string, symbol string) bool {
 		}
 	}
 	return false
+}
+
+func TestWalkSymbols_JavaPublicFilter(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "Types.java"), `package demo;
+
+public class Visible {
+    public void shown() {}
+    void hidden() {}
+}
+
+class Internal {
+    public void alsoHiddenType() {}
+}
+`)
+
+	refs, err := collectRefs(dir, "path:./", ingest.ListOptions{})
+	if err != nil {
+		t.Fatalf("walk symbols: %v", err)
+	}
+	if !containsRef(refs, "path:./Types.java::Visible") {
+		t.Fatalf("expected public type, got %v", refs)
+	}
+	if !containsRef(refs, "path:./Types.java::Visible.shown") {
+		t.Fatalf("expected public method, got %v", refs)
+	}
+	if containsRef(refs, "path:./Types.java::Visible.hidden") {
+		t.Fatalf("did not expect package-private method, got %v", refs)
+	}
+	if containsRef(refs, "path:./Types.java::Internal") {
+		t.Fatalf("did not expect package-private type, got %v", refs)
+	}
+
+	refs, err = collectRefs(dir, "path:./", ingest.ListOptions{IncludeHidden: true})
+	if err != nil {
+		t.Fatalf("walk symbols: %v", err)
+	}
+	if !containsRef(refs, "path:./Types.java::Visible.hidden") || !containsRef(refs, "path:./Types.java::Internal") {
+		t.Fatalf("expected hidden symbols with IncludeHidden, got %v", refs)
+	}
 }

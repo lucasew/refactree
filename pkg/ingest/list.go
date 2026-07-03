@@ -70,7 +70,7 @@ func WalkSymbols(dir, reference string, opts ListOptions, yield func(SymbolInfo)
 		if !providerAllowListEntity(ref, entRef, entPath, language, opts) {
 			continue
 		}
-		if !allowSymbolByLanguage(entRef.Symbol, language, SymbolListOptions{
+		if !allowListedEntity(ent, language, SymbolListOptions{
 			IncludeHidden: opts.IncludeHidden,
 		}) {
 			continue
@@ -138,6 +138,21 @@ func matchesListPathScope(entPath, refPath string, refIsDir, recursive bool) boo
 		return true
 	}
 	return entPath == refPath
+}
+
+func allowListedEntity(ent Entity, language string, opts SymbolListOptions) bool {
+	if opts.IncludeHidden {
+		return true
+	}
+	driver, ok := languageDriverForName(language)
+	if !ok {
+		return true
+	}
+	if filter, ok := driver.(ExportedFlagFilter); ok && filter.UseExportedFlag() {
+		return ent.Exported
+	}
+	entRef := ParseReference(ent.Reference)
+	return driver.AllowListSymbol(entRef.Symbol, opts)
 }
 
 func allowSymbolByLanguage(name, language string, opts SymbolListOptions) bool {

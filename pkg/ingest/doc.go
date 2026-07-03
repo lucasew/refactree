@@ -169,6 +169,13 @@ func findDeclContaining(root *grammar.Node, nameStart uint32, language string) *
 		declTypes["class_definition"] = true
 	case "javascript":
 		declTypes["function_declaration"] = true
+	case "java":
+		declTypes["class_declaration"] = true
+		declTypes["interface_declaration"] = true
+		declTypes["enum_declaration"] = true
+		declTypes["record_declaration"] = true
+		declTypes["annotation_type_declaration"] = true
+		declTypes["method_declaration"] = true
 	}
 
 	for i := uint32(0); i < root.ChildCount(); i++ {
@@ -188,6 +195,33 @@ func findDeclContaining(root *grammar.Node, nameStart uint32, language string) *
 					}
 				}
 			}
+		}
+		// Java members nested in type bodies.
+		if language == "java" {
+			if found := findJavaMemberDecl(child, nameStart, declTypes); found != nil {
+				return found
+			}
+		}
+	}
+	return nil
+}
+
+func findJavaMemberDecl(n *grammar.Node, nameStart uint32, declTypes map[string]bool) *grammar.Node {
+	if n == nil {
+		return nil
+	}
+	if declTypes[n.Type()] {
+		if name := childByField(n, "name"); name != nil && name.StartByte() == nameStart {
+			return n
+		}
+	}
+	body := childByField(n, "body")
+	if body == nil {
+		return nil
+	}
+	for i := uint32(0); i < body.ChildCount(); i++ {
+		if found := findJavaMemberDecl(body.Child(i), nameStart, declTypes); found != nil {
+			return found
 		}
 	}
 	return nil
@@ -276,7 +310,7 @@ func extractCommentBefore(root *grammar.Node, funcNode *grammar.Node, source []b
 		switch language {
 		case "go":
 			isComment = strings.HasPrefix(line, "//")
-		case "javascript":
+		case "javascript", "java":
 			isComment = strings.HasPrefix(line, "//") || strings.HasPrefix(line, "*") || strings.HasPrefix(line, "/*") || strings.HasPrefix(line, "*/")
 		}
 		if !isComment {
