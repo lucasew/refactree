@@ -1,3 +1,7 @@
 .codex
 /rft
 .tmp
+
+# fuzzy harness local state
+.rft-fuzzy/
+

@@ -1,21 +1,30 @@
 ---
 name: rft-fuzzy-mv
-description: Make refactoring implementation more exhaustive, complete and stable by testing operations on repositories in the wild and checking whether rft reacts the expected way.
+description: Make refactoring implementation more exhaustive, complete and stable by fuzzing mv on repositories in the wild with isolated project checks via the rft fuzzy harness.
 ---
 
 # Restrictions
-Only run this skill on ephemeral environments. If it looks like a personal computer or a VPS, refuse it.
+Setup/check run in Docker via testcontainers, so a personal machine is fine. Only refuse `--no-isolate` on a non-ephemeral host unless `RFT_FUZZY_ALLOW=1` / `--allow` / `CI=true`.
 
-# The process
+# Source of truth
+- Catalog: `testdata/fuzzy/projects.toml` (`[projects.<slug>]` + `[projects.<slug>.mise]`)
+- Human index: `references/projects.md`
+- Harness: `internal/fuzzy`, CLI `rft fuzzy mv` / `rft fuzzy run`
+- Isolation: testcontainers + Docker, default image `jdxcode/mise:latest`
 
-- Choose one project from projects.md
-- Clone it in a temporary location
-- Run its tests to check whether it is in a non-broken state
-- Test the mv operation on it in a random configuration
-- See how rft reacts to the operation, whether it makes sense and whether the project broke because of the operation.
-- If it broke
-  - Debug why it broke
-  - Create a mv test fixture that hits the edge case
-  - Fix the implementation to deal with the issue
-  - Suggest a more clever but simple abstraction structure to support the middle ground if necessary
-- Reset the project you cloned to the original state for the next run
+# Process
+1. Docker must be available.
+2. Choose a project slug from the catalog.
+3. Run:
+   ```bash
+   go run ./cmd/rft fuzzy run --project <slug> --iterations 10 --seed 1
+   ```
+   Setup/check run in `jdxcode/mise` via testcontainers (`mise install` then `mise run setup` / `mise run test`). Ingest/mv stay on the host.
+4. Inspect `report:` (`events.jsonl`, `logs/`, `scaffold/` on failures).
+5. On `class=bug`: curate `testdata/mv/...`, fix `pkg/ingest`, rerun with the same `--seed`.
+
+# Flags
+- `--project <slug>`, `--iterations`, `--seed`
+- `--no-isolate` host setup/check (no Docker)
+- `--fail-fast`, `--strict-refs`, `--work-root`, `--report-dir`
+- override image per project: `[projects.<slug>.isolate] image = "..."`

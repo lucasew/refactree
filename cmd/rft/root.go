@@ -49,6 +49,7 @@ func newRootCmd() (*cobra.Command, *pprof.Profiler) {
 		newMvCmd(opts),
 		newDocCmd(opts),
 		newIngestCmd(opts),
+		newFuzzyCmd(opts),
 		newServeCmd(opts),
 	)
 

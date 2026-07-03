@@ -1,0 +1,81 @@
+[projects.workspaced]
+url = "https://github.com/lucasew/workspaced.git"
+ref = "ac8f8483d9931adac8697b5f0c71e19840bd28a3"
+language = "go"
+root = "."
+ingest_roots = ["."]
+preserve_globs = []
+
+[projects.workspaced.mv]
+enabled = true
+ops = ["rename", "cross_file", "package"]
+
+[projects.workspaced.isolate]
+setup_network = true
+check_network = false
+
+[projects.workspaced.mise.tools]
+go = "1.26.4"
+
+[projects.workspaced.mise.tasks.setup]
+description = "Download modules"
+run = "go mod download -x"
+
+[projects.workspaced.mise.tasks.test]
+description = "Run tests"
+run = "go test -count=1 ./..."
+
+[projects.ritm_annotation]
+url = "https://github.com/lucasew-graveyard/ritm_annotation.git"
+ref = "b7998abbfc8581c2344c00b54a4ddd68d4cbcf3c"
+language = "python"
+root = "."
+ingest_roots = ["ritm_annotation"]
+preserve_globs = [".venv", ".uv"]
+
+[projects.ritm_annotation.mv]
+enabled = true
+ops = ["rename", "cross_file", "package"]
+
+[projects.ritm_annotation.isolate]
+setup_network = true
+check_network = false
+
+[projects.ritm_annotation.mise.tools]
+uv = "latest"
+
+[projects.ritm_annotation.mise.tasks.setup]
+description = "Install dev dependencies"
+run = "uv sync --extra dev --verbose"
+
+[projects.ritm_annotation.mise.tasks.test]
+description = "Lint"
+run = "uv run ruff check -v ."
+
+[projects.astro]
+url = "https://github.com/withastro/astro.git"
+ref = "6929e4034fcc7e11d96d0327b5d8ca126ae826ef"
+language = "javascript"
+root = "."
+ingest_roots = ["packages/compiler"]
+preserve_globs = ["node_modules", ".pnpm-store"]
+
+[projects.astro.mv]
+enabled = true
+ops = ["rename", "cross_file"]
+
+[projects.astro.isolate]
+setup_network = true
+check_network = false
+
+[projects.astro.mise.tools]
+node = "22"
+pnpm = "latest"
+
+[projects.astro.mise.tasks.setup]
+description = "Install compiler package workspace deps"
+run = "pnpm install --reporter=default --filter @astrojs/compiler..."
+
+[projects.astro.mise.tasks.test]
+description = "Run compiler package tests"
+run = "pnpm --filter @astrojs/compiler test -- --verbose"

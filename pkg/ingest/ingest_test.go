@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"sort"
 	"testing"
 
 	"github.com/lucasew/refactree/pkg/ingest"
@@ -49,8 +48,8 @@ func TestIngest(t *testing.T) {
 				t.Fatalf("ingest: %v", err)
 			}
 
-			sortResult(&expected)
-			sortResult(got)
+			ingest.SortResult(&expected)
+			ingest.SortResult(got)
 
 			expJSON, _ := json.MarshalIndent(&expected, "", "  ")
 			gotJSON, _ := json.MarshalIndent(got, "", "  ")
@@ -60,28 +59,4 @@ func TestIngest(t *testing.T) {
 			}
 		})
 	}
-}
-
-func sortResult(r *ingest.Result) {
-	sort.Slice(r.Files, func(i, j int) bool {
-		return r.Files[i].Path < r.Files[j].Path
-	})
-	sort.Slice(r.Entities, func(i, j int) bool {
-		if r.Entities[i].Reference != r.Entities[j].Reference {
-			return r.Entities[i].Reference < r.Entities[j].Reference
-		}
-		return r.Entities[i].StartByte < r.Entities[j].StartByte
-	})
-	sort.Slice(r.Aliases, func(i, j int) bool {
-		if r.Aliases[i].Reference != r.Aliases[j].Reference {
-			return r.Aliases[i].Reference < r.Aliases[j].Reference
-		}
-		return r.Aliases[i].StartByte < r.Aliases[j].StartByte
-	})
-	sort.Slice(r.Relations, func(i, j int) bool {
-		if r.Relations[i].Reference != r.Relations[j].Reference {
-			return r.Relations[i].Reference < r.Relations[j].Reference
-		}
-		return r.Relations[i].StartByte < r.Relations[j].StartByte
-	})
 }

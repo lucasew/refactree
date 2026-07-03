@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"sort"
 
 	"github.com/lucasew/refactree/pkg/ingest"
 	"github.com/spf13/cobra"
@@ -46,7 +45,7 @@ func collectExpectedIngest(dir string) (*ingest.Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	sortIngestResult(result)
+	ingest.SortResult(result)
 	return result, nil
 }
 
@@ -101,28 +100,4 @@ func renderExpectedIngestText(dir string) ([]byte, error) {
 	}
 
 	return buf.Bytes(), nil
-}
-
-func sortIngestResult(r *ingest.Result) {
-	sort.Slice(r.Files, func(i, j int) bool {
-		return r.Files[i].Path < r.Files[j].Path
-	})
-	sort.Slice(r.Entities, func(i, j int) bool {
-		if r.Entities[i].Reference != r.Entities[j].Reference {
-			return r.Entities[i].Reference < r.Entities[j].Reference
-		}
-		return r.Entities[i].StartByte < r.Entities[j].StartByte
-	})
-	sort.Slice(r.Aliases, func(i, j int) bool {
-		if r.Aliases[i].Reference != r.Aliases[j].Reference {
-			return r.Aliases[i].Reference < r.Aliases[j].Reference
-		}
-		return r.Aliases[i].StartByte < r.Aliases[j].StartByte
-	})
-	sort.Slice(r.Relations, func(i, j int) bool {
-		if r.Relations[i].Reference != r.Relations[j].Reference {
-			return r.Relations[i].Reference < r.Relations[j].Reference
-		}
-		return r.Relations[i].StartByte < r.Relations[j].StartByte
-	})
 }

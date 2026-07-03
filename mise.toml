@@ -29,3 +29,18 @@ run = '''
 git tag $(svu ${usage_version})
 goreleaser release --clean
 '''
+
+[tasks.fuzzy]
+description = "Real-world fuzzy ingest/mv (setup/check in testcontainers + jdxcode/mise; --no-isolate needs RFT_FUZZY_ALLOW=1 or CI)"
+env = { MISE_EXPERIMENTAL = "1" }
+run = "go run ./cmd/rft fuzzy run --iterations 10"
+
+[tasks."fuzzy:ingest"]
+description = "Fuzzy ingest invariants on catalog projects"
+env = { MISE_EXPERIMENTAL = "1" }
+run = "go run ./cmd/rft fuzzy ingest"
+
+[tasks."fuzzy:mv"]
+description = "Fuzzy mv on catalog projects with isolated checks via testcontainers"
+env = { MISE_EXPERIMENTAL = "1" }
+run = "go run ./cmd/rft fuzzy mv --iterations 3"
