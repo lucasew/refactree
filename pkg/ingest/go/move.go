@@ -842,9 +842,34 @@ func stripUnusedSourceImports(file string, content []byte, decl ingest.DeclExtra
 	for _, p := range decl.Imports {
 		want[p] = true
 	}
-	remaining := append(append([]byte{}, content[:decl.RemoveStart]...), content[decl.RemoveEnd:]...)
-	remainText := string(remaining)
 	specs := parseGoImportSpecs(content)
+	masked := append([]byte(nil), content...)
+	mask := func(start, end int) {
+		if start < 0 {
+			start = 0
+		}
+		if end > len(masked) {
+			end = len(masked)
+		}
+		for i := start; i < end; i++ {
+			if masked[i] != '\n' {
+				masked[i] = ' '
+			}
+		}
+	}
+	mask(int(decl.RemoveStart), int(decl.RemoveEnd))
+	seenBlocks := map[int]bool{}
+	for _, spec := range specs {
+		if spec.blockStart >= 0 && spec.blockEnd > 0 {
+			if !seenBlocks[spec.blockStart] {
+				mask(spec.blockStart, spec.blockEnd)
+				seenBlocks[spec.blockStart] = true
+			}
+			continue
+		}
+		mask(spec.lineStart, spec.lineEnd)
+	}
+	bodyText := string(masked)
 	var edits []ingest.Edit
 	blockCounts := map[int]int{}
 	blockRemove := map[int]int{}
@@ -857,7 +882,7 @@ func stripUnusedSourceImports(file string, content []byte, decl ingest.DeclExtra
 		if !want[spec.path] || spec.local == "" || spec.local == "." || spec.local == "_" {
 			continue
 		}
-		if goIdentUsed(remainText, spec.local) {
+		if goIdentUsed(bodyText, spec.local) {
 			continue
 		}
 		edits = append(edits, ingest.Edit{
@@ -874,7 +899,7 @@ func stripUnusedSourceImports(file string, content []byte, decl ingest.DeclExtra
 		if removed == 0 || removed < blockCounts[blockStart] {
 			continue
 		}
-		var blockEnd int
+		blockEnd := 0
 		for _, spec := range specs {
 			if spec.blockStart == blockStart && spec.blockEnd > 0 {
 				blockEnd = spec.blockEnd
@@ -884,7 +909,14 @@ func stripUnusedSourceImports(file string, content []byte, decl ingest.DeclExtra
 		if blockEnd <= blockStart {
 			continue
 		}
-		// Drop the entire import block including surrounding blank line if present.
+		filtered := edits[:0]
+		for _, e := range edits {
+			if int(e.StartByte) >= blockStart && int(e.EndByte) <= blockEnd && e.NewText == "" {
+				continue
+			}
+			filtered = append(filtered, e)
+		}
+		edits = filtered
 		start, end := blockStart, blockEnd
 		if start > 0 && content[start-1] == '\n' {
 			start--
