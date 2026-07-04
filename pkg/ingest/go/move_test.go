@@ -109,7 +109,8 @@ func TestRenameMethodDoesNotTouchUnrelatedLeaf(t *testing.T) {
 	}
 	write("go.mod", "module example\n\ngo 1.22\n")
 	write("pkg/a/a.go", "package a\n\ntype Driver interface {\n\tWriteImage()\n}\n\ntype impl struct{}\n\nfunc (d *impl) WriteImage() {}\n")
-	write("pkg/b/b.go", "package b\n\nfunc WriteImage() {}\n\nconst msg = \"WriteImage\"\n\nfunc Other() { WriteImage() }\n")
+	write("pkg/b/b.go", "package b\n\ntype Unrelated struct{}\n\nfunc (Unrelated) WriteImage() {}\n\nfunc WriteImage() {}\n\nconst msg = \"a.WriteImage\"\n\nfunc Other() {\n\tUnrelated{}.WriteImage()\n\tWriteImage()\n}\n")
+	write("cmd/app/main.go", "package main\n\nimport (\n\t\"example/pkg/a\"\n\t\"example/pkg/b\"\n)\n\nfunc main() {\n\tvar d a.Driver\n\td.WriteImage()\n\tb.Unrelated{}.WriteImage()\n\tb.WriteImage()\n\t_ = \"pkg.a.WriteImage\"\n}\n")
 	edits, err := ingest.Rename(dir, "path:./pkg/a/a.go::*impl.WriteImage", "path:./pkg/a/a.go::*impl.Renamed")
 	if err != nil {
 		t.Fatal(err)
@@ -117,17 +118,32 @@ func TestRenameMethodDoesNotTouchUnrelatedLeaf(t *testing.T) {
 	if err := ingest.ApplyEdits(dir, edits); err != nil {
 		t.Fatal(err)
 	}
-	b, err := os.ReadFile(filepath.Join(dir, "pkg/b/b.go"))
+	bGot, err := os.ReadFile(filepath.Join(dir, "pkg/b/b.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := string(b)
-	for _, want := range []string{`func WriteImage()`, `const msg = "WriteImage"`, `WriteImage()`} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("unrelated leaf corrupted, missing %q in:\n%s", want, got)
+	mainGot, err := os.ReadFile(filepath.Join(dir, "cmd/app/main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, got := range []struct{ name, body string }{
+		{"pkg/b/b.go", string(bGot)},
+		{"cmd/app/main.go", string(mainGot)},
+	} {
+		if strings.Contains(got.body, "Renamed") {
+			t.Fatalf("%s wrongly renamed unrelated selectors:\n%s", got.name, got.body)
+		}
+		if !strings.Contains(got.body, "Unrelated{}.WriteImage()") {
+			t.Fatalf("%s missing Unrelated{}.WriteImage():\n%s", got.name, got.body)
 		}
 	}
-	if strings.Contains(got, "Renamed") {
-		t.Fatalf("unrelated package was renamed:\n%s", got)
+	if !strings.Contains(string(bGot), `"a.WriteImage"`) {
+		t.Fatalf("string literal corrupted in pkg/b:\n%s", bGot)
+	}
+	if !strings.Contains(string(mainGot), `"pkg.a.WriteImage"`) {
+		t.Fatalf("string literal corrupted in main:\n%s", mainGot)
+	}
+	if !strings.Contains(string(mainGot), "b.WriteImage()") {
+		t.Fatalf("unrelated package call corrupted in main:\n%s", mainGot)
 	}
 }

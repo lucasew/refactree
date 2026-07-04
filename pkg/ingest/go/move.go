@@ -943,12 +943,21 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 	scopePrefix := methodRenameScopePrefix(strings.TrimPrefix(src.Path, "./"))
 	sourceSet := map[string]bool{}
 	pkgDirs := map[string]bool{}
+	ourPkgDirs := map[string]bool{}
+	srcPkgDir := dirOf(strings.TrimPrefix(src.Path, "./"))
+	if srcPkgDir != "" {
+		ourPkgDirs[srcPkgDir] = true
+	}
+	if scopePrefix != "" {
+		ourPkgDirs[scopePrefix] = true
+	}
 	for _, s := range sourceRefs {
 		sourceSet[s] = true
 		ref := ingest.ParseReference(s)
 		rel := strings.TrimPrefix(ref.Path, "./")
 		if d := dirOf(rel); d != "" {
 			pkgDirs[d] = true
+			ourPkgDirs[d] = true
 		}
 	}
 	occupied := map[string]map[[2]uint32]bool{}
@@ -987,25 +996,34 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 			continue
 		}
 		rel := strings.TrimPrefix(f.Path, "./")
-		inScope := scopePrefix != "" && (rel == scopePrefix || strings.HasPrefix(rel, scopePrefix+"/"))
+		entPkg := dirOf(rel)
+		inOurPkg := ourPkgDirs[entPkg]
 		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
 		if err != nil {
 			continue
 		}
 		importsRelated := fileImportsAnyPackage(content, pkgDirs)
-		if !inScope && !relatedFiles[rel] && !importsRelated {
+		if !inOurPkg && !relatedFiles[rel] && !importsRelated {
 			continue
 		}
 		occ := occupied[rel]
-		// Selector uses: pkg.Old / recv.Old — never bare idents or string literals.
-		for _, e := range findSelectorLeafEdits(rel, content, oldLeaf, newLeaf) {
+		var selectorEdits []ingest.Edit
+		if inOurPkg || relatedFiles[rel] {
+			// Same package tree: rename ident.Leaf only (not Type{}.Leaf).
+			selectorEdits = findSelectorLeafEdits(rel, content, oldLeaf, newLeaf, nil)
+		} else if importsRelated {
+			// External importers: only package-qualifier selectors (a.WriteImage),
+			// never b.Unrelated{}.WriteImage on foreign types.
+			locals := importLocalsForPackages(content, pkgDirs)
+			selectorEdits = findSelectorLeafEdits(rel, content, oldLeaf, newLeaf, locals)
+		}
+		for _, e := range selectorEdits {
 			if occ[[2]uint32{e.StartByte, e.EndByte}] {
 				continue
 			}
 			edits = append(edits, e)
 		}
-		// Interface method names only inside the method's package tree.
-		if inScope {
+		if inOurPkg {
 			for _, e := range findInterfaceMethodEdits(rel, content, recv, oldLeaf, newLeaf) {
 				if occ[[2]uint32{e.StartByte, e.EndByte}] {
 					continue
@@ -1018,21 +1036,31 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 }
 
 func fileImportsAnyPackage(content []byte, pkgDirs map[string]bool) bool {
+	return len(importLocalsForPackages(content, pkgDirs)) > 0
+}
+
+func importLocalsForPackages(content []byte, pkgDirs map[string]bool) map[string]bool {
+	locals := map[string]bool{}
 	if len(pkgDirs) == 0 {
-		return false
+		return locals
 	}
 	for _, spec := range parseGoImportSpecs(content) {
+		if spec.local == "" || spec.local == "." || spec.local == "_" {
+			continue
+		}
 		for dir := range pkgDirs {
 			if spec.path == dir || strings.HasSuffix(spec.path, "/"+dir) {
-				return true
+				locals[spec.local] = true
+				break
 			}
 		}
 	}
-	return false
+	return locals
 }
 
-func findSelectorLeafEdits(file string, content []byte, oldLeaf, newLeaf string) []ingest.Edit {
+func findSelectorLeafEdits(file string, content []byte, oldLeaf, newLeaf string, allowedReceivers map[string]bool) []ingest.Edit {
 	text := string(content)
+	inString := buildStringLiteralMask(text)
 	needle := "." + oldLeaf
 	var edits []ingest.Edit
 	off := 0
@@ -1048,6 +1076,24 @@ func findSelectorLeafEdits(file string, content []byte, oldLeaf, newLeaf string)
 			off = end
 			continue
 		}
+		if inString[dot] || inString[start] {
+			off = end
+			continue
+		}
+		// Receiver must be an identifier (pkg.Leaf / recv.Leaf), not Type{}.Leaf.
+		recvStart := dot - 1
+		if recvStart < 0 || !isIdentChar(text[recvStart]) {
+			off = end
+			continue
+		}
+		for recvStart > 0 && isIdentChar(text[recvStart-1]) {
+			recvStart--
+		}
+		receiver := text[recvStart:dot]
+		if allowedReceivers != nil && !allowedReceivers[receiver] {
+			off = end
+			continue
+		}
 		edits = append(edits, ingest.Edit{
 			File:      file,
 			StartByte: uint32(start),
@@ -1057,6 +1103,61 @@ func findSelectorLeafEdits(file string, content []byte, oldLeaf, newLeaf string)
 		off = end
 	}
 	return edits
+}
+
+func buildStringLiteralMask(text string) []bool {
+	mask := make([]bool, len(text))
+	i := 0
+	for i < len(text) {
+		switch text[i] {
+		case '"':
+			mask[i] = true
+			i++
+			for i < len(text) {
+				mask[i] = true
+				if text[i] == '\\' && i+1 < len(text) {
+					mask[i+1] = true
+					i += 2
+					continue
+				}
+				if text[i] == '"' {
+					i++
+					break
+				}
+				i++
+			}
+		case '`':
+			mask[i] = true
+			i++
+			for i < len(text) {
+				mask[i] = true
+				if text[i] == '`' {
+					i++
+					break
+				}
+				i++
+			}
+		case '\'':
+			mask[i] = true
+			i++
+			for i < len(text) {
+				mask[i] = true
+				if text[i] == '\\' && i+1 < len(text) {
+					mask[i+1] = true
+					i += 2
+					continue
+				}
+				if text[i] == '\'' {
+					i++
+					break
+				}
+				i++
+			}
+		default:
+			i++
+		}
+	}
+	return mask
 }
 
 func findInterfaceMethodEdits(file string, content []byte, recvName, oldLeaf, newLeaf string) []ingest.Edit {
