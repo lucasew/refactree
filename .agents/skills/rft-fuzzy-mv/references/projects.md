@@ -18,3 +18,8 @@ Machine-readable catalog: [`testdata/fuzzy/projects.toml`](../../../../testdata/
 - id: `astro`
 - https://github.com/withastro/astro
 - `[projects.<slug>.mise]` for astro; scoped ingest `packages/compiler`; `mise run test`
+
+# Java
+- id: `gson`
+- https://github.com/google/gson
+- `[projects.<slug>.mise]` for gson; scoped ingest `gson/`; `mise run setup` / `mise run test`

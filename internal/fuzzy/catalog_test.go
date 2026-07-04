@@ -40,7 +40,7 @@ func TestLoadCatalog(t *testing.T) {
 			t.Fatalf("%s missing tools in:\n%s", p.ID, content)
 		}
 	}
-	for _, id := range []string{"workspaced", "ritm_annotation", "astro"} {
+	for _, id := range []string{"workspaced", "ritm_annotation", "astro", "gson"} {
 		if !ids[id] {
 			t.Fatalf("missing %s", id)
 		}

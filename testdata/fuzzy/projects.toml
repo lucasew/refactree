@@ -79,3 +79,31 @@ run = "pnpm install --reporter=default --filter @astrojs/compiler..."
 [projects.astro.mise.tasks.test]
 description = "Run compiler package tests"
 run = "pnpm --filter @astrojs/compiler test -- --verbose"
+
+[projects.gson]
+url = "https://github.com/google/gson.git"
+ref = "c9f3fd55854a743b66f857ace3c7b268ea3e2ef7"
+language = "java"
+root = "."
+ingest_roots = ["gson"]
+preserve_globs = ["target", "gson/target"]
+
+[projects.gson.mv]
+enabled = true
+ops = ["rename", "cross_file", "package"]
+
+[projects.gson.isolate]
+setup_network = true
+check_network = false
+
+[projects.gson.mise.tools]
+java = "21"
+maven = "3.9"
+
+[projects.gson.mise.tasks.setup]
+description = "Resolve gson module dependencies"
+run = "mvn -B -pl gson -am dependency:resolve -DskipTests"
+
+[projects.gson.mise.tasks.test]
+description = "Run gson module tests"
+run = "mvn -B -pl gson test"
