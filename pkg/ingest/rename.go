@@ -420,12 +420,19 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 	}
 	oldDirBase := lastPathComponent(srcDir)
 	newDirBase := lastPathComponent(dstDir)
-	dirPairs := expandPackageDirPairs(result, srcDir, dstDir)
+	dirPairs := [][2]string{{srcDir, dstDir}}
+	var planner PackageMovePlanner
+	if p, ok := packageMovePlannerFor(result, srcDir); ok {
+		planner = p
+		if expanded := p.ExpandPackageDirs(result, srcDir, dstDir); len(expanded) > 0 {
+			dirPairs = expanded
+		}
+	}
 
 	var edits []Edit
 	movedFiles := map[string]bool{}
 
-	// Relocate package contents across every paired source-root directory.
+	// Relocate package contents across every paired directory.
 	for _, pair := range dirPairs {
 		fromDir, toDir := pair[0], pair[1]
 		pairSrc := Reference{Provider: "path", Path: "./" + fromDir}
@@ -498,166 +505,15 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 		}
 	}
 
-	if javaPackage, ok := javaPackageNameFromSourceDir(srcDir); ok {
-		newJavaPackage, ok := javaPackageNameFromSourceDir(dstDir)
-		if ok && javaPackage != newJavaPackage {
-			extra, err := rewriteJavaPackageInSupportFiles(dir, result, movedFiles, javaPackage, newJavaPackage)
-			if err != nil {
-				return nil, err
-			}
-			edits = append(edits, extra...)
+	if planner != nil {
+		extra, err := planner.RewriteSupportFiles(dir, result, movedFiles, srcDir, dstDir)
+		if err != nil {
+			return nil, err
 		}
+		edits = append(edits, extra...)
 	}
 
 	return edits, nil
-}
-
-// expandPackageDirPairs returns source/dest directory pairs for a package move.
-// For Java, a package often exists under multiple source roots (src/main/java and
-// src/test/java); moving only one root leaves PackageLocation errors.
-func expandPackageDirPairs(result *Result, srcDir, dstDir string) [][2]string {
-	srcDir = strings.TrimSuffix(strings.TrimPrefix(srcDir, "./"), "/")
-	dstDir = strings.TrimSuffix(strings.TrimPrefix(dstDir, "./"), "/")
-	pairs := [][2]string{{srcDir, dstDir}}
-	srcSuffix, ok := javaSourceRootSuffix(srcDir)
-	if !ok {
-		return pairs
-	}
-	dstSuffix, ok := javaSourceRootSuffix(dstDir)
-	if !ok {
-		return pairs
-	}
-	seen := map[string]bool{srcDir: true}
-	for _, f := range result.Files {
-		if f.Language != "java" {
-			continue
-		}
-		rel := strings.TrimPrefix(f.Path, "./")
-		pkgDir := path.Dir(rel)
-		if pkgDir == "." {
-			continue
-		}
-		suffix, ok := javaSourceRootSuffix(pkgDir)
-		if !ok || suffix != srcSuffix || seen[pkgDir] {
-			continue
-		}
-		root := strings.TrimSuffix(pkgDir, suffix)
-		root = strings.TrimSuffix(root, "/")
-		dstPkgDir := dstSuffix
-		if root != "" {
-			dstPkgDir = path.Join(root, dstSuffix)
-		}
-		seen[pkgDir] = true
-		pairs = append(pairs, [2]string{pkgDir, dstPkgDir})
-	}
-	return pairs
-}
-
-func javaSourceRootSuffix(dir string) (string, bool) {
-	dir = strings.Trim(strings.TrimPrefix(dir, "./"), "/")
-	for _, root := range []string{"src/main/java/", "src/test/java/", "src/"} {
-		if strings.HasPrefix(dir, root) {
-			return strings.TrimPrefix(dir, root), true
-		}
-	}
-	return "", false
-}
-
-func javaPackageNameFromSourceDir(dir string) (string, bool) {
-	suffix, ok := javaSourceRootSuffix(dir)
-	if !ok || suffix == "" {
-		return "", false
-	}
-	return strings.ReplaceAll(suffix, "/", "."), true
-}
-
-func rewriteJavaPackageInSupportFiles(root string, result *Result, movedFiles map[string]bool, oldPkg, newPkg string) ([]Edit, error) {
-	ingested := map[string]bool{}
-	for _, f := range result.Files {
-		ingested[strings.TrimPrefix(f.Path, "./")] = true
-	}
-	var edits []Edit
-	err := filepath.Walk(root, func(abs string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			base := info.Name()
-			if base == ".git" || base == "target" || base == "node_modules" || base == ".gradle" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		rel, err := filepath.Rel(root, abs)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
-		if ingested[rel] || movedFiles[rel] {
-			return nil
-		}
-		switch strings.ToLower(filepath.Ext(rel)) {
-		case ".pro", ".xml", ".properties", ".mf", ".gradle", ".kts", ".md", ".txt", ".json":
-		default:
-			base := path.Base(rel)
-			if base != "module-info.java" && !strings.HasPrefix(base, "Module.") {
-				return nil
-			}
-		}
-		content, err := os.ReadFile(abs)
-		if err != nil {
-			return err
-		}
-		text := string(content)
-		oldSlash := strings.ReplaceAll(oldPkg, ".", "/")
-		newSlash := strings.ReplaceAll(newPkg, ".", "/")
-		if !strings.Contains(text, oldPkg) && !strings.Contains(text, oldSlash) {
-			return nil
-		}
-		edits = append(edits, rewriteJavaNameTokenEdits(rel, content, oldPkg, newPkg)...)
-		if oldSlash != oldPkg {
-			edits = append(edits, rewriteJavaNameTokenEdits(rel, content, oldSlash, newSlash)...)
-		}
-		return nil
-	})
-	return edits, err
-}
-
-func rewriteJavaNameTokenEdits(fileRelPath string, content []byte, oldName, newName string) []Edit {
-	if oldName == "" || oldName == newName {
-		return nil
-	}
-	text := string(content)
-	var edits []Edit
-	off := 0
-	for off < len(text) {
-		idx := strings.Index(text[off:], oldName)
-		if idx < 0 {
-			break
-		}
-		start := off + idx
-		end := start + len(oldName)
-		if start > 0 && isJavaIdentByte(text[start-1]) {
-			off = end
-			continue
-		}
-		if end < len(text) && isJavaIdentByte(text[end]) {
-			off = end
-			continue
-		}
-		edits = append(edits, Edit{
-			File:      fileRelPath,
-			StartByte: uint32(start),
-			EndByte:   uint32(end),
-			NewText:   newName,
-		})
-		off = end
-	}
-	return edits
-}
-
-func isJavaIdentByte(b byte) bool {
-	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '$'
 }
 
 func isUnderDir(p, dir string) bool {

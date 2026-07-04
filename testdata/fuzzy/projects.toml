@@ -86,7 +86,9 @@ ref = "c9f3fd55854a743b66f857ace3c7b268ea3e2ef7"
 language = "java"
 root = "."
 ingest_roots = ["gson"]
-preserve_globs = ["target", "gson/target"]
+# Do not preserve target/: package moves invalidate compiled outputs and
+# obfuscation intermediates; mise-data keeps Maven caches outside the worktree.
+preserve_globs = []
 
 [projects.gson.mv]
 enabled = true

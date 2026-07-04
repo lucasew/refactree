@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -36,6 +37,21 @@ type MoveDriver interface {
 	RewriteImports(fileRelPath string, content []byte, result *Result, oldRef, newRef Reference) []Edit
 }
 
+// PackageMovePlanner is an optional MoveDriver capability for languages that
+// need multi-root package relocation and non-source support-file rewrites
+// (for example Java src/main/java + src/test/java and proguard/pom paths).
+type PackageMovePlanner interface {
+	// ExpandPackageDirs returns all (srcDir, dstDir) pairs to relocate for a
+	// package move. Pairs use slash paths relative to the ingest root without a
+	// leading "./". The slice must include the primary pair.
+	ExpandPackageDirs(result *Result, srcDir, dstDir string) [][2]string
+
+	// RewriteSupportFiles returns edits for non-ingested support files under
+	// rootDir (build configs, proguard rules, etc.). movedFiles lists source
+	// paths already relocated by the core planner.
+	RewriteSupportFiles(rootDir string, result *Result, movedFiles map[string]bool, srcDir, dstDir string) ([]Edit, error)
+}
+
 var (
 	moveDriversMu sync.RWMutex
 	moveDrivers   = map[string]MoveDriver{}
@@ -64,4 +80,28 @@ func moveDriverForLanguage(lang string) (MoveDriver, bool) {
 	defer moveDriversMu.RUnlock()
 	d, ok := moveDrivers[lang]
 	return d, ok
+}
+
+// packageMovePlannerFor picks a PackageMovePlanner for files under srcDir.
+func packageMovePlannerFor(result *Result, srcDir string) (PackageMovePlanner, bool) {
+	srcDir = strings.TrimSuffix(strings.TrimPrefix(srcDir, "./"), "/")
+	seen := map[string]bool{}
+	for _, f := range result.Files {
+		rel := strings.TrimPrefix(f.Path, "./")
+		if f.Language == "" || seen[f.Language] {
+			continue
+		}
+		if rel != srcDir && !strings.HasPrefix(rel, srcDir+"/") {
+			continue
+		}
+		seen[f.Language] = true
+		driver, ok := moveDriverForLanguage(f.Language)
+		if !ok {
+			continue
+		}
+		if planner, ok := driver.(PackageMovePlanner); ok {
+			return planner, true
+		}
+	}
+	return nil, false
 }
