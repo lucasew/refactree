@@ -97,6 +97,69 @@ func TestPreserveSnapshotRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPrepareReuseIsIdempotent(t *testing.T) {
+	remote := initGitRepo(t)
+	ref := gitOutput(t, remote, "rev-parse", "HEAD")
+	ws, err := fuzzy.NewWorkspace(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := fuzzy.Project{
+		ID:            "demo",
+		URL:           remote,
+		Ref:           ref,
+		Language:      "go",
+		Root:          ".",
+		PreserveGlobs: []string{"vendor"},
+	}
+	first, commit, err := ws.Prepare(p, fuzzy.PrefetchRunID, fuzzy.PrepareOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(first, "vendor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(first, "vendor", "lib"), []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.SavePreserveSnapshot(p, first); err != nil {
+		t.Fatal(err)
+	}
+	st1, err := os.Stat(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	second, commit2, err := ws.Prepare(p, fuzzy.PrefetchRunID, fuzzy.PrepareOptions{Reuse: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != first || commit2 != commit {
+		t.Fatalf("reuse changed paths/commits: %s/%s %s/%s", first, second, commit, commit2)
+	}
+	st2, err := os.Stat(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(st1, st2) {
+		t.Fatal("reuse replaced worktree directory")
+	}
+	data, err := os.ReadFile(filepath.Join(second, "vendor", "lib"))
+	if err != nil || string(data) != "v1" {
+		t.Fatalf("vendor restore: %v %q", err, data)
+	}
+
+	// Failed save must keep the previous snapshot.
+	_ = os.RemoveAll(filepath.Join(first, "vendor"))
+	if err := ws.SavePreserveSnapshot(p, first); err == nil {
+		t.Fatal("expected save without globs to fail")
+	}
+	data, err = os.ReadFile(filepath.Join(ws.Root, "preserve", "demo", "vendor", "lib"))
+	if err != nil || string(data) != "v1" {
+		t.Fatalf("atomic save clobbered snapshot: %v %q", err, data)
+	}
+}
+
 func TestPrepareOfflineRequiresPreserveSnapshot(t *testing.T) {
 	local := t.TempDir()
 	if err := os.WriteFile(filepath.Join(local, "main.go"), []byte("package main\n"), 0o644); err != nil {

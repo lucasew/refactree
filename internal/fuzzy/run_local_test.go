@@ -39,36 +39,22 @@ func TestRunLocalIngestAndMv(t *testing.T) {
 func TestPrefetchThenOfflineIngest(t *testing.T) {
 	catalog, local := localGoCatalog(t, []string{".deps"})
 	workRoot := filepath.Join(t.TempDir(), "work")
+	seedDeps(t, local)
 
-	// Simulate in-tree deps that must survive into --offline runs via snapshot.
-	if err := os.MkdirAll(filepath.Join(local, ".deps"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(local, ".deps", "ok"), []byte("1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	pre, err := fuzzy.Run(context.Background(), fuzzy.Options{
-		CatalogPath: catalog,
-		Mode:        fuzzy.ModePrefetch,
-		WorkRoot:    workRoot,
-		ReportDir:   filepath.Join(t.TempDir(), "reports-pre"),
-		Allow:       true,
-		NoIsolate:   true,
-		Stdout:      os.Stdout,
-		Stderr:      os.Stderr,
-	})
-	if err != nil {
-		t.Fatalf("prefetch: %v (report %#v)", err, pre)
-	}
+	pre := runPrefetch(t, catalog, workRoot)
 	if pre.Passed != 1 {
 		t.Fatalf("prefetch passed=%d", pre.Passed)
 	}
-	if _, err := os.Stat(filepath.Join(workRoot, "preserve", "local_go", ".deps", "ok")); err != nil {
+	snap := filepath.Join(workRoot, "preserve", "local_go", ".deps", "ok")
+	if _, err := os.Stat(snap); err != nil {
 		t.Fatalf("missing preserve snapshot: %v", err)
 	}
+	worktree := filepath.Join(workRoot, "runs", "local_go", fuzzy.PrefetchRunID)
+	if st, err := os.Stat(worktree); err != nil || !st.IsDir() {
+		t.Fatalf("missing prefetch worktree: %v", err)
+	}
 
-	_, err = fuzzy.Run(context.Background(), fuzzy.Options{
+	_, err := fuzzy.Run(context.Background(), fuzzy.Options{
 		CatalogPath: catalog,
 		Mode:        fuzzy.ModePrefetch,
 		WorkRoot:    workRoot,
@@ -99,6 +85,78 @@ func TestPrefetchThenOfflineIngest(t *testing.T) {
 	}
 	if res.BugCount != 0 || res.Passed != 1 {
 		t.Fatalf("offline ingest bugs=%d passed=%d", res.BugCount, res.Passed)
+	}
+}
+
+func TestPrefetchIdempotent(t *testing.T) {
+	catalog, local := localGoCatalog(t, []string{".deps"})
+	workRoot := filepath.Join(t.TempDir(), "work")
+	seedDeps(t, local)
+
+	worktree := filepath.Join(workRoot, "runs", "local_go", fuzzy.PrefetchRunID)
+	first := runPrefetch(t, catalog, workRoot)
+	st1, err := os.Stat(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapBefore, err := os.ReadFile(filepath.Join(workRoot, "preserve", "local_go", ".deps", "ok"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	second := runPrefetch(t, catalog, workRoot)
+	if first.Passed != 1 || second.Passed != 1 {
+		t.Fatalf("passed first=%d second=%d", first.Passed, second.Passed)
+	}
+	st2, err := os.Stat(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(st1, st2) {
+		t.Fatal("prefetch rerun replaced worktree directory instead of reusing it")
+	}
+	snapAfter, err := os.ReadFile(filepath.Join(workRoot, "preserve", "local_go", ".deps", "ok"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(snapAfter) != string(snapBefore) {
+		t.Fatalf("snapshot changed on rerun: %q -> %q", snapBefore, snapAfter)
+	}
+	for _, leak := range []string{
+		filepath.Join(workRoot, "preserve", "local_go.tmp"),
+		filepath.Join(workRoot, "preserve", "local_go.old"),
+	} {
+		if _, err := os.Stat(leak); !os.IsNotExist(err) {
+			t.Fatalf("leaked snapshot path %s: %v", leak, err)
+		}
+	}
+}
+
+func runPrefetch(t *testing.T, catalog, workRoot string) *fuzzy.Result {
+	t.Helper()
+	res, err := fuzzy.Run(context.Background(), fuzzy.Options{
+		CatalogPath: catalog,
+		Mode:        fuzzy.ModePrefetch,
+		WorkRoot:    workRoot,
+		ReportDir:   filepath.Join(t.TempDir(), "reports"),
+		Allow:       true,
+		NoIsolate:   true,
+		Stdout:      os.Stdout,
+		Stderr:      os.Stderr,
+	})
+	if err != nil {
+		t.Fatalf("prefetch: %v (report %#v)", err, res)
+	}
+	return res
+}
+
+func seedDeps(t *testing.T, local string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(local, ".deps"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(local, ".deps", "ok"), []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -8,6 +8,9 @@ import (
 	"strings"
 )
 
+// PrefetchRunID is the stable worktree name used by prefetch so reruns reuse state.
+const PrefetchRunID = "prefetch"
+
 // Workspace manages cached bare clones and mutable worktrees.
 type Workspace struct {
 	Root string
@@ -41,46 +44,82 @@ func (w *Workspace) runPath(id, runID string) string {
 	return filepath.Join(w.Root, "runs", id, runID)
 }
 
-// PrepareOptions controls clone and snapshot restore behavior.
+// PrepareOptions controls clone, snapshot restore, and reuse behavior.
 type PrepareOptions struct {
 	Offline bool
+	// Reuse keeps an existing worktree at the pinned ref (reset in place) instead
+	// of deleting it. Prefetch sets this so repeated runs are idempotent.
+	Reuse bool
 }
 
-// Prepare returns a clean work directory at the project pin.
+// Prepare returns a work directory at the project pin.
 // When offline, uses the bare cache only (no git fetch/clone from URL) and
-// restores preserve snapshots written by prefetch.
+// requires preserve snapshots written by prefetch.
 func (w *Workspace) Prepare(p Project, runID string, opts PrepareOptions) (workDir string, commit string, err error) {
-	if p.LocalPath != "" {
-		src, err := filepath.Abs(p.LocalPath)
+	if opts.Reuse {
+		workDir, commit, err = w.reuseWorkDir(p, runID, opts)
 		if err != nil {
 			return "", "", err
 		}
-		workDir = w.runPath(p.ID, runID)
-		if err := ForceRemoveAll(workDir); err != nil {
-			return "", "", err
+		if workDir != "" {
+			return workDir, commit, nil
 		}
-		if err := copyDir(src, workDir); err != nil {
-			return "", "", err
+	}
+	return w.prepareFresh(p, runID, opts)
+}
+
+func (w *Workspace) reuseWorkDir(p Project, runID string, opts PrepareOptions) (workDir string, commit string, err error) {
+	workDir = w.runPath(p.ID, runID)
+	st, err := os.Stat(workDir)
+	if err != nil || !st.IsDir() {
+		return "", "", nil
+	}
+
+	if p.LocalPath != "" {
+		if err := w.Reset(p, workDir); err != nil {
+			return "", "", fmt.Errorf("reuse reset: %w", err)
 		}
-		if err := w.RestorePreserveSnapshot(p, workDir); err != nil {
-			return "", "", err
-		}
-		if opts.Offline {
-			if err := w.requirePreserveSnapshot(p); err != nil {
-				return "", "", err
-			}
-		}
-		return workDir, "local", nil
+		return w.finishPrepare(p, workDir, "local", opts)
 	}
 
 	if err := w.ensureBare(p, opts.Offline); err != nil {
 		return "", "", err
 	}
+	want, err := revParse(w.cachePath(p.ID), p.Ref)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve pin %s: %w", p.Ref, err)
+	}
+	have, err := revParse(workDir, "HEAD")
+	if err != nil || have != want {
+		return "", "", nil
+	}
+	if err := w.Reset(p, workDir); err != nil {
+		return "", "", fmt.Errorf("reuse reset: %w", err)
+	}
+	return w.finishPrepare(p, workDir, have, opts)
+}
+
+func (w *Workspace) prepareFresh(p Project, runID string, opts PrepareOptions) (workDir string, commit string, err error) {
 	workDir = w.runPath(p.ID, runID)
 	if err := ForceRemoveAll(workDir); err != nil {
 		return "", "", err
 	}
 	if err := os.MkdirAll(filepath.Dir(workDir), 0o755); err != nil {
+		return "", "", err
+	}
+
+	if p.LocalPath != "" {
+		src, err := filepath.Abs(p.LocalPath)
+		if err != nil {
+			return "", "", err
+		}
+		if err := copyDir(src, workDir); err != nil {
+			return "", "", err
+		}
+		return w.finishPrepare(p, workDir, "local", opts)
+	}
+
+	if err := w.ensureBare(p, opts.Offline); err != nil {
 		return "", "", err
 	}
 	cmd := exec.Command("git", "clone", "--no-checkout", w.cachePath(p.ID), workDir)
@@ -96,6 +135,10 @@ func (w *Workspace) Prepare(p Project, runID string, opts PrepareOptions) (workD
 	if err != nil {
 		return "", "", err
 	}
+	return w.finishPrepare(p, workDir, commit, opts)
+}
+
+func (w *Workspace) finishPrepare(p Project, workDir, commit string, opts PrepareOptions) (string, string, error) {
 	if err := w.RestorePreserveSnapshot(p, workDir); err != nil {
 		return "", "", err
 	}
@@ -109,35 +152,47 @@ func (w *Workspace) Prepare(p Project, runID string, opts PrepareOptions) (workD
 
 // SavePreserveSnapshot copies configured preserve_globs from workDir into the
 // durable work-root snapshot used by later Prepare calls (especially --offline).
+// The swap is atomic so a failed save leaves the previous snapshot intact.
 func (w *Workspace) SavePreserveSnapshot(p Project, workDir string) error {
 	if len(p.PreserveGlobs) == 0 {
 		return nil
 	}
-	dstRoot := w.preservePath(p.ID)
-	if err := ForceRemoveAll(dstRoot); err != nil {
+	final := w.preservePath(p.ID)
+	tmp := final + ".tmp"
+	old := final + ".old"
+	if err := ForceRemoveAll(tmp); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dstRoot, 0o755); err != nil {
+	if err := os.MkdirAll(tmp, 0o755); err != nil {
 		return err
 	}
-	saved := 0
-	for _, g := range p.PreserveGlobs {
-		src := filepath.Join(workDir, filepath.FromSlash(g))
-		if _, err := os.Stat(src); err != nil {
-			continue
-		}
-		dst := filepath.Join(dstRoot, filepath.FromSlash(g))
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return err
-		}
-		if err := copyDir(src, dst); err != nil {
-			return fmt.Errorf("snapshot %s: %w", g, err)
-		}
-		saved++
+	saved, err := copyGlobs(workDir, tmp, p.PreserveGlobs)
+	if err != nil {
+		_ = ForceRemoveAll(tmp)
+		return err
 	}
-	if saved == 0 {
+	if len(saved) == 0 {
+		_ = ForceRemoveAll(tmp)
 		return fmt.Errorf("preserve snapshot for %s: none of %v present after setup", p.ID, p.PreserveGlobs)
 	}
+	if err := ForceRemoveAll(old); err != nil {
+		_ = ForceRemoveAll(tmp)
+		return err
+	}
+	if _, err := os.Stat(final); err == nil {
+		if err := os.Rename(final, old); err != nil {
+			_ = ForceRemoveAll(tmp)
+			return err
+		}
+	}
+	if err := os.Rename(tmp, final); err != nil {
+		if _, statErr := os.Stat(old); statErr == nil {
+			_ = os.Rename(old, final)
+		}
+		_ = ForceRemoveAll(tmp)
+		return err
+	}
+	_ = ForceRemoveAll(old)
 	return nil
 }
 
@@ -151,23 +206,8 @@ func (w *Workspace) RestorePreserveSnapshot(p Project, workDir string) error {
 	if err != nil || !st.IsDir() {
 		return nil
 	}
-	for _, g := range p.PreserveGlobs {
-		src := filepath.Join(srcRoot, filepath.FromSlash(g))
-		if _, err := os.Stat(src); err != nil {
-			continue
-		}
-		dst := filepath.Join(workDir, filepath.FromSlash(g))
-		if err := ForceRemoveAll(dst); err != nil {
-			return err
-		}
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return err
-		}
-		if err := copyDir(src, dst); err != nil {
-			return fmt.Errorf("restore snapshot %s: %w", g, err)
-		}
-	}
-	return nil
+	_, err = copyGlobs(srcRoot, workDir, p.PreserveGlobs)
+	return err
 }
 
 func (w *Workspace) requirePreserveSnapshot(p Project) error {
@@ -180,40 +220,54 @@ func (w *Workspace) requirePreserveSnapshot(p Project) error {
 		return fmt.Errorf("offline preserve snapshot missing for %s (run: rft fuzzy prefetch --project %s)", p.ID, p.ID)
 	}
 	for _, g := range p.PreserveGlobs {
-		src := filepath.Join(srcRoot, filepath.FromSlash(g))
-		if _, err := os.Stat(src); err == nil {
+		if _, err := os.Stat(filepath.Join(srcRoot, filepath.FromSlash(g))); err == nil {
 			return nil
 		}
 	}
 	return fmt.Errorf("offline preserve snapshot for %s has none of %v (re-run prefetch)", p.ID, p.PreserveGlobs)
 }
 
+// HasPreserveSnapshot reports whether a usable durable snapshot exists.
+func (w *Workspace) HasPreserveSnapshot(p Project) bool {
+	return w.requirePreserveSnapshot(p) == nil
+}
+
 // Reset restores the workdir to the pinned ref, preserving configured globs.
 func (w *Workspace) Reset(p Project, workDir string) error {
-	if p.LocalPath != "" {
-		// Re-copy from local source.
-		preserved, err := stashPreserved(workDir, p.PreserveGlobs)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = ForceRemoveAll(preserved.dir) }()
-		if err := ForceRemoveAll(workDir); err != nil {
-			return err
-		}
-		if err := copyDir(p.LocalPath, workDir); err != nil {
-			return err
-		}
-		return preserved.restore(workDir)
-	}
-
 	preserved, err := stashPreserved(workDir, p.PreserveGlobs)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = ForceRemoveAll(preserved.dir) }()
 
+	if p.LocalPath != "" {
+		if err := replaceDirContents(workDir, p.LocalPath); err != nil {
+			return err
+		}
+	} else if err := resetGitWorkDir(workDir, p.Ref); err != nil {
+		return err
+	}
+	return preserved.restore(workDir)
+}
+
+// replaceDirContents clears dst's entries without removing dst itself, then
+// copies src into it. Keeps the directory inode stable for idempotent reuse.
+func replaceDirContents(dst, src string) error {
+	entries, err := os.ReadDir(dst)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := ForceRemoveAll(filepath.Join(dst, e.Name())); err != nil {
+			return err
+		}
+	}
+	return copyDir(src, dst)
+}
+
+func resetGitWorkDir(workDir, ref string) error {
 	cmds := [][]string{
-		{"git", "reset", "--hard", p.Ref},
+		{"git", "reset", "--hard", ref},
 		{"git", "clean", "-fdx"},
 	}
 	for _, argv := range cmds {
@@ -225,7 +279,7 @@ func (w *Workspace) Reset(p Project, workDir string) error {
 			}
 		}
 	}
-	return preserved.restore(workDir)
+	return nil
 }
 
 // forceCleanUntracked removes untracked files that git clean cannot delete
@@ -309,48 +363,63 @@ func stashPreserved(workDir string, globs []string) (*preservedSet, error) {
 		return nil, err
 	}
 	ps.dir = tmp
-	for _, g := range globs {
-		src := filepath.Join(workDir, filepath.FromSlash(g))
-		if _, err := os.Stat(src); err != nil {
-			continue
-		}
-		dst := filepath.Join(tmp, filepath.FromSlash(g))
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return nil, err
-		}
-		if err := os.Rename(src, dst); err != nil {
-			if err := copyDir(src, dst); err != nil {
-				return nil, err
-			}
-			if err := ForceRemoveAll(src); err != nil {
-				return nil, err
-			}
-		}
-		ps.items = append(ps.items, g)
+	items, err := moveGlobs(workDir, tmp, globs)
+	if err != nil {
+		_ = ForceRemoveAll(tmp)
+		return nil, err
 	}
+	ps.items = items
 	return ps, nil
 }
 
 func (ps *preservedSet) restore(workDir string) error {
-	if ps == nil || ps.dir == "" {
+	if ps == nil || ps.dir == "" || len(ps.items) == 0 {
 		return nil
 	}
-	for _, g := range ps.items {
-		src := filepath.Join(ps.dir, filepath.FromSlash(g))
-		dst := filepath.Join(workDir, filepath.FromSlash(g))
+	_, err := moveGlobs(ps.dir, workDir, ps.items)
+	return err
+}
+
+// copyGlobs copies each present glob from srcRoot to dstRoot, replacing destinations.
+func copyGlobs(srcRoot, dstRoot string, globs []string) ([]string, error) {
+	return transferGlobs(srcRoot, dstRoot, globs, false)
+}
+
+// moveGlobs renames each present glob from srcRoot to dstRoot, copying on cross-device failure.
+func moveGlobs(srcRoot, dstRoot string, globs []string) ([]string, error) {
+	return transferGlobs(srcRoot, dstRoot, globs, true)
+}
+
+func transferGlobs(srcRoot, dstRoot string, globs []string, move bool) ([]string, error) {
+	var done []string
+	for _, g := range globs {
+		rel := filepath.FromSlash(g)
+		src := filepath.Join(srcRoot, rel)
+		if _, err := os.Stat(src); err != nil {
+			continue
+		}
+		dst := filepath.Join(dstRoot, rel)
 		if err := ForceRemoveAll(dst); err != nil {
-			return err
+			return done, err
 		}
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return err
+			return done, err
 		}
-		if err := os.Rename(src, dst); err != nil {
-			if err := copyDir(src, dst); err != nil {
-				return err
+		if move {
+			if err := os.Rename(src, dst); err != nil {
+				if err := copyDir(src, dst); err != nil {
+					return done, fmt.Errorf("%s: %w", g, err)
+				}
+				if err := ForceRemoveAll(src); err != nil {
+					return done, err
+				}
 			}
+		} else if err := copyDir(src, dst); err != nil {
+			return done, fmt.Errorf("%s: %w", g, err)
 		}
+		done = append(done, g)
 	}
-	return nil
+	return done, nil
 }
 
 func copyDir(src, dst string) error {

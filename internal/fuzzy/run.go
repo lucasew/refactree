@@ -174,227 +174,275 @@ func sessionNetwork(opts Options, p Project) bool {
 	return p.Isolate.SetupNetworkEnabled() || p.Isolate.CheckNetworkEnabled()
 }
 
+type projectEnv struct {
+	workDir  string
+	root     string
+	commit   string
+	imageKey string
+	session  *Session
+}
+
 func runProject(ctx context.Context, opts Options, p Project, ws *Workspace, runner Runner, rng *rand.Rand, report *Report, out *Result) error {
-	runID := fmt.Sprintf("%d", opts.Seed)
-	if opts.Mode == ModePrefetch {
-		runID = "prefetch"
-	}
 	fmt.Fprintf(opts.Stdout, "== project %s ==\n", p.ID)
-	workDir, commit, err := ws.Prepare(p, runID, PrepareOptions{Offline: opts.Offline})
+	env, err := openProjectEnv(ctx, opts, p, ws, runner, report, out)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = env.session.Close(ctx) }()
+
+	if err := runLoggedSetup(ctx, opts, p, env.session, report, out, p.ID+"-setup", "setup", 0); err != nil {
+		return err
+	}
+
+	if opts.Mode == ModePrefetch {
+		return finishPrefetch(opts, p, ws, runner, env, report, out)
+	}
+	return runFuzzProject(ctx, opts, p, ws, rng, env, report, out)
+}
+
+func openProjectEnv(ctx context.Context, opts Options, p Project, ws *Workspace, runner Runner, report *Report, out *Result) (*projectEnv, error) {
+	runID := fmt.Sprintf("%d", opts.Seed)
+	prep := PrepareOptions{Offline: opts.Offline}
+	if opts.Mode == ModePrefetch {
+		runID = PrefetchRunID
+		prep.Reuse = true
+	}
+	workDir, commit, err := ws.Prepare(p, runID, prep)
 	if err != nil {
 		out.EnvFails++
 		_ = report.LogEvent(Event{Project: p.ID, Kind: "prepare", Outcome: "error", Class: "env", Error: err.Error()})
-		return fmt.Errorf("prepare: %w", err)
+		return nil, fmt.Errorf("prepare: %w", err)
 	}
 	report.Meta.Commit = commit
-	imageKey := ImageKey(p, commit)
 	_ = report.LogEvent(Event{Project: p.ID, Kind: "prepare", Outcome: "pass", Error: commit})
 
 	root := ProjectRoot(workDir, p)
 	if err := ApplyProjectMise(p, root); err != nil {
 		out.EnvFails++
 		_ = report.LogEvent(Event{Project: p.ID, Kind: "mise", Outcome: "error", Class: "env", Error: err.Error()})
-		return fmt.Errorf("apply [projects.<slug>.mise]: %w", err)
+		return nil, fmt.Errorf("apply [projects.<slug>.mise]: %w", err)
 	}
 	if HasEmbeddedMise(p) {
 		fmt.Fprintf(opts.Stdout, "mise: wrote [projects.<slug>.mise] to %s\n", filepath.Join(root, "mise.toml"))
 	}
 
-	// One session for setup + all checks on this project.
-	network := sessionNetwork(opts, p)
-	session, err := runner.StartSession(ctx, p.Isolate, root, imageKey, network)
+	imageKey := ImageKey(p, commit)
+	session, err := runner.StartSession(ctx, p.Isolate, root, imageKey, sessionNetwork(opts, p))
 	if err != nil {
 		out.EnvFails++
 		_ = report.LogEvent(Event{Project: p.ID, Kind: "session", Outcome: "error", Class: "env", Error: err.Error()})
-		return fmt.Errorf("start isolate session: %w", err)
+		return nil, fmt.Errorf("start isolate session: %w", err)
 	}
-	defer func() { _ = session.Close(ctx) }()
+	return &projectEnv{workDir: workDir, root: root, commit: commit, imageKey: imageKey, session: session}, nil
+}
 
+func runLoggedSetup(ctx context.Context, opts Options, p Project, session *Session, report *Report, out *Result, logName, label string, iteration int) error {
 	if argv := SetupArgv(p); len(argv) > 0 {
-		fmt.Fprintf(opts.Stdout, "setup: %s\n", strings.Join(argv, " "))
+		fmt.Fprintf(opts.Stdout, "%s: %s\n", label, strings.Join(argv, " "))
 	}
-	setupRes := RunSetup(ctx, session, p)
-	setupLog, _ := report.WriteRunResult(p.ID+"-setup", setupRes)
-	if err := requireOK("setup", setupRes); err != nil {
+	res := RunSetup(ctx, session, p)
+	return logCommandResult(opts, p, report, out, res, logName, label, "setup", iteration)
+}
+
+func runLoggedCheck(ctx context.Context, opts Options, p Project, session *Session, report *Report, out *Result, logName, label string, iteration int) error {
+	if argv := CheckArgv(p); len(argv) > 0 {
+		fmt.Fprintf(opts.Stdout, "%s: %s\n", label, strings.Join(argv, " "))
+	}
+	res := RunCheck(ctx, session, p)
+	return logCommandResult(opts, p, report, out, res, logName, label, "check_before", iteration)
+}
+
+func logCommandResult(opts Options, p Project, report *Report, out *Result, res RunResult, logName, label, kind string, iteration int) error {
+	logRel, _ := report.WriteRunResult(logName, res)
+	ev := Event{
+		Project:   p.ID,
+		Iteration: iteration,
+		Kind:      kind,
+		Log:       logRel,
+		ExitCode:  res.ExitCode,
+		Error:     isolatedSuffix(res),
+	}
+	if err := requireOK(label, res); err != nil {
 		out.EnvFails++
-		printRunFailure(opts.Stdout, opts.Verbose, "setup", setupRes, report.LogPath(setupLog))
-		_ = report.LogEvent(Event{Project: p.ID, Kind: "setup", Outcome: "error", Class: "env", Error: shortRunErr(setupRes), Log: setupLog, ExitCode: setupRes.ExitCode})
+		printRunFailure(opts.Stdout, opts.Verbose, label, res, report.LogPath(logRel))
+		ev.Outcome = "error"
+		ev.Class = "env"
+		ev.Error = shortRunErr(res)
+		_ = report.LogEvent(ev)
 		return err
 	}
-	if len(SetupArgv(p)) > 0 {
-		_ = report.LogEvent(Event{Project: p.ID, Kind: "setup", Outcome: "pass", Log: setupLog, ExitCode: setupRes.ExitCode, Error: isolatedSuffix(setupRes)})
+	if kind != "setup" || len(SetupArgv(p)) > 0 {
+		ev.Outcome = "pass"
+		_ = report.LogEvent(ev)
 	}
+	return nil
+}
 
-	if opts.Mode == ModePrefetch {
-		if err := ws.SavePreserveSnapshot(p, workDir); err != nil {
-			out.EnvFails++
-			_ = report.LogEvent(Event{Project: p.ID, Kind: "preserve_snapshot", Outcome: "error", Class: "env", Error: err.Error()})
-			return fmt.Errorf("preserve snapshot: %w", err)
-		}
-		if len(p.PreserveGlobs) > 0 {
-			_ = report.LogEvent(Event{Project: p.ID, Kind: "preserve_snapshot", Outcome: "pass", Error: ws.preservePath(p.ID)})
-			fmt.Fprintf(opts.Stdout, "preserve snapshot: %s\n", ws.preservePath(p.ID))
-		}
-		out.Passed++
-		fmt.Fprintf(opts.Stdout, "prefetch: ready (cache=%s mise-data=%s)\n", ws.cachePath(p.ID), runner.miseDataDir(imageKey))
-		return nil
+func finishPrefetch(opts Options, p Project, ws *Workspace, runner Runner, env *projectEnv, report *Report, out *Result) error {
+	if err := ws.SavePreserveSnapshot(p, env.workDir); err != nil {
+		out.EnvFails++
+		_ = report.LogEvent(Event{Project: p.ID, Kind: "preserve_snapshot", Outcome: "error", Class: "env", Error: err.Error()})
+		return fmt.Errorf("preserve snapshot: %w", err)
 	}
+	if len(p.PreserveGlobs) > 0 {
+		snap := ws.preservePath(p.ID)
+		_ = report.LogEvent(Event{Project: p.ID, Kind: "preserve_snapshot", Outcome: "pass", Error: snap})
+		fmt.Fprintf(opts.Stdout, "preserve snapshot: %s\n", snap)
+	}
+	out.Passed++
+	fmt.Fprintf(opts.Stdout, "prefetch: ready (cache=%s mise-data=%s worktree=%s)\n",
+		ws.cachePath(p.ID), runner.miseDataDir(env.imageKey), env.workDir)
+	return nil
+}
 
+func runFuzzProject(ctx context.Context, opts Options, p Project, ws *Workspace, rng *rand.Rand, env *projectEnv, report *Report, out *Result) error {
 	doIngest := opts.Mode == ModeIngest || opts.Mode == ModeRun
 	doMv := (opts.Mode == ModeMv || opts.Mode == ModeRun) && p.Mv.Enabled
 
 	if doIngest {
-		bugs, err := RunIngestProject(p, workDir, InvariantOptions{StrictRefs: opts.StrictRefs}, report)
+		bugs, err := RunIngestProject(p, env.workDir, InvariantOptions{StrictRefs: opts.StrictRefs}, report)
 		out.BugCount += bugs
 		if err != nil {
 			return err
 		}
 		out.Passed++
 	}
-
 	if !doMv {
 		return nil
 	}
 
-	fmt.Fprintf(opts.Stdout, "check: %s\n", strings.Join(CheckArgv(p), " "))
-	checkRes := RunCheck(ctx, session, p)
-	checkLog, _ := report.WriteRunResult(p.ID+"-check-before", checkRes)
-	if err := requireOK("baseline check", checkRes); err != nil {
-		out.EnvFails++
-		printRunFailure(opts.Stdout, opts.Verbose, "baseline check", checkRes, report.LogPath(checkLog))
-		_ = report.LogEvent(Event{Project: p.ID, Kind: "check_before", Outcome: "error", Class: "env", Error: shortRunErr(checkRes), Log: checkLog, ExitCode: checkRes.ExitCode})
+	if err := runLoggedCheck(ctx, opts, p, env.session, report, out, p.ID+"-check-before", "baseline check", 0); err != nil {
 		return err
 	}
-	_ = report.LogEvent(Event{Project: p.ID, Kind: "check_before", Outcome: "pass", Log: checkLog, ExitCode: checkRes.ExitCode, Error: isolatedSuffix(checkRes)})
 
 	ingestOpts := InvariantOptions{StrictRefs: opts.StrictRefs}
 	for i := 0; i < opts.Iterations; i++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := ws.Reset(p, workDir); err != nil {
+		if err := ws.Reset(p, env.workDir); err != nil {
 			out.EnvFails++
 			return fmt.Errorf("reset: %w", err)
 		}
-		if err := ApplyProjectMise(p, root); err != nil {
+		if err := ApplyProjectMise(p, env.root); err != nil {
 			out.EnvFails++
 			return fmt.Errorf("re-apply [projects.<slug>.mise]: %w", err)
 		}
-		// Re-run setup in the same session if deps were wiped.
 		if len(p.PreserveGlobs) == 0 && len(SetupArgv(p)) > 0 {
-			sr := RunSetup(ctx, session, p)
-			srLog, _ := report.WriteRunResult(fmt.Sprintf("%s-setup-after-reset-%d", p.ID, i+1), sr)
-			if err := requireOK("setup after reset", sr); err != nil {
-				out.EnvFails++
-				printRunFailure(opts.Stdout, opts.Verbose, "setup after reset", sr, report.LogPath(srLog))
-				_ = report.LogEvent(Event{Project: p.ID, Iteration: i + 1, Kind: "setup", Outcome: "error", Class: "env", Error: shortRunErr(sr), Log: srLog, ExitCode: sr.ExitCode})
+			label := "setup after reset"
+			if err := runLoggedSetup(ctx, opts, p, env.session, report, out, fmt.Sprintf("%s-setup-after-reset-%d", p.ID, i+1), label, i+1); err != nil {
 				return err
 			}
 		}
-
-		ingestRoot := primaryIngestRoot(p, workDir)
-		result, fails, err := RunIngestOnRoot(ingestRoot, ingestOpts)
-		if err != nil {
-			out.BugCount++
-			_ = report.LogEvent(Event{Project: p.ID, Iteration: i + 1, Kind: "mv_pre_ingest", Outcome: "error", Class: "bug", Error: err.Error()})
-			if opts.FailFast {
-				return err
-			}
-			continue
+		if err := runMvIteration(ctx, opts, p, rng, env, report, out, ingestOpts, i); err != nil {
+			return err
 		}
-		if len(fails) > 0 {
-			out.BugCount += len(fails)
-			_ = report.LogEvent(Event{Project: p.ID, Iteration: i + 1, Kind: "mv_pre_ingest", Outcome: "fail", Class: "bug", Failures: fails})
-			if opts.FailFast {
-				return fmt.Errorf("pre-mv invariants: %v", fails)
-			}
-			continue
-		}
-
-		plan, err := pickMvPlan(rng, p, ingestRoot, result, opts.Ops)
-		if err != nil {
-			out.Unsupported++
-			fmt.Fprintf(opts.Stdout, "mv[%d/%d]: skip pick: %v\n", i+1, opts.Iterations, err)
-			_ = report.LogEvent(Event{Project: p.ID, Iteration: i + 1, Kind: "mv_pick", Outcome: "skip", Class: "unsupported", Error: err.Error()})
-			continue
-		}
-		fmt.Fprintf(opts.Stdout, "mv[%d/%d]: %s %s -> %s\n", i+1, opts.Iterations, plan.Op, plan.Src, plan.Dst)
-
-		start := time.Now()
-		edits, err := ApplyMvPlan(ingestRoot, plan)
-		ev := Event{
-			Project:    p.ID,
-			Iteration:  i + 1,
-			Kind:       "mv",
-			Op:         plan.Op,
-			Source:     plan.Src,
-			Dest:       plan.Dst,
-			DurationMs: time.Since(start).Milliseconds(),
-		}
-		if err != nil {
-			ev.Error = err.Error()
-			ev.Class = classifyMvError(err)
-			ev.Outcome = "error"
-			if ev.Class == "bug" {
-				out.BugCount++
-				scaffold := report.ScaffoldDir(p.ID, opts.Seed, i+1)
-				_ = ScaffoldMvFixture(ingestRoot, scaffold, plan.Src, plan.Dst, edits)
-			} else {
-				out.Unsupported++
-			}
-			fmt.Fprintf(opts.Stdout, "mv[%d/%d]: %s (%s): %v\n", i+1, opts.Iterations, ev.Outcome, ev.Class, err)
-			_ = report.LogEvent(ev)
-			if ev.Class == "bug" && opts.FailFast {
-				return err
-			}
-			continue
-		}
-
-		postFails := postMvInvariants(ingestRoot, plan, opts.StrictRefs)
-		if len(postFails) > 0 {
-			ev.Outcome = "fail"
-			ev.Class = "bug"
-			ev.Failures = postFails
-			out.BugCount += len(postFails)
-			scaffold := report.ScaffoldDir(p.ID, opts.Seed, i+1)
-			_ = ScaffoldMvFixture(ingestRoot, scaffold, plan.Src, plan.Dst, edits)
-			fmt.Fprintf(opts.Stdout, "mv[%d/%d]: fail (post-ingest): %v\n", i+1, opts.Iterations, postFails)
-			_ = report.LogEvent(ev)
-			if opts.FailFast {
-				return fmt.Errorf("post-mv invariants: %v", postFails)
-			}
-			continue
-		}
-
-		after := RunCheck(ctx, session, p)
-		afterLog, _ := report.WriteRunResult(fmt.Sprintf("%s-check-after-%d", p.ID, i+1), after)
-		ev.Log = afterLog
-		ev.ExitCode = after.ExitCode
-		if !after.OK() {
-			label := fmt.Sprintf("mv[%d/%d] post-check", i+1, opts.Iterations)
-			ev.Outcome = "fail"
-			ev.Class = "bug"
-			ev.Error = shortRunErr(after)
-			out.BugCount++
-			scaffold := report.ScaffoldDir(p.ID, opts.Seed, i+1)
-			_ = ScaffoldMvFixture(ingestRoot, scaffold, plan.Src, plan.Dst, edits)
-			fmt.Fprintf(opts.Stdout, "mv[%d/%d]: fail (check exit %d)\n", i+1, opts.Iterations, after.ExitCode)
-			printRunFailure(opts.Stdout, opts.Verbose, label, after, report.LogPath(afterLog))
-			_ = report.LogEvent(ev)
-			if opts.FailFast {
-				err := requireOK(label, after)
-				if afterLog != "" {
-					return fmt.Errorf("%w\nfull check log: %s", err, filepath.Join(report.LogPath(afterLog), "full.log"))
-				}
-				return err
-			}
-			continue
-		}
-		ev.Outcome = "pass"
-		out.Passed++
-		fmt.Fprintf(opts.Stdout, "mv[%d/%d]: pass\n", i+1, opts.Iterations)
-		_ = report.LogEvent(ev)
 	}
+	return nil
+}
+
+func runMvIteration(ctx context.Context, opts Options, p Project, rng *rand.Rand, env *projectEnv, report *Report, out *Result, ingestOpts InvariantOptions, i int) error {
+	ingestRoot := primaryIngestRoot(p, env.workDir)
+	result, fails, err := RunIngestOnRoot(ingestRoot, ingestOpts)
+	if err != nil {
+		out.BugCount++
+		_ = report.LogEvent(Event{Project: p.ID, Iteration: i + 1, Kind: "mv_pre_ingest", Outcome: "error", Class: "bug", Error: err.Error()})
+		if opts.FailFast {
+			return err
+		}
+		return nil
+	}
+	if len(fails) > 0 {
+		out.BugCount += len(fails)
+		_ = report.LogEvent(Event{Project: p.ID, Iteration: i + 1, Kind: "mv_pre_ingest", Outcome: "fail", Class: "bug", Failures: fails})
+		if opts.FailFast {
+			return fmt.Errorf("pre-mv invariants: %v", fails)
+		}
+		return nil
+	}
+
+	plan, err := pickMvPlan(rng, p, ingestRoot, result, opts.Ops)
+	if err != nil {
+		out.Unsupported++
+		fmt.Fprintf(opts.Stdout, "mv[%d/%d]: skip pick: %v\n", i+1, opts.Iterations, err)
+		_ = report.LogEvent(Event{Project: p.ID, Iteration: i + 1, Kind: "mv_pick", Outcome: "skip", Class: "unsupported", Error: err.Error()})
+		return nil
+	}
+	fmt.Fprintf(opts.Stdout, "mv[%d/%d]: %s %s -> %s\n", i+1, opts.Iterations, plan.Op, plan.Src, plan.Dst)
+
+	start := time.Now()
+	edits, err := ApplyMvPlan(ingestRoot, plan)
+	ev := Event{
+		Project:    p.ID,
+		Iteration:  i + 1,
+		Kind:       "mv",
+		Op:         plan.Op,
+		Source:     plan.Src,
+		Dest:       plan.Dst,
+		DurationMs: time.Since(start).Milliseconds(),
+	}
+	scaffold := func() {
+		_ = ScaffoldMvFixture(ingestRoot, report.ScaffoldDir(p.ID, opts.Seed, i+1), plan.Src, plan.Dst, edits)
+	}
+	if err != nil {
+		ev.Error = err.Error()
+		ev.Class = classifyMvError(err)
+		ev.Outcome = "error"
+		if ev.Class == "bug" {
+			out.BugCount++
+			scaffold()
+		} else {
+			out.Unsupported++
+		}
+		fmt.Fprintf(opts.Stdout, "mv[%d/%d]: %s (%s): %v\n", i+1, opts.Iterations, ev.Outcome, ev.Class, err)
+		_ = report.LogEvent(ev)
+		if ev.Class == "bug" && opts.FailFast {
+			return err
+		}
+		return nil
+	}
+
+	if postFails := postMvInvariants(ingestRoot, plan, opts.StrictRefs); len(postFails) > 0 {
+		ev.Outcome = "fail"
+		ev.Class = "bug"
+		ev.Failures = postFails
+		out.BugCount += len(postFails)
+		scaffold()
+		fmt.Fprintf(opts.Stdout, "mv[%d/%d]: fail (post-ingest): %v\n", i+1, opts.Iterations, postFails)
+		_ = report.LogEvent(ev)
+		if opts.FailFast {
+			return fmt.Errorf("post-mv invariants: %v", postFails)
+		}
+		return nil
+	}
+
+	after := RunCheck(ctx, env.session, p)
+	afterLog, _ := report.WriteRunResult(fmt.Sprintf("%s-check-after-%d", p.ID, i+1), after)
+	ev.Log = afterLog
+	ev.ExitCode = after.ExitCode
+	if !after.OK() {
+		label := fmt.Sprintf("mv[%d/%d] post-check", i+1, opts.Iterations)
+		ev.Outcome = "fail"
+		ev.Class = "bug"
+		ev.Error = shortRunErr(after)
+		out.BugCount++
+		scaffold()
+		fmt.Fprintf(opts.Stdout, "mv[%d/%d]: fail (check exit %d)\n", i+1, opts.Iterations, after.ExitCode)
+		printRunFailure(opts.Stdout, opts.Verbose, label, after, report.LogPath(afterLog))
+		_ = report.LogEvent(ev)
+		if opts.FailFast {
+			err := requireOK(label, after)
+			if afterLog != "" {
+				return fmt.Errorf("%w\nfull check log: %s", err, filepath.Join(report.LogPath(afterLog), "full.log"))
+			}
+			return err
+		}
+		return nil
+	}
+	ev.Outcome = "pass"
+	out.Passed++
+	fmt.Fprintf(opts.Stdout, "mv[%d/%d]: pass\n", i+1, opts.Iterations)
+	_ = report.LogEvent(ev)
 	return nil
 }
 

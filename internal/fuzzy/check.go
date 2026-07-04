@@ -10,22 +10,15 @@ import (
 
 // RunSetup executes setup in the shared session (installs tools once per session).
 func RunSetup(ctx context.Context, session *Session, p Project) RunResult {
-	argv := SetupArgv(p)
-	if len(argv) == 0 {
-		return RunResult{ExitCode: 0}
-	}
-	if session == nil {
-		return RunResult{Err: fmt.Errorf("nil session"), ExitCode: 1}
-	}
-	if err := ApplyProjectMise(p, session.abs); err != nil {
-		return RunResult{Err: err, ExitCode: 1}
-	}
-	return session.Run(ctx, argv)
+	return runSessionTask(ctx, session, p, SetupArgv(p))
 }
 
 // RunCheck executes the check task in the shared session.
 func RunCheck(ctx context.Context, session *Session, p Project) RunResult {
-	argv := CheckArgv(p)
+	return runSessionTask(ctx, session, p, CheckArgv(p))
+}
+
+func runSessionTask(ctx context.Context, session *Session, p Project, argv []string) RunResult {
 	if len(argv) == 0 {
 		return RunResult{ExitCode: 0}
 	}

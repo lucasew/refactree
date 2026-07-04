@@ -15,7 +15,7 @@ Setup/check run in Docker by default via testcontainers. Pass `--no-isolate` to 
 - Isolation: Docker default (`jdxcode/mise:latest`); ingest runs on the host
 
 # Airgapped flow
-1. Online: `go run ./cmd/rft fuzzy prefetch --project <slug> --work-root /var/cache/rft-fuzzy`
+1. Online (idempotent): `go run ./cmd/rft fuzzy prefetch --project <slug> --work-root /var/cache/rft-fuzzy`
 2. Copy work-root and the mise image to the airgapped host.
 3. Offline: `go run ./cmd/rft fuzzy ingest --project <slug> --work-root /var/cache/rft-fuzzy --offline`
 4. In an isolated env without Docker: add `--no-isolate --allow` (or `RFT_FUZZY_ALLOW=1`).
