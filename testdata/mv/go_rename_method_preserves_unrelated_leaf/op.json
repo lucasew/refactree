@@ -1,0 +1,4 @@
+{
+  "source": "path:./pkg/a/a.go::*impl.WriteImage",
+  "destination": "path:./pkg/a/a.go::*impl.Renamed"
+}
