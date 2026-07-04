@@ -143,7 +143,9 @@ func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ing
 		}
 		return ingest.FindAllWholeWordOccurrences(fileRelPath, content, oldBase, newBase)
 	}
-	return rewriteJavaPrefixedSpecs(fileRelPath, content, []string{"import static ", "import ", "package "}, oldPkg, newPkg)
+	// Replace the fully-qualified package token everywhere it appears as a
+	// Java name segment (package/import lines, FQNs, module exports).
+	return rewriteJavaNameToken(fileRelPath, content, oldPkg, newPkg)
 }
 
 func findJavaTopLevelDecl(root *grammar.Node, nameStart uint32) *grammar.Node {
@@ -255,6 +257,43 @@ func rewriteJavaPrefixedSpecs(fileRelPath string, content []byte, prefixes []str
 		}
 	}
 	return edits
+}
+
+func rewriteJavaNameToken(fileRelPath string, content []byte, oldName, newName string) []ingest.Edit {
+	if oldName == "" || oldName == newName {
+		return nil
+	}
+	text := string(content)
+	var edits []ingest.Edit
+	off := 0
+	for off < len(text) {
+		idx := strings.Index(text[off:], oldName)
+		if idx < 0 {
+			break
+		}
+		start := off + idx
+		end := start + len(oldName)
+		if start > 0 && isJavaIdentChar(text[start-1]) {
+			off = end
+			continue
+		}
+		if end < len(text) && isJavaIdentChar(text[end]) {
+			off = end
+			continue
+		}
+		edits = append(edits, ingest.Edit{
+			File:      fileRelPath,
+			StartByte: uint32(start),
+			EndByte:   uint32(end),
+			NewText:   newName,
+		})
+		off = end
+	}
+	return edits
+}
+
+func isJavaIdentChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '$'
 }
 
 func lastPathComponent(s string) string {

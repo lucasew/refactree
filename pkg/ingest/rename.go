@@ -144,6 +144,25 @@ func symbolNameLeaf(symbol string) string {
 	return strings.TrimPrefix(leaf, "*")
 }
 
+// applyEditsToString applies byte-offset edits to an in-memory buffer.
+func applyEditsToString(content string, edits []Edit) string {
+	if len(edits) == 0 {
+		return content
+	}
+	sorted := append([]Edit(nil), edits...)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].StartByte > sorted[j].StartByte
+	})
+	buf := []byte(content)
+	for _, e := range sorted {
+		if int(e.EndByte) > len(buf) || e.StartByte > e.EndByte {
+			continue
+		}
+		buf = append(buf[:e.StartByte], append([]byte(e.NewText), buf[e.EndByte:]...)...)
+	}
+	return string(buf)
+}
+
 // planCrossFileMove orchestrates a cross-file move using the MoveDriver interface.
 // It extracts the declaration, inserts it at the destination, and if the source
 // and destination are in different directories, rewrites imports in consumer files.
@@ -405,7 +424,7 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 	var edits []Edit
 
 	// Relocate package contents: for every file listed under the source dir,
-	// delete its content at old path, insert full original content at new path.
+	// delete its content at old path, insert rewritten content at new path.
 	for _, f := range result.Files {
 		if !isUnderDir(f.Path, srcDir) {
 			continue
@@ -421,6 +440,13 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 		if err != nil {
 			return nil, fmt.Errorf("reading %s: %w", srcFile, err)
 		}
+		newContent := string(content)
+		// Languages with a move driver can rewrite package/module decls inside
+		// relocated files (e.g. Java `package` lines). Others keep bytes intact
+		// because the package identity may be declared independently of dir name.
+		if driver, ok := moveDriverForLanguage(f.Language); ok {
+			newContent = applyEditsToString(newContent, driver.RewriteImports(dstFile, content, result, src, dst))
+		}
 		// Clear entire old file.
 		edits = append(edits, Edit{
 			File:      srcFile,
@@ -428,12 +454,12 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 			EndByte:   uint32(len(content)),
 			NewText:   "",
 		})
-		// Insert full content at new location (create if needed handled by ApplyEdits).
+		// Insert rewritten content at new location (create if needed handled by ApplyEdits).
 		edits = append(edits, Edit{
 			File:      dstFile,
 			StartByte: 0,
 			EndByte:   0,
-			NewText:   string(content),
+			NewText:   newContent,
 		})
 	}
 

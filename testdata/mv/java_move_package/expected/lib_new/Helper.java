@@ -1,4 +1,4 @@
-package lib;
+package lib_new;
 
 public class Helper {
   public static int help() {
