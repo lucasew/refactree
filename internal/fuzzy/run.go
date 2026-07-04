@@ -201,7 +201,7 @@ func runProject(ctx context.Context, opts Options, p Project, ws *Workspace, run
 	doMv := (opts.Mode == ModeMv || opts.Mode == ModeRun) && p.Mv.Enabled
 
 	if doIngest {
-		bugs, err := RunIngestProject(p, workDir, IngestRunOptions{StrictRefs: opts.StrictRefs}, report)
+		bugs, err := RunIngestProject(p, workDir, InvariantOptions{StrictRefs: opts.StrictRefs}, report)
 		out.BugCount += bugs
 		if err != nil {
 			return err
@@ -224,7 +224,7 @@ func runProject(ctx context.Context, opts Options, p Project, ws *Workspace, run
 	}
 	_ = report.LogEvent(Event{Project: p.ID, Kind: "check_before", Outcome: "pass", Log: checkLog, ExitCode: checkRes.ExitCode, Error: isolatedSuffix(checkRes)})
 
-	ingestOpts := IngestRunOptions{StrictRefs: opts.StrictRefs}
+	ingestOpts := InvariantOptions{StrictRefs: opts.StrictRefs}
 	for i := 0; i < opts.Iterations; i++ {
 		if err := ctx.Err(); err != nil {
 			return err

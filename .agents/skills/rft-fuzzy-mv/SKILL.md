@@ -10,7 +10,8 @@ Setup/check run in Docker via testcontainers, so a personal machine is fine. Onl
 - Catalog: `testdata/fuzzy/projects.toml` (`[projects.<slug>]` + `[projects.<slug>.mise]`)
 - Human index: `references/projects.md`
 - Harness: `internal/fuzzy`, CLI `rft fuzzy mv` / `rft fuzzy run`
-- Isolation: testcontainers + Docker, default image `jdxcode/mise:latest`
+- Fixtures: `testdata/mv/` on `class=bug`; ingest phase uses `testdata/ingest/` (`ingestor-fixtures`)
+- Isolation: testcontainers + Docker, default image `jdxcode/mise:latest`; ingest/mv run on the host
 
 # Process
 1. Docker must be available.
@@ -24,7 +25,7 @@ Setup/check run in Docker via testcontainers, so a personal machine is fine. Onl
 5. On `class=bug`: curate `testdata/mv/...`, fix `pkg/ingest`, rerun with the same `--seed`.
 
 # Flags
-- `--project <slug>`, `--iterations`, `--seed`
+- `--project <slug>` (repeatable), `--iterations`, `--seed`
 - `--no-isolate` host setup/check (no Docker)
-- `--fail-fast`, `--strict-refs`, `--work-root`, `--report-dir`
+- `--fail-fast`, `--strict-refs`, `--work-root`, `--report-dir`, `--ops`
 - override image per project: `[projects.<slug>.isolate] image = "..."`

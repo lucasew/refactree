@@ -22,7 +22,7 @@ func TestInvariantsOnIngestFixtures(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			dir := filepath.Join(fixtureDir, name)
-			_, fails, err := fuzzy.RunIngestOnRoot(dir, fuzzy.IngestRunOptions{StrictRefs: false})
+			_, fails, err := fuzzy.RunIngestOnRoot(dir, fuzzy.InvariantOptions{})
 			if err != nil {
 				t.Fatalf("ingest: %v", err)
 			}

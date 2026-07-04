@@ -7,25 +7,20 @@ import (
 	"github.com/lucasew/refactree/pkg/ingest"
 )
 
-// IngestRunOptions configures ingest fuzzing.
-type IngestRunOptions struct {
-	StrictRefs bool
-}
-
 // RunIngestOnRoot ingests one directory and checks invariants.
-func RunIngestOnRoot(root string, opts IngestRunOptions) (result *ingest.Result, fails []InvariantFailure, err error) {
+func RunIngestOnRoot(root string, opts InvariantOptions) (result *ingest.Result, fails []InvariantFailure, err error) {
 	result, err = ingest.Ingest(root)
 	if err != nil {
 		return nil, nil, err
 	}
-	fails = append(fails, CheckInvariants(root, result, InvariantOptions{StrictRefs: opts.StrictRefs})...)
+	fails = append(fails, CheckInvariants(root, result, opts)...)
 	fails = append(fails, CheckIdempotentIngest(root, result)...)
 	fails = append(fails, CheckWalkSymbolsSubset(root, result)...)
 	return result, fails, nil
 }
 
 // RunIngestProject runs ingest checks for every configured root.
-func RunIngestProject(p Project, workDir string, opts IngestRunOptions, report *Report) (bugFails int, err error) {
+func RunIngestProject(p Project, workDir string, opts InvariantOptions, report *Report) (bugFails int, err error) {
 	for _, rel := range p.IngestRoots {
 		root := ResolveIngestRoot(workDir, rel)
 		start := time.Now()
