@@ -88,7 +88,12 @@ func pickMvPlan(rng *rand.Rand, p Project, root string, result *ingest.Result, o
 
 	switch op {
 	case "rename":
-		name := uniqueSymbol(rng, symbolNames)
+		leaf := srcRef.Symbol
+		if i := strings.LastIndex(leaf, "."); i >= 0 {
+			leaf = leaf[i+1:]
+		}
+		leaf = strings.TrimPrefix(leaf, "*")
+		name := uniqueSymbol(rng, symbolNames, leaf)
 		// Preserve qualifiers for nested symbols (e.g. Java Type.method).
 		if i := strings.LastIndex(srcRef.Symbol, "."); i >= 0 {
 			name = srcRef.Symbol[:i+1] + name
@@ -142,14 +147,37 @@ func pickMvPlan(rng *rand.Rand, p Project, root string, result *ingest.Result, o
 	}
 }
 
-func uniqueSymbol(rng *rand.Rand, existing map[string]bool) string {
+func uniqueSymbol(rng *rand.Rand, existing map[string]bool, styleHint string) string {
 	for i := 0; i < 1000; i++ {
-		name := fmt.Sprintf("fuzz_%x", rng.Intn(1<<20))
+		n := rng.Intn(1 << 20)
+		name := formatFuzzName(styleHint, n)
 		if !existing[name] {
 			return name
 		}
 	}
-	return fmt.Sprintf("fuzz_%d", rng.Int63())
+	return formatFuzzName(styleHint, int(rng.Int63()))
+}
+
+func formatFuzzName(styleHint string, n int) string {
+	hex := fmt.Sprintf("%x", n)
+	if styleHint == "" {
+		return "fuzz_" + hex
+	}
+	if strings.ToUpper(styleHint) == styleHint && strings.Contains(styleHint, "_") {
+		return "FUZZ_" + strings.ToUpper(hex)
+	}
+	if strings.ToUpper(styleHint[:1]) == styleHint[:1] && strings.ToLower(styleHint[1:]) != styleHint[1:] {
+		// PascalCase
+		return "Fuzz" + hex
+	}
+	if strings.ToLower(styleHint[:1]) == styleHint[:1] && !strings.Contains(styleHint, "_") {
+		// camelCase — ErrorProne accepts lowerCamelCase for non-immutable statics.
+		return "fuzz" + hex
+	}
+	if strings.ToUpper(styleHint) == styleHint {
+		return "FUZZ" + strings.ToUpper(hex)
+	}
+	return "fuzz_" + hex
 }
 
 // ApplyMvPlan runs Rename+ApplyEdits and returns edits.

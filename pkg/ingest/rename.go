@@ -420,55 +420,59 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 	}
 	oldDirBase := lastPathComponent(srcDir)
 	newDirBase := lastPathComponent(dstDir)
+	dirPairs := expandPackageDirPairs(result, srcDir, dstDir)
 
 	var edits []Edit
+	movedFiles := map[string]bool{}
 
-	// Relocate package contents: for every file listed under the source dir,
-	// delete its content at old path, insert rewritten content at new path.
-	for _, f := range result.Files {
-		if !isUnderDir(f.Path, srcDir) {
-			continue
+	// Relocate package contents across every paired source-root directory.
+	for _, pair := range dirPairs {
+		fromDir, toDir := pair[0], pair[1]
+		pairSrc := Reference{Provider: "path", Path: "./" + fromDir}
+		pairDst := Reference{Provider: "path", Path: "./" + toDir}
+		for _, f := range result.Files {
+			rel := strings.TrimPrefix(f.Path, "./")
+			if !isUnderDir(rel, fromDir) {
+				continue
+			}
+			srcFile := rel
+			if movedFiles[srcFile] {
+				continue
+			}
+			movedFiles[srcFile] = true
+			under := strings.TrimPrefix(srcFile, fromDir)
+			under = strings.TrimPrefix(under, "/")
+			dstFile := toDir
+			if under != "" {
+				dstFile = path.Join(toDir, under)
+			}
+			content, err := os.ReadFile(filepath.Join(dir, srcFile))
+			if err != nil {
+				return nil, fmt.Errorf("reading %s: %w", srcFile, err)
+			}
+			newContent := string(content)
+			if driver, ok := moveDriverForLanguage(f.Language); ok {
+				newContent = applyEditsToString(newContent, driver.RewriteImports(dstFile, content, result, pairSrc, pairDst))
+			}
+			edits = append(edits, Edit{
+				File:      srcFile,
+				StartByte: 0,
+				EndByte:   uint32(len(content)),
+				NewText:   "",
+			})
+			edits = append(edits, Edit{
+				File:      dstFile,
+				StartByte: 0,
+				EndByte:   0,
+				NewText:   newContent,
+			})
 		}
-		srcFile := f.Path
-		under := strings.TrimPrefix(srcFile, srcDir)
-		under = strings.TrimPrefix(under, "/")
-		dstFile := dstDir
-		if under != "" {
-			dstFile = path.Join(dstDir, under)
-		}
-		content, err := os.ReadFile(filepath.Join(dir, srcFile))
-		if err != nil {
-			return nil, fmt.Errorf("reading %s: %w", srcFile, err)
-		}
-		newContent := string(content)
-		// Languages with a move driver can rewrite package/module decls inside
-		// relocated files (e.g. Java `package` lines). Others keep bytes intact
-		// because the package identity may be declared independently of dir name.
-		if driver, ok := moveDriverForLanguage(f.Language); ok {
-			newContent = applyEditsToString(newContent, driver.RewriteImports(dstFile, content, result, src, dst))
-		}
-		// Clear entire old file.
-		edits = append(edits, Edit{
-			File:      srcFile,
-			StartByte: 0,
-			EndByte:   uint32(len(content)),
-			NewText:   "",
-		})
-		// Insert rewritten content at new location (create if needed handled by ApplyEdits).
-		edits = append(edits, Edit{
-			File:      dstFile,
-			StartByte: 0,
-			EndByte:   0,
-			NewText:   newContent,
-		})
 	}
 
-	// Update import references in all consumer files (files not under srcDir).
-	// Dispatches to the per-language MoveDriver.RewriteImports when available;
-	// falls back to global leaf-based string replacement for languages without
-	// a registered move driver.
+	// Update references in all consumer files (files not relocated).
 	for _, f := range result.Files {
-		if isUnderDir(f.Path, srcDir) {
+		rel := strings.TrimPrefix(f.Path, "./")
+		if movedFiles[rel] {
 			continue
 		}
 		fcontent, err := os.ReadFile(filepath.Join(dir, f.Path))
@@ -480,7 +484,6 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 			occs := driver.RewriteImports(f.Path, fcontent, result, src, dst)
 			edits = append(edits, occs...)
 		} else {
-			// Fallback: whole-word leaf-based path token replace.
 			pathOld := oldDirBase
 			pathNew := newDirBase
 			if cp := CommonPathPrefix(srcDir, dstDir); cp != "" {
@@ -493,10 +496,168 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 				edits = append(edits, occs...)
 			}
 		}
+	}
 
+	if javaPackage, ok := javaPackageNameFromSourceDir(srcDir); ok {
+		newJavaPackage, ok := javaPackageNameFromSourceDir(dstDir)
+		if ok && javaPackage != newJavaPackage {
+			extra, err := rewriteJavaPackageInSupportFiles(dir, result, movedFiles, javaPackage, newJavaPackage)
+			if err != nil {
+				return nil, err
+			}
+			edits = append(edits, extra...)
+		}
 	}
 
 	return edits, nil
+}
+
+// expandPackageDirPairs returns source/dest directory pairs for a package move.
+// For Java, a package often exists under multiple source roots (src/main/java and
+// src/test/java); moving only one root leaves PackageLocation errors.
+func expandPackageDirPairs(result *Result, srcDir, dstDir string) [][2]string {
+	srcDir = strings.TrimSuffix(strings.TrimPrefix(srcDir, "./"), "/")
+	dstDir = strings.TrimSuffix(strings.TrimPrefix(dstDir, "./"), "/")
+	pairs := [][2]string{{srcDir, dstDir}}
+	srcSuffix, ok := javaSourceRootSuffix(srcDir)
+	if !ok {
+		return pairs
+	}
+	dstSuffix, ok := javaSourceRootSuffix(dstDir)
+	if !ok {
+		return pairs
+	}
+	seen := map[string]bool{srcDir: true}
+	for _, f := range result.Files {
+		if f.Language != "java" {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Path, "./")
+		pkgDir := path.Dir(rel)
+		if pkgDir == "." {
+			continue
+		}
+		suffix, ok := javaSourceRootSuffix(pkgDir)
+		if !ok || suffix != srcSuffix || seen[pkgDir] {
+			continue
+		}
+		root := strings.TrimSuffix(pkgDir, suffix)
+		root = strings.TrimSuffix(root, "/")
+		dstPkgDir := dstSuffix
+		if root != "" {
+			dstPkgDir = path.Join(root, dstSuffix)
+		}
+		seen[pkgDir] = true
+		pairs = append(pairs, [2]string{pkgDir, dstPkgDir})
+	}
+	return pairs
+}
+
+func javaSourceRootSuffix(dir string) (string, bool) {
+	dir = strings.Trim(strings.TrimPrefix(dir, "./"), "/")
+	for _, root := range []string{"src/main/java/", "src/test/java/", "src/"} {
+		if strings.HasPrefix(dir, root) {
+			return strings.TrimPrefix(dir, root), true
+		}
+	}
+	return "", false
+}
+
+func javaPackageNameFromSourceDir(dir string) (string, bool) {
+	suffix, ok := javaSourceRootSuffix(dir)
+	if !ok || suffix == "" {
+		return "", false
+	}
+	return strings.ReplaceAll(suffix, "/", "."), true
+}
+
+func rewriteJavaPackageInSupportFiles(root string, result *Result, movedFiles map[string]bool, oldPkg, newPkg string) ([]Edit, error) {
+	ingested := map[string]bool{}
+	for _, f := range result.Files {
+		ingested[strings.TrimPrefix(f.Path, "./")] = true
+	}
+	var edits []Edit
+	err := filepath.Walk(root, func(abs string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			base := info.Name()
+			if base == ".git" || base == "target" || base == "node_modules" || base == ".gradle" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(root, abs)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if ingested[rel] || movedFiles[rel] {
+			return nil
+		}
+		switch strings.ToLower(filepath.Ext(rel)) {
+		case ".pro", ".xml", ".properties", ".mf", ".gradle", ".kts", ".md", ".txt", ".json":
+		default:
+			base := path.Base(rel)
+			if base != "module-info.java" && !strings.HasPrefix(base, "Module.") {
+				return nil
+			}
+		}
+		content, err := os.ReadFile(abs)
+		if err != nil {
+			return err
+		}
+		text := string(content)
+		oldSlash := strings.ReplaceAll(oldPkg, ".", "/")
+		newSlash := strings.ReplaceAll(newPkg, ".", "/")
+		if !strings.Contains(text, oldPkg) && !strings.Contains(text, oldSlash) {
+			return nil
+		}
+		edits = append(edits, rewriteJavaNameTokenEdits(rel, content, oldPkg, newPkg)...)
+		if oldSlash != oldPkg {
+			edits = append(edits, rewriteJavaNameTokenEdits(rel, content, oldSlash, newSlash)...)
+		}
+		return nil
+	})
+	return edits, err
+}
+
+func rewriteJavaNameTokenEdits(fileRelPath string, content []byte, oldName, newName string) []Edit {
+	if oldName == "" || oldName == newName {
+		return nil
+	}
+	text := string(content)
+	var edits []Edit
+	off := 0
+	for off < len(text) {
+		idx := strings.Index(text[off:], oldName)
+		if idx < 0 {
+			break
+		}
+		start := off + idx
+		end := start + len(oldName)
+		if start > 0 && isJavaIdentByte(text[start-1]) {
+			off = end
+			continue
+		}
+		if end < len(text) && isJavaIdentByte(text[end]) {
+			off = end
+			continue
+		}
+		edits = append(edits, Edit{
+			File:      fileRelPath,
+			StartByte: uint32(start),
+			EndByte:   uint32(end),
+			NewText:   newName,
+		})
+		off = end
+	}
+	return edits
+}
+
+func isJavaIdentByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '$'
 }
 
 func isUnderDir(p, dir string) bool {

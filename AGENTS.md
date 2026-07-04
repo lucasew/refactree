@@ -8,7 +8,7 @@
 
 
 # Requirements
-- Language specific logic on language specific package. Use interfaces to standardize behavior.
+- Language specific logic on language specific package. Use interfaces to standardize behavior. No exceptions.
 
 # Suggestions
 ## For Janitor
