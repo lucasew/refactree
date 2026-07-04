@@ -1012,10 +1012,19 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 			// Same package tree: rename ident.Leaf only (not Type{}.Leaf).
 			selectorEdits = findSelectorLeafEdits(rel, content, oldLeaf, newLeaf, nil)
 		} else if importsRelated {
-			// External importers: only package-qualifier selectors (a.WriteImage),
-			// never b.Unrelated{}.WriteImage on foreign types.
-			locals := importLocalsForPackages(content, pkgDirs)
-			selectorEdits = findSelectorLeafEdits(rel, content, oldLeaf, newLeaf, locals)
+			// External importers: package qualifiers for our pkgs plus variables
+			// typed as imported interfaces that carry this method (var d a.Driver).
+			// Never b.Unrelated{}.WriteImage or b.WriteImage on foreign packages.
+			allowed := importLocalsForPackages(content, pkgDirs)
+			ifaceNames := interfaceNamesWithMethod(rootDir, result, ourPkgDirs, oldLeaf)
+			for local := range importLocalsForPackages(content, pkgDirs) {
+				for _, iface := range ifaceNames {
+					for name := range varsTypedAsImported(content, local, iface) {
+						allowed[name] = true
+					}
+				}
+			}
+			selectorEdits = findSelectorLeafEdits(rel, content, oldLeaf, newLeaf, allowed)
 		}
 		for _, e := range selectorEdits {
 			if occ[[2]uint32{e.StartByte, e.EndByte}] {
@@ -1033,6 +1042,116 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		}
 	}
 	return edits
+}
+
+// interfaceNamesWithMethod returns interface type names in ourPkgDirs that
+// declare a method named oldLeaf.
+func interfaceNamesWithMethod(rootDir string, result *ingest.Result, ourPkgDirs map[string]bool, oldLeaf string) []string {
+	seen := map[string]bool{}
+	var names []string
+	for _, f := range result.Files {
+		if f.Language != "go" {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Path, "./")
+		if !ourPkgDirs[dirOf(rel)] {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		for _, name := range interfaceTypeNamesWithMethod(content, oldLeaf) {
+			if !seen[name] {
+				seen[name] = true
+				names = append(names, name)
+			}
+		}
+	}
+	return names
+}
+
+func interfaceTypeNamesWithMethod(content []byte, methodLeaf string) []string {
+	lang, ok := grammar.GetByExtension(".go")
+	if !ok {
+		return nil
+	}
+	parser := grammar.NewParser()
+	defer parser.Delete()
+	if !parser.SetLanguage(lang) {
+		return nil
+	}
+	tree := parser.ParseString(string(content))
+	defer tree.Delete()
+	var names []string
+	var walk func(n *grammar.Node, ifaceName string, inIface bool)
+	walk = func(n *grammar.Node, ifaceName string, inIface bool) {
+		if n == nil {
+			return
+		}
+		nextName, nextIface := ifaceName, inIface
+		if n.Type() == "type_spec" {
+			if id := ingest.ChildByType(n, "type_identifier"); id != nil {
+				nextName = ingest.NodeText(id, content)
+			}
+			if t := ingest.ChildByField(n, "type"); t != nil && t.Type() == "interface_type" {
+				nextIface = true
+			}
+		}
+		if inIface && (n.Type() == "method_elem" || n.Type() == "field_declaration") {
+			if name := ingest.ChildByField(n, "name"); name != nil && ingest.NodeText(name, content) == methodLeaf {
+				if ifaceName != "" {
+					names = append(names, ifaceName)
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i), nextName, nextIface)
+		}
+	}
+	walk(tree.RootNode(), "", false)
+	return names
+}
+
+// varsTypedAsImported returns identifiers in content whose type is written as
+// importLocal.TypeName or *importLocal.TypeName (e.g. var d a.Driver).
+func varsTypedAsImported(content []byte, importLocal, typeName string) map[string]bool {
+	names := map[string]bool{}
+	if importLocal == "" || typeName == "" {
+		return names
+	}
+	text := string(content)
+	inString := buildStringLiteralMask(text)
+	for _, needle := range []string{importLocal + "." + typeName, "*" + importLocal + "." + typeName} {
+		off := 0
+		for {
+			idx := strings.Index(text[off:], needle)
+			if idx < 0 {
+				break
+			}
+			pos := off + idx
+			if inString[pos] {
+				off = pos + len(needle)
+				continue
+			}
+			j := pos - 1
+			for j >= 0 && (text[j] == ' ' || text[j] == '\t' || text[j] == '\n') {
+				j--
+			}
+			end := j + 1
+			for j >= 0 && isIdentChar(text[j]) {
+				j--
+			}
+			name := text[j+1 : end]
+			switch name {
+			case "", "var", "const", "type", "func", "return", "range", "map", "chan", "struct", "interface":
+			default:
+				names[name] = true
+			}
+			off = pos + len(needle)
+		}
+	}
+	return names
 }
 
 func fileImportsAnyPackage(content []byte, pkgDirs map[string]bool) bool {

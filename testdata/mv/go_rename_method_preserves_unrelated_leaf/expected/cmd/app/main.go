@@ -7,7 +7,7 @@ import (
 
 func main() {
 	var d a.Driver
-	d.WriteImage()
+	d.Renamed()
 	b.Unrelated{}.WriteImage()
 	b.WriteImage()
 	_ = "pkg.a.WriteImage"
