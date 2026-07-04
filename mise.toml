@@ -9,8 +9,8 @@ description = "No-op (refactree has no codegen step)"
 run = "echo 'codegen: nothing to do'"
 
 [tasks.format]
-description = "Format source"
-run = "gofmt -w ."
+description = "Format source packages (skips testdata/ and other non-package trees)"
+run = "go fmt ./..."
 
 [tasks.ci]
 description = "CI checks and tests"

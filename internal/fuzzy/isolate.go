@@ -475,5 +475,3 @@ func ForceRemoveAll(path string) error {
 	}
 	return nil
 }
-
-
