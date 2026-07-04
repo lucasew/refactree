@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/lucasew/refactree/pkg/ingest"
@@ -41,8 +42,22 @@ func TestMv(t *testing.T) {
 			tmpDir := t.TempDir()
 			copyDir(t, filepath.Join(dir, "input"), tmpDir)
 
+			wantErrPath := filepath.Join(dir, "error.txt")
+			wantErrBytes, wantErr := os.ReadFile(wantErrPath)
+			expectErr := wantErr == nil
+
 			// Run rename.
 			edits, err := ingest.Rename(tmpDir, op.Source, op.Destination)
+			if expectErr {
+				if err == nil {
+					t.Fatalf("rename: want error containing %q, got nil", strings.TrimSpace(string(wantErrBytes)))
+				}
+				want := strings.TrimSpace(string(wantErrBytes))
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("rename: want error containing %q, got %v", want, err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("rename: %v", err)
 			}

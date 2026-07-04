@@ -1,0 +1,4 @@
+{
+  "source": "path:./cmd/selfupdate/root.go::createWorkspacedShim",
+  "destination": "path:./pkg/terminal/kitty/driver.go::createWorkspacedShim"
+}
