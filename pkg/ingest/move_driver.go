@@ -13,6 +13,9 @@ type DeclExtract struct {
 	Preamble string
 	// DeclText is the full source text of the declaration.
 	DeclText string
+	// Imports lists import paths the declaration needs in the destination file
+	// (Go module paths, etc.). InsertDecl should ensure they exist.
+	Imports []string
 	// RemoveStart is the start byte of the range to delete from the source file.
 	RemoveStart uint32
 	// RemoveEnd is the end byte of the range to delete from the source file.
@@ -35,6 +38,27 @@ type MoveDriver interface {
 	// RewriteImports produces edits to update import statements in a consumer
 	// file when a symbol or package moves from oldRef to newRef.
 	RewriteImports(fileRelPath string, content []byte, result *Result, oldRef, newRef Reference) []Edit
+}
+
+// RenameExpander is an optional MoveDriver capability that expands a single
+// symbol rename to related entities that must change together (for example a
+// Go interface method and all implementations in the same package tree).
+type RenameExpander interface {
+	ExpandRenameSources(result *Result, sourceRef string) []string
+}
+
+// CrossFileMoveFinisher is an optional MoveDriver capability for extra edits
+// after declaration extract/insert and consumer import rewrites (for example
+// qualifying same-package call sites when a Go symbol leaves its package).
+type CrossFileMoveFinisher interface {
+	FinishCrossFileMove(rootDir string, result *Result, src, dst Reference, decl DeclExtract) ([]Edit, error)
+}
+
+// RenameSpanExpander is an optional MoveDriver capability that adds rename
+// edits beyond entity/relation/alias spans (for example Go interface method
+// names that are not modeled as standalone entities).
+type RenameSpanExpander interface {
+	ExtraRenameEdits(rootDir string, result *Result, sourceRefs []string, oldLeaf, newLeaf string) []Edit
 }
 
 // PackageMovePlanner is an optional MoveDriver capability for languages that

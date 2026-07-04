@@ -1,0 +1,4 @@
+{
+  "source": "path:./pkg/cas",
+  "destination": "path:./pkg/cas_fuzz"
+}

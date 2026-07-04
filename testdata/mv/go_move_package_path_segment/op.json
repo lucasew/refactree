@@ -1,0 +1,4 @@
+{
+  "source": "path:./pkg/api",
+  "destination": "path:./pkg/api_fuzz"
+}

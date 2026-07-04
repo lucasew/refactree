@@ -3,6 +3,7 @@ package ingestgo
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/lucasew/ccgo-tree-sitter/grammar"
@@ -85,9 +86,12 @@ func (moveDriver) ExtractDecl(filePath string, entity ingest.Entity) (ingest.Dec
 		}
 	}
 
+	imports := goImportsNeededByDecl(source, declText)
+
 	return ingest.DeclExtract{
 		Preamble:    pkg,
 		DeclText:    declText,
+		Imports:     imports,
 		RemoveStart: removeStart,
 		RemoveEnd:   removeEnd,
 	}, nil
@@ -98,6 +102,15 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 	insertText := ""
 
 	if dstContent != nil {
+		merged := ensureGoImports(string(dstContent), decl.Imports)
+		if merged != string(dstContent) {
+			return ingest.Edit{
+				File:      dstRelPath,
+				StartByte: 0,
+				EndByte:   uint32(len(dstContent)),
+				NewText:   appendDeclText(merged, decl.DeclText),
+			}
+		}
 		insertAt = uint32(len(dstContent))
 		if len(dstContent) > 0 && dstContent[len(dstContent)-1] != '\n' {
 			insertText += "\n"
@@ -107,7 +120,18 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 		}
 		insertText += decl.DeclText + "\n"
 	} else {
-		insertText = fmt.Sprintf("package %s\n\n%s\n", decl.Preamble, decl.DeclText)
+		pkgName := decl.Preamble
+		if pkgName == "" {
+			pkgName = lastPathComponent(strings.TrimSuffix(dstRelPath, ".go"))
+			if i := strings.LastIndex(pkgName, "/"); i >= 0 {
+				pkgName = pkgName[i+1:]
+			}
+		}
+		body := fmt.Sprintf("package %s\n", pkgName)
+		if len(decl.Imports) > 0 {
+			body = ensureGoImports(body, decl.Imports)
+		}
+		insertText = appendDeclText(body, decl.DeclText)
 	}
 
 	return ingest.Edit{
@@ -116,6 +140,247 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 		EndByte:   insertAt,
 		NewText:   insertText,
 	}
+}
+
+func appendDeclText(content, declText string) string {
+	out := content
+	if len(out) > 0 && out[len(out)-1] != '\n' {
+		out += "\n"
+	}
+	if len(out) > 0 {
+		out += "\n"
+	}
+	return out + declText + "\n"
+}
+
+// goImportsNeededByDecl returns import paths from the source file whose local
+// names appear in declText (selectors or unqualified idents).
+func goImportsNeededByDecl(source []byte, declText string) []string {
+	specs := parseGoImportSpecs(source)
+	if len(specs) == 0 {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, spec := range specs {
+		if spec.path == "" || seen[spec.path] {
+			continue
+		}
+		local := spec.local
+		if local == "" || local == "." || local == "_" {
+			continue
+		}
+		if goIdentUsed(declText, local) {
+			seen[spec.path] = true
+			out = append(out, spec.path)
+		}
+	}
+	return out
+}
+
+type goImportSpec struct {
+	local string
+	path  string
+}
+
+func parseGoImportSpecs(source []byte) []goImportSpec {
+	text := string(source)
+	var specs []goImportSpec
+	lines := strings.Split(text, "\n")
+	inBlock := false
+	for _, line := range lines {
+		trim := strings.TrimSpace(line)
+		if !inBlock {
+			if trim == "import (" {
+				inBlock = true
+				continue
+			}
+			if strings.HasPrefix(trim, "import ") {
+				if spec, ok := parseGoImportLine(strings.TrimSpace(strings.TrimPrefix(trim, "import "))); ok {
+					specs = append(specs, spec)
+				}
+			}
+			continue
+		}
+		if trim == ")" {
+			inBlock = false
+			continue
+		}
+		if trim == "" || strings.HasPrefix(trim, "//") {
+			continue
+		}
+		if spec, ok := parseGoImportLine(trim); ok {
+			specs = append(specs, spec)
+		}
+	}
+	return specs
+}
+
+func parseGoImportLine(s string) (goImportSpec, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return goImportSpec{}, false
+	}
+	local := ""
+	pathPart := s
+	if s[0] == '"' || s[0] == '`' {
+		pathPart = s
+	} else {
+		parts := strings.Fields(s)
+		if len(parts) < 2 {
+			return goImportSpec{}, false
+		}
+		local = parts[0]
+		pathPart = parts[1]
+	}
+	pathPart = strings.TrimSpace(pathPart)
+	if len(pathPart) < 2 {
+		return goImportSpec{}, false
+	}
+	quote := pathPart[0]
+	if quote != '"' && quote != '`' {
+		return goImportSpec{}, false
+	}
+	end := strings.IndexByte(pathPart[1:], quote)
+	if end < 0 {
+		return goImportSpec{}, false
+	}
+	p := pathPart[1 : 1+end]
+	if local == "" {
+		local = lastPathComponent(p)
+	}
+	return goImportSpec{local: local, path: p}, true
+}
+
+func goIdentUsed(text, ident string) bool {
+	if ident == "" {
+		return false
+	}
+	off := 0
+	for {
+		idx := strings.Index(text[off:], ident)
+		if idx < 0 {
+			return false
+		}
+		pos := off + idx
+		end := pos + len(ident)
+		if pos > 0 && isIdentChar(text[pos-1]) {
+			off = end
+			continue
+		}
+		if end < len(text) && isIdentChar(text[end]) {
+			off = end
+			continue
+		}
+		return true
+	}
+}
+
+func ensureGoImports(content string, paths []string) string {
+	if len(paths) == 0 {
+		return content
+	}
+	existing := map[string]bool{}
+	for _, spec := range parseGoImportSpecs([]byte(content)) {
+		existing[spec.path] = true
+	}
+	var missing []string
+	for _, p := range paths {
+		if p == "" || existing[p] {
+			continue
+		}
+		existing[p] = true
+		missing = append(missing, p)
+	}
+	if len(missing) == 0 {
+		return content
+	}
+	block := formatGoImportBlock(missing)
+	// Insert after package clause.
+	lines := strings.Split(content, "\n")
+	insertAt := 0
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "package ") {
+			insertAt = i + 1
+			break
+		}
+	}
+	// Skip blank lines after package.
+	for insertAt < len(lines) && strings.TrimSpace(lines[insertAt]) == "" {
+		insertAt++
+	}
+	if insertAt < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[insertAt]), "import ") {
+		// Merge into existing import section by rewriting whole file imports.
+		return mergeIntoExistingGoImports(content, missing)
+	}
+	out := make([]string, 0, len(lines)+len(missing)+3)
+	out = append(out, lines[:insertAt]...)
+	if insertAt > 0 && insertAt <= len(lines) {
+		out = append(out, "")
+	}
+	out = append(out, strings.Split(strings.TrimSuffix(block, "\n"), "\n")...)
+	out = append(out, "")
+	out = append(out, lines[insertAt:]...)
+	return strings.Join(out, "\n")
+}
+
+func formatGoImportBlock(paths []string) string {
+	if len(paths) == 1 {
+		return fmt.Sprintf("import %q", paths[0])
+	}
+	var b strings.Builder
+	b.WriteString("import (\n")
+	for _, p := range paths {
+		b.WriteString(fmt.Sprintf("\t%q\n", p))
+	}
+	b.WriteString(")")
+	return b.String()
+}
+
+func mergeIntoExistingGoImports(content string, missing []string) string {
+	specs := parseGoImportSpecs([]byte(content))
+	have := map[string]bool{}
+	for _, s := range specs {
+		have[s.path] = true
+	}
+	var add []string
+	for _, p := range missing {
+		if !have[p] {
+			have[p] = true
+			add = append(add, p)
+		}
+	}
+	if len(add) == 0 {
+		return content
+	}
+	text := content
+	// Prefer inserting into an import ( ... ) block.
+	if idx := strings.Index(text, "import ("); idx >= 0 {
+		end := strings.Index(text[idx:], "\n)")
+		if end >= 0 {
+			insertPos := idx + end + 1
+			var b strings.Builder
+			for _, p := range add {
+				b.WriteString(fmt.Sprintf("\t%q\n", p))
+			}
+			return text[:insertPos] + b.String() + text[insertPos:]
+		}
+	}
+	// Single-line import: convert by appending a new import line after it.
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "import ") {
+			var extra []string
+			for _, p := range add {
+				extra = append(extra, fmt.Sprintf("import %q", p))
+			}
+			out := append([]string{}, lines[:i+1]...)
+			out = append(out, extra...)
+			out = append(out, lines[i+1:]...)
+			return strings.Join(out, "\n")
+		}
+	}
+	return ensureGoImports(content, add)
 }
 
 func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ingest.Result, oldRef, newRef ingest.Reference) []ingest.Edit {
@@ -137,18 +402,12 @@ func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ing
 
 	var edits []ingest.Edit
 
-	// For Go consumers, rewrite import path strings (not bare identifiers,
-	// since the qualifier name comes from the package directive, not the dir).
-	//
-	// Try full subdir path first (e.g. "pkg/executil" -> "pkg/newutil"),
-	// fall back to leaf-based replacement if the full path doesn't appear.
-	didFull := false
-	if strings.Contains(string(content), oldDir) {
-		edits = ingest.FindAllOccurrencesInStrings(fileRelPath, content, oldDir, newDir)
-		didFull = len(edits) > 0
-	}
+	// Rewrite import path strings on path-segment boundaries so that moving
+	// "pkg/api" does not rewrite "pkg/palette/api", and moving "pkg/cas" does
+	// not corrupt "case" or "lucas" inside string literals.
+	edits = ingest.FindAllPathSegmentOccurrencesInStrings(fileRelPath, content, oldDir, newDir)
 
-	if !didFull {
+	if len(edits) == 0 {
 		oldBase := lastPathComponent(oldDir)
 		newBase := lastPathComponent(newDir)
 		if cp := ingest.CommonPathPrefix(oldDir, newDir); cp != "" {
@@ -157,7 +416,10 @@ func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ing
 			}
 		}
 		if oldBase != newBase {
-			edits = ingest.FindAllOccurrencesInStrings(fileRelPath, content, oldBase, newBase)
+			parent := dirOf(oldDir)
+			edits = ingest.FindAllPathSegmentOccurrencesInStringsWithParent(
+				fileRelPath, content, oldBase, newBase, parent,
+			)
 		}
 	}
 
@@ -168,12 +430,48 @@ func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ing
 		oldQual := lastPathComponent(oldDir)
 		newQual := lastPathComponent(newDir)
 		if oldQual != newQual {
-			qualEdits := ingest.FindAllOccurrences(fileRelPath, content, oldQual+".", newQual+".")
+			qualEdits := findQualifierDotOccurrences(fileRelPath, content, oldQual, newQual)
 			edits = append(edits, qualEdits...)
 		}
 	}
 
 	return edits
+}
+
+// findQualifierDotOccurrences rewrites ident. selections where ident is a
+// whole word (package qualifier), avoiding substring hits like mypkga.X.
+func findQualifierDotOccurrences(file string, content []byte, oldQual, newQual string) []ingest.Edit {
+	if oldQual == "" || oldQual == newQual {
+		return nil
+	}
+	text := string(content)
+	needle := oldQual + "."
+	var edits []ingest.Edit
+	off := 0
+	for {
+		idx := strings.Index(text[off:], needle)
+		if idx < 0 {
+			break
+		}
+		pos := off + idx
+		endPos := pos + len(oldQual)
+		if pos > 0 && isIdentChar(text[pos-1]) {
+			off = pos + len(needle)
+			continue
+		}
+		edits = append(edits, ingest.Edit{
+			File:      file,
+			StartByte: uint32(pos),
+			EndByte:   uint32(endPos),
+			NewText:   newQual,
+		})
+		off = pos + len(needle)
+	}
+	return edits
+}
+
+func isIdentChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
 }
 
 // dedentOnce removes one leading tab from each line of s.
@@ -239,4 +537,311 @@ func findGoDecl(root *grammar.Node, nameStart uint32) *goDeclResult {
 		}
 	}
 	return nil
+}
+
+func (moveDriver) ExpandRenameSources(result *ingest.Result, sourceRef string) []string {
+	src := ingest.ParseReference(sourceRef)
+	if src.Symbol == "" {
+		return nil
+	}
+	leaf := symbolLeaf(src.Symbol)
+	recv, isMethod := receiverTypeName(src.Symbol)
+	if leaf == "" {
+		return nil
+	}
+	srcRel := strings.TrimPrefix(src.Path, "./")
+	scopePrefix := methodRenameScopePrefix(srcRel)
+	exported := isExportedIdent(leaf)
+	var extra []string
+	for _, ent := range result.Entities {
+		ref := ingest.ParseReference(ent.Reference)
+		if ref.Provider != "path" || ref.Symbol == "" {
+			continue
+		}
+		rel := strings.TrimPrefix(ref.Path, "./")
+		if !exported && scopePrefix != "" && rel != scopePrefix && !strings.HasPrefix(rel, scopePrefix+"/") {
+			continue
+		}
+		entLeaf := symbolLeaf(ref.Symbol)
+		if entLeaf != leaf {
+			continue
+		}
+		if isMethod {
+			entRecv, entMethod := receiverTypeName(ref.Symbol)
+			if entMethod {
+				if entRecv != recv {
+					continue
+				}
+			} else if ref.Symbol != leaf {
+				continue
+			}
+		} else if ref.Symbol != src.Symbol && ref.Symbol != leaf {
+			// Non-method rename: only exact symbol matches (already primary).
+			continue
+		}
+		if ent.Reference != sourceRef {
+			extra = append(extra, ent.Reference)
+		}
+	}
+	return extra
+}
+
+func isExportedIdent(name string) bool {
+	if name == "" {
+		return false
+	}
+	r := name[0]
+	return r >= 'A' && r <= 'Z'
+}
+
+func symbolLeaf(symbol string) string {
+	leaf := symbol
+	if i := strings.LastIndex(leaf, "."); i >= 0 {
+		leaf = leaf[i+1:]
+	}
+	return strings.TrimPrefix(leaf, "*")
+}
+
+func receiverTypeName(symbol string) (string, bool) {
+	i := strings.LastIndex(symbol, ".")
+	if i < 0 {
+		return "", false
+	}
+	recv := strings.TrimPrefix(symbol[:i], "*")
+	if recv == "" {
+		return "", false
+	}
+	return recv, true
+}
+
+// methodRenameScopePrefix returns the parent package directory of the file's
+// package dir (e.g. pkg/driver/wallpaper/feh/driver.go -> pkg/driver/wallpaper)
+// so interface methods and sibling implementations rename together without
+// touching unrelated Driver types in other package trees.
+func methodRenameScopePrefix(fileRel string) string {
+	dir := dirOf(fileRel)
+	if dir == "" {
+		return ""
+	}
+	parent := dirOf(dir)
+	if parent == "" {
+		return dir
+	}
+	return parent
+}
+
+func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src, dst ingest.Reference, decl ingest.DeclExtract) ([]ingest.Edit, error) {
+	srcRel := strings.TrimPrefix(src.Path, "./")
+	dstRel := strings.TrimPrefix(dst.Path, "./")
+	oldDir := dirOf(srcRel)
+	newDir := dirOf(dstRel)
+	if oldDir == "" || newDir == "" || oldDir == newDir {
+		return nil, nil
+	}
+
+	leaf := symbolLeaf(src.Symbol)
+	if leaf == "" {
+		return nil, nil
+	}
+	if leaf == "init" {
+		return nil, fmt.Errorf("cross-package move of init is not supported")
+	}
+	if !isExportedIdent(leaf) {
+		return nil, fmt.Errorf("cross-package move of unexported symbol is not supported")
+	}
+	if strings.HasSuffix(srcRel, "_test.go") && !strings.HasSuffix(dstRel, "_test.go") {
+		return nil, fmt.Errorf("moving test declarations into non-test files is not supported")
+	}
+
+	newQual := lastPathComponent(newDir)
+	modPath, err := readGoModulePath(rootDir)
+	if err != nil || modPath == "" {
+		return nil, nil
+	}
+	newImportPath := modPath + "/" + newDir
+
+	srcRef := src.String()
+	var edits []ingest.Edit
+	seenFiles := map[string]bool{dstRel: true}
+	needImport := map[string]bool{}
+
+	for _, rel := range result.Relations {
+		if rel.Target != srcRef || rel.ViaImportAlias {
+			continue
+		}
+		ref := ingest.ParseReference(rel.Reference)
+		fileRel := strings.TrimPrefix(ref.Path, "./")
+		if fileRel == dstRel {
+			continue
+		}
+		if dirOf(fileRel) != oldDir {
+			continue
+		}
+		// Skip spans inside the declaration being removed from the source file.
+		if fileRel == srcRel && rel.StartByte >= decl.RemoveStart && rel.EndByte <= decl.RemoveEnd {
+			continue
+		}
+		// Same-package calls are bare identifiers; qualify them for the new package.
+		edits = append(edits, ingest.Edit{
+			File:      fileRel,
+			StartByte: rel.StartByte,
+			EndByte:   rel.EndByte,
+			NewText:   newQual + "." + leaf,
+		})
+		needImport[fileRel] = true
+	}
+	for fileRel := range needImport {
+		if seenFiles[fileRel] {
+			continue
+		}
+		seenFiles[fileRel] = true
+		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(fileRel)))
+		if err != nil {
+			continue
+		}
+		edits = append(edits, goImportInsertEdits(fileRel, content, []string{newImportPath})...)
+	}
+	return edits, nil
+}
+
+func readGoModulePath(rootDir string) (string, error) {
+	dir := rootDir
+	for {
+		data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+		if err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "module ") {
+					return strings.TrimSpace(strings.TrimPrefix(line, "module ")), nil
+				}
+			}
+			return "", fmt.Errorf("no module line in go.mod")
+		}
+		parent := filepath.Dir(dir)
+		if parent == "" || parent == dir {
+			return "", err
+		}
+		dir = parent
+	}
+}
+
+func goImportInsertEdits(file string, content []byte, paths []string) []ingest.Edit {
+	text := string(content)
+	existing := map[string]bool{}
+	for _, spec := range parseGoImportSpecs(content) {
+		existing[spec.path] = true
+	}
+	var missing []string
+	for _, p := range paths {
+		if p != "" && !existing[p] {
+			existing[p] = true
+			missing = append(missing, p)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	if idx := strings.Index(text, "import ("); idx >= 0 {
+		end := strings.Index(text[idx:], "\n)")
+		if end >= 0 {
+			insertPos := idx + end + 1
+			var b strings.Builder
+			for _, p := range missing {
+				b.WriteString(fmt.Sprintf("\t%q\n", p))
+			}
+			return []ingest.Edit{{
+				File:      file,
+				StartByte: uint32(insertPos),
+				EndByte:   uint32(insertPos),
+				NewText:   b.String(),
+			}}
+		}
+	}
+	lines := strings.Split(text, "\n")
+	offset := 0
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "import ") {
+			insertPos := offset + len(line) + 1
+			var b strings.Builder
+			for _, p := range missing {
+				b.WriteString(fmt.Sprintf("import %q\n", p))
+			}
+			return []ingest.Edit{{
+				File:      file,
+				StartByte: uint32(insertPos),
+				EndByte:   uint32(insertPos),
+				NewText:   b.String(),
+			}}
+		}
+		if strings.HasPrefix(strings.TrimSpace(line), "package ") {
+			insertPos := offset + len(line) + 1
+			// Preserve a single blank line between import and the next decl.
+			_ = i
+			return []ingest.Edit{{
+				File:      file,
+				StartByte: uint32(insertPos),
+				EndByte:   uint32(insertPos),
+				NewText:   "\n" + formatGoImportBlock(missing) + "\n",
+			}}
+		}
+		offset += len(line) + 1
+	}
+	return nil
+}
+
+func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, sourceRefs []string, oldLeaf, newLeaf string) []ingest.Edit {
+	if oldLeaf == "" || oldLeaf == newLeaf || len(sourceRefs) == 0 || rootDir == "" {
+		return nil
+	}
+	src := ingest.ParseReference(sourceRefs[0])
+	if _, isMethod := receiverTypeName(src.Symbol); !isMethod {
+		return nil
+	}
+	scopePrefix := methodRenameScopePrefix(strings.TrimPrefix(src.Path, "./"))
+	exported := isExportedIdent(oldLeaf)
+	occupied := map[string]map[[2]uint32]bool{}
+	mark := func(file string, start, end uint32) {
+		file = strings.TrimPrefix(file, "./")
+		if occupied[file] == nil {
+			occupied[file] = map[[2]uint32]bool{}
+		}
+		occupied[file][[2]uint32{start, end}] = true
+	}
+	for _, ent := range result.Entities {
+		ref := ingest.ParseReference(ent.Reference)
+		if symbolLeaf(ref.Symbol) == oldLeaf {
+			mark(ref.Path, ent.StartByte, ent.EndByte)
+		}
+	}
+	sourceSet := map[string]bool{}
+	for _, s := range sourceRefs {
+		sourceSet[s] = true
+	}
+	for _, rel := range result.Relations {
+		if sourceSet[rel.Target] {
+			ref := ingest.ParseReference(rel.Reference)
+			mark(ref.Path, rel.StartByte, rel.EndByte)
+		}
+	}
+	var edits []ingest.Edit
+	for _, f := range result.Files {
+		if f.Language != "go" {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Path, "./")
+		if !exported && scopePrefix != "" && rel != scopePrefix && !strings.HasPrefix(rel, scopePrefix+"/") {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		for _, e := range ingest.FindAllWholeWordOccurrences(rel, content, oldLeaf, newLeaf) {
+			if occupied[rel][[2]uint32{e.StartByte, e.EndByte}] {
+				continue
+			}
+			edits = append(edits, e)
+		}
+	}
+	return edits
 }

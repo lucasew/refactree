@@ -1,0 +1,4 @@
+{
+  "source": "path:./pkga/a.go::Helper",
+  "destination": "path:./pkgb/b.go::Helper"
+}

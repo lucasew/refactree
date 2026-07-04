@@ -1,0 +1,4 @@
+{
+  "source": "path:./pkg/driver/wallpaper/feh/driver.go::*Driver.SetStatic",
+  "destination": "path:./pkg/driver/wallpaper/feh/driver.go::*Driver.SetImage"
+}

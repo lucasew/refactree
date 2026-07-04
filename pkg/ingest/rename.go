@@ -65,7 +65,30 @@ func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 		return planCrossFileMove(dir, result, src, dst, sourceEntity, driver)
 	}
 
-	return planSymbolRename(result, sourceRef, dst.Symbol)
+	sourceRefs := []string{sourceRef}
+	if srcLang := languageForRefPath(result, src.Path); srcLang != "" {
+		if driver, ok := moveDriverForLanguage(srcLang); ok {
+			if expander, ok := driver.(RenameExpander); ok {
+				if extra := expander.ExpandRenameSources(result, sourceRef); len(extra) > 0 {
+					sourceRefs = uniqueStrings(append(sourceRefs, extra...))
+				}
+			}
+		}
+	}
+	return planSymbolRename(dir, result, sourceRefs, dst.Symbol)
+}
+
+func uniqueStrings(in []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range in {
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
 }
 
 func findEntityByReference(result *Result, ref string) (Entity, bool) {
@@ -77,61 +100,102 @@ func findEntityByReference(result *Result, ref string) (Entity, bool) {
 	return Entity{}, false
 }
 
-func planSymbolRename(result *Result, sourceRef, destSymbol string) ([]Edit, error) {
+func planSymbolRename(dir string, result *Result, sourceRefs []string, destSymbol string) ([]Edit, error) {
+	if len(sourceRefs) == 0 {
+		return nil, fmt.Errorf("no source references to rename")
+	}
+	sourceSet := map[string]bool{}
+	for _, s := range sourceRefs {
+		sourceSet[s] = true
+	}
 	var edits []Edit
 	// Spans store the identifier leaf (e.g. "toJson"), while references may be
 	// qualified ("Gson.toJson"). Always rewrite source text with the leaf.
 	newText := symbolNameLeaf(destSymbol)
+	oldLeaf := symbolNameLeaf(ParseReference(sourceRefs[0]).Symbol)
 
-	// 1. Rename the entity definition.
+	// 1. Rename each related entity definition. Destination symbol qualifiers
+	// stay aligned with each source entity's receiver prefix.
 	for _, ent := range result.Entities {
-		if ent.Reference == sourceRef {
-			ref := ParseReference(ent.Reference)
-			edits = append(edits, Edit{
-				File:      strings.TrimPrefix(ref.Path, "./"),
-				StartByte: ent.StartByte,
-				EndByte:   ent.EndByte,
-				NewText:   newText,
-			})
+		if !sourceSet[ent.Reference] {
+			continue
 		}
+		ref := ParseReference(ent.Reference)
+		edits = append(edits, Edit{
+			File:      strings.TrimPrefix(ref.Path, "./"),
+			StartByte: ent.StartByte,
+			EndByte:   ent.EndByte,
+			NewText:   newText,
+		})
 	}
 
-	// 2. Rename at every call site that targets this entity.
+	// 2. Rename at every call site that targets any expanded entity.
 	for _, rel := range result.Relations {
-		if rel.Target == sourceRef {
-			// Usage through explicit import alias bindings (`as`) should keep
-			// the local alias name unchanged when renaming the imported symbol.
-			if rel.ViaImportAlias {
-				continue
-			}
-			ref := ParseReference(rel.Reference)
-			edits = append(edits, Edit{
-				File:      strings.TrimPrefix(ref.Path, "./"),
-				StartByte: rel.StartByte,
-				EndByte:   rel.EndByte,
-				NewText:   newText,
-			})
+		if !sourceSet[rel.Target] {
+			continue
 		}
+		// Usage through explicit import alias bindings (`as`) should keep
+		// the local alias name unchanged when renaming the imported symbol.
+		if rel.ViaImportAlias {
+			continue
+		}
+		ref := ParseReference(rel.Reference)
+		edits = append(edits, Edit{
+			File:      strings.TrimPrefix(ref.Path, "./"),
+			StartByte: rel.StartByte,
+			EndByte:   rel.EndByte,
+			NewText:   newText,
+		})
 	}
 
-	// 3. Rename in import bindings that target this entity.
+	// 3. Rename in import bindings that target any expanded entity.
 	for _, alias := range result.Aliases {
-		if alias.Target == sourceRef {
-			ref := ParseReference(alias.Reference)
-			edits = append(edits, Edit{
-				File:      strings.TrimPrefix(ref.Path, "./"),
-				StartByte: alias.StartByte,
-				EndByte:   alias.EndByte,
-				NewText:   newText,
-			})
+		if !sourceSet[alias.Target] {
+			continue
 		}
+		ref := ParseReference(alias.Reference)
+		edits = append(edits, Edit{
+			File:      strings.TrimPrefix(ref.Path, "./"),
+			StartByte: alias.StartByte,
+			EndByte:   alias.EndByte,
+			NewText:   newText,
+		})
 	}
 
 	if len(edits) == 0 {
-		return nil, fmt.Errorf("no entity found for reference %s", sourceRef)
+		return nil, fmt.Errorf("no entity found for reference %s", sourceRefs[0])
 	}
 
-	return edits, nil
+	src0 := ParseReference(sourceRefs[0])
+	if srcLang := languageForRefPath(result, src0.Path); srcLang != "" {
+		if driver, ok := moveDriverForLanguage(srcLang); ok {
+			if expander, ok := driver.(RenameSpanExpander); ok {
+				extra := expander.ExtraRenameEdits(dir, result, sourceRefs, oldLeaf, newText)
+				edits = append(edits, extra...)
+			}
+		}
+	}
+
+	return dedupeEdits(edits), nil
+}
+
+func dedupeEdits(edits []Edit) []Edit {
+	type key struct {
+		file       string
+		start, end uint32
+		text       string
+	}
+	seen := map[key]bool{}
+	var out []Edit
+	for _, e := range edits {
+		k := key{e.File, e.StartByte, e.EndByte, e.NewText}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, e)
+	}
+	return out
 }
 
 // symbolNameLeaf returns the identifier text written at a definition/use span.
@@ -206,6 +270,14 @@ func planCrossFileMove(dir string, result *Result, src, dst Reference, sourceEnt
 			return nil, err
 		}
 		edits = append(edits, importEdits...)
+	}
+
+	if finisher, ok := driver.(CrossFileMoveFinisher); ok {
+		extra, err := finisher.FinishCrossFileMove(dir, result, src, dst, decl)
+		if err != nil {
+			return nil, err
+		}
+		edits = append(edits, extra...)
 	}
 
 	return edits, nil
@@ -602,14 +674,41 @@ func FindAllOccurrences(file string, content []byte, oldBase, newBase string) []
 // names without touching bare identifiers (which may be qualifiers whose
 // name comes from the package directive).
 func FindAllOccurrencesInStrings(file string, content []byte, oldBase, newBase string) []Edit {
+	return findInStringLiterals(file, content, oldBase, newBase, false, "")
+}
+
+// FindAllPathSegmentOccurrencesInStrings replaces oldPath with newPath only
+// inside string literals and only when oldPath sits on import-path segment
+// boundaries (not as a substring of a longer segment like "cas" in "case" or
+// "pkg/api" nested incorrectly inside another path).
+func FindAllPathSegmentOccurrencesInStrings(file string, content []byte, oldPath, newPath string) []Edit {
+	return findInStringLiterals(file, content, oldPath, newPath, true, "")
+}
+
+// FindAllPathSegmentOccurrencesInStringsWithParent is like the path-segment
+// string replacer, but for a single path leaf: a match is kept only when the
+// segment immediately before the leaf equals parentDir's final segment (or
+// parentDir is empty and the leaf is the entire import path body).
+// parentDir is the directory containing the leaf (e.g. "pkg" for "pkg/api").
+func FindAllPathSegmentOccurrencesInStringsWithParent(file string, content []byte, leaf, newLeaf, parentDir string) []Edit {
+	return findInStringLiterals(file, content, leaf, newLeaf, true, parentDir)
+}
+
+func findInStringLiterals(file string, content []byte, oldBase, newBase string, pathSegments bool, parentDir string) []Edit {
 	if oldBase == "" || oldBase == newBase {
 		return nil
+	}
+	parentLeaf := ""
+	if parentDir != "" {
+		parentLeaf = parentDir
+		if i := strings.LastIndex(parentDir, "/"); i >= 0 {
+			parentLeaf = parentDir[i+1:]
+		}
 	}
 	text := string(content)
 	var edits []Edit
 	off := 0
 	for off < len(text) {
-		// find next string literal start
 		dq := strings.IndexByte(text[off:], '"')
 		rq := strings.IndexByte(text[off:], '`')
 		start := -1
@@ -623,7 +722,6 @@ func FindAllOccurrencesInStrings(file string, content []byte, oldBase, newBase s
 		if start < 0 {
 			break
 		}
-		// find matching end
 		end := -1
 		if isRaw {
 			e := strings.IndexByte(text[start+1:], '`')
@@ -631,7 +729,6 @@ func FindAllOccurrencesInStrings(file string, content []byte, oldBase, newBase s
 				end = start + 1 + e
 			}
 		} else {
-			// double-quoted, skip escapes
 			i := start + 1
 			for i < len(text) {
 				if text[i] == '\\' && i+1 < len(text) {
@@ -646,9 +743,8 @@ func FindAllOccurrencesInStrings(file string, content []byte, oldBase, newBase s
 			}
 		}
 		if end < 0 {
-			break // unterminated; give up on this file
+			break
 		}
-		// search inside the literal [start:end+1]
 		seg := text[start : end+1]
 		sOff := 0
 		for {
@@ -656,18 +752,61 @@ func FindAllOccurrencesInStrings(file string, content []byte, oldBase, newBase s
 			if idx < 0 {
 				break
 			}
-			pos := start + sOff + idx
-			edits = append(edits, Edit{
-				File:      file,
-				StartByte: uint32(pos),
-				EndByte:   uint32(pos + len(oldBase)),
-				NewText:   newBase,
-			})
-			sOff += idx + len(oldBase)
+			posInSeg := sOff + idx
+			pos := start + posInSeg
+			endPos := pos + len(oldBase)
+			keep := true
+			if pathSegments {
+				keep = pathSegmentBounded(seg, posInSeg, posInSeg+len(oldBase))
+				if keep && parentDir != "" {
+					keep = pathSegmentHasParent(seg, posInSeg, parentLeaf)
+				}
+			}
+			if keep {
+				edits = append(edits, Edit{
+					File:      file,
+					StartByte: uint32(pos),
+					EndByte:   uint32(endPos),
+					NewText:   newBase,
+				})
+			}
+			sOff = posInSeg + len(oldBase)
 		}
 		off = end + 1
 	}
 	return edits
+}
+
+func pathSegmentBounded(seg string, start, end int) bool {
+	if start > 0 && isPathSegmentChar(seg[start-1]) {
+		return false
+	}
+	if end < len(seg) && isPathSegmentChar(seg[end]) {
+		return false
+	}
+	return true
+}
+
+func pathSegmentHasParent(seg string, leafStart int, parentLeaf string) bool {
+	if parentLeaf == "" {
+		return leafStart == 1 // immediately inside opening quote
+	}
+	if leafStart < 2 || seg[leafStart-1] != '/' {
+		return false
+	}
+	parentStart := leafStart - 1 - len(parentLeaf)
+	if parentStart < 1 {
+		return false
+	}
+	if seg[parentStart:leafStart-1] != parentLeaf {
+		return false
+	}
+	return pathSegmentBounded(seg, parentStart, leafStart-1)
+}
+
+func isPathSegmentChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') ||
+		b == '_' || b == '-' || b == '.' || b == '~' || b == '+'
 }
 
 // CommonPathPrefix returns the common directory prefix of two paths.
