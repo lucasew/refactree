@@ -1,0 +1,4 @@
+{
+  "source": "path:./lib",
+  "destination": "path:./lib_new"
+}

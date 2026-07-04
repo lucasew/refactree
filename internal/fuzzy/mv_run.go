@@ -89,6 +89,11 @@ func pickMvPlan(rng *rand.Rand, p Project, root string, result *ingest.Result, o
 	switch op {
 	case "rename":
 		name := uniqueSymbol(rng, symbolNames)
+		// Preserve qualifiers for nested symbols (e.g. Java Type.method).
+		if i := strings.LastIndex(srcRef.Symbol, "."); i >= 0 {
+			name = srcRef.Symbol[:i+1] + name
+		}
+		symbolNames[name] = true
 		return mvPlan{
 			Op:  op,
 			Src: ent.Reference,

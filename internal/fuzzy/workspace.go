@@ -43,7 +43,7 @@ func (w *Workspace) Prepare(p Project, runID string) (workDir string, commit str
 			return "", "", err
 		}
 		workDir = w.runPath(p.ID, runID)
-		if err := os.RemoveAll(workDir); err != nil {
+		if err := ForceRemoveAll(workDir); err != nil {
 			return "", "", err
 		}
 		if err := copyDir(src, workDir); err != nil {
@@ -56,7 +56,7 @@ func (w *Workspace) Prepare(p Project, runID string) (workDir string, commit str
 		return "", "", err
 	}
 	workDir = w.runPath(p.ID, runID)
-	if err := os.RemoveAll(workDir); err != nil {
+	if err := ForceRemoveAll(workDir); err != nil {
 		return "", "", err
 	}
 	if err := os.MkdirAll(filepath.Dir(workDir), 0o755); err != nil {
@@ -86,8 +86,8 @@ func (w *Workspace) Reset(p Project, workDir string) error {
 		if err != nil {
 			return err
 		}
-		defer os.RemoveAll(preserved.dir)
-		if err := os.RemoveAll(workDir); err != nil {
+		defer func() { _ = ForceRemoveAll(preserved.dir) }()
+		if err := ForceRemoveAll(workDir); err != nil {
 			return err
 		}
 		if err := copyDir(p.LocalPath, workDir); err != nil {
@@ -100,7 +100,7 @@ func (w *Workspace) Reset(p Project, workDir string) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(preserved.dir)
+	defer func() { _ = ForceRemoveAll(preserved.dir) }()
 
 	cmds := [][]string{
 		{"git", "reset", "--hard", p.Ref},
@@ -110,10 +110,39 @@ func (w *Workspace) Reset(p Project, workDir string) error {
 		cmd := exec.Command(argv[0], argv[1:]...)
 		cmd.Dir = workDir
 		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("%s: %w\n%s", strings.Join(argv, " "), err, out)
+			if cleanErr := forceCleanUntracked(workDir); cleanErr != nil {
+				return fmt.Errorf("%s: %w\n%s\nforce clean: %v", strings.Join(argv, " "), err, out, cleanErr)
+			}
 		}
 	}
 	return preserved.restore(workDir)
+}
+
+// forceCleanUntracked removes untracked files that git clean cannot delete
+// (typically root-owned build outputs from older container runs).
+func forceCleanUntracked(workDir string) error {
+	cmd := exec.Command("git", "clean", "-fdxn")
+	cmd.Dir = workDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git clean -fdxn: %w\n%s", err, out)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		rel, ok := strings.CutPrefix(line, "Would remove ")
+		if !ok || rel == "" {
+			continue
+		}
+		if err := ForceRemoveAll(filepath.Join(workDir, filepath.FromSlash(rel))); err != nil {
+			return err
+		}
+	}
+	cmd = exec.Command("git", "clean", "-fdx")
+	cmd.Dir = workDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git clean -fdx after force remove: %w\n%s", err, out)
+	}
+	return nil
 }
 
 func (w *Workspace) ensureBare(p Project) error {
@@ -174,7 +203,9 @@ func stashPreserved(workDir string, globs []string) (*preservedSet, error) {
 			if err := copyDir(src, dst); err != nil {
 				return nil, err
 			}
-			_ = os.RemoveAll(src)
+			if err := ForceRemoveAll(src); err != nil {
+				return nil, err
+			}
 		}
 		ps.items = append(ps.items, g)
 	}
@@ -188,7 +219,9 @@ func (ps *preservedSet) restore(workDir string) error {
 	for _, g := range ps.items {
 		src := filepath.Join(ps.dir, filepath.FromSlash(g))
 		dst := filepath.Join(workDir, filepath.FromSlash(g))
-		_ = os.RemoveAll(dst)
+		if err := ForceRemoveAll(dst); err != nil {
+			return err
+		}
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return err
 		}

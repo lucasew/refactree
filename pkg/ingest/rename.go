@@ -79,6 +79,9 @@ func findEntityByReference(result *Result, ref string) (Entity, bool) {
 
 func planSymbolRename(result *Result, sourceRef, destSymbol string) ([]Edit, error) {
 	var edits []Edit
+	// Spans store the identifier leaf (e.g. "toJson"), while references may be
+	// qualified ("Gson.toJson"). Always rewrite source text with the leaf.
+	newText := symbolNameLeaf(destSymbol)
 
 	// 1. Rename the entity definition.
 	for _, ent := range result.Entities {
@@ -88,7 +91,7 @@ func planSymbolRename(result *Result, sourceRef, destSymbol string) ([]Edit, err
 				File:      strings.TrimPrefix(ref.Path, "./"),
 				StartByte: ent.StartByte,
 				EndByte:   ent.EndByte,
-				NewText:   destSymbol,
+				NewText:   newText,
 			})
 		}
 	}
@@ -106,7 +109,7 @@ func planSymbolRename(result *Result, sourceRef, destSymbol string) ([]Edit, err
 				File:      strings.TrimPrefix(ref.Path, "./"),
 				StartByte: rel.StartByte,
 				EndByte:   rel.EndByte,
-				NewText:   destSymbol,
+				NewText:   newText,
 			})
 		}
 	}
@@ -119,7 +122,7 @@ func planSymbolRename(result *Result, sourceRef, destSymbol string) ([]Edit, err
 				File:      strings.TrimPrefix(ref.Path, "./"),
 				StartByte: alias.StartByte,
 				EndByte:   alias.EndByte,
-				NewText:   destSymbol,
+				NewText:   newText,
 			})
 		}
 	}
@@ -129,6 +132,16 @@ func planSymbolRename(result *Result, sourceRef, destSymbol string) ([]Edit, err
 	}
 
 	return edits, nil
+}
+
+// symbolNameLeaf returns the identifier text written at a definition/use span.
+// Qualified symbols use "." separators; Go pointer receivers may prefix "*".
+func symbolNameLeaf(symbol string) string {
+	leaf := symbol
+	if i := strings.LastIndex(leaf, "."); i >= 0 {
+		leaf = leaf[i+1:]
+	}
+	return strings.TrimPrefix(leaf, "*")
 }
 
 // planCrossFileMove orchestrates a cross-file move using the MoveDriver interface.

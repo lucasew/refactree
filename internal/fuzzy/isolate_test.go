@@ -3,6 +3,7 @@ package fuzzy_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -73,12 +74,13 @@ func TestSessionReusesContainerForSetupAndCheck(t *testing.T) {
 		t.Skip(err.Error())
 	}
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "mise.toml"), []byte(`
+	marker := filepath.Join(dir, "session-marker")
+	if err := os.WriteFile(filepath.Join(dir, "mise.toml"), []byte(fmt.Sprintf(`
 [tasks.setup]
-run = "echo setup-marker > /tmp/session-marker && echo did-setup"
+run = "echo setup-marker > %s && echo did-setup"
 [tasks.test]
-run = "test -f /tmp/session-marker && echo did-check"
-`), 0o644); err != nil {
+run = "test -f %s && echo did-check"
+`, marker, marker)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	var live bytes.Buffer

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 
@@ -15,6 +16,10 @@ import (
 	tcexec "github.com/testcontainers/testcontainers-go/exec"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
+
+// containerHome is the HOME used inside isolated sessions so bind-mounted
+// caches are writable by the host uid/gid (not root-only /root paths).
+const containerHome = "/home/rft"
 
 // RunResult captures command output and status.
 type RunResult struct {
@@ -116,44 +121,83 @@ func (r Runner) StartSession(ctx context.Context, cfg IsolateConfig, dir, imageK
 		return nil, err
 	}
 	dataDir := r.miseDataDir(imageKey)
-	for _, sub := range []string{"mise", "go-mod", "go-cache", "cache"} {
+	for _, sub := range []string{
+		"mise",
+		"mise-cache",
+		"mise-state",
+		"mise-config",
+		"go-mod",
+		"go-cache",
+		"cache",
+		"m2",
+	} {
 		if err := os.MkdirAll(filepath.Join(dataDir, sub), 0o755); err != nil {
 			return nil, err
 		}
+	}
+	// Override the image's root-owned global mise config so `mise install` only
+	// uses the project-embedded tools (avoids writing into /mise/cache).
+	emptyGlobal := filepath.Join(dataDir, "mise-config", "global.toml")
+	if err := os.WriteFile(emptyGlobal, []byte("# refactree fuzzy: no global tools\n"), 0o644); err != nil {
+		return nil, err
 	}
 	image := cfg.ImageOrDefault()
 	env := envMap(cfg.Env)
 	if env == nil {
 		env = map[string]string{}
 	}
+	home := containerHome
+	env["HOME"] = home
+	env["USER"] = containerUserName()
 	env["MISE_YES"] = "1"
 	env["MISE_VERBOSE"] = "1"
-	env["MISE_TRUSTED_CONFIG_PATHS"] = abs
-	env["GOPATH"] = "/root/go"
-	env["GOMODCACHE"] = "/root/go/pkg/mod"
-	env["GOCACHE"] = "/root/.cache/go-build"
-	env["XDG_CACHE_HOME"] = "/root/.cache"
+	env["MISE_TRUSTED_CONFIG_PATHS"] = strings.Join([]string{abs, home, home + "/.config/mise", "/mise"}, ":")
+	// Keep all mise state under the bind-mounted home; the image's /mise/* tree is root-owned.
+	env["MISE_DATA_DIR"] = home + "/.local/share/mise"
+	env["MISE_CACHE_DIR"] = home + "/.cache/mise"
+	env["MISE_STATE_DIR"] = home + "/.local/state/mise"
+	env["MISE_CONFIG_DIR"] = home + "/.config/mise"
+	env["MISE_GLOBAL_CONFIG_FILE"] = home + "/.config/mise/global.toml"
+	env["GOPATH"] = home + "/go"
+	env["GOMODCACHE"] = home + "/go/pkg/mod"
+	env["GOCACHE"] = home + "/.cache/go-build"
+	env["XDG_CACHE_HOME"] = home + "/.cache"
+	env["XDG_STATE_HOME"] = home + "/.local/state"
+	env["XDG_CONFIG_HOME"] = home + "/.config"
+	// Maven/Gradle default caches under HOME.
+	env["MAVEN_USER_HOME"] = home + "/.m2"
+
+	uid, gid := hostUserNamespace()
+	userSpec := fmt.Sprintf("%d:%d", uid, gid)
 
 	if network {
-		r.logf("isolate: starting session image=%s network=on workdir=%s data=%s\n", image, abs, dataDir)
+		r.logf("isolate: starting session image=%s user=%s network=on workdir=%s data=%s\n", image, userSpec, abs, dataDir)
 	} else {
-		r.logf("isolate: starting session image=%s network=none workdir=%s data=%s\n", image, abs, dataDir)
+		r.logf("isolate: starting session image=%s user=%s network=none workdir=%s data=%s\n", image, userSpec, abs, dataDir)
 	}
 
 	req := testcontainers.ContainerRequest{
 		Image:      image,
 		Entrypoint: []string{"/bin/bash", "-lc"},
 		Cmd:        []string{"sleep infinity"},
+		User:       userSpec,
 		WorkingDir: abs,
 		Env:        env,
 		WaitingFor: wait.ForExec([]string{"/bin/true"}),
 		HostConfigModifier: func(hc *container.HostConfig) {
+			// Mount each cache path directly (no nested mounts under a HOME bind)
+			// so host-side cleanup does not hit busy mountpoints.
 			hc.Binds = []string{
 				abs + ":" + abs,
-				filepath.Join(dataDir, "mise") + ":/root/.local/share/mise",
-				filepath.Join(dataDir, "go-mod") + ":/root/go/pkg/mod",
-				filepath.Join(dataDir, "go-cache") + ":/root/.cache/go-build",
-				filepath.Join(dataDir, "cache") + ":/root/.cache",
+				filepath.Join(dataDir, "mise") + ":" + home + "/.local/share/mise",
+				filepath.Join(dataDir, "mise-cache") + ":" + home + "/.cache/mise",
+				filepath.Join(dataDir, "mise-state") + ":" + home + "/.local/state/mise",
+				filepath.Join(dataDir, "mise-config") + ":" + home + "/.config/mise",
+				filepath.Join(dataDir, "mise-config", "global.toml") + ":/mise/config.toml:ro",
+				filepath.Join(dataDir, "go-mod") + ":" + home + "/go/pkg/mod",
+				filepath.Join(dataDir, "go-cache") + ":" + home + "/.cache/go-build",
+				filepath.Join(dataDir, "cache") + ":" + home + "/.cache",
+				filepath.Join(dataDir, "m2") + ":" + home + "/.m2",
 			}
 			if !network {
 				hc.NetworkMode = container.NetworkMode("none")
@@ -377,3 +421,59 @@ func ImageKey(p Project, commit string) string {
 	}
 	return p.ID + "-" + ref
 }
+
+func hostUserNamespace() (uid, gid int) {
+	uid = os.Getuid()
+	gid = os.Getgid()
+	if uid < 0 {
+		uid = 0
+	}
+	if gid < 0 {
+		gid = 0
+	}
+	return uid, gid
+}
+
+func containerUserName() string {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	return "rft"
+}
+
+// ForceRemoveAll deletes path, using a privileged docker rm when the host
+// user cannot remove root-owned artifacts left by older isolation runs.
+func ForceRemoveAll(path string) error {
+	if path == "" {
+		return nil
+	}
+	if err := os.RemoveAll(path); err == nil {
+		return nil
+	}
+	if _, statErr := os.Stat(path); statErr != nil && os.IsNotExist(statErr) {
+		return nil
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(abs); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+	}
+	parent := filepath.Dir(abs)
+	base := filepath.Base(abs)
+	cmd := exec.Command("docker", "run", "--rm", "-v", parent+":/work", "alpine:3.20", "rm", "-rf", "/work/"+base)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("force remove %s: %w\n%s", abs, err, out)
+	}
+	if _, err := os.Stat(abs); err == nil {
+		return fmt.Errorf("force remove %s: path still exists", abs)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+

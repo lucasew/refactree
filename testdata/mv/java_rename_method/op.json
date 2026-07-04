@@ -1,0 +1,4 @@
+{
+  "source": "path:./Main.java::Main.help",
+  "destination": "path:./Main.java::Main.doHelp"
+}
