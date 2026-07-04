@@ -668,42 +668,13 @@ func FindAllOccurrences(file string, content []byte, oldBase, newBase string) []
 	return edits
 }
 
-// FindAllOccurrencesInStrings is like findAllOccurrences but only produces
-// edits for matches that occur inside Go string literals ("..." or `...`).
-// Used for updating import path strings (the location part) using directory
-// names without touching bare identifiers (which may be qualifiers whose
-// name comes from the package directive).
+// FindAllOccurrencesInStrings is like FindAllOccurrences but only produces
+// edits for matches that occur inside double-quoted or raw string literals.
+// Language packages use this for import-path text; language-specific boundary
+// rules belong in those packages.
 func FindAllOccurrencesInStrings(file string, content []byte, oldBase, newBase string) []Edit {
-	return findInStringLiterals(file, content, oldBase, newBase, false, "")
-}
-
-// FindAllPathSegmentOccurrencesInStrings replaces oldPath with newPath only
-// inside string literals and only when oldPath sits on import-path segment
-// boundaries (not as a substring of a longer segment like "cas" in "case" or
-// "pkg/api" nested incorrectly inside another path).
-func FindAllPathSegmentOccurrencesInStrings(file string, content []byte, oldPath, newPath string) []Edit {
-	return findInStringLiterals(file, content, oldPath, newPath, true, "")
-}
-
-// FindAllPathSegmentOccurrencesInStringsWithParent is like the path-segment
-// string replacer, but for a single path leaf: a match is kept only when the
-// segment immediately before the leaf equals parentDir's final segment (or
-// parentDir is empty and the leaf is the entire import path body).
-// parentDir is the directory containing the leaf (e.g. "pkg" for "pkg/api").
-func FindAllPathSegmentOccurrencesInStringsWithParent(file string, content []byte, leaf, newLeaf, parentDir string) []Edit {
-	return findInStringLiterals(file, content, leaf, newLeaf, true, parentDir)
-}
-
-func findInStringLiterals(file string, content []byte, oldBase, newBase string, pathSegments bool, parentDir string) []Edit {
 	if oldBase == "" || oldBase == newBase {
 		return nil
-	}
-	parentLeaf := ""
-	if parentDir != "" {
-		parentLeaf = parentDir
-		if i := strings.LastIndex(parentDir, "/"); i >= 0 {
-			parentLeaf = parentDir[i+1:]
-		}
 	}
 	text := string(content)
 	var edits []Edit
@@ -754,59 +725,17 @@ func findInStringLiterals(file string, content []byte, oldBase, newBase string, 
 			}
 			posInSeg := sOff + idx
 			pos := start + posInSeg
-			endPos := pos + len(oldBase)
-			keep := true
-			if pathSegments {
-				keep = pathSegmentBounded(seg, posInSeg, posInSeg+len(oldBase))
-				if keep && parentDir != "" {
-					keep = pathSegmentHasParent(seg, posInSeg, parentLeaf)
-				}
-			}
-			if keep {
-				edits = append(edits, Edit{
-					File:      file,
-					StartByte: uint32(pos),
-					EndByte:   uint32(endPos),
-					NewText:   newBase,
-				})
-			}
+			edits = append(edits, Edit{
+				File:      file,
+				StartByte: uint32(pos),
+				EndByte:   uint32(pos + len(oldBase)),
+				NewText:   newBase,
+			})
 			sOff = posInSeg + len(oldBase)
 		}
 		off = end + 1
 	}
 	return edits
-}
-
-func pathSegmentBounded(seg string, start, end int) bool {
-	if start > 0 && isPathSegmentChar(seg[start-1]) {
-		return false
-	}
-	if end < len(seg) && isPathSegmentChar(seg[end]) {
-		return false
-	}
-	return true
-}
-
-func pathSegmentHasParent(seg string, leafStart int, parentLeaf string) bool {
-	if parentLeaf == "" {
-		return leafStart == 1 // immediately inside opening quote
-	}
-	if leafStart < 2 || seg[leafStart-1] != '/' {
-		return false
-	}
-	parentStart := leafStart - 1 - len(parentLeaf)
-	if parentStart < 1 {
-		return false
-	}
-	if seg[parentStart:leafStart-1] != parentLeaf {
-		return false
-	}
-	return pathSegmentBounded(seg, parentStart, leafStart-1)
-}
-
-func isPathSegmentChar(b byte) bool {
-	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') ||
-		b == '_' || b == '-' || b == '.' || b == '~' || b == '+'
 }
 
 // CommonPathPrefix returns the common directory prefix of two paths.

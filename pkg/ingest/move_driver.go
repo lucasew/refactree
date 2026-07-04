@@ -13,8 +13,8 @@ type DeclExtract struct {
 	Preamble string
 	// DeclText is the full source text of the declaration.
 	DeclText string
-	// Imports lists import paths the declaration needs in the destination file
-	// (Go module paths, etc.). InsertDecl should ensure they exist.
+	// Imports lists import specs the declaration needs in the destination
+	// file. InsertDecl should ensure they exist; interpretation is language-specific.
 	Imports []string
 	// RemoveStart is the start byte of the range to delete from the source file.
 	RemoveStart uint32

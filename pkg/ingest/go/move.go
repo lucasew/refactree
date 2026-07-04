@@ -436,7 +436,7 @@ func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ing
 	// Rewrite import path strings on path-segment boundaries so that moving
 	// "pkg/api" does not rewrite "pkg/palette/api", and moving "pkg/cas" does
 	// not corrupt "case" or "lucas" inside string literals.
-	edits = ingest.FindAllPathSegmentOccurrencesInStrings(fileRelPath, content, oldDir, newDir)
+	edits = findPathSegmentOccurrencesInStrings(fileRelPath, content, oldDir, newDir)
 
 	if len(edits) == 0 {
 		oldBase := lastPathComponent(oldDir)
@@ -448,7 +448,7 @@ func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ing
 		}
 		if oldBase != newBase {
 			parent := dirOf(oldDir)
-			edits = ingest.FindAllPathSegmentOccurrencesInStringsWithParent(
+			edits = findPathSegmentOccurrencesInStringsWithParent(
 				fileRelPath, content, oldBase, newBase, parent,
 			)
 		}
@@ -1109,6 +1109,23 @@ func buildStringLiteralMask(text string) []bool {
 	mask := make([]bool, len(text))
 	i := 0
 	for i < len(text) {
+		// Skip comments so apostrophes in prose (doesn't) are not char literals.
+		if i+1 < len(text) && text[i] == '/' && text[i+1] == '/' {
+			for i < len(text) && text[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		if i+1 < len(text) && text[i] == '/' && text[i+1] == '*' {
+			i += 2
+			for i+1 < len(text) && !(text[i] == '*' && text[i+1] == '/') {
+				i++
+			}
+			if i+1 < len(text) {
+				i += 2
+			}
+			continue
+		}
 		switch text[i] {
 		case '"':
 			mask[i] = true
@@ -1138,20 +1155,27 @@ func buildStringLiteralMask(text string) []bool {
 				i++
 			}
 		case '\'':
+			// Go character literals are short; bound scan to avoid comment apostrophes
+			// that slipped through.
+			start := i
 			mask[i] = true
 			i++
-			for i < len(text) {
+			if i < len(text) && text[i] == '\\' && i+1 < len(text) {
 				mask[i] = true
-				if text[i] == '\\' && i+1 < len(text) {
-					mask[i+1] = true
-					i += 2
-					continue
-				}
-				if text[i] == '\'' {
-					i++
-					break
-				}
+				mask[i+1] = true
+				i += 2
+			} else if i < len(text) {
+				mask[i] = true
 				i++
+			}
+			if i < len(text) && text[i] == '\'' {
+				mask[i] = true
+				i++
+			} else {
+				// Invalid/incomplete rune; do not treat following code as a string.
+				for j := start; j < i && j < len(mask); j++ {
+					mask[j] = false
+				}
 			}
 		default:
 			i++

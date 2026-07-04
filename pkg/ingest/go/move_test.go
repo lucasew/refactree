@@ -48,15 +48,15 @@ import (
 )
 const s = "case lucas"
 `)
-	edits := ingest.FindAllPathSegmentOccurrencesInStrings("f.go", content, "pkg/api", "pkg/api_fuzz")
+	edits := findPathSegmentOccurrencesInStrings("f.go", content, "pkg/api", "pkg/api_fuzz")
 	if len(edits) != 1 || edits[0].NewText != "pkg/api_fuzz" {
 		t.Fatalf("full path edits: %+v", edits)
 	}
-	edits = ingest.FindAllPathSegmentOccurrencesInStringsWithParent("f.go", content, "api", "api_fuzz", "pkg")
+	edits = findPathSegmentOccurrencesInStringsWithParent("f.go", content, "api", "api_fuzz", "pkg")
 	if len(edits) != 1 {
 		t.Fatalf("parent-scoped leaf edits: %+v", edits)
 	}
-	edits = ingest.FindAllPathSegmentOccurrencesInStrings("f.go", content, "cas", "cas_fuzz")
+	edits = findPathSegmentOccurrencesInStrings("f.go", content, "cas", "cas_fuzz")
 	if len(edits) != 0 {
 		t.Fatalf("expected no cas substring hits, got %+v", edits)
 	}
@@ -145,5 +145,36 @@ func TestRenameMethodDoesNotTouchUnrelatedLeaf(t *testing.T) {
 	}
 	if !strings.Contains(string(mainGot), "b.WriteImage()") {
 		t.Fatalf("unrelated package call corrupted in main:\n%s", mainGot)
+	}
+}
+
+func TestSelectorFindsVarCallInFacade(t *testing.T) {
+	content := []byte("package wallpaper\n\nfunc SetStatic(path string) error {\n\tvar d Driver\n\treturn d.SetStatic(path)\n}\n\nfunc Wrap(ctx context.Context, path string) error {\n\td, err := driver.Get[Driver](ctx)\n\tif err != nil { return err }\n\treturn d.SetStatic(ctx, path)\n}\n")
+	edits := findSelectorLeafEdits("facade.go", content, "SetStatic", "Fuzz", nil)
+	if len(edits) != 2 {
+		t.Fatalf("expected 2 selector edits, got %+v", edits)
+	}
+}
+
+func TestSelectorIgnoresCommentApostrophes(t *testing.T) {
+	content := []byte("package wallpaper\n\nfunc SetStatic(path string) error {\n\t// Ignore errors if service doesn't exist\n\td, err := get()\n\tif err != nil { return err }\n\treturn d.SetStatic(ctx, path)\n}\n")
+	edits := findSelectorLeafEdits("facade.go", content, "SetStatic", "Fuzz", nil)
+	if len(edits) != 1 {
+		t.Fatalf("expected 1 selector edit despite comment apostrophe, got %+v", edits)
+	}
+}
+
+func TestSelectorOnRealFacadeFile(t *testing.T) {
+	content, err := os.ReadFile("/tmp/grok-goal-064fb14fad6a/implementer/work/ws-sel1/runs/workspaced/42/pkg/driver/wallpaper/facade.go")
+	if err != nil { t.Fatal(err) }
+	edits := findSelectorLeafEdits("pkg/driver/wallpaper/facade.go", content, "SetStatic", "Fuzz", nil)
+	var hits []ingest.Edit
+	for _, e := range edits {
+		if e.StartByte == 1305 {
+			hits = append(hits, e)
+		}
+	}
+	if len(hits) != 1 {
+		t.Fatalf("expected selector at 1305, edits=%+v", edits)
 	}
 }
