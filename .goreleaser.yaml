@@ -20,10 +20,13 @@ builds:
     main: ./cmd/rft
     env:
       - CGO_ENABLED=0
-    goos:
+    goos: # only what ccgo-tree-sitter supports, PRs welcome though
       - linux
       # - windows
       # - darwin
+    goarch:
+      - amd64
+      - arm64
     ldflags:
       - -s -w -X github.com/lucasew/refactree/pkg/version.version={{ .Version }}
 
