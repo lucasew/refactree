@@ -15,9 +15,10 @@ import (
 type Mode string
 
 const (
-	ModeIngest Mode = "ingest"
-	ModeMv     Mode = "mv"
-	ModeRun    Mode = "run"
+	ModeIngest   Mode = "ingest"
+	ModeMv       Mode = "mv"
+	ModeRun      Mode = "run"
+	ModePrefetch Mode = "prefetch"
 )
 
 // Options configures a harness run.
@@ -30,7 +31,8 @@ type Options struct {
 	WorkRoot    string
 	ReportDir   string
 	Allow       bool
-	NoIsolate   bool
+	NoIsolate   bool // opt out of Docker; run setup/check on the host
+	Offline     bool // use work-root caches only; no git fetch; container network=none
 	StrictRefs  bool
 	FailFast    bool
 	Verbose     bool
@@ -65,6 +67,9 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	if opts.Mode == "" {
 		opts.Mode = ModeRun
 	}
+	if opts.Mode == ModePrefetch && opts.Offline {
+		return nil, fmt.Errorf("prefetch cannot use --offline; run prefetch online, then ingest/mv/run --offline")
+	}
 	if err := CheckAllowed(opts.Allow, opts.NoIsolate); err != nil {
 		return nil, err
 	}
@@ -94,11 +99,18 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		if err := RequireDocker(ctx); err != nil {
 			return nil, err
 		}
-		fmt.Fprintln(opts.Stdout, "isolate: testcontainers session per project (jdxcode/mise); setup+check share one container")
+		fmt.Fprintln(opts.Stdout, "isolate: docker (default); setup/check share one testcontainers session per project")
 	} else {
 		fmt.Fprintln(opts.Stdout, "isolate: disabled (--no-isolate); setup/check run on host")
 	}
-	fmt.Fprintln(opts.Stdout, "note: ingest/mv always run on the host; only setup/check use the container session")
+	if opts.Offline {
+		fmt.Fprintln(opts.Stdout, "offline: using work-root git/mise/preserve caches only; container network disabled")
+	}
+	if opts.Mode != ModePrefetch {
+		fmt.Fprintln(opts.Stdout, "note: ingest/mv always run on the host; only setup/check use the isolate session")
+	} else {
+		fmt.Fprintln(opts.Stdout, "prefetch: clone into work-root cache, run setup, save preserve snapshots and mise-data")
+	}
 
 	ids := make([]string, len(projects))
 	for i, p := range projects {
@@ -112,6 +124,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		WorkRoot:   ws.Root,
 		Allow:      opts.Allow,
 		NoIsolate:  opts.NoIsolate,
+		Offline:    opts.Offline,
 		StrictRefs: opts.StrictRefs,
 	})
 	if err != nil {
@@ -119,6 +132,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	}
 	defer report.Close()
 	fmt.Fprintf(opts.Stdout, "report: %s\n", report.Dir)
+	fmt.Fprintf(opts.Stdout, "work-root: %s\n", ws.Root)
 
 	runner := Runner{
 		NoIsolate: opts.NoIsolate,
@@ -149,10 +163,24 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	return out, nil
 }
 
+// sessionNetwork reports whether the isolate session should have network access.
+func sessionNetwork(opts Options, p Project) bool {
+	if opts.Offline {
+		return false
+	}
+	if opts.Mode == ModePrefetch {
+		return p.Isolate.SetupNetworkEnabled()
+	}
+	return p.Isolate.SetupNetworkEnabled() || p.Isolate.CheckNetworkEnabled()
+}
+
 func runProject(ctx context.Context, opts Options, p Project, ws *Workspace, runner Runner, rng *rand.Rand, report *Report, out *Result) error {
 	runID := fmt.Sprintf("%d", opts.Seed)
+	if opts.Mode == ModePrefetch {
+		runID = "prefetch"
+	}
 	fmt.Fprintf(opts.Stdout, "== project %s ==\n", p.ID)
-	workDir, commit, err := ws.Prepare(p, runID)
+	workDir, commit, err := ws.Prepare(p, runID, PrepareOptions{Offline: opts.Offline})
 	if err != nil {
 		out.EnvFails++
 		_ = report.LogEvent(Event{Project: p.ID, Kind: "prepare", Outcome: "error", Class: "env", Error: err.Error()})
@@ -172,8 +200,8 @@ func runProject(ctx context.Context, opts Options, p Project, ws *Workspace, run
 		fmt.Fprintf(opts.Stdout, "mise: wrote [projects.<slug>.mise] to %s\n", filepath.Join(root, "mise.toml"))
 	}
 
-	// One container for setup + all checks on this project.
-	network := p.Isolate.SetupNetworkEnabled() || p.Isolate.CheckNetworkEnabled()
+	// One session for setup + all checks on this project.
+	network := sessionNetwork(opts, p)
 	session, err := runner.StartSession(ctx, p.Isolate, root, imageKey, network)
 	if err != nil {
 		out.EnvFails++
@@ -195,6 +223,21 @@ func runProject(ctx context.Context, opts Options, p Project, ws *Workspace, run
 	}
 	if len(SetupArgv(p)) > 0 {
 		_ = report.LogEvent(Event{Project: p.ID, Kind: "setup", Outcome: "pass", Log: setupLog, ExitCode: setupRes.ExitCode, Error: isolatedSuffix(setupRes)})
+	}
+
+	if opts.Mode == ModePrefetch {
+		if err := ws.SavePreserveSnapshot(p, workDir); err != nil {
+			out.EnvFails++
+			_ = report.LogEvent(Event{Project: p.ID, Kind: "preserve_snapshot", Outcome: "error", Class: "env", Error: err.Error()})
+			return fmt.Errorf("preserve snapshot: %w", err)
+		}
+		if len(p.PreserveGlobs) > 0 {
+			_ = report.LogEvent(Event{Project: p.ID, Kind: "preserve_snapshot", Outcome: "pass", Error: ws.preservePath(p.ID)})
+			fmt.Fprintf(opts.Stdout, "preserve snapshot: %s\n", ws.preservePath(p.ID))
+		}
+		out.Passed++
+		fmt.Fprintf(opts.Stdout, "prefetch: ready (cache=%s mise-data=%s)\n", ws.cachePath(p.ID), runner.miseDataDir(imageKey))
+		return nil
 	}
 
 	doIngest := opts.Mode == ModeIngest || opts.Mode == ModeRun

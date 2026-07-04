@@ -19,6 +19,7 @@ type fuzzyFlags struct {
 	reportDir  string
 	allow      bool
 	noIsolate  bool
+	offline    bool
 	strictRefs bool
 	failFast   bool
 	ops        []string
@@ -32,17 +33,21 @@ func newFuzzyCmd(root *rootOptions) *cobra.Command {
 		Short: "Real-world ingest/mv fuzzy harness on isolated workspaces",
 	}
 
-	add := func(c *cobra.Command) {
+	addCommon := func(c *cobra.Command) {
 		c.Flags().StringVar(&flags.catalog, "catalog", "", "path to projects.toml (default: testdata/fuzzy/projects.toml)")
 		c.Flags().StringSliceVar(&flags.projects, "project", nil, "project slug (repeatable)")
+		c.Flags().StringVar(&flags.workRoot, "work-root", os.Getenv("RFT_FUZZY_WORK_ROOT"), "workspace root for clones, mise-data, and preserve snapshots")
+		c.Flags().StringVar(&flags.reportDir, "report-dir", "", "directory for reports")
+		c.Flags().BoolVar(&flags.allow, "allow", false, "allow --no-isolate on a non-ephemeral host")
+		c.Flags().BoolVar(&flags.noIsolate, "no-isolate", false, "opt out of Docker isolation; run setup/check on the host (Docker is the default)")
+		c.Flags().BoolVar(&flags.failFast, "fail-fast", false, "stop on first bug-class failure")
+	}
+	addFuzz := func(c *cobra.Command) {
+		addCommon(c)
+		c.Flags().BoolVar(&flags.offline, "offline", false, "use work-root caches only (no git fetch/clone; container network disabled). Run prefetch online first")
 		c.Flags().Int64Var(&flags.seed, "seed", 0, "rng seed (default: time-based)")
 		c.Flags().IntVar(&flags.iterations, "iterations", 1, "mv iterations per project")
-		c.Flags().StringVar(&flags.workRoot, "work-root", os.Getenv("RFT_FUZZY_WORK_ROOT"), "workspace root for clones")
-		c.Flags().StringVar(&flags.reportDir, "report-dir", "", "directory for reports")
-		c.Flags().BoolVar(&flags.allow, "allow", false, "allow --no-isolate on a non-ephemeral host (not needed with Docker isolation)")
-		c.Flags().BoolVar(&flags.noIsolate, "no-isolate", false, "run setup/check on the host instead of testcontainers")
 		c.Flags().BoolVar(&flags.strictRefs, "strict-refs", false, "fail on dangling path targets")
-		c.Flags().BoolVar(&flags.failFast, "fail-fast", false, "stop on first bug-class failure")
 		c.Flags().StringSliceVar(&flags.ops, "ops", nil, "mv ops subset: rename,cross_file,package")
 	}
 
@@ -58,6 +63,7 @@ func newFuzzyCmd(root *rootOptions) *cobra.Command {
 				ReportDir:   flags.reportDir,
 				Allow:       flags.allow,
 				NoIsolate:   flags.noIsolate,
+				Offline:     flags.offline,
 				StrictRefs:  flags.strictRefs,
 				FailFast:    flags.failFast,
 				Verbose:     root != nil && root.verbose,
@@ -73,6 +79,14 @@ func newFuzzyCmd(root *rootOptions) *cobra.Command {
 			return err
 		}
 	}
+
+	prefetchCmd := &cobra.Command{
+		Use:   "prefetch",
+		Short: "Clone catalog repos into work-root and run setup (for later --offline runs)",
+		Long:  "Downloads git pins into --work-root/cache, runs mise install + setup (Docker by default), and saves preserve_globs snapshots. Use the same --work-root with ingest/mv/run --offline on an airgapped host. Pass --no-isolate to run setup on the host instead of Docker.",
+		RunE:  run(fuzzy.ModePrefetch),
+	}
+	addCommon(prefetchCmd)
 
 	ingestCmd := &cobra.Command{
 		Use:   "ingest",
@@ -90,9 +104,10 @@ func newFuzzyCmd(root *rootOptions) *cobra.Command {
 		RunE:  run(fuzzy.ModeRun),
 	}
 	for _, c := range []*cobra.Command{ingestCmd, mvCmd, runCmd} {
-		add(c)
+		addFuzz(c)
 		cmd.AddCommand(c)
 	}
+	cmd.AddCommand(prefetchCmd)
 
 	cmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
 		for _, op := range flags.ops {

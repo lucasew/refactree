@@ -26,6 +26,7 @@ type Meta struct {
 	WorkRoot   string   `json:"work_root"`
 	Allow      bool     `json:"allow"`
 	NoIsolate  bool     `json:"no_isolate"`
+	Offline    bool     `json:"offline"`
 	StrictRefs bool     `json:"strict_refs"`
 }
 

@@ -21,8 +21,10 @@ func NewWorkspace(root string) (*Workspace, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Join(abs, "cache"), 0o755); err != nil {
-		return nil, err
+	for _, sub := range []string{"cache", "preserve", "runs", "mise-data"} {
+		if err := os.MkdirAll(filepath.Join(abs, sub), 0o755); err != nil {
+			return nil, err
+		}
 	}
 	return &Workspace{Root: abs}, nil
 }
@@ -31,12 +33,23 @@ func (w *Workspace) cachePath(id string) string {
 	return filepath.Join(w.Root, "cache", id+".git")
 }
 
+func (w *Workspace) preservePath(id string) string {
+	return filepath.Join(w.Root, "preserve", id)
+}
+
 func (w *Workspace) runPath(id, runID string) string {
 	return filepath.Join(w.Root, "runs", id, runID)
 }
 
+// PrepareOptions controls clone and snapshot restore behavior.
+type PrepareOptions struct {
+	Offline bool
+}
+
 // Prepare returns a clean work directory at the project pin.
-func (w *Workspace) Prepare(p Project, runID string) (workDir string, commit string, err error) {
+// When offline, uses the bare cache only (no git fetch/clone from URL) and
+// restores preserve snapshots written by prefetch.
+func (w *Workspace) Prepare(p Project, runID string, opts PrepareOptions) (workDir string, commit string, err error) {
 	if p.LocalPath != "" {
 		src, err := filepath.Abs(p.LocalPath)
 		if err != nil {
@@ -49,10 +62,18 @@ func (w *Workspace) Prepare(p Project, runID string) (workDir string, commit str
 		if err := copyDir(src, workDir); err != nil {
 			return "", "", err
 		}
+		if err := w.RestorePreserveSnapshot(p, workDir); err != nil {
+			return "", "", err
+		}
+		if opts.Offline {
+			if err := w.requirePreserveSnapshot(p); err != nil {
+				return "", "", err
+			}
+		}
 		return workDir, "local", nil
 	}
 
-	if err := w.ensureBare(p); err != nil {
+	if err := w.ensureBare(p, opts.Offline); err != nil {
 		return "", "", err
 	}
 	workDir = w.runPath(p.ID, runID)
@@ -75,7 +96,96 @@ func (w *Workspace) Prepare(p Project, runID string) (workDir string, commit str
 	if err != nil {
 		return "", "", err
 	}
+	if err := w.RestorePreserveSnapshot(p, workDir); err != nil {
+		return "", "", err
+	}
+	if opts.Offline {
+		if err := w.requirePreserveSnapshot(p); err != nil {
+			return "", "", err
+		}
+	}
 	return workDir, commit, nil
+}
+
+// SavePreserveSnapshot copies configured preserve_globs from workDir into the
+// durable work-root snapshot used by later Prepare calls (especially --offline).
+func (w *Workspace) SavePreserveSnapshot(p Project, workDir string) error {
+	if len(p.PreserveGlobs) == 0 {
+		return nil
+	}
+	dstRoot := w.preservePath(p.ID)
+	if err := ForceRemoveAll(dstRoot); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dstRoot, 0o755); err != nil {
+		return err
+	}
+	saved := 0
+	for _, g := range p.PreserveGlobs {
+		src := filepath.Join(workDir, filepath.FromSlash(g))
+		if _, err := os.Stat(src); err != nil {
+			continue
+		}
+		dst := filepath.Join(dstRoot, filepath.FromSlash(g))
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		if err := copyDir(src, dst); err != nil {
+			return fmt.Errorf("snapshot %s: %w", g, err)
+		}
+		saved++
+	}
+	if saved == 0 {
+		return fmt.Errorf("preserve snapshot for %s: none of %v present after setup", p.ID, p.PreserveGlobs)
+	}
+	return nil
+}
+
+// RestorePreserveSnapshot overlays durable preserve snapshots onto workDir.
+func (w *Workspace) RestorePreserveSnapshot(p Project, workDir string) error {
+	if len(p.PreserveGlobs) == 0 {
+		return nil
+	}
+	srcRoot := w.preservePath(p.ID)
+	st, err := os.Stat(srcRoot)
+	if err != nil || !st.IsDir() {
+		return nil
+	}
+	for _, g := range p.PreserveGlobs {
+		src := filepath.Join(srcRoot, filepath.FromSlash(g))
+		if _, err := os.Stat(src); err != nil {
+			continue
+		}
+		dst := filepath.Join(workDir, filepath.FromSlash(g))
+		if err := ForceRemoveAll(dst); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		if err := copyDir(src, dst); err != nil {
+			return fmt.Errorf("restore snapshot %s: %w", g, err)
+		}
+	}
+	return nil
+}
+
+func (w *Workspace) requirePreserveSnapshot(p Project) error {
+	if len(p.PreserveGlobs) == 0 {
+		return nil
+	}
+	srcRoot := w.preservePath(p.ID)
+	st, err := os.Stat(srcRoot)
+	if err != nil || !st.IsDir() {
+		return fmt.Errorf("offline preserve snapshot missing for %s (run: rft fuzzy prefetch --project %s)", p.ID, p.ID)
+	}
+	for _, g := range p.PreserveGlobs {
+		src := filepath.Join(srcRoot, filepath.FromSlash(g))
+		if _, err := os.Stat(src); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("offline preserve snapshot for %s has none of %v (re-run prefetch)", p.ID, p.PreserveGlobs)
 }
 
 // Reset restores the workdir to the pinned ref, preserving configured globs.
@@ -145,15 +255,24 @@ func forceCleanUntracked(workDir string) error {
 	return nil
 }
 
-func (w *Workspace) ensureBare(p Project) error {
+func (w *Workspace) ensureBare(p Project, offline bool) error {
 	cache := w.cachePath(p.ID)
 	if st, err := os.Stat(cache); err == nil && st.IsDir() {
+		if offline {
+			if _, err := revParse(cache, p.Ref); err != nil {
+				return fmt.Errorf("offline cache for %s missing ref %s (run: rft fuzzy prefetch --project %s): %w", p.ID, p.Ref, p.ID, err)
+			}
+			return nil
+		}
 		cmd := exec.Command("git", "fetch", "--force", "origin", p.Ref)
 		cmd.Dir = cache
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("git fetch %s: %w\n%s", p.ID, err, out)
 		}
 		return nil
+	}
+	if offline {
+		return fmt.Errorf("offline git cache missing for %s at %s (run: rft fuzzy prefetch --project %s)", p.ID, cache, p.ID)
 	}
 	if err := os.MkdirAll(filepath.Dir(cache), 0o755); err != nil {
 		return err

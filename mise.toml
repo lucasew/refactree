@@ -31,7 +31,7 @@ goreleaser release --clean
 '''
 
 [tasks.fuzzy]
-description = "Real-world fuzzy ingest/mv (setup/check in testcontainers + jdxcode/mise; --no-isolate needs RFT_FUZZY_ALLOW=1 or CI)"
+description = "Real-world fuzzy ingest/mv (Docker setup/check by default; --no-isolate on host needs RFT_FUZZY_ALLOW=1 or CI; --offline needs prior fuzzy:prefetch)"
 env = { MISE_EXPERIMENTAL = "1" }
 run = "go run ./cmd/rft fuzzy run --iterations 10"
 
@@ -44,3 +44,8 @@ run = "go run ./cmd/rft fuzzy ingest"
 description = "Fuzzy mv on catalog projects with isolated checks via testcontainers"
 env = { MISE_EXPERIMENTAL = "1" }
 run = "go run ./cmd/rft fuzzy mv --iterations 3"
+
+[tasks."fuzzy:prefetch"]
+description = "Prefetch catalog repos into work-root (git cache, mise-data, preserve snapshots) for later --offline runs"
+env = { MISE_EXPERIMENTAL = "1" }
+run = "go run ./cmd/rft fuzzy prefetch"
