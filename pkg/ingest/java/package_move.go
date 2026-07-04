@@ -10,8 +10,9 @@ import (
 )
 
 // ExpandPackageDirs implements ingest.PackageMovePlanner.
-// Java packages often exist under multiple source roots (src/main/java and
-// src/test/java); moving only one root leaves PackageLocation errors.
+// Java packages often exist under multiple source roots (src/main/java,
+// src/test/java, src/main/java-templates, ...); moving only one root leaves
+// PackageLocation errors when package clauses are rewritten elsewhere.
 func (moveDriver) ExpandPackageDirs(result *ingest.Result, srcDir, dstDir string) [][2]string {
 	srcDir = strings.TrimSuffix(strings.TrimPrefix(srcDir, "./"), "/")
 	dstDir = strings.TrimSuffix(strings.TrimPrefix(dstDir, "./"), "/")
@@ -27,18 +28,14 @@ func (moveDriver) ExpandPackageDirs(result *ingest.Result, srcDir, dstDir string
 	}
 
 	seen := map[string]bool{srcDir: true}
-	for _, f := range result.Files {
-		if f.Language != "java" {
-			continue
-		}
-		rel := strings.TrimPrefix(f.Path, "./")
-		pkgDir := path.Dir(rel)
-		if pkgDir == "." {
-			continue
+	addPair := func(pkgDir string) {
+		pkgDir = strings.TrimSuffix(strings.TrimPrefix(pkgDir, "./"), "/")
+		if pkgDir == "" || seen[pkgDir] {
+			return
 		}
 		suffix, ok := sourceRootSuffix(pkgDir)
-		if !ok || suffix != srcSuffix || seen[pkgDir] {
-			continue
+		if !ok || suffix != srcSuffix {
+			return
 		}
 		root := strings.TrimSuffix(pkgDir, suffix)
 		root = strings.TrimSuffix(root, "/")
@@ -48,6 +45,25 @@ func (moveDriver) ExpandPackageDirs(result *ingest.Result, srcDir, dstDir string
 		}
 		seen[pkgDir] = true
 		pairs = append(pairs, [2]string{pkgDir, dstPkgDir})
+	}
+	for _, f := range result.Files {
+		if f.Language != "java" {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Path, "./")
+		pkgDir := path.Dir(rel)
+		if pkgDir == "." {
+			continue
+		}
+		addPair(pkgDir)
+		// Pair the package root when this file lives in a subpackage directory
+		// (e.g. .../com/google/gson/internal under .../com/google/gson), including
+		// alternate roots such as src/main/java-templates.
+		if idx := strings.Index(pkgDir, "/"+srcSuffix+"/"); idx >= 0 {
+			addPair(pkgDir[:idx+1+len(srcSuffix)])
+		} else if strings.HasSuffix(pkgDir, "/"+srcSuffix) || pkgDir == srcSuffix {
+			addPair(pkgDir)
+		}
 	}
 	return pairs
 }
@@ -115,7 +131,15 @@ func (moveDriver) RewriteSupportFiles(rootDir string, result *ingest.Result, mov
 
 func sourceRootSuffix(dir string) (string, bool) {
 	dir = strings.Trim(strings.TrimPrefix(dir, "./"), "/")
-	for _, root := range []string{"src/main/java/", "src/test/java/", "src/"} {
+	for _, root := range []string{
+		"src/main/java-templates/",
+		"src/test/java-templates/",
+		"src/main/java/",
+		"src/test/java/",
+		"src/main/resources/",
+		"src/test/resources/",
+		"src/",
+	} {
 		if strings.HasPrefix(dir, root) {
 			return strings.TrimPrefix(dir, root), true
 		}

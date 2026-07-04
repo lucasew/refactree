@@ -182,21 +182,14 @@ func packageNameForJavaDir(relPath string) string {
 	if relPath == "" || relPath == "." {
 		return ""
 	}
-	for _, root := range []string{"src/main/java/", "src/test/java/", "src/"} {
-		if strings.HasPrefix(relPath, root) {
-			relPath = strings.TrimPrefix(relPath, root)
-			break
-		}
-	}
-	relPath = strings.Trim(relPath, "/")
-	if relPath == "" {
-		return ""
-	}
 	if strings.HasSuffix(relPath, ".java") {
 		relPath = path.Dir(relPath)
 		if relPath == "." {
 			return ""
 		}
+	}
+	if pkg, ok := packageNameFromSourceDir(relPath); ok {
+		return pkg
 	}
 	return strings.ReplaceAll(relPath, "/", ".")
 }
