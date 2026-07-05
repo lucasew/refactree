@@ -1,6 +1,7 @@
 package fuzzy_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,6 +33,9 @@ func TestLoadCatalog(t *testing.T) {
 		if p.CheckTask != "test" || p.SetupTask != "setup" {
 			t.Fatalf("%s tasks setup=%q check=%q", p.ID, p.SetupTask, p.CheckTask)
 		}
+		if p.Isolate.ImageOrDefault() != fuzzy.DefaultMiseImage {
+			t.Fatalf("%s image %q want default pin", p.ID, p.Isolate.ImageOrDefault())
+		}
 		content, err := fuzzy.ResolveMiseTOML(p)
 		if err != nil || content == "" {
 			t.Fatalf("%s resolve mise: %v %q", p.ID, err, content)
@@ -39,11 +43,73 @@ func TestLoadCatalog(t *testing.T) {
 		if !strings.Contains(content, "[tools]") && !strings.Contains(content, "tools") {
 			t.Fatalf("%s missing tools in:\n%s", p.ID, content)
 		}
+		if strings.Contains(content, "latest") {
+			t.Fatalf("%s mise tools must be pinned:\n%s", p.ID, content)
+		}
 	}
 	for _, id := range []string{"workspaced", "ritm_annotation", "astro", "gson"} {
 		if !ids[id] {
 			t.Fatalf("missing %s", id)
 		}
+	}
+}
+
+func TestMiseToolsMustBePinned(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	catalog := filepath.Join(dir, "projects.toml")
+	cases := []struct {
+		name string
+		ver  string
+	}{
+		{"latest", `uv = "latest"`},
+		{"major", `node = "22"`},
+		{"major_minor", `maven = "3.9"`},
+		{"unquoted", `java = 21`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data := fmt.Sprintf(`
+[projects.x]
+language = "go"
+local_path = "/tmp/x"
+ingest_roots = ["."]
+[projects.x.mise.tools]
+%s
+[projects.x.mise.tasks.test]
+run = "true"
+`, tc.ver)
+			if err := os.WriteFile(catalog, []byte(data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fuzzy.LoadCatalog(catalog); err == nil {
+				t.Fatal("expected pin validation error")
+			}
+		})
+	}
+}
+
+func TestIsolateImageRejectsLatest(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	catalog := filepath.Join(dir, "projects.toml")
+	data := `
+[projects.x]
+language = "go"
+local_path = "/tmp/x"
+ingest_roots = ["."]
+[projects.x.isolate]
+image = "jdxcode/mise:latest"
+[projects.x.mise.tools]
+go = "1.26.4"
+[projects.x.mise.tasks.test]
+run = "true"
+`
+	if err := os.WriteFile(catalog, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fuzzy.LoadCatalog(catalog); err == nil {
+		t.Fatal("expected isolate.image pin error")
 	}
 }
 

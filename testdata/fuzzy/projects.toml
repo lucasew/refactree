@@ -42,7 +42,7 @@ setup_network = true
 check_network = false
 
 [projects.ritm_annotation.mise.tools]
-uv = "latest"
+uv = "0.11.26"
 
 [projects.ritm_annotation.mise.tasks.setup]
 description = "Install dev dependencies"
@@ -69,8 +69,8 @@ setup_network = true
 check_network = false
 
 [projects.astro.mise.tools]
-node = "22"
-pnpm = "latest"
+node = "22.23.1"
+pnpm = "11.9.0"
 
 [projects.astro.mise.tasks.setup]
 description = "Install compiler package workspace deps"
@@ -99,8 +99,8 @@ setup_network = true
 check_network = false
 
 [projects.gson.mise.tools]
-java = "21"
-maven = "3.9"
+java = "21.0.2"
+maven = "3.9.16"
 
 [projects.gson.mise.tasks.setup]
 description = "Resolve gson module dependencies"

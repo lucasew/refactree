@@ -12,11 +12,11 @@ Setup/check run in Docker by default via testcontainers. Pass `--no-isolate` to 
 - Harness: `internal/fuzzy`, CLI `rft fuzzy mv` / `rft fuzzy run` / `rft fuzzy prefetch`
 - Fixtures: `testdata/mv/` on `class=bug`; ingest phase uses `testdata/ingest/` (`ingestor-fixtures`)
 - Work root: `--work-root` / `RFT_FUZZY_WORK_ROOT` (`cache/`, `mise-data/`, `preserve/`)
-- Isolation: Docker default (`jdxcode/mise:latest`); ingest/mv run on the host
+- Isolation: Docker default (`DefaultMiseImage` digest pin in `internal/fuzzy`); ingest/mv run on the host
 
 # Airgapped flow
 1. Online (idempotent): `go run ./cmd/rft fuzzy prefetch --project <slug> --work-root /var/cache/rft-fuzzy`
-2. Copy work-root + `jdxcode/mise:latest` (unless using `--no-isolate`).
+2. Copy work-root + pinned `DefaultMiseImage` (unless using `--no-isolate`).
 3. Offline: `go run ./cmd/rft fuzzy run --project <slug> --work-root /var/cache/rft-fuzzy --offline --iterations 10 --seed 1`
 4. Host-only isolated env: add `--no-isolate --allow`.
 

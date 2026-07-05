@@ -92,7 +92,7 @@ run = "test -f %s && echo did-check"
 		Stderr:   io.MultiWriter(os.Stderr, &live),
 	}
 	ctx := context.Background()
-	s, err := r.StartSession(ctx, fuzzy.IsolateConfig{Image: "jdxcode/mise:latest"}, dir, "reuse", true)
+	s, err := r.StartSession(ctx, fuzzy.IsolateConfig{Image: fuzzy.DefaultMiseImage}, dir, "reuse", true)
 	if err != nil {
 		t.Fatal(err)
 	}

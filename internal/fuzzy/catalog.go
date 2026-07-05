@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -16,11 +17,18 @@ type MvConfig struct {
 	Ops     []string `toml:"ops"`
 }
 
-const defaultMiseImage = "jdxcode/mise:latest"
+// DefaultMiseImage is the pinned testcontainers image (digest, not a floating tag).
+const DefaultMiseImage = "jdxcode/mise@sha256:d536ef04425b3321dcbd60f6e7687994d5a1b8859574f0f9c2529dba620b74cb"
+
+var (
+	majorOnlyVersion   = regexp.MustCompile(`^[0-9]+$`)
+	majorMinorVersion  = regexp.MustCompile(`^[0-9]+\.[0-9]+$`)
+	floatingImageTag   = regexp.MustCompile(`:latest(?:@|$)`)
+)
 
 // IsolateConfig controls docker/testcontainers execution for setup/check.
 type IsolateConfig struct {
-	Image        string   `toml:"image"`         // default jdxcode/mise:latest
+	Image        string   `toml:"image"`         // default DefaultMiseImage
 	SetupNetwork *bool    `toml:"setup_network"` // default true
 	CheckNetwork *bool    `toml:"check_network"` // default false
 	Env          []string `toml:"env"`           // KEY=VAL passed into the container
@@ -31,7 +39,7 @@ func (c IsolateConfig) ImageOrDefault() string {
 	if c.Image != "" {
 		return c.Image
 	}
-	return defaultMiseImage
+	return DefaultMiseImage
 }
 
 // SetupNetworkEnabled reports whether setup has network access (default true).
@@ -151,6 +159,9 @@ func validateProject(p *Project) error {
 		if p.SetupTask == "" && len(p.Setup) == 0 {
 			p.SetupTask = "setup"
 		}
+		if err := validateMiseTools(p.Mise); err != nil {
+			return err
+		}
 	}
 	if len(p.Check) == 0 && p.CheckTask == "" && p.LocalPath == "" {
 		return fmt.Errorf("check_task, check, or [projects.%s.mise] with default test task is required", p.ID)
@@ -165,8 +176,73 @@ func validateProject(p *Project) error {
 			return fmt.Errorf("unknown mv op %q", op)
 		}
 	}
+	if err := validateIsolateImage(p.Isolate.Image); err != nil {
+		return err
+	}
 	p.Isolate.SetupNetwork = boolPtr(p.Isolate.SetupNetworkEnabled())
 	p.Isolate.CheckNetwork = boolPtr(p.Isolate.CheckNetworkEnabled())
+	return nil
+}
+
+func validateMiseTools(mise map[string]any) error {
+	raw, ok := mise["tools"]
+	if !ok || raw == nil {
+		return nil
+	}
+	tools, ok := raw.(map[string]any)
+	if !ok {
+		return fmt.Errorf("[projects.<slug>.mise.tools] must be a table")
+	}
+	names := make([]string, 0, len(tools))
+	for name := range tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		ver, err := toolVersionString(tools[name])
+		if err != nil {
+			return fmt.Errorf("mise tool %q: %w", name, err)
+		}
+		if err := checkPinnedToolVersion(name, ver); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func toolVersionString(v any) (string, error) {
+	switch t := v.(type) {
+	case string:
+		return strings.TrimSpace(t), nil
+	case int64, float64:
+		return "", fmt.Errorf("version must be a quoted string (got %v)", v)
+	default:
+		return "", fmt.Errorf("version must be a quoted string (got %T)", v)
+	}
+}
+
+// checkPinnedToolVersion rejects floating mise versions like "latest", "22", or "3.9".
+func checkPinnedToolVersion(name, ver string) error {
+	if ver == "" {
+		return fmt.Errorf("mise tool %q: empty version", name)
+	}
+	lower := strings.ToLower(ver)
+	if lower == "latest" || strings.HasPrefix(lower, "latest-") || strings.HasSuffix(lower, "-latest") {
+		return fmt.Errorf("mise tool %q: pin an exact version (got %q)", name, ver)
+	}
+	if majorOnlyVersion.MatchString(ver) || majorMinorVersion.MatchString(ver) {
+		return fmt.Errorf("mise tool %q: pin a full version (got %q)", name, ver)
+	}
+	return nil
+}
+
+func validateIsolateImage(image string) error {
+	if image == "" {
+		return nil
+	}
+	if floatingImageTag.MatchString(image) || strings.HasSuffix(image, ":latest") {
+		return fmt.Errorf("isolate.image must be pinned (got %q)", image)
+	}
 	return nil
 }
 
