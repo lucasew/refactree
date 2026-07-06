@@ -58,14 +58,19 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	if opts.Stderr == nil {
 		opts.Stderr = os.Stderr
 	}
-	if opts.Iterations <= 0 {
-		opts.Iterations = 1
-	}
-	if opts.Seed == 0 {
-		opts.Seed = time.Now().UnixNano()
-	}
 	if opts.Mode == "" {
 		opts.Mode = ModeRun
+	}
+	if opts.Mode == ModeMv || opts.Mode == ModeRun {
+		if opts.Iterations <= 0 {
+			opts.Iterations = 1
+		}
+		if opts.Seed == 0 {
+			opts.Seed = time.Now().UnixNano()
+		}
+	} else if opts.Seed == 0 {
+		// Report directory disambiguator only; ingest/prefetch use stable worktree IDs.
+		opts.Seed = time.Now().UnixNano()
 	}
 	if opts.Mode == ModePrefetch && opts.Offline {
 		return nil, fmt.Errorf("prefetch cannot use --offline; run prefetch online, then ingest/mv/run --offline")
@@ -142,7 +147,10 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		Stdout:    opts.Stdout,
 		Stderr:    opts.Stderr,
 	}
-	rng := rand.New(rand.NewSource(opts.Seed))
+	var rng *rand.Rand
+	if opts.Mode == ModeMv || opts.Mode == ModeRun {
+		rng = rand.New(rand.NewSource(opts.Seed))
+	}
 	out := &Result{ReportDir: report.Dir}
 
 	for _, p := range projects {
@@ -203,8 +211,12 @@ func runProject(ctx context.Context, opts Options, p Project, ws *Workspace, run
 func openProjectEnv(ctx context.Context, opts Options, p Project, ws *Workspace, runner Runner, report *Report, out *Result) (*projectEnv, error) {
 	runID := fmt.Sprintf("%d", opts.Seed)
 	prep := PrepareOptions{Offline: opts.Offline}
-	if opts.Mode == ModePrefetch {
+	switch opts.Mode {
+	case ModePrefetch:
 		runID = PrefetchRunID
+		prep.Reuse = true
+	case ModeIngest:
+		runID = IngestRunID
 		prep.Reuse = true
 	}
 	workDir, commit, err := ws.Prepare(p, runID, prep)

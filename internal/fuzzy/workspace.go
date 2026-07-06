@@ -11,6 +11,9 @@ import (
 // PrefetchRunID is the stable worktree name used by prefetch so reruns reuse state.
 const PrefetchRunID = "prefetch"
 
+// IngestRunID is the stable worktree name used by ingest-only runs so reruns reuse state.
+const IngestRunID = "ingest"
+
 // Workspace manages cached bare clones and mutable worktrees.
 type Workspace struct {
 	Root string

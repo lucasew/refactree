@@ -42,12 +42,18 @@ func newFuzzyCmd(root *rootOptions) *cobra.Command {
 		c.Flags().BoolVar(&flags.noIsolate, "no-isolate", false, "opt out of Docker isolation; run setup/check on the host (Docker is the default)")
 		c.Flags().BoolVar(&flags.failFast, "fail-fast", false, "stop on first bug-class failure")
 	}
-	addFuzz := func(c *cobra.Command) {
-		addCommon(c)
+	addOffline := func(c *cobra.Command) {
 		c.Flags().BoolVar(&flags.offline, "offline", false, "use work-root caches only (no git fetch/clone; container network disabled). Run prefetch online first")
-		c.Flags().Int64Var(&flags.seed, "seed", 0, "rng seed (default: time-based)")
-		c.Flags().IntVar(&flags.iterations, "iterations", 1, "mv iterations per project")
+	}
+	addIngestFlags := func(c *cobra.Command) {
+		addCommon(c)
+		addOffline(c)
 		c.Flags().BoolVar(&flags.strictRefs, "strict-refs", false, "fail on dangling path targets")
+	}
+	addMvFlags := func(c *cobra.Command) {
+		addIngestFlags(c)
+		c.Flags().Int64Var(&flags.seed, "seed", 0, "rng seed (default: time-based); also names the per-run worktree")
+		c.Flags().IntVar(&flags.iterations, "iterations", 1, "mv iterations per project")
 		c.Flags().StringSliceVar(&flags.ops, "ops", nil, "mv ops subset: rename,cross_file,package")
 	}
 
@@ -93,6 +99,8 @@ func newFuzzyCmd(root *rootOptions) *cobra.Command {
 		Short: "Run ingest invariant checks on catalog projects",
 		RunE:  run(fuzzy.ModeIngest),
 	}
+	addIngestFlags(ingestCmd)
+
 	mvCmd := &cobra.Command{
 		Use:   "mv",
 		Short: "Fuzz mv operations with isolated project checks",
@@ -103,22 +111,20 @@ func newFuzzyCmd(root *rootOptions) *cobra.Command {
 		Short: "Run ingest then mv fuzzing",
 		RunE:  run(fuzzy.ModeRun),
 	}
-	for _, c := range []*cobra.Command{ingestCmd, mvCmd, runCmd} {
-		addFuzz(c)
-		cmd.AddCommand(c)
-	}
-	cmd.AddCommand(prefetchCmd)
-
-	cmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
-		for _, op := range flags.ops {
-			switch strings.TrimSpace(op) {
-			case "", "rename", "cross_file", "package":
-			default:
-				return fmt.Errorf("unknown op %q", op)
+	for _, c := range []*cobra.Command{mvCmd, runCmd} {
+		addMvFlags(c)
+		c.PreRunE = func(cmd *cobra.Command, args []string) error {
+			for _, op := range flags.ops {
+				switch strings.TrimSpace(op) {
+				case "", "rename", "cross_file", "package":
+				default:
+					return fmt.Errorf("unknown op %q", op)
+				}
 			}
+			return nil
 		}
-		return nil
 	}
+	cmd.AddCommand(ingestCmd, mvCmd, runCmd, prefetchCmd)
 
 	return cmd
 }

@@ -68,23 +68,13 @@ func TestPrefetchThenOfflineIngest(t *testing.T) {
 		t.Fatal("expected prefetch --offline to fail")
 	}
 
-	res, err := fuzzy.Run(context.Background(), fuzzy.Options{
-		CatalogPath: catalog,
-		Mode:        fuzzy.ModeIngest,
-		WorkRoot:    workRoot,
-		ReportDir:   filepath.Join(t.TempDir(), "reports-off"),
-		Allow:       true,
-		NoIsolate:   true,
-		Offline:     true,
-		FailFast:    true,
-		Stdout:      os.Stdout,
-		Stderr:      os.Stderr,
-	})
-	if err != nil {
-		t.Fatalf("offline ingest: %v (report %#v)", err, res)
-	}
+	res := runIngest(t, catalog, workRoot, true)
 	if res.BugCount != 0 || res.Passed != 1 {
 		t.Fatalf("offline ingest bugs=%d passed=%d", res.BugCount, res.Passed)
+	}
+	ingestTree := filepath.Join(workRoot, "runs", "local_go", fuzzy.IngestRunID)
+	if _, err := os.Stat(ingestTree); err != nil {
+		t.Fatalf("missing ingest worktree: %v", err)
 	}
 }
 
@@ -132,6 +122,29 @@ func TestPrefetchIdempotent(t *testing.T) {
 	}
 }
 
+func TestIngestIdempotent(t *testing.T) {
+	catalog, _ := localGoCatalog(t, nil)
+	workRoot := filepath.Join(t.TempDir(), "work")
+	worktree := filepath.Join(workRoot, "runs", "local_go", fuzzy.IngestRunID)
+
+	first := runIngest(t, catalog, workRoot, false)
+	st1, err := os.Stat(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := runIngest(t, catalog, workRoot, false)
+	if first.Passed != 1 || second.Passed != 1 {
+		t.Fatalf("passed first=%d second=%d", first.Passed, second.Passed)
+	}
+	st2, err := os.Stat(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(st1, st2) {
+		t.Fatal("ingest rerun replaced worktree directory instead of reusing it")
+	}
+}
+
 func runPrefetch(t *testing.T, catalog, workRoot string) *fuzzy.Result {
 	t.Helper()
 	res, err := fuzzy.Run(context.Background(), fuzzy.Options{
@@ -146,6 +159,26 @@ func runPrefetch(t *testing.T, catalog, workRoot string) *fuzzy.Result {
 	})
 	if err != nil {
 		t.Fatalf("prefetch: %v (report %#v)", err, res)
+	}
+	return res
+}
+
+func runIngest(t *testing.T, catalog, workRoot string, offline bool) *fuzzy.Result {
+	t.Helper()
+	res, err := fuzzy.Run(context.Background(), fuzzy.Options{
+		CatalogPath: catalog,
+		Mode:        fuzzy.ModeIngest,
+		WorkRoot:    workRoot,
+		ReportDir:   filepath.Join(t.TempDir(), "reports"),
+		Allow:       true,
+		NoIsolate:   true,
+		Offline:     offline,
+		FailFast:    true,
+		Stdout:      os.Stdout,
+		Stderr:      os.Stderr,
+	})
+	if err != nil {
+		t.Fatalf("ingest: %v (report %#v)", err, res)
 	}
 	return res
 }
