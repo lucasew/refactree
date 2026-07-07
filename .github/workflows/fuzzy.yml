@@ -1,0 +1,52 @@
+# Fuzzy harness (internal/fuzzy only — not linked into the rft binary).
+# Local fixtures + unit tests always run. Catalog prefetch (network-heavy) is opt-in.
+name: Fuzzy
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+    inputs:
+      catalog_warmup:
+        description: "Also run full catalog prefetch (needs network; long)"
+        type: boolean
+        default: false
+
+jobs:
+  fuzzy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4
+
+      - name: Fuzzy harness tests
+        env:
+          CI: "true"
+          MISE_EXPERIMENTAL: "1"
+          # Durable work-root under the runner workspace (not a shared /tmp litter).
+          RFT_FUZZY_WORK_ROOT: ${{ github.workspace }}/.cache/rft-fuzzy
+        run: mise run fuzzy:ci
+
+      - name: Catalog prefetch warmup (optional)
+        if: github.event_name == 'workflow_dispatch' && inputs.catalog_warmup
+        env:
+          CI: "true"
+          MISE_EXPERIMENTAL: "1"
+          RFT_FUZZY_WARMUP: "1"
+          RFT_FUZZY_WORK_ROOT: ${{ github.workspace }}/.cache/rft-fuzzy
+        run: mise run fuzzy:prefetch
+
+      - name: Upload fuzzy work-root on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rft-fuzzy-work-root
+          path: ${{ github.workspace }}/.cache/rft-fuzzy
+          if-no-files-found: ignore
+          retention-days: 7

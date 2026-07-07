@@ -34,6 +34,11 @@ goreleaser release --clean
 # Warm caches first: mise run fuzzy:prefetch
 # Then offline/unit catalog tests against RFT_FUZZY_WORK_ROOT.
 
+[tasks."fuzzy:ci"]
+description = "CI fuzzy suite: all internal/fuzzy tests (warmup skipped unless RFT_FUZZY_WARMUP=1). No go test deadline."
+env = { MISE_EXPERIMENTAL = "1", CI = "true" }
+run = "go test ./internal/fuzzy -count=1 -timeout 0 -v"
+
 [tasks."fuzzy:prefetch"]
 description = "Warm catalog work-root (TestPrefetchWarmup / PrefetchOnce). Needs network + Docker unless RFT_FUZZY_NO_ISOLATE=1"
 env = { MISE_EXPERIMENTAL = "1", RFT_FUZZY_WARMUP = "1" }

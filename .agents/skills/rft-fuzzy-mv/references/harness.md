@@ -8,6 +8,11 @@ The harness lives only under `internal/fuzzy` (not linked into the `rft` binary)
    - otherwise **only fill gaps** (per-project skip when warm; git fetch only if pin missing; docker pull only if image missing)
 2. **Tests** run with `Offline: true` and `WorkRoot: fuzzy.DefaultWorkRoot()` (or the path returned by prefetch) so they use **only** that local cache.
 
+# CI
+GitHub Actions workflow `.github/workflows/fuzzy.yml` runs `mise run fuzzy:ci`
+(`go test ./internal/fuzzy -timeout 0`) on PR/push to master. Catalog warmup is
+manual via workflow_dispatch (`catalog_warmup: true`) or local `mise run fuzzy:prefetch`.
+
 # Warmup
 ```bash
 mise run fuzzy:prefetch
