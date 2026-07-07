@@ -1,33 +1,28 @@
 ---
 name: rft-fuzzy-mv
-description: Make refactoring implementation more exhaustive, complete and stable by fuzzing mv on repositories in the wild with isolated project checks via the rft fuzzy harness.
+description: Make refactoring implementation more exhaustive, complete and stable by fuzzing mv on repositories in the wild with isolated project checks via the internal/fuzzy harness (go test, not rft CLI).
 ---
 
 Shared harness notes: [`references/harness.md`](references/harness.md)
 Catalog index: [`references/projects.md`](references/projects.md)
 Fixtures: `testdata/mv/` on `class=bug`; ingest phase uses `testdata/ingest/` (`ingestor-fixtures`).
-`mv`/`run` worktrees are `runs/<slug>/<seed>` (pass the same `--seed` to reproduce).
 
 # Process
-1. Docker must be available unless `--no-isolate`.
-2. Prefer a warm work-root: `go run ./cmd/rft fuzzy prefetch` (once online), then offline or online loops.
-3. Choose a project slug from the catalog (or omit `--project` for all).
-4. Run:
+1. Warm caches (online, once):
    ```bash
-   go run ./cmd/rft fuzzy run --project <slug> --iterations 10 --seed 1
+   mise run fuzzy:prefetch
+   # or: RFT_FUZZY_WARMUP=1 go test ./internal/fuzzy -run '^TestPrefetchWarmup$' -count=1 -timeout 0 -v
    ```
-   Setup/check share one Docker session (`mise install` then `mise run setup` / `mise run test`). Ingest/mv stay on the host.
-5. Inspect `report:` (`events.jsonl`, `logs/`, `scaffold/` on failures).
-6. On `class=bug`: curate `testdata/mv/...`, fix `pkg/ingest`, rerun with the same `--seed`.
+2. Drive the harness from tests or a small Go main via `fuzzy.Run` / `fuzzy.PrefetchOnce` (see `harness.md`).
+3. Local fixture smoke (no catalog network):
+   ```bash
+   go test ./internal/fuzzy -run 'TestRunLocalIngestAndMv|TestPrefetchThenOfflineIngest' -count=1 -v
+   ```
+4. On `class=bug`: curate `testdata/mv/...`, fix `pkg/ingest`, re-run with the same seed.
 
-# Flags
-Common flags in `harness.md`, plus:
-- `--iterations`, `--seed` (rng + worktree name), `--ops` (`rename,cross_file,package`)
-- `--strict-refs` fail on dangling path targets
-
-Airgapped example:
+# Airgapped
 ```bash
-go run ./cmd/rft fuzzy prefetch --work-root /var/cache/rft-fuzzy
-# disable network
-go run ./cmd/rft fuzzy run --project <slug> --work-root /var/cache/rft-fuzzy --offline --iterations 10 --seed 1
+RFT_FUZZY_WARMUP=1 RFT_FUZZY_WORK_ROOT=/var/cache/rft-fuzzy \
+  go test ./internal/fuzzy -run '^TestPrefetchWarmup$' -count=1 -timeout 0 -v
+# unplug network, then offline fuzzy.Run against the same work-root
 ```

@@ -30,27 +30,21 @@ git tag $(svu ${usage_version})
 goreleaser release --clean
 '''
 
-[tasks.fuzzy]
-description = "Real-world fuzzy ingest/mv (Docker default; --no-isolate needs RFT_FUZZY_ALLOW=1 or CI; --offline needs prior fuzzy:prefetch)"
-env = { MISE_EXPERIMENTAL = "1" }
-run = "go run ./cmd/rft fuzzy run --iterations 10"
-
-[tasks."fuzzy:ingest"]
-description = "Fuzzy ingest invariants on catalog projects"
-env = { MISE_EXPERIMENTAL = "1" }
-run = "go run ./cmd/rft fuzzy ingest"
-
-[tasks."fuzzy:mv"]
-description = "Fuzzy mv on catalog projects with isolated checks via testcontainers"
-env = { MISE_EXPERIMENTAL = "1" }
-run = "go run ./cmd/rft fuzzy mv --iterations 3"
+# Fuzzy harness lives under internal/fuzzy only (not linked into the rft binary).
+# Warm caches first: mise run fuzzy:prefetch
+# Then offline/unit catalog tests against RFT_FUZZY_WORK_ROOT.
 
 [tasks."fuzzy:prefetch"]
-description = "Fill work-root (git/mise-data/preserve/manifest) and docker pull images for later --offline runs"
+description = "Warm catalog work-root (TestPrefetchWarmup / PrefetchOnce). Needs network + Docker unless RFT_FUZZY_NO_ISOLATE=1"
+env = { MISE_EXPERIMENTAL = "1", RFT_FUZZY_WARMUP = "1" }
+run = "go test ./internal/fuzzy -run '^TestPrefetchWarmup$' -count=1 -timeout 0 -v"
+
+[tasks.fuzzy]
+description = "Local fixture fuzzy run (no catalog network). Warm real catalog with fuzzy:prefetch first."
 env = { MISE_EXPERIMENTAL = "1" }
-run = "go run ./cmd/rft fuzzy prefetch"
+run = "go test ./internal/fuzzy -run 'TestRunLocalIngestAndMv|TestPrefetchThenOfflineIngest' -count=1 -timeout 30m -v"
 
 [tasks."fuzzy:offline"]
-description = "Run fuzzy with --offline using RFT_FUZZY_WORK_ROOT (after fuzzy:prefetch)"
+description = "Re-run offline local fixture path after a warm work-root (uses process Once only within one go test invocation)"
 env = { MISE_EXPERIMENTAL = "1" }
-run = "go run ./cmd/rft fuzzy run --offline --iterations 10"
+run = "go test ./internal/fuzzy -run '^TestPrefetchThenOfflineIngest$' -count=1 -timeout 30m -v"
