@@ -78,7 +78,8 @@ check_network = false
 
 [projects.astro.mise.tools]
 node = "22.23.1"
-pnpm = "11.9.0"
+# npm backend (not bare "pnpm" → aqua). mise has no "node:pnpm" backend name.
+"npm:pnpm" = "11.9.0"
 
 [projects.astro.mise.tasks.setup]
 description = "Install astro package workspace deps (offline when RFT_FUZZY_OFFLINE=1)"
