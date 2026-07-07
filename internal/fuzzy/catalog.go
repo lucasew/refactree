@@ -25,9 +25,9 @@ const DefaultMiseImage = "jdxcode/mise@sha256:d536ef04425b3321dcbd60f6e7687994d5
 const CleanupImage = DefaultMiseImage
 
 var (
-	majorOnlyVersion   = regexp.MustCompile(`^[0-9]+$`)
-	majorMinorVersion  = regexp.MustCompile(`^[0-9]+\.[0-9]+$`)
-	floatingImageTag   = regexp.MustCompile(`:latest(?:@|$)`)
+	majorOnlyVersion  = regexp.MustCompile(`^[0-9]+$`)
+	majorMinorVersion = regexp.MustCompile(`^[0-9]+\.[0-9]+$`)
+	floatingImageTag  = regexp.MustCompile(`:latest(?:@|$)`)
 )
 
 // IsolateConfig controls docker/testcontainers execution for setup/check.

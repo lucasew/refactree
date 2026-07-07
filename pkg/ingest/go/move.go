@@ -833,7 +833,6 @@ func goImportInsertEdits(file string, content []byte, paths []string) []ingest.E
 	return nil
 }
 
-
 func stripUnusedSourceImports(file string, content []byte, decl ingest.DeclExtract) []ingest.Edit {
 	if len(decl.Imports) == 0 {
 		return nil
