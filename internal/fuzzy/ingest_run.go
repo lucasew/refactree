@@ -20,34 +20,26 @@ func RunIngestOnRoot(root string, opts InvariantOptions) (result *ingest.Result,
 }
 
 // RunIngestProject runs ingest checks for every configured root.
-func RunIngestProject(p Project, workDir string, opts InvariantOptions, report *Report) (bugFails int, err error) {
+// Failures always stop the project (caller decides multi-project FailFast).
+func RunIngestProject(p Project, workDir string, opts InvariantOptions, report *Report, out *Result) error {
 	for _, rel := range p.IngestRoots {
 		root := ResolveIngestRoot(workDir, rel)
 		start := time.Now()
-		_, fails, ierr := RunIngestOnRoot(root, opts)
+		_, fails, err := RunIngestOnRoot(root, opts)
 		ev := Event{
 			Project:    p.ID,
 			Kind:       "ingest",
 			DurationMs: time.Since(start).Milliseconds(),
 		}
-		if ierr != nil {
-			ev.Outcome = "error"
-			ev.Class = "bug"
-			ev.Error = ierr.Error()
-			bugFails++
-			_ = report.LogEvent(ev)
-			return bugFails, fmt.Errorf("ingest %s (%s): %w", p.ID, rel, ierr)
-		}
-		if len(fails) > 0 {
-			ev.Outcome = "fail"
-			ev.Class = "bug"
-			ev.Failures = fails
-			bugFails += len(fails)
-			_ = report.LogEvent(ev)
-			return bugFails, fmt.Errorf("ingest invariants failed for %s (%s): %v", p.ID, rel, fails)
+		if err != nil || len(fails) > 0 {
+			_ = out.ingestBug(report, ev, err, fails)
+			if err != nil {
+				return fmt.Errorf("ingest %s (%s): %w", p.ID, rel, err)
+			}
+			return fmt.Errorf("ingest invariants failed for %s (%s): %v", p.ID, rel, fails)
 		}
 		ev.Outcome = "pass"
 		_ = report.LogEvent(ev)
 	}
-	return 0, nil
+	return nil
 }

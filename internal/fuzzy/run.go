@@ -52,30 +52,7 @@ type Result struct {
 
 // Run executes the fuzzy harness.
 func Run(ctx context.Context, opts Options) (*Result, error) {
-	if opts.Stdout == nil {
-		opts.Stdout = os.Stdout
-	}
-	if opts.Stderr == nil {
-		opts.Stderr = os.Stderr
-	}
-	if opts.Mode == "" {
-		opts.Mode = ModeRun
-	}
-	if opts.Mode == ModeMv || opts.Mode == ModeRun {
-		if opts.Iterations <= 0 {
-			opts.Iterations = 1
-		}
-		if opts.Seed == 0 {
-			opts.Seed = time.Now().UnixNano()
-		}
-	} else if opts.Seed == 0 {
-		// Report directory disambiguator only; ingest/prefetch use stable worktree IDs.
-		opts.Seed = time.Now().UnixNano()
-	}
-	if opts.Mode == ModePrefetch && opts.Offline {
-		return nil, fmt.Errorf("prefetch cannot use --offline; run prefetch online, then ingest/mv/run --offline")
-	}
-	if err := CheckAllowed(opts.Allow, opts.NoIsolate); err != nil {
+	if err := normalizeOptions(&opts); err != nil {
 		return nil, err
 	}
 
@@ -104,18 +81,8 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		if err := RequireDocker(ctx); err != nil {
 			return nil, err
 		}
-		fmt.Fprintln(opts.Stdout, "isolate: docker (default); setup/check share one testcontainers session per project")
-	} else {
-		fmt.Fprintln(opts.Stdout, "isolate: disabled (--no-isolate); setup/check run on host")
 	}
-	if opts.Offline {
-		fmt.Fprintln(opts.Stdout, "offline: using work-root git/mise/preserve caches only; container network disabled")
-	}
-	if opts.Mode != ModePrefetch {
-		fmt.Fprintln(opts.Stdout, "note: ingest/mv always run on the host; only setup/check use the isolate session")
-	} else {
-		fmt.Fprintln(opts.Stdout, "prefetch: clone into work-root cache, run setup, save preserve snapshots and mise-data")
-	}
+	printRunBanner(opts)
 
 	ids := make([]string, len(projects))
 	for i, p := range projects {
@@ -148,7 +115,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		Stderr:    opts.Stderr,
 	}
 	var rng *rand.Rand
-	if opts.Mode == ModeMv || opts.Mode == ModeRun {
+	if opts.Mode.fuzzesMv() {
 		rng = rand.New(rand.NewSource(opts.Seed))
 	}
 	out := &Result{ReportDir: report.Dir}
@@ -171,12 +138,50 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	return out, nil
 }
 
+func normalizeOptions(opts *Options) error {
+	if opts.Stdout == nil {
+		opts.Stdout = os.Stdout
+	}
+	if opts.Stderr == nil {
+		opts.Stderr = os.Stderr
+	}
+	if opts.Mode == "" {
+		opts.Mode = ModeRun
+	}
+	if opts.Seed == 0 {
+		opts.Seed = time.Now().UnixNano()
+	}
+	if opts.Mode.fuzzesMv() && opts.Iterations <= 0 {
+		opts.Iterations = 1
+	}
+	if opts.Mode.isPrefetch() && opts.Offline {
+		return fmt.Errorf("prefetch cannot use --offline; run prefetch online, then ingest/mv/run --offline")
+	}
+	return CheckAllowed(opts.Allow, opts.NoIsolate)
+}
+
+func printRunBanner(opts Options) {
+	if opts.NoIsolate {
+		fmt.Fprintln(opts.Stdout, "isolate: disabled (--no-isolate); setup/check run on host")
+	} else {
+		fmt.Fprintln(opts.Stdout, "isolate: docker (default); setup/check share one testcontainers session per project")
+	}
+	if opts.Offline {
+		fmt.Fprintln(opts.Stdout, "offline: using work-root git/mise/preserve caches only; container network disabled")
+	}
+	if opts.Mode.isPrefetch() {
+		fmt.Fprintln(opts.Stdout, "prefetch: clone into work-root cache, run setup, save preserve snapshots and mise-data")
+		return
+	}
+	fmt.Fprintln(opts.Stdout, "note: ingest/mv always run on the host; only setup/check use the isolate session")
+}
+
 // sessionNetwork reports whether the isolate session should have network access.
 func sessionNetwork(opts Options, p Project) bool {
 	if opts.Offline {
 		return false
 	}
-	if opts.Mode == ModePrefetch {
+	if opts.Mode.isPrefetch() {
 		return p.Isolate.SetupNetworkEnabled()
 	}
 	return p.Isolate.SetupNetworkEnabled() || p.Isolate.CheckNetworkEnabled()
@@ -202,37 +207,24 @@ func runProject(ctx context.Context, opts Options, p Project, ws *Workspace, run
 		return err
 	}
 
-	if opts.Mode == ModePrefetch {
+	if opts.Mode.isPrefetch() {
 		return finishPrefetch(opts, p, ws, runner, env, report, out)
 	}
 	return runFuzzProject(ctx, opts, p, ws, rng, env, report, out)
 }
 
 func openProjectEnv(ctx context.Context, opts Options, p Project, ws *Workspace, runner Runner, report *Report, out *Result) (*projectEnv, error) {
-	runID := fmt.Sprintf("%d", opts.Seed)
-	prep := PrepareOptions{Offline: opts.Offline}
-	switch opts.Mode {
-	case ModePrefetch:
-		runID = PrefetchRunID
-		prep.Reuse = true
-	case ModeIngest:
-		runID = IngestRunID
-		prep.Reuse = true
-	}
-	workDir, commit, err := ws.Prepare(p, runID, prep)
+	runID, reuse := opts.Mode.worktreeID(opts.Seed)
+	workDir, commit, err := ws.Prepare(p, runID, PrepareOptions{Offline: opts.Offline, Reuse: reuse})
 	if err != nil {
-		out.EnvFails++
-		_ = report.LogEvent(Event{Project: p.ID, Kind: "prepare", Outcome: "error", Class: "env", Error: err.Error()})
-		return nil, fmt.Errorf("prepare: %w", err)
+		return nil, out.envErrorf(report, p.ID, "prepare", "prepare", err)
 	}
 	report.Meta.Commit = commit
 	_ = report.LogEvent(Event{Project: p.ID, Kind: "prepare", Outcome: "pass", Error: commit})
 
 	root := ProjectRoot(workDir, p)
 	if err := ApplyProjectMise(p, root); err != nil {
-		out.EnvFails++
-		_ = report.LogEvent(Event{Project: p.ID, Kind: "mise", Outcome: "error", Class: "env", Error: err.Error()})
-		return nil, fmt.Errorf("apply [projects.<slug>.mise]: %w", err)
+		return nil, out.envErrorf(report, p.ID, "mise", "apply [projects.<slug>.mise]", err)
 	}
 	if HasEmbeddedMise(p) {
 		fmt.Fprintf(opts.Stdout, "mise: wrote [projects.<slug>.mise] to %s\n", filepath.Join(root, "mise.toml"))
@@ -241,9 +233,7 @@ func openProjectEnv(ctx context.Context, opts Options, p Project, ws *Workspace,
 	imageKey := ImageKey(p, commit)
 	session, err := runner.StartSession(ctx, p.Isolate, root, imageKey, sessionNetwork(opts, p))
 	if err != nil {
-		out.EnvFails++
-		_ = report.LogEvent(Event{Project: p.ID, Kind: "session", Outcome: "error", Class: "env", Error: err.Error()})
-		return nil, fmt.Errorf("start isolate session: %w", err)
+		return nil, out.envErrorf(report, p.ID, "session", "start isolate session", err)
 	}
 	return &projectEnv{workDir: workDir, root: root, commit: commit, imageKey: imageKey, session: session}, nil
 }
@@ -252,16 +242,14 @@ func runLoggedSetup(ctx context.Context, opts Options, p Project, session *Sessi
 	if argv := SetupArgv(p); len(argv) > 0 {
 		fmt.Fprintf(opts.Stdout, "%s: %s\n", label, strings.Join(argv, " "))
 	}
-	res := RunSetup(ctx, session, p)
-	return logCommandResult(opts, p, report, out, res, logName, label, "setup", iteration)
+	return logCommandResult(opts, p, report, out, RunSetup(ctx, session, p), logName, label, "setup", iteration)
 }
 
 func runLoggedCheck(ctx context.Context, opts Options, p Project, session *Session, report *Report, out *Result, logName, label string, iteration int) error {
 	if argv := CheckArgv(p); len(argv) > 0 {
 		fmt.Fprintf(opts.Stdout, "%s: %s\n", label, strings.Join(argv, " "))
 	}
-	res := RunCheck(ctx, session, p)
-	return logCommandResult(opts, p, report, out, res, logName, label, "check_before", iteration)
+	return logCommandResult(opts, p, report, out, RunCheck(ctx, session, p), logName, label, "check_before", iteration)
 }
 
 func logCommandResult(opts Options, p Project, report *Report, out *Result, res RunResult, logName, label, kind string, iteration int) error {
@@ -278,7 +266,7 @@ func logCommandResult(opts Options, p Project, report *Report, out *Result, res 
 		out.EnvFails++
 		printRunFailure(opts.Stdout, opts.Verbose, label, res, report.LogPath(logRel))
 		ev.Outcome = "error"
-		ev.Class = "env"
+		ev.Class = classEnv
 		ev.Error = shortRunErr(res)
 		_ = report.LogEvent(ev)
 		return err
@@ -292,9 +280,7 @@ func logCommandResult(opts Options, p Project, report *Report, out *Result, res 
 
 func finishPrefetch(opts Options, p Project, ws *Workspace, runner Runner, env *projectEnv, report *Report, out *Result) error {
 	if err := ws.SavePreserveSnapshot(p, env.workDir); err != nil {
-		out.EnvFails++
-		_ = report.LogEvent(Event{Project: p.ID, Kind: "preserve_snapshot", Outcome: "error", Class: "env", Error: err.Error()})
-		return fmt.Errorf("preserve snapshot: %w", err)
+		return out.envErrorf(report, p.ID, "preserve_snapshot", "preserve snapshot", err)
 	}
 	if len(p.PreserveGlobs) > 0 {
 		snap := ws.preservePath(p.ID)
@@ -308,18 +294,13 @@ func finishPrefetch(opts Options, p Project, ws *Workspace, runner Runner, env *
 }
 
 func runFuzzProject(ctx context.Context, opts Options, p Project, ws *Workspace, rng *rand.Rand, env *projectEnv, report *Report, out *Result) error {
-	doIngest := opts.Mode == ModeIngest || opts.Mode == ModeRun
-	doMv := (opts.Mode == ModeMv || opts.Mode == ModeRun) && p.Mv.Enabled
-
-	if doIngest {
-		bugs, err := RunIngestProject(p, env.workDir, InvariantOptions{StrictRefs: opts.StrictRefs}, report)
-		out.BugCount += bugs
-		if err != nil {
+	if opts.Mode.checksIngest() {
+		if err := RunIngestProject(p, env.workDir, InvariantOptions{StrictRefs: opts.StrictRefs}, report, out); err != nil {
 			return err
 		}
 		out.Passed++
 	}
-	if !doMv {
+	if !opts.Mode.fuzzesMv() || !p.Mv.Enabled {
 		return nil
 	}
 
@@ -332,19 +313,8 @@ func runFuzzProject(ctx context.Context, opts Options, p Project, ws *Workspace,
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := ws.Reset(p, env.workDir); err != nil {
-			out.EnvFails++
-			return fmt.Errorf("reset: %w", err)
-		}
-		if err := ApplyProjectMise(p, env.root); err != nil {
-			out.EnvFails++
-			return fmt.Errorf("re-apply [projects.<slug>.mise]: %w", err)
-		}
-		if len(p.PreserveGlobs) == 0 && len(SetupArgv(p)) > 0 {
-			label := "setup after reset"
-			if err := runLoggedSetup(ctx, opts, p, env.session, report, out, fmt.Sprintf("%s-setup-after-reset-%d", p.ID, i+1), label, i+1); err != nil {
-				return err
-			}
+		if err := resetForMvIteration(ctx, opts, p, ws, env, report, out, i); err != nil {
+			return err
 		}
 		if err := runMvIteration(ctx, opts, p, rng, env, report, out, ingestOpts, i); err != nil {
 			return err
@@ -353,40 +323,60 @@ func runFuzzProject(ctx context.Context, opts Options, p Project, ws *Workspace,
 	return nil
 }
 
-func runMvIteration(ctx context.Context, opts Options, p Project, rng *rand.Rand, env *projectEnv, report *Report, out *Result, ingestOpts InvariantOptions, i int) error {
-	ingestRoot := primaryIngestRoot(p, env.workDir)
-	result, fails, err := RunIngestOnRoot(ingestRoot, ingestOpts)
-	if err != nil {
-		out.BugCount++
-		_ = report.LogEvent(Event{Project: p.ID, Iteration: i + 1, Kind: "mv_pre_ingest", Outcome: "error", Class: "bug", Error: err.Error()})
-		if opts.FailFast {
-			return err
-		}
-		return nil
+func resetForMvIteration(ctx context.Context, opts Options, p Project, ws *Workspace, env *projectEnv, report *Report, out *Result, i int) error {
+	if err := ws.Reset(p, env.workDir); err != nil {
+		out.EnvFails++
+		return fmt.Errorf("reset: %w", err)
 	}
-	if len(fails) > 0 {
-		out.BugCount += len(fails)
-		_ = report.LogEvent(Event{Project: p.ID, Iteration: i + 1, Kind: "mv_pre_ingest", Outcome: "fail", Class: "bug", Failures: fails})
+	if err := ApplyProjectMise(p, env.root); err != nil {
+		out.EnvFails++
+		return fmt.Errorf("re-apply [projects.<slug>.mise]: %w", err)
+	}
+	if len(p.PreserveGlobs) == 0 && len(SetupArgv(p)) > 0 {
+		return runLoggedSetup(ctx, opts, p, env.session, report, out,
+			fmt.Sprintf("%s-setup-after-reset-%d", p.ID, i+1), "setup after reset", i+1)
+	}
+	return nil
+}
+
+func runMvIteration(ctx context.Context, opts Options, p Project, rng *rand.Rand, env *projectEnv, report *Report, out *Result, ingestOpts InvariantOptions, i int) error {
+	iter := i + 1
+	label := fmt.Sprintf("mv[%d/%d]", iter, opts.Iterations)
+	ingestRoot := primaryIngestRoot(p, env.workDir)
+
+	result, fails, err := RunIngestOnRoot(ingestRoot, ingestOpts)
+	if err != nil || len(fails) > 0 {
+		ev := Event{Project: p.ID, Iteration: iter, Kind: "mv_pre_ingest"}
+		failErr := out.ingestBug(report, ev, err, fails)
+		if err == nil {
+			failErr = fmt.Errorf("pre-mv invariants: %v", fails)
+		}
 		if opts.FailFast {
-			return fmt.Errorf("pre-mv invariants: %v", fails)
+			return failErr
 		}
 		return nil
 	}
 
 	plan, err := pickMvPlan(rng, p, ingestRoot, result, opts.Ops)
 	if err != nil {
-		out.Unsupported++
-		fmt.Fprintf(opts.Stdout, "mv[%d/%d]: skip pick: %v\n", i+1, opts.Iterations, err)
-		_ = report.LogEvent(Event{Project: p.ID, Iteration: i + 1, Kind: "mv_pick", Outcome: "skip", Class: "unsupported", Error: err.Error()})
+		fmt.Fprintf(opts.Stdout, "%s: skip pick: %v\n", label, err)
+		out.recordUnsupported(report, Event{
+			Project:   p.ID,
+			Iteration: iter,
+			Kind:      "mv_pick",
+			Outcome:   "skip",
+			Class:     classUnsupported,
+			Error:     err.Error(),
+		})
 		return nil
 	}
-	fmt.Fprintf(opts.Stdout, "mv[%d/%d]: %s %s -> %s\n", i+1, opts.Iterations, plan.Op, plan.Src, plan.Dst)
+	fmt.Fprintf(opts.Stdout, "%s: %s %s -> %s\n", label, plan.Op, plan.Src, plan.Dst)
 
 	start := time.Now()
 	edits, err := ApplyMvPlan(ingestRoot, plan)
 	ev := Event{
 		Project:    p.ID,
-		Iteration:  i + 1,
+		Iteration:  iter,
 		Kind:       "mv",
 		Op:         plan.Op,
 		Source:     plan.Src,
@@ -394,67 +384,44 @@ func runMvIteration(ctx context.Context, opts Options, p Project, rng *rand.Rand
 		DurationMs: time.Since(start).Milliseconds(),
 	}
 	scaffold := func() {
-		_ = ScaffoldMvFixture(ingestRoot, report.ScaffoldDir(p.ID, opts.Seed, i+1), plan.Src, plan.Dst, edits)
+		_ = ScaffoldMvFixture(ingestRoot, report.ScaffoldDir(p.ID, opts.Seed, iter), plan.Src, plan.Dst, edits)
 	}
+
 	if err != nil {
-		ev.Error = err.Error()
-		ev.Class = classifyMvError(err)
-		ev.Outcome = "error"
-		if ev.Class == "bug" {
-			out.BugCount++
-			scaffold()
-		} else {
-			out.Unsupported++
-		}
-		fmt.Fprintf(opts.Stdout, "mv[%d/%d]: %s (%s): %v\n", i+1, opts.Iterations, ev.Outcome, ev.Class, err)
-		_ = report.LogEvent(ev)
-		if ev.Class == "bug" && opts.FailFast {
-			return err
-		}
-		return nil
+		fmt.Fprintf(opts.Stdout, "%s: error (%s): %v\n", label, classifyMvError(err), err)
+		return out.mvApplyOutcome(opts, report, ev, err, scaffold)
 	}
 
 	if postFails := postMvInvariants(ingestRoot, plan, opts.StrictRefs); len(postFails) > 0 {
 		ev.Outcome = "fail"
-		ev.Class = "bug"
+		ev.Class = classBug
 		ev.Failures = postFails
-		out.BugCount += len(postFails)
+		fmt.Fprintf(opts.Stdout, "%s: fail (post-ingest): %v\n", label, postFails)
 		scaffold()
-		fmt.Fprintf(opts.Stdout, "mv[%d/%d]: fail (post-ingest): %v\n", i+1, opts.Iterations, postFails)
-		_ = report.LogEvent(ev)
-		if opts.FailFast {
-			return fmt.Errorf("post-mv invariants: %v", postFails)
-		}
-		return nil
+		return out.bugErr(opts, report, ev, fmt.Errorf("post-mv invariants: %v", postFails))
 	}
 
 	after := RunCheck(ctx, env.session, p)
-	afterLog, _ := report.WriteRunResult(fmt.Sprintf("%s-check-after-%d", p.ID, i+1), after)
+	afterLog, _ := report.WriteRunResult(fmt.Sprintf("%s-check-after-%d", p.ID, iter), after)
 	ev.Log = afterLog
 	ev.ExitCode = after.ExitCode
 	if !after.OK() {
-		label := fmt.Sprintf("mv[%d/%d] post-check", i+1, opts.Iterations)
+		checkLabel := label + " post-check"
 		ev.Outcome = "fail"
-		ev.Class = "bug"
+		ev.Class = classBug
 		ev.Error = shortRunErr(after)
-		out.BugCount++
+		fmt.Fprintf(opts.Stdout, "%s: fail (check exit %d)\n", label, after.ExitCode)
+		printRunFailure(opts.Stdout, opts.Verbose, checkLabel, after, report.LogPath(afterLog))
 		scaffold()
-		fmt.Fprintf(opts.Stdout, "mv[%d/%d]: fail (check exit %d)\n", i+1, opts.Iterations, after.ExitCode)
-		printRunFailure(opts.Stdout, opts.Verbose, label, after, report.LogPath(afterLog))
-		_ = report.LogEvent(ev)
-		if opts.FailFast {
-			err := requireOK(label, after)
-			if afterLog != "" {
-				return fmt.Errorf("%w\nfull check log: %s", err, filepath.Join(report.LogPath(afterLog), "full.log"))
-			}
-			return err
+		failErr := requireOK(checkLabel, after)
+		if afterLog != "" {
+			failErr = fmt.Errorf("%w\nfull check log: %s", failErr, filepath.Join(report.LogPath(afterLog), "full.log"))
 		}
-		return nil
+		return out.bugErr(opts, report, ev, failErr)
 	}
-	ev.Outcome = "pass"
-	out.Passed++
-	fmt.Fprintf(opts.Stdout, "mv[%d/%d]: pass\n", i+1, opts.Iterations)
-	_ = report.LogEvent(ev)
+
+	fmt.Fprintf(opts.Stdout, "%s: pass\n", label)
+	out.recordPass(report, ev)
 	return nil
 }
 
