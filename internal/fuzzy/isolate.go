@@ -148,6 +148,10 @@ func sessionToolEnv(abs, home string, offline bool, extra map[string]string) map
 	env["USER"] = containerUserName()
 	env["MISE_YES"] = "1"
 	env["MISE_VERBOSE"] = "1"
+	// Skip mise GPG (needs writable ~/.gnupg). Global gpg_verify plus node.gpg_verify:
+	// core:node only checks node.gpg_verify (see mise node plugin).
+	env["MISE_GPG_VERIFY"] = "false"
+	env["MISE_NODE_GPG_VERIFY"] = "false"
 	env["MISE_TRUSTED_CONFIG_PATHS"] = strings.Join([]string{abs, home, home + "/.config/mise", "/mise"}, ":")
 	env["MISE_DATA_DIR"] = home + "/.local/share/mise"
 	env["MISE_CACHE_DIR"] = home + "/.cache/mise"
@@ -174,10 +178,12 @@ func hostEnvFromDataDir(abs, dataDir string, offline bool, projectEnv []string) 
 	// Point cache env vars at dataDir subdirs directly (more reliable than symlink home).
 	extra := envMap(projectEnv)
 	envMap := map[string]string{
-		"HOME":                    filepath.Join(dataDir, "host-home"),
-		"USER":                    containerUserName(),
-		"MISE_YES":                "1",
-		"MISE_VERBOSE":            "1",
+		"HOME":                      filepath.Join(dataDir, "host-home"),
+		"USER":                      containerUserName(),
+		"MISE_YES":                  "1",
+		"MISE_VERBOSE":              "1",
+		"MISE_GPG_VERIFY":           "false",
+		"MISE_NODE_GPG_VERIFY":      "false",
 		"MISE_TRUSTED_CONFIG_PATHS": abs + ":" + filepath.Join(dataDir, "host-home") + ":" + filepath.Join(dataDir, "mise-config"),
 		"MISE_DATA_DIR":           filepath.Join(dataDir, "mise"),
 		"MISE_CACHE_DIR":          filepath.Join(dataDir, "mise-cache"),

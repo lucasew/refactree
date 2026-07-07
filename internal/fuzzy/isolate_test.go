@@ -50,12 +50,34 @@ func TestHostSessionOfflineEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close(context.Background())
-	res := s.Run(context.Background(), []string{"sh", "-c", "test \"$RFT_FUZZY_OFFLINE\" = 1 && test \"$GOPROXY\" = off && echo ok-offline"})
+	res := s.Run(context.Background(), []string{"sh", "-c", "test \"$RFT_FUZZY_OFFLINE\" = 1 && test \"$GOPROXY\" = off && test \"$MISE_GPG_VERIFY\" = false && test \"$MISE_NODE_GPG_VERIFY\" = false && echo ok-offline"})
 	if !res.OK() {
 		t.Fatalf("offline env: %#v\n%s%s", res, res.Stdout, res.Stderr)
 	}
 	if !strings.Contains(res.Stdout, "ok-offline") {
 		t.Fatalf("stdout=%q", res.Stdout)
+	}
+}
+
+func TestSessionSetsMiseGpgVerifyOff(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	r := fuzzy.Runner{
+		NoIsolate: true,
+		DataRoot:  filepath.Join(t.TempDir(), "mise-data"),
+		Log:       io.Discard,
+	}
+	s, err := r.StartSession(context.Background(), fuzzy.IsolateConfig{}, dir, "gpg", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close(context.Background())
+	res := s.Run(context.Background(), []string{"sh", "-c", "printf '%s %s' \"$MISE_GPG_VERIFY\" \"$MISE_NODE_GPG_VERIFY\""})
+	if !res.OK() {
+		t.Fatalf("%#v\n%s%s", res, res.Stdout, res.Stderr)
+	}
+	if got := strings.TrimSpace(res.Stdout); got != "false false" {
+		t.Fatalf("got %q want %q", got, "false false")
 	}
 }
 
