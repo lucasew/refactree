@@ -8,21 +8,15 @@ Catalog index: [`references/projects.md`](references/projects.md)
 Fixtures: `testdata/mv/` on `class=bug`; ingest phase uses `testdata/ingest/` (`ingestor-fixtures`).
 
 # Process
-1. Warm caches (online, once):
-   ```bash
-   mise run fuzzy:prefetch
-   # or: RFT_FUZZY_WARMUP=1 go test ./internal/fuzzy -run '^TestPrefetchWarmup$' -count=1 -timeout 0 -v
-   ```
-2. Drive the harness from tests or a small Go main via `fuzzy.Run` / `fuzzy.PrefetchOnce` (see `harness.md`).
-3. Local fixture smoke (no catalog network):
-   ```bash
-   go test ./internal/fuzzy -run 'TestRunLocalIngestAndMv|TestPrefetchThenOfflineIngest' -count=1 -v
-   ```
-4. On `class=bug`: curate `testdata/mv/...`, fix `pkg/ingest`, re-run with the same seed.
+1. Warm (online, once): `mise run fuzzy:prefetch`
+2. Run suite: `mise run fuzzy:run`  
+   Catalog canvas / `FuzzMvOneOp` seeds need step 1. Mutator campaign: `FUZZTIME=30s mise run fuzzy:run`
+3. Or drive from Go: `fuzzy.Run` / `fuzzy.PrefetchOnce` (see `harness.md`).
+4. On `class=bug`: curate `testdata/mv/...` from scaffolds, fix `pkg/ingest`, re-run.
 
 # Airgapped
 ```bash
-RFT_FUZZY_WARMUP=1 RFT_FUZZY_WORK_ROOT=/var/cache/rft-fuzzy \
-  go test ./internal/fuzzy -run '^TestPrefetchWarmup$' -count=1 -timeout 0 -v
-# unplug network, then offline fuzzy.Run against the same work-root
+RFT_FUZZY_WORK_ROOT=/var/cache/rft-fuzzy mise run fuzzy:prefetch
+# unplug network, then:
+RFT_FUZZY_WORK_ROOT=/var/cache/rft-fuzzy mise run fuzzy:run
 ```

@@ -30,31 +30,23 @@ git tag $(svu ${usage_version})
 goreleaser release --clean
 '''
 
-# Fuzzy harness lives under internal/fuzzy only (not linked into the rft binary).
-# Warm caches first: mise run fuzzy:prefetch
-# Then offline/unit catalog tests against RFT_FUZZY_WORK_ROOT.
-
-[tasks."fuzzy:ci"]
-description = "CI fuzzy suite: all internal/fuzzy tests (warmup skipped unless RFT_FUZZY_WARMUP=1). No go test deadline."
-env = { MISE_EXPERIMENTAL = "1", CI = "true" }
-run = "go test ./internal/fuzzy -count=1 -timeout 0 -v"
+# Fuzzy harness (internal/fuzzy only — not in the rft binary).
+#   mise run fuzzy:prefetch   # warm catalog work-root (network + Docker unless NO_ISOLATE)
+#   mise run fuzzy:run        # go test ./internal/fuzzy (FuzzMvOneOp skips if work-root cold)
+# Optional: FUZZTIME=30s mise run fuzzy:run  → enable native mutator on FuzzMvOneOp
 
 [tasks."fuzzy:prefetch"]
-description = "Warm catalog work-root (TestPrefetchWarmup / PrefetchOnce). Needs network + Docker unless RFT_FUZZY_NO_ISOLATE=1"
+description = "Warm catalog work-root for offline/catalog canvas runs."
 env = { MISE_EXPERIMENTAL = "1", RFT_FUZZY_WARMUP = "1" }
 run = "go test ./internal/fuzzy -run '^TestPrefetchWarmup$' -count=1 -timeout 0 -v"
 
-[tasks.fuzzy]
-description = "Local fixture fuzzy run (no catalog network). Warm real catalog with fuzzy:prefetch first."
+[tasks."fuzzy:run"]
+description = "Run all internal/fuzzy tests. Set FUZZTIME (e.g. 30s) to also run go test -fuzz=FuzzMvOneOp."
 env = { MISE_EXPERIMENTAL = "1" }
-run = "go test ./internal/fuzzy -run 'TestRunLocalIngestAndMv|TestPrefetchThenOfflineIngest' -count=1 -timeout 0 -v"
-
-[tasks."fuzzy:offline"]
-description = "Re-run offline local fixture path after a warm work-root (uses process Once only within one go test invocation)"
-env = { MISE_EXPERIMENTAL = "1" }
-run = "go test ./internal/fuzzy -run '^TestPrefetchThenOfflineIngest$' -count=1 -timeout 0 -v"
-
-[tasks."fuzzy:ingest"]
-description = "Fuzzy ingest-related tests (no go test timeout)"
-env = { MISE_EXPERIMENTAL = "1" }
-run = "go test ./internal/fuzzy -run 'Ingest|ingest' -count=1 -timeout 0 -v"
+run = '''
+if [ -n "${FUZZTIME:-}" ]; then
+  go test ./internal/fuzzy -fuzz=FuzzMvOneOp -fuzztime="$FUZZTIME" -timeout 0 -v
+else
+  go test ./internal/fuzzy -count=1 -timeout 0 -v
+fi
+'''

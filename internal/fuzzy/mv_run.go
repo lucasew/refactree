@@ -21,6 +21,25 @@ type mvPlan struct {
 	Dst string
 }
 
+// PlanInput is the minimizable decision surface shared by catalog RNG iterations
+// and Go native fuzz (testing.F). Indices are taken mod available options.
+type PlanInput struct {
+	OpIndex     uint8
+	EntityIndex uint32
+	Entropy     uint32
+	FileIndex   uint32
+}
+
+// PlanInputFromRand draws a PlanInput from a seeded RNG (catalog ModeMv/ModeRun).
+func PlanInputFromRand(rng *rand.Rand) PlanInput {
+	return PlanInput{
+		OpIndex:     uint8(rng.Intn(256)),
+		EntityIndex: uint32(rng.Uint32()),
+		Entropy:     uint32(rng.Uint32()),
+		FileIndex:   uint32(rng.Uint32()),
+	}
+}
+
 func classifyMvError(err error) string {
 	if err == nil {
 		return ""
@@ -43,13 +62,17 @@ func classifyMvError(err error) string {
 }
 
 func pickMvPlan(rng *rand.Rand, p Project, root string, result *ingest.Result, ops []string) (mvPlan, error) {
+	return pickMvPlanWith(PlanInputFromRand(rng), p, root, result, ops)
+}
+
+func pickMvPlanWith(in PlanInput, p Project, root string, result *ingest.Result, ops []string) (mvPlan, error) {
 	if len(ops) == 0 {
 		ops = p.Mv.Ops
 	}
 	if len(ops) == 0 {
 		return mvPlan{}, fmt.Errorf("no mv ops configured")
 	}
-	op := ops[rng.Intn(len(ops))]
+	op := ops[int(in.OpIndex)%len(ops)]
 
 	var entities []ingest.Entity
 	symbolNames := map[string]bool{}
@@ -69,7 +92,7 @@ func pickMvPlan(rng *rand.Rand, p Project, root string, result *ingest.Result, o
 		if !ok || lang != p.Language {
 			continue
 		}
-		if strings.HasPrefix(ref.Symbol, "fuzz_") {
+		if strings.HasPrefix(ref.Symbol, "fuzz_") || strings.HasPrefix(ref.Symbol, "Fuzz") || strings.HasPrefix(ref.Symbol, "FUZZ") {
 			continue
 		}
 		entities = append(entities, e)
@@ -79,7 +102,7 @@ func pickMvPlan(rng *rand.Rand, p Project, root string, result *ingest.Result, o
 		return mvPlan{}, fmt.Errorf("no movable entities for language %s", p.Language)
 	}
 
-	ent := entities[rng.Intn(len(entities))]
+	ent := entities[int(in.EntityIndex)%len(entities)]
 	srcRef := ingest.ParseReference(ent.Reference)
 	srcPath := srcRef.Path
 	if !strings.HasPrefix(srcPath, "./") {
@@ -93,7 +116,7 @@ func pickMvPlan(rng *rand.Rand, p Project, root string, result *ingest.Result, o
 			leaf = leaf[i+1:]
 		}
 		leaf = strings.TrimPrefix(leaf, "*")
-		name := uniqueSymbol(rng, symbolNames, leaf)
+		name := uniqueSymbolFrom(in.Entropy, symbolNames, leaf)
 		// Preserve qualifiers for nested symbols (e.g. Java Type.method).
 		if i := strings.LastIndex(srcRef.Symbol, "."); i >= 0 {
 			name = srcRef.Symbol[:i+1] + name
@@ -110,8 +133,8 @@ func pickMvPlan(rng *rand.Rand, p Project, root string, result *ingest.Result, o
 			return mvPlan{}, fmt.Errorf("no destination files")
 		}
 		var dstPath string
-		for tries := 0; tries < 16; tries++ {
-			cand := files[rng.Intn(len(files))]
+		for tries := uint32(0); tries < 16; tries++ {
+			cand := files[int(in.FileIndex+tries)%len(files)]
 			if !strings.HasPrefix(cand, "./") {
 				cand = "./" + cand
 			}
@@ -124,7 +147,7 @@ func pickMvPlan(rng *rand.Rand, p Project, root string, result *ingest.Result, o
 			// new sibling file
 			ext := filepath.Ext(srcPath)
 			base := strings.TrimSuffix(filepath.Base(srcPath), ext)
-			dstPath = "./" + filepath.ToSlash(filepath.Join(filepath.Dir(strings.TrimPrefix(srcPath, "./")), fmt.Sprintf("%s_fuzz_%d%s", base, rng.Intn(1<<16), ext)))
+			dstPath = "./" + filepath.ToSlash(filepath.Join(filepath.Dir(strings.TrimPrefix(srcPath, "./")), fmt.Sprintf("%s_fuzz_%x%s", base, in.Entropy&0xffff, ext)))
 		}
 		return mvPlan{
 			Op:  op,
@@ -136,7 +159,7 @@ func pickMvPlan(rng *rand.Rand, p Project, root string, result *ingest.Result, o
 		if srcDir == "./." || srcDir == "./" {
 			return mvPlan{}, fmt.Errorf("entity not in a package directory")
 		}
-		dstDir := srcDir + "_fuzz"
+		dstDir := fmt.Sprintf("%s_fuzz_%x", strings.TrimSuffix(srcDir, "/"), in.Entropy&0xffff)
 		return mvPlan{
 			Op:  op,
 			Src: "path:" + strings.TrimSuffix(srcDir, "/"),
@@ -147,15 +170,15 @@ func pickMvPlan(rng *rand.Rand, p Project, root string, result *ingest.Result, o
 	}
 }
 
-func uniqueSymbol(rng *rand.Rand, existing map[string]bool, styleHint string) string {
-	for i := 0; i < 1000; i++ {
-		n := rng.Intn(1 << 20)
+func uniqueSymbolFrom(entropy uint32, existing map[string]bool, styleHint string) string {
+	for i := uint32(0); i < 1000; i++ {
+		n := int((entropy + i) & ((1 << 20) - 1))
 		name := formatFuzzName(styleHint, n)
 		if !existing[name] {
 			return name
 		}
 	}
-	return formatFuzzName(styleHint, int(rng.Int63()))
+	return formatFuzzName(styleHint, int(entropy))
 }
 
 func formatFuzzName(styleHint string, n int) string {

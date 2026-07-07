@@ -8,6 +8,6 @@ Catalog index: [`../rft-fuzzy-mv/references/projects.md`](../rft-fuzzy-mv/refere
 Fixtures: `testdata/ingest/` (see `ingestor-fixtures` skill).
 
 # Process
-1. Prefer a warm work-root: `mise run fuzzy:prefetch` / `TestPrefetchWarmup`.
-2. Run ingest via `fuzzy.Run` with `Mode: fuzzy.ModeIngest` (and `Offline: true` after warmup), or local invariant tests under `internal/fuzzy`.
+1. Prefer a warm work-root: `mise run fuzzy:prefetch`.
+2. Run: `mise run fuzzy:run`, or `fuzzy.Run` with `Mode: fuzzy.ModeIngest` (`Offline: true` after warmup).
 3. On `class=bug`: curate `testdata/ingest/<lang>_.../` with `ingestor-fixtures`, fix the language package, rerun.

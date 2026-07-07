@@ -31,7 +31,7 @@ jobs:
           MISE_EXPERIMENTAL: "1"
           # Durable work-root under the runner workspace (not a shared /tmp litter).
           RFT_FUZZY_WORK_ROOT: ${{ github.workspace }}/.cache/rft-fuzzy
-        run: mise run fuzzy:ci
+        run: mise run fuzzy:run
 
       - name: Catalog prefetch warmup (optional)
         if: github.event_name == 'workflow_dispatch' && inputs.catalog_warmup

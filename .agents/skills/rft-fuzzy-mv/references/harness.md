@@ -8,20 +8,14 @@ The harness lives only under `internal/fuzzy` (not linked into the `rft` binary)
    - otherwise **only fill gaps** (per-project skip when warm; git fetch only if pin missing; docker pull only if image missing)
 2. **Tests** run with `Offline: true` and `WorkRoot: fuzzy.DefaultWorkRoot()` (or the path returned by prefetch) so they use **only** that local cache.
 
-# CI
-GitHub Actions workflow `.github/workflows/fuzzy.yml` runs `mise run fuzzy:ci`
-(`go test ./internal/fuzzy -timeout 0`) on PR/push to master. Catalog warmup is
-manual via workflow_dispatch (`catalog_warmup: true`) or local `mise run fuzzy:prefetch`.
-
-# Warmup
+# Mise tasks (only two)
 ```bash
-mise run fuzzy:prefetch
-# or:
-RFT_FUZZY_WARMUP=1 RFT_FUZZY_WORK_ROOT=/var/cache/rft-fuzzy \
-  go test ./internal/fuzzy -run '^TestPrefetchWarmup$' -count=1 -timeout 0 -v
+mise run fuzzy:prefetch   # warm work-root (network + Docker unless RFT_FUZZY_NO_ISOLATE=1)
+mise run fuzzy:run        # go test ./internal/fuzzy (FuzzMvOneOp skips if cold)
+FUZZTIME=30s mise run fuzzy:run   # native mutator on catalog canvas
 ```
 
-Second warmup on the same work-root should print `prefetch: no-op (work-root warm)`.
+Second prefetch on the same work-root should print `prefetch: no-op (work-root warm)`.
 
 API:
 ```go
@@ -31,6 +25,11 @@ res, err := fuzzy.Run(ctx, fuzzy.Options{
   Iterations: 10, Seed: 1, Allow: true, NoIsolate: /* host */,
 })
 ```
+
+# Go native fuzz (testing.F)
+Canvas = **catalog** projects with `mv.enabled` (not `testdata/mv` fixtures).
+Fixtures are **outputs**: curate `testdata/mv` / `testdata/ingest` from bug scaffolds
+(`$TMPDIR/rft-fuzzy-fuzz-fail/…`). Shared surface: `fuzzy.PlanInput`.
 
 # Source of truth
 - Catalog: `testdata/fuzzy/projects.toml`
