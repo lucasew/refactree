@@ -135,16 +135,18 @@ func (w *Workspace) prepareFresh(p Project, runID string, opts PrepareOptions) (
 	if err := w.ensureBare(p, opts.Offline); err != nil {
 		return "", "", err
 	}
-	logCmdLine(os.Stdout, "git", "clone", "--no-checkout", w.cachePath(p.ID), workDir)
-	cmd := exec.Command("git", "clone", "--no-checkout", w.cachePath(p.ID), workDir)
-	if out, err := runStreamingCombined(cmd, os.Stdout); err != nil {
-		return "", "", fmt.Errorf("git clone worktree: %w\n%s", err, out)
-	}
-	logCmdLine(os.Stdout, "git", "-C", workDir, "checkout", "--force", p.Ref)
-	co := exec.Command("git", "checkout", "--force", p.Ref)
-	co.Dir = workDir
-	if out, err := runStreamingCombined(co, os.Stdout); err != nil {
-		return "", "", fmt.Errorf("git checkout %s: %w\n%s", p.Ref, err, out)
+	// Linked worktree from the shallow bare cache (avoids a second full object copy
+	// and works when the only tip is refs/rft/pin from a depth-1 fetch).
+	cache := w.cachePath(p.ID)
+	// Drop stale registrations if a prior run deleted the path with ForceRemoveAll.
+	prune := exec.Command("git", "worktree", "prune", "--verbose")
+	prune.Dir = cache
+	_, _ = prune.CombinedOutput()
+	logCmdLine(os.Stdout, "git", "-C", cache, "worktree", "add", "--detach", "--force", workDir, p.Ref)
+	wt := exec.Command("git", "worktree", "add", "--detach", "--force", workDir, p.Ref)
+	wt.Dir = cache
+	if out, err := runStreamingCombined(wt, os.Stdout); err != nil {
+		return "", "", fmt.Errorf("git worktree add %s: %w\n%s", p.Ref, err, out)
 	}
 	commit, err = revParse(workDir, "HEAD")
 	if err != nil {
@@ -334,12 +336,9 @@ func (w *Workspace) ensureBare(p Project, offline bool) error {
 		if offline {
 			return fmt.Errorf("offline cache for %s missing ref %s (run: go test ./internal/fuzzy -run TestPrefetchWarmup with RFT_FUZZY_WARMUP=1): %w", p.ID, p.Ref, err)
 		}
-		// Pin not in cache yet: fetch only what we need.
-		logCmdLine(os.Stdout, "git", "-C", cache, "fetch", "--force", "origin", p.Ref)
-		cmd := exec.Command("git", "fetch", "--force", "origin", p.Ref)
-		cmd.Dir = cache
-		if out, err := runStreamingCombined(cmd, os.Stdout); err != nil {
-			return fmt.Errorf("git fetch %s: %w\n%s", p.ID, err, out)
+		// Pin not in cache yet: shallow-fetch only that tip.
+		if err := shallowFetchPin(cache, p.Ref); err != nil {
+			return fmt.Errorf("git fetch %s: %w", p.ID, err)
 		}
 		if _, err := revParse(cache, p.Ref); err != nil {
 			return fmt.Errorf("git cache for %s still missing ref %s after fetch: %w", p.ID, p.Ref, err)
@@ -352,10 +351,57 @@ func (w *Workspace) ensureBare(p Project, offline bool) error {
 	if err := os.MkdirAll(filepath.Dir(cache), 0o755); err != nil {
 		return err
 	}
-	logCmdLine(os.Stdout, "git", "clone", "--bare", p.URL, cache)
-	cmd := exec.Command("git", "clone", "--bare", p.URL, cache)
+	// Shallow bare: only the catalog pin (full history is never needed).
+	if err := shallowBareClone(p.URL, cache, p.Ref); err != nil {
+		_ = ForceRemoveAll(cache)
+		return fmt.Errorf("git shallow clone %s: %w", p.URL, err)
+	}
+	return nil
+}
+
+// shallowBareClone creates a bare repo and fetches only ref at depth 1.
+// Works for full commit SHAs, tags, and branch names (GitHub and most forges).
+func shallowBareClone(url, cache, ref string) error {
+	logCmdLine(os.Stdout, "git", "init", "--bare", cache)
+	initCmd := exec.Command("git", "init", "--bare", cache)
+	if out, err := runStreamingCombined(initCmd, os.Stdout); err != nil {
+		return fmt.Errorf("git init --bare: %w\n%s", err, out)
+	}
+	logCmdLine(os.Stdout, "git", "-C", cache, "remote", "add", "origin", url)
+	remoteCmd := exec.Command("git", "remote", "add", "origin", url)
+	remoteCmd.Dir = cache
+	if out, err := runStreamingCombined(remoteCmd, os.Stdout); err != nil {
+		return fmt.Errorf("git remote add: %w\n%s", err, out)
+	}
+	if err := shallowFetchPin(cache, ref); err != nil {
+		return err
+	}
+	if _, err := revParse(cache, ref); err != nil {
+		return fmt.Errorf("pin %s missing after shallow fetch: %w", ref, err)
+	}
+	return nil
+}
+
+// shallowFetchPin pulls a single tip into an existing bare (or partial) cache.
+// The tip is stored at refs/rft/pin so worktree add / rev-parse always find it
+// (a FETCH_HEAD-only fetch leaves no durable ref).
+func shallowFetchPin(cache, ref string) error {
+	const pinRef = "refs/rft/pin"
+	// depth 1: only the catalog pin tip; no full history.
+	spec := ref + ":" + pinRef
+	args := []string{"fetch", "--depth", "1", "--force", "origin", spec}
+	logCmdLine(os.Stdout, append([]string{"git", "-C", cache}, args...)...)
+	cmd := exec.Command("git", args...)
+	cmd.Dir = cache
 	if out, err := runStreamingCombined(cmd, os.Stdout); err != nil {
-		return fmt.Errorf("git clone --bare %s: %w\n%s", p.URL, err, out)
+		return fmt.Errorf("%w\n%s", err, out)
+	}
+	// Point HEAD at the pin so tools that read the default branch see a tip.
+	logCmdLine(os.Stdout, "git", "-C", cache, "symbolic-ref", "HEAD", pinRef)
+	head := exec.Command("git", "symbolic-ref", "HEAD", pinRef)
+	head.Dir = cache
+	if out, err := head.CombinedOutput(); err != nil {
+		return fmt.Errorf("symbolic-ref HEAD: %w\n%s", err, out)
 	}
 	return nil
 }

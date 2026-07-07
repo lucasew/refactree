@@ -32,18 +32,27 @@ goreleaser release --clean
 
 # Fuzzy harness (internal/fuzzy only — not in the rft binary).
 #   mise run fuzzy:prefetch   # warm catalog work-root (network + Docker unless NO_ISOLATE)
-#   mise run fuzzy:run        # go test ./internal/fuzzy (FuzzMvOneOp skips if work-root cold)
-# Optional: FUZZTIME=30s mise run fuzzy:run  → enable native mutator on FuzzMvOneOp
+#   mise run fuzzy:run        # go test ./internal/fuzzy
+# Optional: FUZZTIME=30s mise run fuzzy:run  → native mutator on FuzzMvOneOp
+#
+# Work-root: pin RFT_FUZZY_WORK_ROOT before the go test process (init reads it once).
+# If unset, tasks default to ${XDG_CACHE_HOME:-$HOME/.cache}/rft-fuzzy so prefetch
+# and run share a durable path. Plain `go test` without the env uses a private
+# temp dir via TestMain so unit tests never touch that cache.
 
 [tasks."fuzzy:prefetch"]
 description = "Warm catalog work-root for offline/catalog canvas runs."
 env = { MISE_EXPERIMENTAL = "1", RFT_FUZZY_WARMUP = "1" }
-run = "go test ./internal/fuzzy -run '^TestPrefetchWarmup$' -count=1 -timeout 0 -v"
+run = '''
+export RFT_FUZZY_WORK_ROOT="${RFT_FUZZY_WORK_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/rft-fuzzy}"
+go test ./internal/fuzzy -run '^TestPrefetchWarmup$' -count=1 -timeout 0 -v
+'''
 
 [tasks."fuzzy:run"]
-description = "Run all internal/fuzzy tests. Set FUZZTIME (e.g. 30s) to also run go test -fuzz=FuzzMvOneOp."
+description = "Run all internal/fuzzy tests. Set FUZZTIME (e.g. 30s) for -fuzz=FuzzMvOneOp."
 env = { MISE_EXPERIMENTAL = "1" }
 run = '''
+export RFT_FUZZY_WORK_ROOT="${RFT_FUZZY_WORK_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/rft-fuzzy}"
 if [ -n "${FUZZTIME:-}" ]; then
   go test ./internal/fuzzy -fuzz=FuzzMvOneOp -fuzztime="$FUZZTIME" -timeout 0 -v
 else

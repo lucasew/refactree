@@ -33,15 +33,18 @@ Fixtures are **outputs**: curate `testdata/mv` / `testdata/ingest` from bug scaf
 
 # Source of truth
 - Catalog: `testdata/fuzzy/projects.toml`
-- Work root (everything on disk): `RFT_FUZZY_WORK_ROOT` or `$TMPDIR/rft-fuzzy`
-  - `cache/`, `preserve/`, `runs/`, `mise-data/`, `reports/`
-  - no separate `/tmp/rft-fuzzy-reports` or `/tmp/rft-fuzzy-mise-data`
+- Work root (set once in package `init`, not re-read per call):
+  - `RFT_FUZZY_WORK_ROOT` if set **before process start**
+  - else `$TMPDIR/rft-fuzzy` for normal tools/import
+  - `mise run fuzzy:*` exports `${XDG_CACHE_HOME:-$HOME/.cache}/rft-fuzzy` when unset
+  - plain `go test` without the env: `TestMain` swaps in a **private temp dir** so tests never touch the shared cache
+  - layout: `cache/`, `preserve/`, `runs/`, `mise-data/`, `reports/`
 - Isolation: Docker default; host via `RFT_FUZZY_NO_ISOLATE=1`
 
 # Env
 | Env | Purpose |
 | --- | --- |
 | `RFT_FUZZY_WARMUP=1` | Enable `TestPrefetchWarmup` |
-| `RFT_FUZZY_WORK_ROOT` | Durable work-root |
+| `RFT_FUZZY_WORK_ROOT` | Durable work-root (must be set before `go test` / process start) |
 | `RFT_FUZZY_NO_ISOLATE=1` | Host setup/check |
 | `RFT_FUZZY_PROJECT` | Comma-separated slugs for prefetch |

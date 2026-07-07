@@ -7,16 +7,17 @@ import (
 	"testing"
 )
 
-func TestDefaultWorkRootEnv(t *testing.T) {
-	t.Setenv("RFT_FUZZY_WORK_ROOT", "/var/cache/rft-fuzzy-test")
-	if got := DefaultWorkRoot(); got != "/var/cache/rft-fuzzy-test" {
-		t.Fatalf("got %q", got)
-	}
-	t.Setenv("RFT_FUZZY_WORK_ROOT", "")
-	got := DefaultWorkRoot()
-	want := filepath.Join(os.TempDir(), "rft-fuzzy")
-	if got != want {
+func TestSetDefaultWorkRoot(t *testing.T) {
+	prev := DefaultWorkRoot()
+	t.Cleanup(func() { SetDefaultWorkRoot(prev) })
+
+	want := filepath.Join(t.TempDir(), "custom-work-root")
+	SetDefaultWorkRoot(want)
+	if got := DefaultWorkRoot(); got != want {
 		t.Fatalf("got %q want %q", got, want)
+	}
+	if st, err := os.Stat(want); err != nil || !st.IsDir() {
+		t.Fatalf("work-root not created: %v", err)
 	}
 }
 

@@ -50,7 +50,7 @@ type Event struct {
 
 // NewReport creates base/<timestamp>-<seed>/.
 // When base is empty, reports live under work-root/reports (meta.WorkRoot, or
-// DefaultWorkRoot() which is RFT_FUZZY_WORK_ROOT or $TMPDIR/rft-fuzzy).
+// DefaultWorkRoot() from package init / SetDefaultWorkRoot).
 func NewReport(base string, meta Meta) (*Report, error) {
 	if base == "" {
 		root := meta.WorkRoot

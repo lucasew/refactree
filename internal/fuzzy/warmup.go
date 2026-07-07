@@ -10,14 +10,52 @@ import (
 	"sync"
 )
 
-// DefaultWorkRoot is the single on-disk root for the fuzzy harness:
-// cache/, preserve/, runs/, mise-data/, reports/.
-// It is RFT_FUZZY_WORK_ROOT when set, otherwise $TMPDIR/rft-fuzzy.
-func DefaultWorkRoot() string {
-	if root := os.Getenv("RFT_FUZZY_WORK_ROOT"); root != "" {
-		return root
+// Process default work-root (set once in init, overridable via SetDefaultWorkRoot).
+//
+//	RFT_FUZZY_WORK_ROOT if set at process start, else $TMPDIR/rft-fuzzy
+//
+// go test binaries (see TestMain) replace this with a private temp dir when the
+// env was unset, so unit tests never touch a shared/user cache.
+var (
+	defaultWorkRoot   string
+	workRootFromEnv   bool // true if RFT_FUZZY_WORK_ROOT was set when init ran
+	defaultWorkRootMu sync.RWMutex
+)
+
+func init() {
+	if root := strings.TrimSpace(os.Getenv("RFT_FUZZY_WORK_ROOT")); root != "" {
+		defaultWorkRoot = root
+		workRootFromEnv = true
+	} else {
+		defaultWorkRoot = filepath.Join(os.TempDir(), "rft-fuzzy")
 	}
-	return filepath.Join(os.TempDir(), "rft-fuzzy")
+	// Best-effort create so prefetch/run have a place to land.
+	_ = os.MkdirAll(defaultWorkRoot, 0o755)
+}
+
+// DefaultWorkRoot is the process work-root for the fuzzy harness:
+// cache/, preserve/, runs/, mise-data/, reports/.
+// Fixed at init (or last SetDefaultWorkRoot); not re-read from the env on each call.
+func DefaultWorkRoot() string {
+	defaultWorkRootMu.RLock()
+	defer defaultWorkRootMu.RUnlock()
+	return defaultWorkRoot
+}
+
+// WorkRootPinnedByEnv reports whether init took RFT_FUZZY_WORK_ROOT from the environment.
+func WorkRootPinnedByEnv() bool {
+	return workRootFromEnv
+}
+
+// SetDefaultWorkRoot overrides the process work-root (tests / explicit reconfig).
+func SetDefaultWorkRoot(root string) {
+	if root == "" {
+		return
+	}
+	defaultWorkRootMu.Lock()
+	defaultWorkRoot = root
+	defaultWorkRootMu.Unlock()
+	_ = os.MkdirAll(root, 0o755)
 }
 
 var prefetchMu sync.Mutex
