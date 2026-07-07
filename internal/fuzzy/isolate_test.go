@@ -59,18 +59,17 @@ func TestHostSessionOfflineEnv(t *testing.T) {
 	}
 }
 
-func TestQuietModeBuffersUntilFailure(t *testing.T) {
+func TestCommandOutputStreamsAndCaptures(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	var live bytes.Buffer
 	r := fuzzy.Runner{
 		NoIsolate: true,
-		Verbose:   false,
 		Log:       io.Discard,
 		Stdout:    &live,
 		Stderr:    &live,
 	}
-	s, err := r.StartSession(context.Background(), fuzzy.IsolateConfig{}, dir, "quiet", true)
+	s, err := r.StartSession(context.Background(), fuzzy.IsolateConfig{}, dir, "stream", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,11 +78,11 @@ func TestQuietModeBuffersUntilFailure(t *testing.T) {
 	if !res.OK() {
 		t.Fatal(res.Err)
 	}
-	if strings.Contains(live.String(), "secret-ok") {
-		t.Fatalf("quiet mode leaked output: %q", live.String())
+	if !strings.Contains(live.String(), "secret-ok") {
+		t.Fatalf("expected live stream of command stdout: %q", live.String())
 	}
 	if !strings.Contains(res.Stdout, "secret-ok") {
-		t.Fatalf("expected accumulated stdout, got %q", res.Stdout)
+		t.Fatalf("expected captured stdout, got %q", res.Stdout)
 	}
 	fail := s.Run(context.Background(), []string{"sh", "-c", "echo secret-fail >&2; exit 7"})
 	if fail.OK() {
@@ -92,8 +91,8 @@ func TestQuietModeBuffersUntilFailure(t *testing.T) {
 	if !strings.Contains(fail.Stdout+fail.Stderr, "secret-fail") {
 		t.Fatalf("failure should accumulate logs: stdout=%q stderr=%q", fail.Stdout, fail.Stderr)
 	}
-	if strings.Contains(live.String(), "secret-fail") {
-		t.Fatalf("quiet mode leaked failure output live: %q", live.String())
+	if !strings.Contains(live.String(), "secret-fail") {
+		t.Fatalf("expected live stream of failure output: %q", live.String())
 	}
 }
 

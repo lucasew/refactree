@@ -45,12 +45,13 @@ check_network = false
 uv = "0.11.26"
 
 [projects.ritm_annotation.mise.tasks.setup]
-description = "Install dev dependencies (offline when RFT_FUZZY_OFFLINE=1)"
+description = "Install dev deps without building the local cython package (offline when RFT_FUZZY_OFFLINE=1)"
 run = """
+# --no-install-project: skip editable/cython build (needs clang/cc). ruff only needs the env.
 if [ "${RFT_FUZZY_OFFLINE:-}" = 1 ]; then
-  uv sync --extra dev --verbose --offline
+  uv sync --extra dev --verbose --offline --no-install-project
 else
-  uv sync --extra dev --verbose
+  uv sync --extra dev --verbose --no-install-project
 fi
 """
 
@@ -63,7 +64,8 @@ url = "https://github.com/withastro/astro.git"
 ref = "6929e4034fcc7e11d96d0327b5d8ca126ae826ef"
 language = "javascript"
 root = "."
-ingest_roots = ["packages/compiler"]
+# packages/compiler was removed from this monorepo pin; main package is packages/astro.
+ingest_roots = ["packages/astro"]
 preserve_globs = ["node_modules", ".pnpm-store"]
 
 [projects.astro.mv]
@@ -79,18 +81,22 @@ node = "22.23.1"
 pnpm = "11.9.0"
 
 [projects.astro.mise.tasks.setup]
-description = "Install compiler package workspace deps (offline when RFT_FUZZY_OFFLINE=1)"
+description = "Install astro package workspace deps (offline when RFT_FUZZY_OFFLINE=1)"
 run = """
+# Fail if the filter matches nothing (pnpm otherwise exits 0 with no node_modules).
+set -euo pipefail
+FILTER="astro..."
 if [ "${RFT_FUZZY_OFFLINE:-}" = 1 ]; then
-  pnpm install --offline --reporter=default --filter @astrojs/compiler...
+  pnpm install --offline --reporter=default --filter "$FILTER"
 else
-  pnpm install --reporter=default --filter @astrojs/compiler...
+  pnpm install --reporter=default --filter "$FILTER"
 fi
+test -d node_modules
 """
 
 [projects.astro.mise.tasks.test]
-description = "Run compiler package tests"
-run = "pnpm --filter @astrojs/compiler test -- --verbose"
+description = "Run unit tests for the astro package"
+run = "pnpm --filter astro run test:unit -- --verbose"
 
 [projects.gson]
 url = "https://github.com/google/gson.git"

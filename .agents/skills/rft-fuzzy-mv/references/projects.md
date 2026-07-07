@@ -6,7 +6,7 @@ Setup tasks honor `RFT_FUZZY_OFFLINE=1` (set by harness `--offline`) so cached d
 - id: `ritm_annotation`
 - https://github.com/lucasew-graveyard/ritm_annotation
 - scoped ingest `ritm_annotation`; `mise run setup` / `mise run test`
-- preserve `.venv`, `.uv`; offline setup uses `uv sync --offline`
+- preserve `.venv`, `.uv`; setup uses `uv sync --no-install-project` (no clang/cython); offline adds `--offline`
 
 # Go
 - id: `workspaced`
@@ -17,8 +17,8 @@ Setup tasks honor `RFT_FUZZY_OFFLINE=1` (set by harness `--offline`) so cached d
 # JavaScript
 - id: `astro`
 - https://github.com/withastro/astro
-- scoped ingest `packages/compiler`; `mise run setup` / `mise run test`
-- preserve `node_modules`, `.pnpm-store`; offline setup uses `pnpm install --offline`
+- scoped ingest `packages/astro` (not the old `packages/compiler`); filter `astro...`
+- preserve `node_modules`, `.pnpm-store`; setup asserts `node_modules` exists; offline uses `pnpm install --offline`
 
 # Java
 - id: `gson`

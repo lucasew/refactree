@@ -43,12 +43,12 @@ type Runner struct {
 	Offline bool
 	// DataRoot holds persistent caches across projects (work-root/mise-data).
 	DataRoot string
-	// Verbose streams command stdout/stderr live; otherwise output is accumulated
-	// and only surfaced on failure.
+	// Verbose is reserved for extra harness noise; command stdout/stderr always
+	// stream live when Stdout/Stderr/Log is set, and are still captured for reports.
 	Verbose bool
 	// Log receives progress lines always (session start/stop, exec labels).
 	Log io.Writer
-	// Stdout/Stderr receive live command output only when Verbose is set.
+	// Stdout/Stderr receive live command output (also used as fallback for Log).
 	Stdout io.Writer
 	Stderr io.Writer
 }
@@ -64,21 +64,23 @@ func (r Runner) logf(format string, args ...any) {
 	fmt.Fprintf(w, format, args...)
 }
 
+// liveStdout is where command stdout is teed in addition to capture buffers.
 func (r Runner) liveStdout() io.Writer {
-	if r.Verbose {
+	if r.Stdout != nil {
 		return r.Stdout
 	}
-	return nil
+	return r.Log
 }
 
+// liveStderr is where command stderr is teed in addition to capture buffers.
 func (r Runner) liveStderr() io.Writer {
-	if !r.Verbose {
-		return nil
-	}
 	if r.Stderr != nil {
 		return r.Stderr
 	}
-	return r.Stdout
+	if r.Stdout != nil {
+		return r.Stdout
+	}
+	return r.Log
 }
 
 // RequireDocker checks that the Docker API is reachable (Jules includes docker).
@@ -337,10 +339,8 @@ func (s *Session) Run(ctx context.Context, argv []string) RunResult {
 	if s.ctr == nil {
 		s.runner.logf("isolate: host exec: %s\n", strings.Join(argv, " "))
 		if !s.installed {
-			if err := s.hostMiseInstall(ctx); err != nil {
-				res.Err = err
-				res.ExitCode = 1
-				return res
+			if install := s.hostMiseInstall(ctx); !install.OK() {
+				return install
 			}
 			s.installed = true
 		}
@@ -365,11 +365,13 @@ func (s *Session) Run(ctx context.Context, argv []string) RunResult {
 	return s.execScript(ctx, joinCommand(argv))
 }
 
-func (s *Session) hostMiseInstall(ctx context.Context) error {
+func (s *Session) hostMiseInstall(ctx context.Context) RunResult {
+	res := RunResult{Dir: s.abs, Isolated: false, Args: []string{"mise", "-v", "install"}}
 	// Skip when no mise.toml (local fixtures may only run `true`).
 	if _, err := os.Stat(filepath.Join(s.abs, "mise.toml")); err != nil {
-		return nil
+		return res
 	}
+	s.runner.logf("isolate: host exec: mise -v install\n")
 	cmd := exec.CommandContext(ctx, "mise", "-v", "install")
 	cmd.Dir = s.abs
 	if len(s.hostEnv) > 0 {
@@ -377,11 +379,7 @@ func (s *Session) hostMiseInstall(ctx context.Context) error {
 	} else {
 		cmd.Env = appendVerboseEnv(os.Environ())
 	}
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("host mise install: %w\n%s", err, out)
-	}
-	return nil
+	return finishHostCmd(cmd, &res, s.runner.liveStdout(), s.runner.liveStderr())
 }
 
 func (s *Session) execScript(ctx context.Context, scriptBody string) RunResult {
@@ -394,16 +392,12 @@ func (s *Session) execScript(ctx context.Context, scriptBody string) RunResult {
 	s.runner.logf("isolate: exec %s\n", scriptBody)
 
 	var outBuf, errBuf bytes.Buffer
-	// Multiplexed exec combines streams; split live passthrough vs capture.
-	var live io.Writer
-	if s.runner.Verbose {
-		if s.runner.Stdout != nil && s.runner.Stderr != nil && s.runner.Stdout != s.runner.Stderr {
-			live = io.MultiWriter(s.runner.Stdout, s.runner.Stderr)
-		} else if s.runner.Stdout != nil {
-			live = s.runner.Stdout
-		} else {
-			live = s.runner.Stderr
-		}
+	// Multiplexed exec combines streams; tee live to harness writers and capture for reports.
+	live := s.runner.liveStdout()
+	if s.runner.Stderr != nil && s.runner.Stdout != nil && s.runner.Stdout != s.runner.Stderr {
+		live = io.MultiWriter(s.runner.Stdout, s.runner.Stderr)
+	} else if live == nil {
+		live = s.runner.liveStderr()
 	}
 	capture := io.Writer(&outBuf)
 	if live != nil {

@@ -114,16 +114,17 @@ func formatRunFailure(label string, res RunResult) string {
 	return b.String()
 }
 
-// printRunFailure writes accumulated command logs unless they were already
-// streamed live under --verbose. logRel is the report-relative log directory.
+// printRunFailure writes a failure banner. Command output is already streamed
+// live; full capture remains in the report log dir. logAbs is that directory.
 func printRunFailure(w io.Writer, verbose bool, label string, res RunResult, logAbs string) {
 	if w == nil || res.OK() {
 		return
 	}
+	// Always print the failure line; re-dump full buffers only when verbose so
+	// interactive runs are not tripled (live + dump + returned error).
+	fmt.Fprintf(w, "%s failed (exit %d): %v\n", label, res.ExitCode, res.Err)
 	if verbose {
-		fmt.Fprintf(w, "%s failed (exit %d): %v\n", label, res.ExitCode, res.Err)
-	} else {
-		_, _ = io.WriteString(w, formatRunFailure(label, res))
+		_, _ = io.WriteString(w, formatRunOutput(res))
 	}
 	if logAbs != "" {
 		fmt.Fprintf(w, "full check log: %s\n", filepath.Join(logAbs, "full.log"))
