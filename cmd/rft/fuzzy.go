@@ -11,18 +11,19 @@ import (
 )
 
 type fuzzyFlags struct {
-	catalog    string
-	projects   []string
-	seed       int64
-	iterations int
-	workRoot   string
-	reportDir  string
-	allow      bool
-	noIsolate  bool
-	offline    bool
-	strictRefs bool
-	failFast   bool
-	ops        []string
+	catalog         string
+	projects        []string
+	seed            int64
+	iterations      int
+	workRoot        string
+	reportDir       string
+	allow           bool
+	noIsolate       bool
+	offline         bool
+	noVerifyOffline bool
+	strictRefs      bool
+	failFast        bool
+	ops             []string
 }
 
 func newFuzzyCmd(root *rootOptions) *cobra.Command {
@@ -43,7 +44,7 @@ func newFuzzyCmd(root *rootOptions) *cobra.Command {
 		c.Flags().BoolVar(&flags.failFast, "fail-fast", false, "stop on first bug-class failure")
 	}
 	addOffline := func(c *cobra.Command) {
-		c.Flags().BoolVar(&flags.offline, "offline", false, "use work-root caches only (no git fetch/clone; container network disabled). Run prefetch online first")
+		c.Flags().BoolVar(&flags.offline, "offline", false, "use work-root caches + local docker images only (no git fetch/pull; container network=none; package managers offline). Run prefetch online first")
 	}
 	addIngestFlags := func(c *cobra.Command) {
 		addCommon(c)
@@ -60,22 +61,23 @@ func newFuzzyCmd(root *rootOptions) *cobra.Command {
 	run := func(mode fuzzy.Mode) func(*cobra.Command, []string) error {
 		return func(cmd *cobra.Command, args []string) error {
 			opts := fuzzy.Options{
-				CatalogPath: flags.catalog,
-				ProjectIDs:  flags.projects,
-				Mode:        mode,
-				Seed:        flags.seed,
-				Iterations:  flags.iterations,
-				WorkRoot:    flags.workRoot,
-				ReportDir:   flags.reportDir,
-				Allow:       flags.allow,
-				NoIsolate:   flags.noIsolate,
-				Offline:     flags.offline,
-				StrictRefs:  flags.strictRefs,
-				FailFast:    flags.failFast,
-				Verbose:     root != nil && root.verbose,
-				Ops:         flags.ops,
-				Stdout:      cmd.OutOrStdout(),
-				Stderr:      cmd.ErrOrStderr(),
+				CatalogPath:     flags.catalog,
+				ProjectIDs:      flags.projects,
+				Mode:            mode,
+				Seed:            flags.seed,
+				Iterations:      flags.iterations,
+				WorkRoot:        flags.workRoot,
+				ReportDir:       flags.reportDir,
+				Allow:           flags.allow,
+				NoIsolate:       flags.noIsolate,
+				Offline:         flags.offline,
+				NoVerifyOffline: flags.noVerifyOffline,
+				StrictRefs:      flags.strictRefs,
+				FailFast:        flags.failFast,
+				Verbose:         root != nil && root.verbose,
+				Ops:             flags.ops,
+				Stdout:          cmd.OutOrStdout(),
+				Stderr:          cmd.ErrOrStderr(),
 			}
 			res, err := fuzzy.Run(context.Background(), opts)
 			if res != nil {
@@ -88,11 +90,26 @@ func newFuzzyCmd(root *rootOptions) *cobra.Command {
 
 	prefetchCmd := &cobra.Command{
 		Use:   "prefetch",
-		Short: "Clone catalog repos into work-root and run setup (for later --offline runs)",
-		Long:  "Downloads git pins into --work-root/cache, runs mise install + setup (Docker by default), and saves preserve_globs snapshots. Use the same --work-root with ingest/mv/run --offline on an airgapped host. Pass --no-isolate to run setup on the host instead of Docker.",
-		RunE:  run(fuzzy.ModePrefetch),
+		Short: "Fill work-root and pull docker images for later --offline runs",
+		Long: strings.TrimSpace(`
+Online-only pack step for airgapped fuzzy runs.
+
+Fills --work-root with git bare caches, mise-data tool/package caches, preserve_globs
+snapshots, and manifest.json. With Docker isolation (default), docker pull ensures
+pinned session/cleanup images are on the local daemon (images are not stored in
+work-root). After all projects succeed, writes the manifest and verifies offline
+readiness (disable with --no-verify-offline).
+
+Then unplug the network (or stay offline) and run:
+  rft fuzzy run --work-root <same> --offline
+
+Without Docker: pass --no-isolate --allow (or RFT_FUZZY_ALLOW=1). Host setup/check
+use the same work-root/mise-data caches.
+`),
+		RunE: run(fuzzy.ModePrefetch),
 	}
 	addCommon(prefetchCmd)
+	prefetchCmd.Flags().BoolVar(&flags.noVerifyOffline, "no-verify-offline", false, "skip post-prefetch offline readiness check")
 
 	ingestCmd := &cobra.Command{
 		Use:   "ingest",

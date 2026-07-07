@@ -9,19 +9,20 @@ Fixtures: `testdata/ingest/` (see `ingestor-fixtures` skill). Ingest reuses `run
 
 # Process
 1. Docker must be available unless `--no-isolate`.
-2. Choose a project slug from the catalog.
-3. Run:
+2. Prefer a warm work-root: `go run ./cmd/rft fuzzy prefetch` (once online).
+3. Choose a project slug from the catalog.
+4. Run:
    ```bash
    go run ./cmd/rft fuzzy ingest --project <slug>
    ```
-4. Inspect `report:` (`events.jsonl`, `logs/`).
-5. On `class=bug`: curate `testdata/ingest/<lang>_.../` with `ingestor-fixtures`, fix the language package, rerun.
+5. Inspect `report:` (`events.jsonl`, `logs/`).
+6. On `class=bug`: curate `testdata/ingest/<lang>_.../` with `ingestor-fixtures`, fix the language package, rerun.
 
 # Flags
 Common flags in `harness.md`, plus:
 - `--strict-refs` fail on dangling path targets
 
-Offline example:
+Airgapped example:
 ```bash
 go run ./cmd/rft fuzzy ingest --project <slug> --work-root /var/cache/rft-fuzzy --offline
 ```

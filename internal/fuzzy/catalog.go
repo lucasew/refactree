@@ -20,6 +20,10 @@ type MvConfig struct {
 // DefaultMiseImage is the pinned testcontainers image (digest, not a floating tag).
 const DefaultMiseImage = "jdxcode/mise@sha256:d536ef04425b3321dcbd60f6e7687994d5a1b8859574f0f9c2529dba620b74cb"
 
+// CleanupImage is used for privileged host cleanup (ForceRemoveAll). Same pin as
+// the session image so prefetch only needs one docker pull.
+const CleanupImage = DefaultMiseImage
+
 var (
 	majorOnlyVersion   = regexp.MustCompile(`^[0-9]+$`)
 	majorMinorVersion  = regexp.MustCompile(`^[0-9]+\.[0-9]+$`)

@@ -33,12 +33,16 @@ type Options struct {
 	Allow       bool
 	NoIsolate   bool // opt out of Docker; run setup/check on the host
 	Offline     bool // use work-root caches only; no git fetch; container network=none
-	StrictRefs  bool
-	FailFast    bool
-	Verbose     bool
-	Ops         []string
-	Stdout      io.Writer
-	Stderr      io.Writer
+	// VerifyOffline, when true after prefetch, re-validates offline readiness.
+	// Prefetch defaults this to true unless NoVerifyOffline is set.
+	VerifyOffline   bool
+	NoVerifyOffline bool // skip post-prefetch offline verification
+	StrictRefs      bool
+	FailFast        bool
+	Verbose         bool
+	Ops             []string
+	Stdout          io.Writer
+	Stderr          io.Writer
 }
 
 // Result summarizes a harness invocation.
@@ -81,8 +85,23 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		if err := RequireDocker(ctx); err != nil {
 			return nil, err
 		}
+		disableRyuk()
 	}
 	printRunBanner(opts)
+
+	if opts.Offline {
+		if err := ValidateOfflineReady(ws, projects, opts.NoIsolate); err != nil {
+			return nil, err
+		}
+		fmt.Fprintln(opts.Stdout, "offline preflight: ok")
+	}
+	if opts.Mode.isPrefetch() && !opts.NoIsolate {
+		imgs := RequiredImages(projects)
+		fmt.Fprintf(opts.Stdout, "prefetch: ensuring docker images (%d)\n", len(imgs))
+		if err := EnsureImages(imgs, true); err != nil {
+			return nil, err
+		}
+	}
 
 	ids := make([]string, len(projects))
 	for i, p := range projects {
@@ -108,6 +127,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 
 	runner := Runner{
 		NoIsolate: opts.NoIsolate,
+		Offline:   opts.Offline,
 		DataRoot:  filepath.Join(ws.Root, "mise-data"),
 		Verbose:   opts.Verbose,
 		Log:       opts.Stdout,
@@ -119,16 +139,22 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		rng = rand.New(rand.NewSource(opts.Seed))
 	}
 	out := &Result{ReportDir: report.Dir}
+	commits := map[string]string{}
 
 	for _, p := range projects {
 		if err := ctx.Err(); err != nil {
 			return out, err
 		}
-		if err := runProject(ctx, opts, p, ws, runner, rng, report, out); err != nil {
+		if err := runProject(ctx, opts, p, ws, runner, rng, report, out, commits); err != nil {
 			if opts.FailFast {
 				return out, err
 			}
 			fmt.Fprintf(opts.Stderr, "%s: %v\n", p.ID, err)
+		}
+	}
+	if opts.Mode.isPrefetch() && out.EnvFails == 0 && out.BugCount == 0 {
+		if err := finishPrefetchAll(opts, ws, projects, commits); err != nil {
+			return out, err
 		}
 	}
 	if out.BugCount > 0 || out.EnvFails > 0 {
@@ -157,6 +183,9 @@ func normalizeOptions(opts *Options) error {
 	if opts.Mode.isPrefetch() && opts.Offline {
 		return fmt.Errorf("prefetch cannot use --offline; run prefetch online, then ingest/mv/run --offline")
 	}
+	if opts.Mode.isPrefetch() && !opts.NoVerifyOffline {
+		opts.VerifyOffline = true
+	}
 	return CheckAllowed(opts.Allow, opts.NoIsolate)
 }
 
@@ -167,10 +196,10 @@ func printRunBanner(opts Options) {
 		fmt.Fprintln(opts.Stdout, "isolate: docker (default); setup/check share one testcontainers session per project")
 	}
 	if opts.Offline {
-		fmt.Fprintln(opts.Stdout, "offline: using work-root git/mise/preserve caches only; container network disabled")
+		fmt.Fprintln(opts.Stdout, "offline: work-root caches only; no git fetch/pull; container network=none; package managers offline")
 	}
 	if opts.Mode.isPrefetch() {
-		fmt.Fprintln(opts.Stdout, "prefetch: clone into work-root cache, run setup, save preserve snapshots and mise-data")
+		fmt.Fprintln(opts.Stdout, "prefetch: fill work-root (git cache, mise-data, preserve), docker pull images if isolating, write manifest")
 		return
 	}
 	fmt.Fprintln(opts.Stdout, "note: ingest/mv always run on the host; only setup/check use the isolate session")
@@ -195,13 +224,16 @@ type projectEnv struct {
 	session  *Session
 }
 
-func runProject(ctx context.Context, opts Options, p Project, ws *Workspace, runner Runner, rng *rand.Rand, report *Report, out *Result) error {
+func runProject(ctx context.Context, opts Options, p Project, ws *Workspace, runner Runner, rng *rand.Rand, report *Report, out *Result, commits map[string]string) error {
 	fmt.Fprintf(opts.Stdout, "== project %s ==\n", p.ID)
 	env, err := openProjectEnv(ctx, opts, p, ws, runner, report, out)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = env.session.Close(ctx) }()
+	if commits != nil {
+		commits[p.ID] = env.commit
+	}
 
 	if err := runLoggedSetup(ctx, opts, p, env.session, report, out, p.ID+"-setup", "setup", 0); err != nil {
 		return err
@@ -290,6 +322,23 @@ func finishPrefetch(opts Options, p Project, ws *Workspace, runner Runner, env *
 	out.Passed++
 	fmt.Fprintf(opts.Stdout, "prefetch: ready (cache=%s mise-data=%s worktree=%s)\n",
 		ws.cachePath(p.ID), runner.miseDataDir(env.imageKey), env.workDir)
+	return nil
+}
+
+func finishPrefetchAll(opts Options, ws *Workspace, projects []Project, commits map[string]string) error {
+	m := ws.BuildManifest(projects, opts.NoIsolate, commits)
+	if err := ws.SaveManifest(m); err != nil {
+		return fmt.Errorf("write manifest: %w", err)
+	}
+	fmt.Fprintf(opts.Stdout, "manifest: %s (%d projects)\n", ws.manifestPath(), len(m.Projects))
+	if !opts.VerifyOffline {
+		return nil
+	}
+	fmt.Fprintln(opts.Stdout, "prefetch: verify-offline preflight")
+	if err := ValidateOfflineReady(ws, projects, opts.NoIsolate); err != nil {
+		return fmt.Errorf("prefetch verify-offline failed: %w", err)
+	}
+	fmt.Fprintln(opts.Stdout, "prefetch: verify-offline ok")
 	return nil
 }
 

@@ -16,7 +16,8 @@ import (
 func TestRunnerNoIsolate(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	r := fuzzy.Runner{NoIsolate: true, Log: io.Discard}
+	dataRoot := filepath.Join(t.TempDir(), "mise-data")
+	r := fuzzy.Runner{NoIsolate: true, DataRoot: dataRoot, Log: io.Discard}
 	s, err := r.StartSession(context.Background(), fuzzy.IsolateConfig{}, dir, "local", true)
 	if err != nil {
 		t.Fatal(err)
@@ -28,6 +29,33 @@ func TestRunnerNoIsolate(t *testing.T) {
 	}
 	if res.Isolated {
 		t.Fatal("expected non-isolated")
+	}
+	// Host sessions must materialize work-root mise-data for the image key.
+	if entries, err := os.ReadDir(dataRoot); err != nil || len(entries) == 0 {
+		t.Fatalf("expected mise-data populated: %v", err)
+	}
+}
+
+func TestHostSessionOfflineEnv(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	r := fuzzy.Runner{
+		NoIsolate: true,
+		Offline:   true,
+		DataRoot:  filepath.Join(t.TempDir(), "mise-data"),
+		Log:       io.Discard,
+	}
+	s, err := r.StartSession(context.Background(), fuzzy.IsolateConfig{}, dir, "off", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close(context.Background())
+	res := s.Run(context.Background(), []string{"sh", "-c", "test \"$RFT_FUZZY_OFFLINE\" = 1 && test \"$GOPROXY\" = off && echo ok-offline"})
+	if !res.OK() {
+		t.Fatalf("offline env: %#v\n%s%s", res, res.Stdout, res.Stderr)
+	}
+	if !strings.Contains(res.Stdout, "ok-offline") {
+		t.Fatalf("stdout=%q", res.Stdout)
 	}
 }
 

@@ -10,21 +10,24 @@ Fixtures: `testdata/mv/` on `class=bug`; ingest phase uses `testdata/ingest/` (`
 
 # Process
 1. Docker must be available unless `--no-isolate`.
-2. Choose a project slug from the catalog.
-3. Run:
+2. Prefer a warm work-root: `go run ./cmd/rft fuzzy prefetch` (once online), then offline or online loops.
+3. Choose a project slug from the catalog (or omit `--project` for all).
+4. Run:
    ```bash
    go run ./cmd/rft fuzzy run --project <slug> --iterations 10 --seed 1
    ```
    Setup/check share one Docker session (`mise install` then `mise run setup` / `mise run test`). Ingest/mv stay on the host.
-4. Inspect `report:` (`events.jsonl`, `logs/`, `scaffold/` on failures).
-5. On `class=bug`: curate `testdata/mv/...`, fix `pkg/ingest`, rerun with the same `--seed`.
+5. Inspect `report:` (`events.jsonl`, `logs/`, `scaffold/` on failures).
+6. On `class=bug`: curate `testdata/mv/...`, fix `pkg/ingest`, rerun with the same `--seed`.
 
 # Flags
 Common flags in `harness.md`, plus:
 - `--iterations`, `--seed` (rng + worktree name), `--ops` (`rename,cross_file,package`)
 - `--strict-refs` fail on dangling path targets
 
-Offline example:
+Airgapped example:
 ```bash
+go run ./cmd/rft fuzzy prefetch --work-root /var/cache/rft-fuzzy
+# disable network
 go run ./cmd/rft fuzzy run --project <slug> --work-root /var/cache/rft-fuzzy --offline --iterations 10 --seed 1
 ```

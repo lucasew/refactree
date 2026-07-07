@@ -39,6 +39,8 @@ func (r RunResult) OK() bool {
 // Runner creates isolation sessions backed by testcontainers.
 type Runner struct {
 	NoIsolate bool
+	// Offline disables package-manager network and requires local docker images.
+	Offline bool
 	// DataRoot holds persistent caches across projects (work-root/mise-data).
 	DataRoot string
 	// Verbose streams command stdout/stderr live; otherwise output is accumulated
@@ -100,26 +102,17 @@ type Session struct {
 	abs       string
 	dataDir   string
 	image     string
+	hostEnv   []string // non-nil for host sessions: full env for exec.Cmd
 	installed bool
 }
 
-// StartSession starts a reusable container with the worktree and tool caches mounted.
-// network follows setup_network (check reuses the same networked session).
-func (r Runner) StartSession(ctx context.Context, cfg IsolateConfig, dir, imageKey string, network bool) (*Session, error) {
-	if r.NoIsolate {
-		abs, err := filepath.Abs(dir)
-		if err != nil {
-			return nil, err
-		}
-		return &Session{runner: r, cfg: cfg, abs: abs, image: "host"}, nil
-	}
-	if err := RequireDocker(ctx); err != nil {
-		return nil, err
-	}
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return nil, err
-	}
+// disableRyuk prevents testcontainers from pulling/running the reaper image.
+func disableRyuk() {
+	_ = os.Setenv("TESTCONTAINERS_RYUK_DISABLED", "true")
+}
+
+// prepareDataDir creates work-root mise-data subdirs and an empty global mise config.
+func (r Runner) prepareDataDir(imageKey string) (string, error) {
 	dataDir := r.miseDataDir(imageKey)
 	for _, sub := range []string{
 		"mise",
@@ -132,27 +125,28 @@ func (r Runner) StartSession(ctx context.Context, cfg IsolateConfig, dir, imageK
 		"m2",
 	} {
 		if err := os.MkdirAll(filepath.Join(dataDir, sub), 0o755); err != nil {
-			return nil, err
+			return "", err
 		}
 	}
-	// Override the image's root-owned global mise config so `mise install` only
-	// uses the project-embedded tools (avoids writing into /mise/cache).
 	emptyGlobal := filepath.Join(dataDir, "mise-config", "global.toml")
 	if err := os.WriteFile(emptyGlobal, []byte("# refactree fuzzy: no global tools\n"), 0o644); err != nil {
-		return nil, err
+		return "", err
 	}
-	image := cfg.ImageOrDefault()
-	env := envMap(cfg.Env)
-	if env == nil {
-		env = map[string]string{}
+	return dataDir, nil
+}
+
+// sessionToolEnv builds HOME/mise/go/maven cache env for a session.
+// home is the logical HOME path (containerHome in docker, or a host path under dataDir).
+func sessionToolEnv(abs, home string, offline bool, extra map[string]string) map[string]string {
+	env := map[string]string{}
+	for k, v := range extra {
+		env[k] = v
 	}
-	home := containerHome
 	env["HOME"] = home
 	env["USER"] = containerUserName()
 	env["MISE_YES"] = "1"
 	env["MISE_VERBOSE"] = "1"
 	env["MISE_TRUSTED_CONFIG_PATHS"] = strings.Join([]string{abs, home, home + "/.config/mise", "/mise"}, ":")
-	// Keep all mise state under the bind-mounted home; the image's /mise/* tree is root-owned.
 	env["MISE_DATA_DIR"] = home + "/.local/share/mise"
 	env["MISE_CACHE_DIR"] = home + "/.cache/mise"
 	env["MISE_STATE_DIR"] = home + "/.local/state/mise"
@@ -164,8 +158,110 @@ func (r Runner) StartSession(ctx context.Context, cfg IsolateConfig, dir, imageK
 	env["XDG_CACHE_HOME"] = home + "/.cache"
 	env["XDG_STATE_HOME"] = home + "/.local/state"
 	env["XDG_CONFIG_HOME"] = home + "/.config"
-	// Maven/Gradle default caches under HOME.
 	env["MAVEN_USER_HOME"] = home + "/.m2"
+	if offline {
+		for k, v := range OfflineSessionEnv() {
+			env[k] = v
+		}
+	}
+	return env
+}
+
+// hostEnvFromDataDir builds exec env using work-root mise-data (no reliance on ambient HOME caches).
+func hostEnvFromDataDir(abs, dataDir string, offline bool, projectEnv []string) []string {
+	// Point cache env vars at dataDir subdirs directly (more reliable than symlink home).
+	extra := envMap(projectEnv)
+	envMap := map[string]string{
+		"HOME":                    filepath.Join(dataDir, "host-home"),
+		"USER":                    containerUserName(),
+		"MISE_YES":                "1",
+		"MISE_VERBOSE":            "1",
+		"MISE_TRUSTED_CONFIG_PATHS": abs + ":" + filepath.Join(dataDir, "host-home") + ":" + filepath.Join(dataDir, "mise-config"),
+		"MISE_DATA_DIR":           filepath.Join(dataDir, "mise"),
+		"MISE_CACHE_DIR":          filepath.Join(dataDir, "mise-cache"),
+		"MISE_STATE_DIR":          filepath.Join(dataDir, "mise-state"),
+		"MISE_CONFIG_DIR":         filepath.Join(dataDir, "mise-config"),
+		"MISE_GLOBAL_CONFIG_FILE": filepath.Join(dataDir, "mise-config", "global.toml"),
+		"GOPATH":                  filepath.Join(dataDir, "go"),
+		"GOMODCACHE":              filepath.Join(dataDir, "go-mod"),
+		"GOCACHE":                 filepath.Join(dataDir, "go-cache"),
+		"XDG_CACHE_HOME":          filepath.Join(dataDir, "cache"),
+		"XDG_STATE_HOME":          filepath.Join(dataDir, "mise-state"),
+		"XDG_CONFIG_HOME":         filepath.Join(dataDir, "mise-config"),
+		"MAVEN_USER_HOME":         filepath.Join(dataDir, "m2"),
+	}
+	_ = os.MkdirAll(filepath.Join(dataDir, "host-home"), 0o755)
+	_ = os.MkdirAll(filepath.Join(dataDir, "go"), 0o755)
+	for k, v := range extra {
+		envMap[k] = v
+	}
+	if offline {
+		for k, v := range OfflineSessionEnv() {
+			envMap[k] = v
+		}
+	}
+	// Merge over ambient env so PATH and other host tools remain available.
+	base := os.Environ()
+	out := make([]string, 0, len(base)+len(envMap)+2)
+	seen := map[string]struct{}{}
+	for k := range envMap {
+		seen[k] = struct{}{}
+	}
+	// Keys we always override from envMap.
+	for _, e := range base {
+		k, _, _ := strings.Cut(e, "=")
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		// Strip ambient offline/mise cache vars that would fight work-root.
+		switch k {
+		case "MISE_OFFLINE", OfflineEnvKey, "GOPROXY", "GOSUMDB", "UV_OFFLINE", "NPM_CONFIG_OFFLINE", "PNPM_OFFLINE":
+			if offline {
+				continue
+			}
+		}
+		out = append(out, e)
+	}
+	for k, v := range envMap {
+		out = append(out, k+"="+v)
+	}
+	return appendVerboseEnv(out)
+}
+
+// StartSession starts a reusable container with the worktree and tool caches mounted.
+// network follows setup_network (check reuses the same networked session).
+func (r Runner) StartSession(ctx context.Context, cfg IsolateConfig, dir, imageKey string, network bool) (*Session, error) {
+	disableRyuk()
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
+	dataDir, err := r.prepareDataDir(imageKey)
+	if err != nil {
+		return nil, err
+	}
+
+	if r.NoIsolate {
+		r.logf("isolate: host session workdir=%s data=%s offline=%v\n", abs, dataDir, r.Offline)
+		hostEnv := hostEnvFromDataDir(abs, dataDir, r.Offline, cfg.Env)
+		return &Session{
+			runner:  r,
+			cfg:     cfg,
+			abs:     abs,
+			dataDir: dataDir,
+			image:   "host",
+			hostEnv: hostEnv,
+		}, nil
+	}
+	if err := RequireDocker(ctx); err != nil {
+		return nil, err
+	}
+	image := cfg.ImageOrDefault()
+	if err := EnsureImages([]string{image}, !r.Offline); err != nil {
+		return nil, err
+	}
+	// Online may still pull; offline already validated. AlwaysPullImage stays false.
+	env := sessionToolEnv(abs, containerHome, r.Offline, envMap(cfg.Env))
 
 	uid, gid := hostUserNamespace()
 	userSpec := fmt.Sprintf("%d:%d", uid, gid)
@@ -176,14 +272,16 @@ func (r Runner) StartSession(ctx context.Context, cfg IsolateConfig, dir, imageK
 		r.logf("isolate: starting session image=%s user=%s network=none workdir=%s data=%s\n", image, userSpec, abs, dataDir)
 	}
 
+	home := containerHome
 	req := testcontainers.ContainerRequest{
-		Image:      image,
-		Entrypoint: []string{"/bin/bash", "-lc"},
-		Cmd:        []string{"sleep infinity"},
-		User:       userSpec,
-		WorkingDir: abs,
-		Env:        env,
-		WaitingFor: wait.ForExec([]string{"/bin/true"}),
+		Image:           image,
+		AlwaysPullImage: false,
+		Entrypoint:      []string{"/bin/bash", "-lc"},
+		Cmd:             []string{"sleep infinity"},
+		User:            userSpec,
+		WorkingDir:      abs,
+		Env:             env,
+		WaitingFor:      wait.ForExec([]string{"/bin/true"}),
 		HostConfigModifier: func(hc *container.HostConfig) {
 			// Mount each cache path directly (no nested mounts under a HOME bind)
 			// so host-side cleanup does not hit busy mountpoints.
@@ -238,13 +336,26 @@ func (s *Session) Run(ctx context.Context, argv []string) RunResult {
 
 	if s.ctr == nil {
 		s.runner.logf("isolate: host exec: %s\n", strings.Join(argv, " "))
+		if !s.installed {
+			if err := s.hostMiseInstall(ctx); err != nil {
+				res.Err = err
+				res.ExitCode = 1
+				return res
+			}
+			s.installed = true
+		}
 		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 		cmd.Dir = s.abs
-		cmd.Env = appendVerboseEnv(os.Environ())
+		if len(s.hostEnv) > 0 {
+			cmd.Env = s.hostEnv
+		} else {
+			cmd.Env = appendVerboseEnv(os.Environ())
+		}
 		return finishHostCmd(cmd, &res, s.runner.liveStdout(), s.runner.liveStderr())
 	}
 
 	if !s.installed {
+		// Offline relies on MISE_OFFLINE=1 in session env (no install --offline flag on all mise versions).
 		install := s.execScript(ctx, "mise -v install")
 		if !install.OK() {
 			return install
@@ -252,6 +363,25 @@ func (s *Session) Run(ctx context.Context, argv []string) RunResult {
 		s.installed = true
 	}
 	return s.execScript(ctx, joinCommand(argv))
+}
+
+func (s *Session) hostMiseInstall(ctx context.Context) error {
+	// Skip when no mise.toml (local fixtures may only run `true`).
+	if _, err := os.Stat(filepath.Join(s.abs, "mise.toml")); err != nil {
+		return nil
+	}
+	cmd := exec.CommandContext(ctx, "mise", "-v", "install")
+	cmd.Dir = s.abs
+	if len(s.hostEnv) > 0 {
+		cmd.Env = s.hostEnv
+	} else {
+		cmd.Env = appendVerboseEnv(os.Environ())
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("host mise install: %w\n%s", err, out)
+	}
+	return nil
 }
 
 func (s *Session) execScript(ctx context.Context, scriptBody string) RunResult {
@@ -464,7 +594,13 @@ func ForceRemoveAll(path string) error {
 	}
 	parent := filepath.Dir(abs)
 	base := filepath.Base(abs)
-	cmd := exec.Command("docker", "run", "--rm", "-v", parent+":/work", "alpine:3.20", "rm", "-rf", "/work/"+base)
+	// Prefer CleanupImage (same pin as sessions). Never pull here — must be local.
+	img := CleanupImage
+	if !ImagePresent(img) {
+		// Last resort: try plain rm again after privileged path unavailable.
+		return fmt.Errorf("force remove %s: cleanup image %q not present locally (run: rft fuzzy prefetch)", abs, img)
+	}
+	cmd := exec.Command("docker", "run", "--rm", "-v", parent+":/work", img, "rm", "-rf", "/work/"+base)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("force remove %s: %w\n%s", abs, err, out)
 	}

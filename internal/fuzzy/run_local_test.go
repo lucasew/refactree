@@ -68,6 +68,14 @@ func TestPrefetchThenOfflineIngest(t *testing.T) {
 		t.Fatal("expected prefetch --offline to fail")
 	}
 
+	if _, err := os.Stat(filepath.Join(workRoot, "manifest.json")); err != nil {
+		t.Fatalf("missing manifest after prefetch: %v", err)
+	}
+	miseEntries, err := os.ReadDir(filepath.Join(workRoot, "mise-data"))
+	if err != nil || len(miseEntries) == 0 {
+		t.Fatalf("expected mise-data under work-root: %v entries=%d", err, len(miseEntries))
+	}
+
 	res := runIngest(t, catalog, workRoot, true)
 	if res.BugCount != 0 || res.Passed != 1 {
 		t.Fatalf("offline ingest bugs=%d passed=%d", res.BugCount, res.Passed)
@@ -75,6 +83,28 @@ func TestPrefetchThenOfflineIngest(t *testing.T) {
 	ingestTree := filepath.Join(workRoot, "runs", "local_go", fuzzy.IngestRunID)
 	if _, err := os.Stat(ingestTree); err != nil {
 		t.Fatalf("missing ingest worktree: %v", err)
+	}
+
+	// Offline run (ingest + mv) must also succeed from the same work-root.
+	runRes, err := fuzzy.Run(context.Background(), fuzzy.Options{
+		CatalogPath: catalog,
+		Mode:        fuzzy.ModeRun,
+		Seed:        7,
+		Iterations:  1,
+		WorkRoot:    workRoot,
+		ReportDir:   filepath.Join(t.TempDir(), "reports"),
+		Allow:       true,
+		NoIsolate:   true,
+		Offline:     true,
+		FailFast:    true,
+		Stdout:      os.Stdout,
+		Stderr:      os.Stderr,
+	})
+	if err != nil {
+		t.Fatalf("offline run: %v (report %#v)", err, runRes)
+	}
+	if runRes.BugCount != 0 {
+		t.Fatalf("offline run bugs=%d", runRes.BugCount)
 	}
 }
 
