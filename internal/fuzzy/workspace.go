@@ -21,18 +21,28 @@ type Workspace struct {
 
 func NewWorkspace(root string) (*Workspace, error) {
 	if root == "" {
-		root = filepath.Join(os.TempDir(), "rft-fuzzy")
+		root = DefaultWorkRoot()
 	}
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
 	}
-	for _, sub := range []string{"cache", "preserve", "runs", "mise-data"} {
+	for _, sub := range []string{"cache", "preserve", "runs", "mise-data", "reports"} {
 		if err := os.MkdirAll(filepath.Join(abs, sub), 0o755); err != nil {
 			return nil, err
 		}
 	}
 	return &Workspace{Root: abs}, nil
+}
+
+// ReportsDir is work-root/reports (event logs and scaffolds for harness runs).
+func (w *Workspace) ReportsDir() string {
+	return filepath.Join(w.Root, "reports")
+}
+
+// MiseDataRoot is work-root/mise-data (tool and package-manager caches).
+func (w *Workspace) MiseDataRoot() string {
+	return filepath.Join(w.Root, "mise-data")
 }
 
 func (w *Workspace) cachePath(id string) string {
@@ -125,13 +135,15 @@ func (w *Workspace) prepareFresh(p Project, runID string, opts PrepareOptions) (
 	if err := w.ensureBare(p, opts.Offline); err != nil {
 		return "", "", err
 	}
+	logCmdLine(os.Stdout, "git", "clone", "--no-checkout", w.cachePath(p.ID), workDir)
 	cmd := exec.Command("git", "clone", "--no-checkout", w.cachePath(p.ID), workDir)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := runStreamingCombined(cmd, os.Stdout); err != nil {
 		return "", "", fmt.Errorf("git clone worktree: %w\n%s", err, out)
 	}
+	logCmdLine(os.Stdout, "git", "-C", workDir, "checkout", "--force", p.Ref)
 	co := exec.Command("git", "checkout", "--force", p.Ref)
 	co.Dir = workDir
-	if out, err := co.CombinedOutput(); err != nil {
+	if out, err := runStreamingCombined(co, os.Stdout); err != nil {
 		return "", "", fmt.Errorf("git checkout %s: %w\n%s", p.Ref, err, out)
 	}
 	commit, err = revParse(workDir, "HEAD")
@@ -220,14 +232,14 @@ func (w *Workspace) requirePreserveSnapshot(p Project) error {
 	srcRoot := w.preservePath(p.ID)
 	st, err := os.Stat(srcRoot)
 	if err != nil || !st.IsDir() {
-		return fmt.Errorf("offline preserve snapshot missing for %s (run: rft fuzzy prefetch --project %s)", p.ID, p.ID)
+		return fmt.Errorf("offline preserve snapshot missing for %s (run prefetch warmup)", p.ID)
 	}
 	for _, g := range p.PreserveGlobs {
 		if _, err := os.Stat(filepath.Join(srcRoot, filepath.FromSlash(g))); err == nil {
 			return nil
 		}
 	}
-	return fmt.Errorf("offline preserve snapshot for %s has none of %v (re-run prefetch)", p.ID, p.PreserveGlobs)
+	return fmt.Errorf("offline preserve snapshot for %s has none of %v (re-run prefetch warmup)", p.ID, p.PreserveGlobs)
 }
 
 // HasPreserveSnapshot reports whether a usable durable snapshot exists.
@@ -315,27 +327,34 @@ func forceCleanUntracked(workDir string) error {
 func (w *Workspace) ensureBare(p Project, offline bool) error {
 	cache := w.cachePath(p.ID)
 	if st, err := os.Stat(cache); err == nil && st.IsDir() {
-		if offline {
-			if _, err := revParse(cache, p.Ref); err != nil {
-				return fmt.Errorf("offline cache for %s missing ref %s (run: rft fuzzy prefetch --project %s): %w", p.ID, p.Ref, p.ID, err)
-			}
+		// Already have the pin: do not fetch (idempotent / airgap-friendly).
+		if _, err := revParse(cache, p.Ref); err == nil {
 			return nil
 		}
+		if offline {
+			return fmt.Errorf("offline cache for %s missing ref %s (run: go test ./internal/fuzzy -run TestPrefetchWarmup with RFT_FUZZY_WARMUP=1): %w", p.ID, p.Ref, err)
+		}
+		// Pin not in cache yet: fetch only what we need.
+		logCmdLine(os.Stdout, "git", "-C", cache, "fetch", "--force", "origin", p.Ref)
 		cmd := exec.Command("git", "fetch", "--force", "origin", p.Ref)
 		cmd.Dir = cache
-		if out, err := cmd.CombinedOutput(); err != nil {
+		if out, err := runStreamingCombined(cmd, os.Stdout); err != nil {
 			return fmt.Errorf("git fetch %s: %w\n%s", p.ID, err, out)
+		}
+		if _, err := revParse(cache, p.Ref); err != nil {
+			return fmt.Errorf("git cache for %s still missing ref %s after fetch: %w", p.ID, p.Ref, err)
 		}
 		return nil
 	}
 	if offline {
-		return fmt.Errorf("offline git cache missing for %s at %s (run: rft fuzzy prefetch --project %s)", p.ID, cache, p.ID)
+		return fmt.Errorf("offline git cache missing for %s at %s (run prefetch warmup)", p.ID, cache)
 	}
 	if err := os.MkdirAll(filepath.Dir(cache), 0o755); err != nil {
 		return err
 	}
+	logCmdLine(os.Stdout, "git", "clone", "--bare", p.URL, cache)
 	cmd := exec.Command("git", "clone", "--bare", p.URL, cache)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := runStreamingCombined(cmd, os.Stdout); err != nil {
 		return fmt.Errorf("git clone --bare %s: %w\n%s", p.URL, err, out)
 	}
 	return nil

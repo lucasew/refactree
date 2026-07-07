@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -58,7 +59,7 @@ func (w *Workspace) SaveManifest(m Manifest) error {
 func (w *Workspace) LoadManifest() (*Manifest, error) {
 	data, err := os.ReadFile(w.manifestPath())
 	if err != nil {
-		return nil, fmt.Errorf("offline manifest missing at %s (run: rft fuzzy prefetch): %w", w.manifestPath(), err)
+		return nil, fmt.Errorf("offline manifest missing at %s (run prefetch warmup): %w", w.manifestPath(), err)
 	}
 	var m Manifest
 	if err := json.Unmarshal(data, &m); err != nil {
@@ -144,27 +145,20 @@ func ValidateOfflineReady(ws *Workspace, projects []Project, noIsolate bool) err
 	for _, p := range projects {
 		mp, ok := byID[p.ID]
 		if !ok {
-			return fmt.Errorf("offline manifest missing project %q (run: rft fuzzy prefetch --project %s)", p.ID, p.ID)
+			return fmt.Errorf("offline manifest missing project %q (run prefetch warmup)", p.ID)
 		}
 		if p.LocalPath == "" && p.Ref != "" && mp.Ref != "" && p.Ref != mp.Ref {
 			return fmt.Errorf("offline manifest pin mismatch for %s: catalog ref %s vs manifest %s (re-run prefetch)", p.ID, p.Ref, mp.Ref)
 		}
-		if p.LocalPath == "" {
-			cache := ws.cachePath(p.ID)
-			if st, err := os.Stat(cache); err != nil || !st.IsDir() {
-				return fmt.Errorf("offline git cache missing for %s at %s (run: rft fuzzy prefetch --project %s)", p.ID, cache, p.ID)
-			}
-			if _, err := revParse(cache, p.Ref); err != nil {
-				return fmt.Errorf("offline cache for %s missing ref %s (run: rft fuzzy prefetch --project %s): %w", p.ID, p.Ref, p.ID, err)
-			}
+		commit, err := projectGitReady(ws, p)
+		if err != nil {
+			return err
 		}
 		if err := ws.requirePreserveSnapshot(p); err != nil {
 			return err
 		}
-		key := ImageKey(p, mp.Commit)
-		misePath := filepath.Join(ws.Root, "mise-data", sanitizeKey(key))
-		if !miseDataPresent(misePath) && !miseDataPresent(mp.MiseDataPath) {
-			return fmt.Errorf("offline mise-data missing for %s at %s (run: rft fuzzy prefetch --project %s)", p.ID, misePath, p.ID)
+		if err := projectMiseReady(ws, p, commit, mp); err != nil {
+			return err
 		}
 		if !noIsolate {
 			img := p.Isolate.ImageOrDefault()
@@ -183,6 +177,65 @@ func ValidateOfflineReady(ws *Workspace, projects []Project, noIsolate bool) err
 		}
 	}
 	return nil
+}
+
+// projectPrefetchReady reports whether a single project already has durable
+// caches for offline use (git pin, preserve, mise-data, and local image when isolating).
+// commit is the resolved pin when ok.
+func projectPrefetchReady(ws *Workspace, p Project, noIsolate bool) (commit string, ok bool) {
+	commit, err := projectGitReady(ws, p)
+	if err != nil {
+		return "", false
+	}
+	if err := ws.requirePreserveSnapshot(p); err != nil {
+		return "", false
+	}
+	if err := projectMiseReady(ws, p, commit, ManifestProject{}); err != nil {
+		return "", false
+	}
+	if !noIsolate {
+		if !ImagePresent(p.Isolate.ImageOrDefault()) || !ImagePresent(CleanupImage) {
+			return "", false
+		}
+	}
+	return commit, true
+}
+
+func projectGitReady(ws *Workspace, p Project) (commit string, err error) {
+	if p.LocalPath != "" {
+		return "local", nil
+	}
+	cache := ws.cachePath(p.ID)
+	if st, err := os.Stat(cache); err != nil || !st.IsDir() {
+		return "", fmt.Errorf("git cache missing for %s at %s", p.ID, cache)
+	}
+	commit, err = revParse(cache, p.Ref)
+	if err != nil {
+		return "", fmt.Errorf("git cache for %s missing ref %s: %w", p.ID, p.Ref, err)
+	}
+	return commit, nil
+}
+
+func projectMiseReady(ws *Workspace, p Project, commit string, mp ManifestProject) error {
+	key := ImageKey(p, commit)
+	misePath := filepath.Join(ws.Root, "mise-data", sanitizeKey(key))
+	if miseDataPresent(misePath) {
+		return nil
+	}
+	if mp.MiseDataPath != "" && miseDataPresent(mp.MiseDataPath) {
+		return nil
+	}
+	// Fallback: any key for this project id under mise-data (older layouts).
+	entries, err := os.ReadDir(filepath.Join(ws.Root, "mise-data"))
+	if err == nil {
+		prefix := sanitizeKey(p.ID) + "-"
+		for _, e := range entries {
+			if e.IsDir() && strings.HasPrefix(e.Name(), prefix) && miseDataPresent(filepath.Join(ws.Root, "mise-data", e.Name())) {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("mise-data missing for %s at %s", p.ID, misePath)
 }
 
 // RequiredImages returns the unique docker image refs needed for projects.

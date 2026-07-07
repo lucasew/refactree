@@ -48,10 +48,16 @@ type Event struct {
 	DurationMs int64              `json:"duration_ms,omitempty"`
 }
 
-// NewReport creates report-dir/<timestamp>-<seed>/.
+// NewReport creates base/<timestamp>-<seed>/.
+// When base is empty, reports live under work-root/reports (meta.WorkRoot, or
+// DefaultWorkRoot() which is RFT_FUZZY_WORK_ROOT or $TMPDIR/rft-fuzzy).
 func NewReport(base string, meta Meta) (*Report, error) {
 	if base == "" {
-		base = filepath.Join(os.TempDir(), "rft-fuzzy-reports")
+		root := meta.WorkRoot
+		if root == "" {
+			root = DefaultWorkRoot()
+		}
+		base = filepath.Join(root, "reports")
 	}
 	stamp := time.Now().Format("20060102-150405")
 	dir := filepath.Join(base, fmt.Sprintf("%s-%d", stamp, meta.Seed))

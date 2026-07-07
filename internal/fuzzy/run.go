@@ -76,9 +76,24 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		return nil, fmt.Errorf("no projects to run")
 	}
 
+	if opts.WorkRoot == "" {
+		opts.WorkRoot = DefaultWorkRoot()
+	}
 	ws, err := NewWorkspace(opts.WorkRoot)
 	if err != nil {
 		return nil, err
+	}
+	// All on-disk harness state lives under work-root (reports, mise-data, caches, …).
+	if opts.ReportDir == "" {
+		opts.ReportDir = ws.ReportsDir()
+	}
+
+	// Prefetch full no-op when work-root already supports offline runs.
+	if opts.Mode.isPrefetch() {
+		if err := ValidateOfflineReady(ws, projects, opts.NoIsolate); err == nil {
+			fmt.Fprintf(opts.Stdout, "prefetch: no-op (work-root warm) %s\n", ws.Root)
+			return &Result{Passed: len(projects)}, nil
+		}
 	}
 
 	if !opts.NoIsolate {
@@ -91,7 +106,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 
 	if opts.Offline {
 		if err := ValidateOfflineReady(ws, projects, opts.NoIsolate); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w (run: RFT_FUZZY_WARMUP=1 go test ./internal/fuzzy -run '^TestPrefetchWarmup$')", err)
 		}
 		fmt.Fprintln(opts.Stdout, "offline preflight: ok")
 	}
@@ -128,7 +143,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	runner := Runner{
 		NoIsolate: opts.NoIsolate,
 		Offline:   opts.Offline,
-		DataRoot:  filepath.Join(ws.Root, "mise-data"),
+		DataRoot:  ws.MiseDataRoot(),
 		Verbose:   opts.Verbose,
 		Log:       opts.Stdout,
 		Stdout:    opts.Stdout,
@@ -144,6 +159,15 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	for _, p := range projects {
 		if err := ctx.Err(); err != nil {
 			return out, err
+		}
+		if opts.Mode.isPrefetch() {
+			if commit, ok := projectPrefetchReady(ws, p, opts.NoIsolate); ok {
+				fmt.Fprintf(opts.Stdout, "== project %s ==\nprefetch: skip (already warm)\n", p.ID)
+				commits[p.ID] = commit
+				out.Passed++
+				_ = report.LogEvent(Event{Project: p.ID, Kind: "prefetch_skip", Outcome: "pass", Error: commit})
+				continue
+			}
 		}
 		if err := runProject(ctx, opts, p, ws, runner, rng, report, out, commits); err != nil {
 			if opts.FailFast {
@@ -199,7 +223,7 @@ func printRunBanner(opts Options) {
 		fmt.Fprintln(opts.Stdout, "offline: work-root caches only; no git fetch/pull; container network=none; package managers offline")
 	}
 	if opts.Mode.isPrefetch() {
-		fmt.Fprintln(opts.Stdout, "prefetch: fill work-root (git cache, mise-data, preserve), docker pull images if isolating, write manifest")
+		fmt.Fprintln(opts.Stdout, "prefetch: no-op if warm; else fill missing git/mise/preserve/images and write manifest")
 		return
 	}
 	fmt.Fprintln(opts.Stdout, "note: ingest/mv always run on the host; only setup/check use the isolate session")

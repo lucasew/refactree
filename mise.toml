@@ -42,9 +42,14 @@ run = "go test ./internal/fuzzy -run '^TestPrefetchWarmup$' -count=1 -timeout 0 
 [tasks.fuzzy]
 description = "Local fixture fuzzy run (no catalog network). Warm real catalog with fuzzy:prefetch first."
 env = { MISE_EXPERIMENTAL = "1" }
-run = "go test ./internal/fuzzy -run 'TestRunLocalIngestAndMv|TestPrefetchThenOfflineIngest' -count=1 -timeout 30m -v"
+run = "go test ./internal/fuzzy -run 'TestRunLocalIngestAndMv|TestPrefetchThenOfflineIngest' -count=1 -timeout 0 -v"
 
 [tasks."fuzzy:offline"]
 description = "Re-run offline local fixture path after a warm work-root (uses process Once only within one go test invocation)"
 env = { MISE_EXPERIMENTAL = "1" }
-run = "go test ./internal/fuzzy -run '^TestPrefetchThenOfflineIngest$' -count=1 -timeout 30m -v"
+run = "go test ./internal/fuzzy -run '^TestPrefetchThenOfflineIngest$' -count=1 -timeout 0 -v"
+
+[tasks."fuzzy:ingest"]
+description = "Fuzzy ingest-related tests (no go test timeout)"
+env = { MISE_EXPERIMENTAL = "1" }
+run = "go test ./internal/fuzzy -run 'Ingest|ingest' -count=1 -timeout 0 -v"

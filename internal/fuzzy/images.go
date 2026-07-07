@@ -2,6 +2,7 @@ package fuzzy
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -16,7 +17,7 @@ func ImagePresent(ref string) bool {
 }
 
 // EnsureImages makes sure each image ref is available locally.
-// When pull is true, missing images are docker-pulled.
+// When pull is true, missing images are docker-pulled (progress streamed live).
 // When pull is false (offline), missing images return an error pointing at prefetch.
 func EnsureImages(refs []string, pull bool) error {
 	seen := map[string]struct{}{}
@@ -33,10 +34,11 @@ func EnsureImages(refs []string, pull bool) error {
 			continue
 		}
 		if !pull {
-			return fmt.Errorf("docker image %q not present locally (run: rft fuzzy prefetch while online)", ref)
+			return fmt.Errorf("docker image %q not present locally (run prefetch warmup while online)", ref)
 		}
+		logCmdLine(os.Stdout, "docker", "pull", ref)
 		cmd := exec.Command("docker", "pull", ref)
-		out, err := cmd.CombinedOutput()
+		out, err := runStreamingCombined(cmd, os.Stdout)
 		if err != nil {
 			return fmt.Errorf("docker pull %s: %w\n%s", ref, err, out)
 		}

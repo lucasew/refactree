@@ -391,25 +391,19 @@ func (s *Session) execScript(ctx context.Context, scriptBody string) RunResult {
 	}
 	s.runner.logf("isolate: exec %s\n", scriptBody)
 
-	var outBuf, errBuf bytes.Buffer
-	// Multiplexed exec combines streams; tee live to harness writers and capture for reports.
-	live := s.runner.liveStdout()
+	var outBuf bytes.Buffer
+	// Multiplexed exec: capture + always passthrough to process stdout (and configured writers).
+	live := passthroughOut(s.runner.liveStdout())
 	if s.runner.Stderr != nil && s.runner.Stdout != nil && s.runner.Stdout != s.runner.Stderr {
-		live = io.MultiWriter(s.runner.Stdout, s.runner.Stderr)
-	} else if live == nil {
-		live = s.runner.liveStderr()
+		live = io.MultiWriter(passthroughOut(s.runner.Stdout), passthroughErr(s.runner.Stderr))
 	}
-	capture := io.Writer(&outBuf)
-	if live != nil {
-		capture = io.MultiWriter(&outBuf, live)
-	}
+	capture := io.MultiWriter(&outBuf, live)
 
 	code, reader, err := s.ctr.Exec(ctx, []string{"/bin/bash", "-lc", script}, tcexec.Multiplexed())
 	if err != nil {
 		res.Err = fmt.Errorf("exec: %w", err)
 		res.ExitCode = 1
 		res.Stdout = outBuf.String()
-		res.Stderr = errBuf.String()
 		return res
 	}
 	if reader != nil {
@@ -417,7 +411,6 @@ func (s *Session) execScript(ctx context.Context, scriptBody string) RunResult {
 	}
 	// Multiplexed output is combined; keep stderr field empty and put all in Stdout.
 	res.Stdout = outBuf.String()
-	res.Stderr = errBuf.String()
 	res.ExitCode = code
 	if code != 0 {
 		res.Err = fmt.Errorf("exit status %d", code)
@@ -439,7 +432,8 @@ func (r Runner) Run(ctx context.Context, cfg IsolateConfig, dir, imageKey string
 func (r Runner) miseDataDir(imageKey string) string {
 	root := r.DataRoot
 	if root == "" {
-		root = filepath.Join(os.TempDir(), "rft-fuzzy-mise-data")
+		// Same tree as work-root; only the work-root itself falls back to $TMPDIR/rft-fuzzy.
+		root = filepath.Join(DefaultWorkRoot(), "mise-data")
 	}
 	key := imageKey
 	if key == "" {
@@ -494,18 +488,10 @@ func envMap(entries []string) map[string]string {
 }
 
 func finishHostCmd(cmd *exec.Cmd, res *RunResult, stdout, stderr io.Writer) RunResult {
-	var outBuf, errBuf bytes.Buffer
-	cmd.Stdout = &outBuf
-	cmd.Stderr = &errBuf
-	if stdout != nil {
-		cmd.Stdout = io.MultiWriter(&outBuf, stdout)
-	}
-	if stderr != nil {
-		cmd.Stderr = io.MultiWriter(&errBuf, stderr)
-	}
-	err := cmd.Run()
-	res.Stdout = outBuf.String()
-	res.Stderr = errBuf.String()
+	// Always passthrough live (default os.Stdout/Stderr) and capture for reports.
+	outStr, errStr, err := runStreaming(cmd, stdout, stderr)
+	res.Stdout = outStr
+	res.Stderr = errStr
 	if err != nil {
 		res.Err = err
 		if ee, ok := err.(*exec.ExitError); ok {
