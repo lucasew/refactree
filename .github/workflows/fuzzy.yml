@@ -25,22 +25,19 @@ jobs:
 
       - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4
 
+      - name: Catalog prefetch warmup
+        env:
+          CI: "true"
+          MISE_EXPERIMENTAL: "1"
+          RFT_FUZZY_WORK_ROOT: ${{ github.workspace }}/.cache/rft-fuzzy
+        run: mise run fuzzy:prefetch
+
       - name: Fuzzy harness tests
         env:
           CI: "true"
           MISE_EXPERIMENTAL: "1"
-          # Durable work-root under the runner workspace (not a shared /tmp litter).
           RFT_FUZZY_WORK_ROOT: ${{ github.workspace }}/.cache/rft-fuzzy
         run: mise run fuzzy:run
-
-      - name: Catalog prefetch warmup (optional)
-        if: github.event_name == 'workflow_dispatch' && inputs.catalog_warmup
-        env:
-          CI: "true"
-          MISE_EXPERIMENTAL: "1"
-          RFT_FUZZY_WARMUP: "1"
-          RFT_FUZZY_WORK_ROOT: ${{ github.workspace }}/.cache/rft-fuzzy
-        run: mise run fuzzy:prefetch
 
       - name: Upload fuzzy work-root on failure
         if: failure()
