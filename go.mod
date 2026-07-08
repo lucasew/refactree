@@ -8,11 +8,23 @@ require (
 	github.com/charmbracelet/glamour v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
 	github.com/docker/docker v28.0.1+incompatible
-	github.com/modernc-tree-sitter/ccgo-tree-sitter v0.0.0-20260708182349-0f0de68fbd82
+	// Per-language modules (proxy size limits). exclude blocks monorepo placeholder v0.0.0
+	// which MVS prefers over pseudo-versions and which only works with local replaces.
+	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar v0.0.0-20260708182349-0f0de68fbd82
+	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/go v0.0.0-20260708182349-0f0de68fbd82
+	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/java v0.0.0-20260708182349-0f0de68fbd82
+	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/javascript v0.0.0-20260708182349-0f0de68fbd82
+	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/nix v0.0.0-20260708182349-0f0de68fbd82
+	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/python v0.0.0-20260708182349-0f0de68fbd82
+	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/svelte v0.0.0-20260708182349-0f0de68fbd82
+	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/tsx v0.0.0-20260708182349-0f0de68fbd82
+	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/typescript v0.0.0-20260708182349-0f0de68fbd82
 	github.com/pelletier/go-toml/v2 v2.2.4
 	github.com/spf13/cobra v1.10.2
 	github.com/testcontainers/testcontainers-go v0.37.0
 )
+
+exclude github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar v0.0.0
 
 require (
 	dario.cat/mergo v1.0.1 // indirect
