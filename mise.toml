@@ -49,12 +49,14 @@ go test ./internal/fuzzy -run '^TestPrefetchWarmup$' -count=1 -timeout 0 -v
 '''
 
 [tasks."fuzzy:run"]
-description = "Run internal/fuzzy tests. Catalog open canvas when work-root warm. FUZZTIME=30s → -fuzz=FuzzMvOneOp on catalog (mute logs; needs prefetch)."
+description = "Unit/fuzzy tests. With FUZZTIME=10m runs catalog campaign (TestCatalogFuzzCampaign) with full failure context — not go -fuzz workers."
 env = { MISE_EXPERIMENTAL = "1" }
 run = '''
 export RFT_FUZZY_WORK_ROOT="${RFT_FUZZY_WORK_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/rft-fuzzy}"
-if [ -n "${FUZZTIME:-}" ]; then
-  go test ./internal/fuzzy -run '^$' -fuzz=FuzzMvOneOp -fuzztime="$FUZZTIME" -timeout 0
+if [ -n "${FUZZTIME:-}" ] || [ -n "${RFT_FUZZY_ITERATIONS:-}" ]; then
+  # Catalog open canvas with clear t.Log/t.Fatal output. go test -fuzz workers
+  # cannot run multi-minute setup/check and fail with exit 2 and no context.
+  go test ./internal/fuzzy -run '^TestCatalogFuzzCampaign$' -count=1 -timeout 0 -v
 else
   go test ./internal/fuzzy -count=1 -timeout 0 -v
 fi

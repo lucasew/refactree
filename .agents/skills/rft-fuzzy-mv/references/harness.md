@@ -28,8 +28,11 @@ res, err := fuzzy.Run(ctx, fuzzy.Options{
 
 # Open canvas = catalog only
 - Canvas: `testdata/fuzzy/projects.toml` (`mv.enabled`). Not `testdata/mv` fixtures.
-- `FuzzMvOneOp` / `TestCatalogMvSeedCorpus` / `fuzzy.Run` all target catalog projects.
-- Process logs muted under `-fuzz` (workers use stdout for IPC).
+- **Campaign (what FUZZTIME runs):** `TestCatalogFuzzCampaign` — normal `go test -v`,
+  random `PlanInput` until wall budget. Failures print plan/src/dst/err/scaffold.
+  **Not** `go test -fuzz` workers (those die with exit 2 and no useful context on
+  multi-second catalog setup/check).
+- Fixed seeds: `TestCatalogMvSeedCorpus` when work-root is warm and FUZZTIME unset.
 - Fixtures are **outputs** from bugs (`$TMPDIR/rft-fuzzy-fuzz-fail/…` → curate `testdata/mv`).
 - Shared decision surface: `fuzzy.PlanInput`.
 

@@ -2,88 +2,141 @@ package fuzzy
 
 import (
 	"fmt"
-	"io"
+	"math/rand"
 	"os"
 	"path/filepath"
-	"runtime/debug"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 )
 
-// FuzzMvOneOp stresses one catalog mv per execution (open canvas = projects.toml only).
-//
-// Requires a warm work-root (mise run fuzzy:prefetch). Skips when cold.
-//
-// Process logs are muted: go -fuzz workers own stdout for IPC; harness/git/mise
-// output there aborts the worker with exit status 2.
+// TestCatalogFuzzCampaign is the open-canvas stress loop: warm catalog only,
+// random PlanInput, full setup/mv/check. Failures print the plan and write a
+// scaffold — no go -fuzz workers (those own stdout and die with exit 2 on
+// multi-second host/docker work, with no useful failure text).
 //
 //	mise run fuzzy:prefetch
-//	FUZZTIME=30s mise run fuzzy:run
-//	# or: go test ./internal/fuzzy -run '^$' -fuzz=FuzzMvOneOp -fuzztime=30s
+//	RFT_FUZZY_WORK_ROOT=… RFT_FUZZY_NO_ISOLATE=1 FUZZTIME=10m mise run fuzzy:run
 //
-// Fixtures are curated from bugs ($TMPDIR/rft-fuzzy-fuzz-fail/…), not used as canvas.
-func FuzzMvOneOp(f *testing.F) {
-	restore := MuteProcessLogs()
-	f.Cleanup(restore)
+// Env:
+//
+//	FUZZTIME          wall budget (Go duration, e.g. 10m, 30s). Default 1m if set empty with campaign forced.
+//	RFT_FUZZY_ITERATIONS  optional hard cap on attempts (0 = only time budget)
+//	RFT_FUZZY_SEED        RNG seed (default 1)
+func TestCatalogFuzzCampaign(t *testing.T) {
+	budget, iterations, ok := campaignBudget()
+	if !ok {
+		t.Skip("set FUZZTIME (e.g. 10m) or RFT_FUZZY_ITERATIONS to run the catalog campaign")
+	}
 
 	noIsolate := truthy(os.Getenv("RFT_FUZZY_NO_ISOLATE"))
 	canvas, err := NewCatalogCanvas(DefaultWorkRoot(), DefaultCatalogPath(), noIsolate)
 	if err != nil {
-		f.Fatal(err)
+		t.Fatal(err)
 	}
-	canvas.Log = io.Discard
-	canvas.runner.Log = io.Discard
-	canvas.runner.Stdout = io.Discard
-	canvas.runner.Stderr = io.Discard
-
 	if err := canvas.Ready(); err != nil {
-		f.Skip("catalog canvas not warm (run: mise run fuzzy:prefetch): ", err)
+		t.Fatalf("catalog canvas not warm (run: mise run fuzzy:prefetch): %v", err)
 	}
 
-	for i := range canvas.Projects {
-		pi := uint8(i)
-		f.Add(pi, uint8(0), uint32(0), uint32(1), uint32(0))
-		f.Add(pi, uint8(1), uint32(1), uint32(2), uint32(1))
-		f.Add(pi, uint8(2), uint32(3), uint32(4), uint32(2))
-	}
-
-	f.Fuzz(func(t *testing.T, projectIdx, opIdx uint8, entityIdx, entropy, fileIdx uint32) {
-		defer func() {
-			if rec := recover(); rec != nil {
-				t.Fatalf("panic: %v\n%s", rec, debug.Stack())
-			}
-		}()
-
-		in := PlanInput{
-			OpIndex:     opIdx,
-			EntityIndex: entityIdx,
-			Entropy:     entropy,
-			FileIndex:   fileIdx,
+	seed := int64(1)
+	if s := strings.TrimSpace(os.Getenv("RFT_FUZZY_SEED")); s != "" {
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			t.Fatalf("RFT_FUZZY_SEED: %v", err)
 		}
-		p := canvas.Project(int(projectIdx))
-		scaffold := filepath.Join(os.TempDir(), "rft-fuzzy-fuzz-fail",
-			fmt.Sprintf("%s-%d-%d-%d-%d", p.ID, opIdx, entityIdx, entropy, fileIdx))
+		seed = n
+	}
+	rng := rand.New(rand.NewSource(seed))
 
-		res := canvas.Attempt(t.Context(), int(projectIdx), in, scaffold)
-		switch res.Class {
-		case classUnsupported, "pass", classEnv:
-			// env = infra; unsupported = expected limits. Soft-return (no t.Skip).
-			if res.Class == classEnv && res.Err != nil {
-				t.Log("env soft-skip: ", res.Err)
-			}
+	deadline := time.Now().Add(budget)
+	t.Logf("catalog campaign: projects=%d budget=%s iterations_cap=%d seed=%d work_root=%s no_isolate=%v",
+		len(canvas.Projects), budget, iterations, seed, DefaultWorkRoot(), noIsolate)
+
+	for attempt := 1; ; attempt++ {
+		if iterations > 0 && attempt > iterations {
+			t.Logf("stopped: hit RFT_FUZZY_ITERATIONS=%d", iterations)
 			return
-		case classBug:
-			t.Fatalf("catalog=%s plan=%s %s -> %s: %v (scaffold %s; curate into testdata/mv)",
-				p.ID, res.Plan.Op, res.Plan.Src, res.Plan.Dst, res.Err, scaffold)
-		default:
-			t.Fatalf("unexpected class %q: %v", res.Class, res.Err)
 		}
-	})
+		if time.Now().After(deadline) {
+			t.Logf("stopped: FUZZTIME budget %s after %d attempts", budget, attempt-1)
+			return
+		}
+
+		projectIdx := rng.Intn(len(canvas.Projects))
+		in := PlanInputFromRand(rng)
+		p := canvas.Project(projectIdx)
+		name := fmt.Sprintf("attempt=%d project=%s op_idx=%d entity_idx=%d entropy=%d file_idx=%d",
+			attempt, p.ID, in.OpIndex, in.EntityIndex, in.Entropy, in.FileIndex)
+
+		t.Run(name, func(t *testing.T) {
+			scaffold := filepath.Join(os.TempDir(), "rft-fuzzy-fuzz-fail",
+				fmt.Sprintf("%s-%d-%d-%d", p.ID, in.OpIndex, in.EntityIndex, in.Entropy))
+
+			// Full choose/result lines to the test log (visible with -v).
+			res := canvas.Attempt(t.Context(), projectIdx, in, scaffold)
+			t.Logf("result class=%s plan op=%s\n  src=%s\n  dst=%s\n  err=%v\n  scaffold=%s",
+				res.Class, res.Plan.Op, res.Plan.Src, res.Plan.Dst, res.Err, scaffold)
+
+			switch res.Class {
+			case classUnsupported, "pass", classEnv:
+				if res.Class == classEnv && res.Err != nil {
+					t.Logf("env soft-skip: %v", res.Err)
+				}
+				return
+			case classBug:
+				t.Fatalf("BUG catalog=%s op=%s\n  src=%s\n  dst=%s\n  err=%v\n  scaffold=%s (curate into testdata/mv)",
+					p.ID, res.Plan.Op, res.Plan.Src, res.Plan.Dst, res.Err, scaffold)
+			default:
+				t.Fatalf("unexpected class %q: %v", res.Class, res.Err)
+			}
+		})
+		if t.Failed() {
+			return
+		}
+	}
 }
 
-// TestCatalogMvSeedCorpus runs the same seed matrix as FuzzMvOneOp f.Add entries
-// as normal subtests (no fuzz worker). Useful when you want catalog coverage
-// without -fuzz.
+// campaignBudget parses FUZZTIME / RFT_FUZZY_ITERATIONS. ok=false → skip campaign.
+func campaignBudget() (budget time.Duration, iterations int, ok bool) {
+	rawT := strings.TrimSpace(os.Getenv("FUZZTIME"))
+	rawN := strings.TrimSpace(os.Getenv("RFT_FUZZY_ITERATIONS"))
+	if rawT == "" && rawN == "" {
+		return 0, 0, false
+	}
+	if rawT != "" {
+		d, err := time.ParseDuration(rawT)
+		if err != nil {
+			// bare number → seconds (common mistake)
+			if n, err2 := strconv.Atoi(rawT); err2 == nil && n > 0 {
+				d = time.Duration(n) * time.Second
+			} else {
+				d = time.Minute
+			}
+		}
+		if d <= 0 {
+			d = time.Minute
+		}
+		budget = d
+	} else {
+		budget = 24 * time.Hour // iterations-only mode
+	}
+	if rawN != "" {
+		n, err := strconv.Atoi(rawN)
+		if err == nil && n > 0 {
+			iterations = n
+		}
+	}
+	return budget, iterations, true
+}
+
+// TestCatalogMvSeedCorpus runs a fixed seed matrix on warm catalog projects
+// (normal go test, no -fuzz workers).
 func TestCatalogMvSeedCorpus(t *testing.T) {
+	if strings.TrimSpace(os.Getenv("FUZZTIME")) != "" || strings.TrimSpace(os.Getenv("RFT_FUZZY_ITERATIONS")) != "" {
+		t.Skip("FUZZTIME/RFT_FUZZY_ITERATIONS set: use TestCatalogFuzzCampaign")
+	}
+
 	noIsolate := truthy(os.Getenv("RFT_FUZZY_NO_ISOLATE"))
 	canvas, err := NewCatalogCanvas(DefaultWorkRoot(), DefaultCatalogPath(), noIsolate)
 	if err != nil {
@@ -113,6 +166,8 @@ func TestCatalogMvSeedCorpus(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			scaffold := filepath.Join(os.TempDir(), "rft-fuzzy-fuzz-fail", name)
 			res := canvas.Attempt(t.Context(), s.projectIdx, s.in, scaffold)
+			t.Logf("class=%s op=%s src=%s dst=%s err=%v",
+				res.Class, res.Plan.Op, res.Plan.Src, res.Plan.Dst, res.Err)
 			switch res.Class {
 			case classUnsupported, "pass", classEnv:
 				if res.Class == classEnv && res.Err != nil {
