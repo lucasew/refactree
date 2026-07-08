@@ -3,6 +3,8 @@ package svelte
 import (
 	"path"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/lucasew/ccgo-tree-sitter/grammar"
 	_ "github.com/lucasew/ccgo-tree-sitter/grammar/javascript"
@@ -14,7 +16,7 @@ import (
 
 func init() {
 	// Honest language id "svelte". Component file is the module.
-	// Script bodies are re-parsed as ECMA (JS/TS via lang= attribute).
+	// Script bodies and markup expressions are re-parsed as ECMA (JS/TS).
 	ingest.RegisterLanguageDriver("svelte", languageDriver{})
 	ingest.RegisterLanguageRules("svelte", ingest.LanguageRules{
 		Extensions:      []string{".svelte"},
@@ -54,20 +56,44 @@ func extractSvelte(root *grammar.Node, source []byte, relPath string) *ingest.Fi
 	if root == nil {
 		return fe
 	}
-	var walk func(n *grammar.Node)
-	walk = func(n *grammar.Node) {
+	// Default script grammar for the file; first <script lang=…> wins for markup expr parsing.
+	scriptGrammar := "javascript"
+
+	var walk func(n *grammar.Node, inScript bool)
+	walk = func(n *grammar.Node, inScript bool) {
 		if n == nil {
 			return
 		}
-		if n.Type() == "script_element" {
+		switch n.Type() {
+		case "script_element":
+			lang := scriptLangAttr(n, source)
+			if g := js.GrammarNameForScriptLang(lang); g != "" {
+				scriptGrammar = g
+			}
 			mergeScript(fe, n, source, relPath)
+			// Do not walk into script raw_text again as markup.
 			return
-		}
-		for i := uint32(0); i < n.ChildCount(); i++ {
-			walk(n.Child(i))
+		case "style_element":
+			// CSS: ignore for symbol graph.
+			return
+		case "svelte_raw_text":
+			if inScript {
+				return
+			}
+			mergeMarkupExpression(fe, n, source, scriptGrammar)
+			return
+		case "tag_name":
+			if !inScript {
+				mergeComponentTag(fe, n, source)
+			}
+			return
+		default:
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				walk(n.Child(i), inScript)
+			}
 		}
 	}
-	walk(root)
+	walk(root, false)
 	return fe
 }
 
@@ -118,6 +144,77 @@ func mergeScript(fe *ingest.FileExtract, scriptEl *grammar.Node, source []byte, 
 	if sub.DefaultExport != "" && fe.DefaultExport == "" {
 		fe.DefaultExport = sub.DefaultExport
 	}
+}
+
+// mergeMarkupExpression parses {…} / #each / #if expression text and records usages.
+func mergeMarkupExpression(fe *ingest.FileExtract, raw *grammar.Node, source []byte, grammarName string) {
+	start := raw.StartByte()
+	end := raw.EndByte()
+	if end > uint32(len(source)) {
+		end = uint32(len(source))
+	}
+	if start >= end {
+		return
+	}
+	expr := source[start:end]
+	// Skip pure whitespace / numeric literals (e.g. size={18}).
+	trim := strings.TrimSpace(string(expr))
+	if trim == "" || isAllDigits(trim) {
+		return
+	}
+	usages, err := js.ExtractECMAExpressionUsages(expr, grammarName)
+	if err != nil {
+		return
+	}
+	for _, u := range usages {
+		u.StartByte += start
+		u.EndByte += start
+		if u.QualStartByte != 0 || u.QualEndByte != 0 {
+			u.QualStartByte += start
+			u.QualEndByte += start
+		}
+		fe.Usages = append(fe.Usages, u)
+	}
+}
+
+// mergeComponentTag records PascalCase tags as component references (e.g. <Search />).
+func mergeComponentTag(fe *ingest.FileExtract, tag *grammar.Node, source []byte) {
+	name := ingest.NodeText(tag, source)
+	if name == "" || !isComponentTagName(name) {
+		return
+	}
+	fe.Usages = append(fe.Usages, ingest.UsageDef{
+		Name:      name,
+		StartByte: tag.StartByte(),
+		EndByte:   tag.EndByte(),
+	})
+}
+
+func isComponentTagName(name string) bool {
+	// Svelte/custom components are conventionally PascalCase (or dotted Foo.Bar).
+	r, _ := utf8.DecodeRuneInString(name)
+	if r == utf8.RuneError || !unicode.IsUpper(r) {
+		return false
+	}
+	switch strings.ToLower(name) {
+	case "svelte:head", "svelte:window", "svelte:body", "svelte:element", "svelte:component",
+		"svelte:self", "svelte:fragment", "svelte:options", "slot":
+		return false
+	default:
+		return true
+	}
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func scriptLangAttr(scriptEl *grammar.Node, source []byte) string {

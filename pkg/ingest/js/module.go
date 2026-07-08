@@ -945,3 +945,99 @@ func ExtractECMAScript(script []byte, grammarName, relPath string) (*ingest.File
 func ResolveECMAImport(sourcePath string, ctx ingest.ImportResolveContext) string {
 	return (languageDriver{}).ResolveImport(sourcePath, ctx)
 }
+
+
+// ExtractECMAExpressionUsages parses a short expression (markup {…}, attribute
+// values, #each/#if heads) and returns identifier/member usages with offsets
+// relative to the expression source.
+func ExtractECMAExpressionUsages(expr []byte, grammarName string) ([]ingest.UsageDef, error) {
+	if len(bytesTrimSpace(expr)) == 0 {
+		return nil, nil
+	}
+	if grammarName == "" {
+		grammarName = "javascript"
+	}
+	lang, ok := grammar.Get(grammarName)
+	if !ok {
+		return nil, fmt.Errorf("unknown grammar %q", grammarName)
+	}
+	parser := grammar.NewParser()
+	defer parser.Delete()
+	if !parser.SetLanguage(lang) {
+		return nil, fmt.Errorf("failed to set grammar %q", grammarName)
+	}
+	tree := parser.ParseString(string(expr))
+	defer tree.Delete()
+	var usages []ingest.UsageDef
+	var walk func(n *grammar.Node, skipIdent bool)
+	walk = func(n *grammar.Node, skipIdent bool) {
+		if n == nil {
+			return
+		}
+		switch n.Type() {
+		case "member_expression", "optional_chain", "member_expression_optional":
+			// tree-sitter-typescript uses member_expression; property may be property_identifier.
+			obj := ingest.ChildByField(n, "object")
+			prop := ingest.ChildByField(n, "property")
+			if obj != nil {
+				walk(obj, false)
+			}
+			if prop != nil {
+				switch prop.Type() {
+				case "property_identifier", "identifier", "private_property_identifier":
+					usages = append(usages, ingest.UsageDef{
+						Name:          ingest.NodeText(prop, expr),
+						StartByte:     prop.StartByte(),
+						EndByte:       prop.EndByte(),
+						Qualifier:     ingest.NodeText(obj, expr),
+						QualStartByte: obj.StartByte(),
+						QualEndByte:   obj.EndByte(),
+					})
+				default:
+					walk(prop, false)
+				}
+			}
+			return
+		case "identifier":
+			if skipIdent {
+				return
+			}
+			name := ingest.NodeText(n, expr)
+			if name == "" || isECMAKeyword(name) {
+				return
+			}
+			usages = append(usages, ingest.UsageDef{
+				Name:      name,
+				StartByte: n.StartByte(),
+				EndByte:   n.EndByte(),
+			})
+			return
+		case "string", "template_string", "number", "true", "false", "null", "undefined",
+			"comment", "regex":
+			return
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i), false)
+		}
+	}
+	walk(tree.RootNode(), false)
+	return usages, nil
+}
+
+func bytesTrimSpace(b []byte) []byte {
+	return []byte(strings.TrimSpace(string(b)))
+}
+
+func isECMAKeyword(name string) bool {
+	switch name {
+	case "true", "false", "null", "undefined", "this", "super", "new", "typeof", "void",
+		"delete", "in", "instanceof", "await", "yield", "as", "satisfies", "is", "keyof",
+		"readonly", "infer", "any", "never", "unknown", "string", "number", "boolean",
+		"object", "symbol", "bigint", "const", "let", "var", "function", "class", "return",
+		"if", "else", "for", "while", "do", "switch", "case", "break", "continue", "try",
+		"catch", "finally", "throw", "import", "export", "default", "from", "of", "async":
+		return true
+	default:
+		return false
+	}
+}
