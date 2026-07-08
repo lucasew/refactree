@@ -6,9 +6,9 @@ import (
 	"path"
 	"strings"
 
+	"github.com/lucasew/refactree/pkg/ingest"
 	"github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar"
 	_ "github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/java"
-	"github.com/lucasew/refactree/pkg/ingest"
 )
 
 func init() {

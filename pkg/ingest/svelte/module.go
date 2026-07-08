@@ -6,12 +6,12 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/lucasew/refactree/pkg/ingest"
+	"github.com/lucasew/refactree/pkg/ingest/js"
 	"github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar"
 	_ "github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/javascript"
 	_ "github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/svelte"
 	_ "github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/typescript"
-	"github.com/lucasew/refactree/pkg/ingest"
-	"github.com/lucasew/refactree/pkg/ingest/js"
 )
 
 func init() {

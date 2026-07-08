@@ -5,8 +5,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar"
 	"github.com/lucasew/refactree/pkg/ingest"
+	"github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar"
 )
 
 func init() {
