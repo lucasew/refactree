@@ -9,8 +9,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/lucasew/ccgo-tree-sitter/grammar"
-	_ "github.com/lucasew/ccgo-tree-sitter/grammar/go"
+	"github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar"
+	_ "github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/go"
 	"github.com/lucasew/refactree/pkg/ingest"
 	refpkg "github.com/lucasew/refactree/pkg/reference"
 	goref "github.com/lucasew/refactree/pkg/reference/go"

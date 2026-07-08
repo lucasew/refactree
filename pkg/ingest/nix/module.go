@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/lucasew/ccgo-tree-sitter/grammar"
-	_ "github.com/lucasew/ccgo-tree-sitter/grammar/nix"
+	"github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar"
+	_ "github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/nix"
 	"github.com/lucasew/refactree/pkg/ingest"
 	refpkg "github.com/lucasew/refactree/pkg/reference"
 	nixref "github.com/lucasew/refactree/pkg/reference/nix"

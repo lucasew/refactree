@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	_ "github.com/lucasew/ccgo-tree-sitter/grammar/javascript"
-	_ "github.com/lucasew/ccgo-tree-sitter/grammar/tsx"
-	_ "github.com/lucasew/ccgo-tree-sitter/grammar/typescript"
+	_ "github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/javascript"
+	_ "github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/tsx"
+	_ "github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/typescript"
 
 	"github.com/lucasew/refactree/pkg/ingest"
 	_ "github.com/lucasew/refactree/pkg/ingest/js"

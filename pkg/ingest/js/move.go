@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/lucasew/ccgo-tree-sitter/grammar"
+	"github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar"
 	"github.com/lucasew/refactree/pkg/ingest"
 )
 

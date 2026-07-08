@@ -1,6 +1,6 @@
 package ingest
 
-import "github.com/lucasew/ccgo-tree-sitter/grammar"
+import "github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar"
 
 // NodeText returns the source text covered by a node.
 func NodeText(n *grammar.Node, source []byte) string {
