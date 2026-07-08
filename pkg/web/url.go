@@ -21,16 +21,15 @@ func EncodeCodeURL(ref string) string {
 	return encodeCodeURLRef(ref)
 }
 
-// EncodeCodeURLInRoot is EncodeCodeURL after ingest.CanonicalizeReference(rootDir, …).
+// EncodeCodeURLInRoot builds a code URL for a reference in a project.
+//
+// It intentionally does NOT call CanonicalizeReference: that runs IngestForFile
+// and following import aliases into node_modules can take tens of seconds per
+// hyperlink during annotate. The page request already canonicalizes the primary
+// ref; link targets use the references produced by the current ingest result.
 func EncodeCodeURLInRoot(rootDir, ref string) string {
-	ref = strings.TrimSpace(ref)
-	if ref == "" {
-		return CodePathPrefix
-	}
-	parsed := ingest.ParseReference(ref)
-	parsed = ingest.CanonicalizeReference(rootDir, parsed)
-	ref = parsed.String()
-	return encodeCodeURLRef(ref)
+	_ = rootDir
+	return EncodeCodeURL(ref)
 }
 
 func encodeCodeURLRef(ref string) string {
