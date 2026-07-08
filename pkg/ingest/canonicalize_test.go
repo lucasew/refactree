@@ -95,3 +95,21 @@ func TestCanonicalizePathReference_StillDirectoryOnly(t *testing.T) {
 		t.Fatalf("path-only canonicalize should not set symbol, got %q", got.String())
 	}
 }
+
+func TestCanonicalizeReference_DefaultAsNamedReexport(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "barrel.js"), []byte(
+		"export { default as Search } from './search.js';\n",
+	), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "search.js"), []byte(
+		"export default function Search() {}\n",
+	), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got := CanonicalizeReference(root, ParseReference("path:./barrel.js::Search"))
+	if got.String() != "path:./search.js::Search" {
+		t.Fatalf("got %q want path:./search.js::Search", got.String())
+	}
+}

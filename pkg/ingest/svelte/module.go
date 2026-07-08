@@ -94,7 +94,42 @@ func extractSvelte(root *grammar.Node, source []byte, relPath string) *ingest.Fi
 		}
 	}
 	walk(root, false)
+
+	// Svelte SFC default export is the component itself when script has no
+	// explicit default (lucide icons, most components).
+	if fe.DefaultExport == "" {
+		if name := componentNameFromPath(relPath); name != "" {
+			fe.DefaultExport = name
+		}
+	}
 	return fe
+}
+
+func componentNameFromPath(relPath string) string {
+	base := path.Base(relPath)
+	base = strings.TrimSuffix(base, path.Ext(base))
+	if base == "" || base == "." {
+		return ""
+	}
+	// kebab-case / snake_case → PascalCase (search → Search, search-check → SearchCheck)
+	parts := strings.FieldsFunc(base, func(r rune) bool {
+		return r == '-' || r == '_' || r == '.'
+	})
+	var b strings.Builder
+	for _, p := range parts {
+		if p == "" {
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(p)
+		if r == utf8.RuneError {
+			continue
+		}
+		b.WriteRune(unicode.ToUpper(r))
+		if len(p) > size {
+			b.WriteString(p[size:])
+		}
+	}
+	return b.String()
 }
 
 func mergeScript(fe *ingest.FileExtract, scriptEl *grammar.Node, source []byte, relPath string) {

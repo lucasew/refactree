@@ -45,12 +45,25 @@ func CanonicalizeReference(rootDir string, ref Reference) Reference {
 		ref = canonicalizeDirectoryModule(rootAbs, ref)
 	}
 
-	result, ok := ingestForCanonicalize(rootAbs, ref)
-	if !ok || result == nil {
-		return ref
+	// Re-seed ingest when a hop lands on a new path (barrel → implementation file)
+	// without pulling every reexport target into one giant Result.
+	const maxOuter = 16
+	for hop := 0; hop < maxOuter; hop++ {
+		result, ok := ingestForCanonicalize(rootAbs, ref)
+		if !ok || result == nil {
+			return projectToInputProvider(origProvider, origPath, ref)
+		}
+		next := CanonicalizeInResult(result, ref)
+		if next.String() == ref.String() {
+			return projectToInputProvider(origProvider, origPath, next)
+		}
+		// Same path refined to a definition — done.
+		if sameScopePath(ref, next) {
+			return projectToInputProvider(origProvider, origPath, next)
+		}
+		ref = next
 	}
-	out := CanonicalizeInResult(result, ref)
-	return projectToInputProvider(origProvider, origPath, out)
+	return projectToInputProvider(origProvider, origPath, ref)
 }
 
 // CanonicalizeInResult walks only the provider-agnostic ingest graph (Entities,
@@ -103,6 +116,21 @@ func CanonicalizeInResult(result *Result, ref Reference) Reference {
 		if next, ok := followAliasForward(result, ref); ok {
 			ref = next
 			continue
+		}
+
+		// ESM "default" often means the module's primary export (DefaultExport alias
+		// or sole entity), not a symbol literally named "default".
+		if ref.Symbol == "default" {
+			bare := ref
+			bare.Symbol = ""
+			if next, ok := followSameScopeSymbolAlias(result, bare); ok {
+				ref = next
+				continue
+			}
+			if next, ok := soleEntityInScope(result, bare); ok {
+				ref = next
+				continue
+			}
 		}
 
 		if ent, ok := soleEntityNamed(result, ref.Symbol); ok {
@@ -279,12 +307,23 @@ func followAliasForward(result *Result, ref Reference) (Reference, bool) {
 		if !sameScopePath(ref, ar) {
 			continue
 		}
+		// Named reexport/import binding: alias reference carries the local export name.
+		if ar.Symbol != "" {
+			if ref.Symbol == "" || ar.Symbol != ref.Symbol {
+				continue
+			}
+			return ParseReference(a.Target), true
+		}
 		tr := ParseReference(a.Target)
-		if tr.Symbol == ref.Symbol {
+		// Legacy/module-level alias whose target already names the requested symbol
+		// (e.g. file → other::Search).
+		if ref.Symbol != "" && tr.Symbol == ref.Symbol {
 			return tr, true
 		}
-		// Star/module forward: alias target is a module/file without symbol.
-		if ref.Symbol != "" && tr.Symbol == "" {
+		// Star re-export only: zero-span module→module forward (export * from).
+		// Import bindings also use file-scoped aliases with spans — do not treat
+		// those as star hops for arbitrary symbols (would send default→wrong module).
+		if ref.Symbol != "" && ar.Symbol == "" && tr.Symbol == "" && a.StartByte == 0 && a.EndByte == 0 {
 			tr.Symbol = ref.Symbol
 			if !hasStar {
 				starHop = tr

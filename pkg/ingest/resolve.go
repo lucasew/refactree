@@ -104,23 +104,47 @@ func resolve(rootDir string, extracts []*FileExtract) *Result {
 
 		// Re-exports / barrels: record as Aliases (zero span) so CanonicalizeInResult
 		// can follow hops using only the provider-agnostic Result graph.
+		//
+		// Named: Reference is this module's export name (path:./barrel.js::Search).
+		// Star:  Reference is the module file; Target is the source module (no symbol).
 		for _, re := range fe.Reexports {
 			base := re.SourcePath
 			if hasDriver {
 				base = driver.ResolveImport(re.SourcePath, ctx)
 			}
-			target := base
-			if !re.Star {
-				name := re.SourceName
-				if name == "" {
-					name = re.ExportName
-				}
-				if name != "" {
-					target = base + "::" + name
-				}
+			// Normalize resolved path:./file or bare path into a path reference string.
+			baseRef := ParseReference(base)
+			if baseRef.Provider == "" {
+				baseRef = ParseReference(FileRef(strings.TrimPrefix(base, "path:")))
+			}
+			if baseRef.Provider == "" {
+				baseRef.Provider = "path"
+			}
+			if re.Star {
+				res.Aliases = append(res.Aliases, Alias{
+					Reference: FileRef("./" + fe.Path),
+					Target:    FileRef(baseRef.Path),
+				})
+				continue
+			}
+			exportName := re.ExportName
+			if exportName == "" {
+				exportName = re.SourceName
+			}
+			sourceName := re.SourceName
+			if sourceName == "" {
+				sourceName = exportName
+			}
+			if exportName == "" {
+				continue
+			}
+			target := FileRef(baseRef.Path)
+			if sourceName != "" {
+				// export { default as Search } → target …::default (or file::SourceName).
+				target = SymbolRef(baseRef.Path, sourceName)
 			}
 			res.Aliases = append(res.Aliases, Alias{
-				Reference: FileRef("./" + fe.Path),
+				Reference: SymbolRef("./"+fe.Path, exportName),
 				Target:    target,
 			})
 		}

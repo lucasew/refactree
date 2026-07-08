@@ -73,15 +73,11 @@ func IngestForFile(rootDir, seedPath string) (*Result, error) {
 		}
 		extracts = append(extracts, fe)
 
-		// Inside dependency trees: follow relative import/reexport hops only
-		// (for canonicalize through barrels). Do NOT list peer files — that
-		// pulls entire package trees and can take tens of seconds per page.
+		// Inside dependency trees: do not expand neighbors. Reexport aliases on
+		// this file alone carry hop targets; CanonicalizeReference re-seeds the
+		// next path. Following every `export { default as X } from './x'` in a
+		// lucide-style barrel loads thousands of files.
 		if isVendoredPath(rootAbs, absPath) {
-			for _, neigh := range relativeImportNeighbors(rootAbs, fe) {
-				if !seen[neigh] {
-					queue = append(queue, neigh)
-				}
-			}
 			continue
 		}
 
