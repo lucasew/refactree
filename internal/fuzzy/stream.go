@@ -7,7 +7,25 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 )
+
+// processLogPassthrough controls whether command streams are also written to the
+// real process stdout/stderr. Must be off inside go test -fuzz workers: they use
+// stdout for a binary protocol, and any harness/mise/git spam causes
+// "fuzzing process hung or terminated unexpectedly: exit status 2".
+var processLogPassthrough atomic.Bool
+
+func init() {
+	processLogPassthrough.Store(true)
+}
+
+// MuteProcessLogs disables teeing to os.Stdout/os.Stderr (fuzz workers).
+// Returns a restore function.
+func MuteProcessLogs() (restore func()) {
+	prev := processLogPassthrough.Swap(false)
+	return func() { processLogPassthrough.Store(prev) }
+}
 
 // flushWriter writes through and Syncs when possible so go test / pipes show
 // output promptly instead of holding large blocks.
@@ -30,6 +48,9 @@ func liveOrStdout(w io.Writer) io.Writer {
 	if w != nil {
 		return flushWriter{w}
 	}
+	if !processLogPassthrough.Load() {
+		return flushWriter{io.Discard}
+	}
 	return flushWriter{os.Stdout}
 }
 
@@ -37,13 +58,20 @@ func liveOrStderr(w io.Writer) io.Writer {
 	if w != nil {
 		return flushWriter{w}
 	}
+	if !processLogPassthrough.Load() {
+		return flushWriter{io.Discard}
+	}
 	return flushWriter{os.Stderr}
 }
 
-// passthroughOut always tees to the process stdout so go test / pipes show
-// command logs even when the harness writer is a buffer or io.Discard.
+// passthroughOut tees to the process stdout when passthrough is enabled so
+// normal go test / pipes show command logs even if the harness writer is a buffer.
+// When muted (fuzz), only `w` receives bytes (use io.Discard to silence).
 func passthroughOut(w io.Writer) io.Writer {
 	fw := liveOrStdout(w)
+	if !processLogPassthrough.Load() {
+		return fw
+	}
 	if w == nil || w == os.Stdout {
 		return fw
 	}
@@ -52,6 +80,9 @@ func passthroughOut(w io.Writer) io.Writer {
 
 func passthroughErr(w io.Writer) io.Writer {
 	fw := liveOrStderr(w)
+	if !processLogPassthrough.Load() {
+		return fw
+	}
 	if w == nil || w == os.Stderr {
 		return fw
 	}
@@ -80,6 +111,9 @@ func runStreamingCombined(cmd *exec.Cmd, live io.Writer) (combined string, err e
 
 func logCmdLine(w io.Writer, argv ...string) {
 	if w == nil {
+		if !processLogPassthrough.Load() {
+			return
+		}
 		w = os.Stdout
 	}
 	fmt.Fprintf(liveOrStdout(w), "+ %s\n", strings.Join(argv, " "))

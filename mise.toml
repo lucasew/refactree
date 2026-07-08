@@ -49,12 +49,12 @@ go test ./internal/fuzzy -run '^TestPrefetchWarmup$' -count=1 -timeout 0 -v
 '''
 
 [tasks."fuzzy:run"]
-description = "Run all internal/fuzzy tests. Set FUZZTIME (e.g. 30s) for -fuzz=FuzzMvOneOp."
+description = "Run internal/fuzzy tests. Catalog open canvas when work-root warm. FUZZTIME=30s → -fuzz=FuzzMvOneOp on catalog (mute logs; needs prefetch)."
 env = { MISE_EXPERIMENTAL = "1" }
 run = '''
 export RFT_FUZZY_WORK_ROOT="${RFT_FUZZY_WORK_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/rft-fuzzy}"
 if [ -n "${FUZZTIME:-}" ]; then
-  go test ./internal/fuzzy -fuzz=FuzzMvOneOp -fuzztime="$FUZZTIME" -timeout 0 -v
+  go test ./internal/fuzzy -run '^$' -fuzz=FuzzMvOneOp -fuzztime="$FUZZTIME" -timeout 0
 else
   go test ./internal/fuzzy -count=1 -timeout 0 -v
 fi

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"sync"
 )
 
@@ -88,12 +89,7 @@ func NewCatalogCanvas(workRoot, catalogPath string, noIsolate bool) (*CatalogCan
 func (c *CatalogCanvas) Ready() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.ready {
-		return c.readyEr
-	}
-	c.readyEr = ValidateOfflineReady(c.Workspace, c.Projects, c.NoIsolate)
-	c.ready = true
-	return c.readyEr
+	return c.readyLocked()
 }
 
 // Project returns projects[i%len] for fuzz projectIdx.
@@ -111,9 +107,18 @@ func (c *CatalogCanvas) Project(i int) Project {
 // from PlanInput, post-ingest invariants, then the project's catalog check
 // (build/test via mise isolate or host). On bug-class failures, scaffoldDir
 // receives a fixture scaffold for later curation into testdata/mv or ingest.
+//
+// Serialized: bare git caches are not safe for concurrent worktree add/remove
+// (Go fuzz workers share this canvas).
 func (c *CatalogCanvas) Attempt(ctx context.Context, projectIdx int, in PlanInput, scaffoldDir string) MvAttemptResult {
-	if err := c.Ready(); err != nil {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if err := c.readyLocked(); err != nil {
 		return MvAttemptResult{Class: classEnv, Err: fmt.Errorf("canvas not ready: %w", err)}
+	}
+	if err := ctx.Err(); err != nil {
+		return MvAttemptResult{Class: classEnv, Err: err}
 	}
 	p := c.Project(projectIdx)
 
@@ -122,10 +127,10 @@ func (c *CatalogCanvas) Attempt(ctx context.Context, projectIdx int, in PlanInpu
 	if err != nil {
 		return MvAttemptResult{Class: classEnv, Err: fmt.Errorf("prepare %s: %w", p.ID, err)}
 	}
-	// Best-effort cleanup of the disposable worktree after the attempt.
-	defer func() {
-		_ = os.RemoveAll(workDir)
-	}()
+	cache := c.Workspace.cachePath(p.ID)
+	// Proper worktree teardown — plain RemoveAll leaves the bare repo corrupted
+	// and can abort later seeds (fuzz worker "terminated unexpectedly").
+	defer removeGitWorktree(cache, workDir)
 
 	root := ProjectRoot(workDir, p)
 	if err := ApplyProjectMise(p, root); err != nil {
@@ -145,7 +150,11 @@ func (c *CatalogCanvas) Attempt(ctx context.Context, projectIdx int, in PlanInpu
 	}
 
 	ingestRoot := primaryIngestRoot(p, workDir)
-	res := RunMvAttempt(ctx, p, ingestRoot, in, c.Strict, nil)
+	log := c.Log
+	if log == nil {
+		log = os.Stdout
+	}
+	res := RunMvAttempt(ctx, p, ingestRoot, in, c.Strict, nil, log)
 	if res.Class != "pass" {
 		if res.Class == classBug && scaffoldDir != "" {
 			_ = ScaffoldAttempt(ingestRoot, scaffoldDir, res)
@@ -157,10 +166,37 @@ func (c *CatalogCanvas) Attempt(ctx context.Context, projectIdx int, in PlanInpu
 	if !check.OK() {
 		res.Class = classBug
 		res.Err = fmt.Errorf("catalog check after %s %s -> %s: %s", res.Plan.Op, res.Plan.Src, res.Plan.Dst, shortRunErr(check))
+		fmt.Fprintf(log, "mv result: project=%s class=bug catalog_check=%s\n", p.ID, shortRunErr(check))
 		if scaffoldDir != "" {
 			_ = ScaffoldAttempt(ingestRoot, scaffoldDir, res)
 		}
 		return res
 	}
+	fmt.Fprintf(log, "mv result: project=%s class=pass op=%s (catalog check ok)\n", p.ID, res.Plan.Op)
 	return res
+}
+
+// readyLocked is Ready() with c.mu already held.
+func (c *CatalogCanvas) readyLocked() error {
+	if c.ready {
+		return c.readyEr
+	}
+	c.readyEr = ValidateOfflineReady(c.Workspace, c.Projects, c.NoIsolate)
+	c.ready = true
+	return c.readyEr
+}
+
+// removeGitWorktree unregisters a linked worktree then deletes the directory.
+func removeGitWorktree(bareCache, workDir string) {
+	if workDir == "" {
+		return
+	}
+	if bareCache != "" {
+		// Prefer git's own remove so the bare repo stays consistent.
+		cmd := exec.Command("git", "-C", bareCache, "worktree", "remove", "--force", workDir)
+		_ = cmd.Run()
+		prune := exec.Command("git", "-C", bareCache, "worktree", "prune")
+		_ = prune.Run()
+	}
+	_ = os.RemoveAll(workDir)
 }

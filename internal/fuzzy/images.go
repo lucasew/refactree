@@ -2,7 +2,6 @@ package fuzzy
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 )
@@ -36,9 +35,9 @@ func EnsureImages(refs []string, pull bool) error {
 		if !pull {
 			return fmt.Errorf("docker image %q not present locally (run prefetch warmup while online)", ref)
 		}
-		logCmdLine(os.Stdout, "docker", "pull", ref)
+		logCmdLine(nil, "docker", "pull", ref)
 		cmd := exec.Command("docker", "pull", ref)
-		out, err := runStreamingCombined(cmd, os.Stdout)
+		out, err := runStreamingCombined(cmd, nil)
 		if err != nil {
 			return fmt.Errorf("docker pull %s: %w\n%s", ref, err, out)
 		}

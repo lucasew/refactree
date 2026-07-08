@@ -26,10 +26,12 @@ res, err := fuzzy.Run(ctx, fuzzy.Options{
 })
 ```
 
-# Go native fuzz (testing.F)
-Canvas = **catalog** projects with `mv.enabled` (not `testdata/mv` fixtures).
-Fixtures are **outputs**: curate `testdata/mv` / `testdata/ingest` from bug scaffolds
-(`$TMPDIR/rft-fuzzy-fuzz-fail/…`). Shared surface: `fuzzy.PlanInput`.
+# Open canvas = catalog only
+- Canvas: `testdata/fuzzy/projects.toml` (`mv.enabled`). Not `testdata/mv` fixtures.
+- `FuzzMvOneOp` / `TestCatalogMvSeedCorpus` / `fuzzy.Run` all target catalog projects.
+- Process logs muted under `-fuzz` (workers use stdout for IPC).
+- Fixtures are **outputs** from bugs (`$TMPDIR/rft-fuzzy-fuzz-fail/…` → curate `testdata/mv`).
+- Shared decision surface: `fuzzy.PlanInput`.
 
 # Source of truth
 - Catalog: `testdata/fuzzy/projects.toml`

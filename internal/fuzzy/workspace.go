@@ -142,10 +142,10 @@ func (w *Workspace) prepareFresh(p Project, runID string, opts PrepareOptions) (
 	prune := exec.Command("git", "worktree", "prune", "--verbose")
 	prune.Dir = cache
 	_, _ = prune.CombinedOutput()
-	logCmdLine(os.Stdout, "git", "-C", cache, "worktree", "add", "--detach", "--force", workDir, p.Ref)
+	logCmdLine(nil, "git", "-C", cache, "worktree", "add", "--detach", "--force", workDir, p.Ref)
 	wt := exec.Command("git", "worktree", "add", "--detach", "--force", workDir, p.Ref)
 	wt.Dir = cache
-	if out, err := runStreamingCombined(wt, os.Stdout); err != nil {
+	if out, err := runStreamingCombined(wt, nil); err != nil {
 		return "", "", fmt.Errorf("git worktree add %s: %w\n%s", p.Ref, err, out)
 	}
 	commit, err = revParse(workDir, "HEAD")
@@ -362,15 +362,15 @@ func (w *Workspace) ensureBare(p Project, offline bool) error {
 // shallowBareClone creates a bare repo and fetches only ref at depth 1.
 // Works for full commit SHAs, tags, and branch names (GitHub and most forges).
 func shallowBareClone(url, cache, ref string) error {
-	logCmdLine(os.Stdout, "git", "init", "--bare", cache)
+	logCmdLine(nil, "git", "init", "--bare", cache)
 	initCmd := exec.Command("git", "init", "--bare", cache)
-	if out, err := runStreamingCombined(initCmd, os.Stdout); err != nil {
+	if out, err := runStreamingCombined(initCmd, nil); err != nil {
 		return fmt.Errorf("git init --bare: %w\n%s", err, out)
 	}
-	logCmdLine(os.Stdout, "git", "-C", cache, "remote", "add", "origin", url)
+	logCmdLine(nil, "git", "-C", cache, "remote", "add", "origin", url)
 	remoteCmd := exec.Command("git", "remote", "add", "origin", url)
 	remoteCmd.Dir = cache
-	if out, err := runStreamingCombined(remoteCmd, os.Stdout); err != nil {
+	if out, err := runStreamingCombined(remoteCmd, nil); err != nil {
 		return fmt.Errorf("git remote add: %w\n%s", err, out)
 	}
 	if err := shallowFetchPin(cache, ref); err != nil {
@@ -390,14 +390,14 @@ func shallowFetchPin(cache, ref string) error {
 	// depth 1: only the catalog pin tip; no full history.
 	spec := ref + ":" + pinRef
 	args := []string{"fetch", "--depth", "1", "--force", "origin", spec}
-	logCmdLine(os.Stdout, append([]string{"git", "-C", cache}, args...)...)
+	logCmdLine(nil, append([]string{"git", "-C", cache}, args...)...)
 	cmd := exec.Command("git", args...)
 	cmd.Dir = cache
-	if out, err := runStreamingCombined(cmd, os.Stdout); err != nil {
+	if out, err := runStreamingCombined(cmd, nil); err != nil {
 		return fmt.Errorf("%w\n%s", err, out)
 	}
 	// Point HEAD at the pin so tools that read the default branch see a tip.
-	logCmdLine(os.Stdout, "git", "-C", cache, "symbolic-ref", "HEAD", pinRef)
+	logCmdLine(nil, "git", "-C", cache, "symbolic-ref", "HEAD", pinRef)
 	head := exec.Command("git", "symbolic-ref", "HEAD", pinRef)
 	head.Dir = cache
 	if out, err := head.CombinedOutput(); err != nil {

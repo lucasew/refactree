@@ -416,86 +416,89 @@ func runMvIteration(ctx context.Context, opts Options, p Project, rng *rand.Rand
 	iter := i + 1
 	label := fmt.Sprintf("mv[%d/%d]", iter, opts.Iterations)
 	ingestRoot := primaryIngestRoot(p, env.workDir)
-
-	result, fails, err := RunIngestOnRoot(ingestRoot, ingestOpts)
-	if err != nil || len(fails) > 0 {
-		ev := Event{Project: p.ID, Iteration: iter, Kind: "mv_pre_ingest"}
-		failErr := out.ingestBug(report, ev, err, fails)
-		if err == nil {
-			failErr = fmt.Errorf("pre-mv invariants: %v", fails)
-		}
-		if opts.FailFast {
-			return failErr
-		}
-		return nil
+	in := PlanInputFromRand(rng)
+	if len(opts.Ops) > 0 {
+		p.Mv.Ops = append([]string(nil), opts.Ops...)
 	}
 
-	plan, err := pickMvPlan(rng, p, ingestRoot, result, opts.Ops)
-	if err != nil {
-		fmt.Fprintf(opts.Stdout, "%s: skip pick: %v\n", label, err)
+	// afterCheck runs the catalog project check so choose/result lines stay in one place.
+	var checkRes RunResult
+	attempt := RunMvAttempt(ctx, p, ingestRoot, in, opts.StrictRefs, func(ctx context.Context) error {
+		checkRes = RunCheck(ctx, env.session, p)
+		if !checkRes.OK() {
+			return fmt.Errorf("%s", shortRunErr(checkRes))
+		}
+		return nil
+	}, opts.Stdout)
+
+	plan := attempt.Plan
+	ev := Event{
+		Project:   p.ID,
+		Iteration: iter,
+		Kind:      "mv",
+		Op:        plan.Op,
+		Source:    plan.Src,
+		Dest:      plan.Dst,
+	}
+	scaffold := func() {
+		_ = ScaffoldMvFixture(ingestRoot, report.ScaffoldDir(p.ID, opts.Seed, iter), plan.Src, plan.Dst, attempt.Edits)
+	}
+
+	switch attempt.Class {
+	case classUnsupported:
+		errMsg := "unsupported"
+		if attempt.Err != nil {
+			errMsg = attempt.Err.Error()
+		} else if plan.Op == "" {
+			errMsg = "pick failed"
+		}
 		out.recordUnsupported(report, Event{
 			Project:   p.ID,
 			Iteration: iter,
 			Kind:      "mv_pick",
 			Outcome:   "skip",
 			Class:     classUnsupported,
-			Error:     err.Error(),
+			Error:     errMsg,
+			Op:        plan.Op,
+			Source:    plan.Src,
+			Dest:      plan.Dst,
 		})
 		return nil
-	}
-	fmt.Fprintf(opts.Stdout, "%s: %s %s -> %s\n", label, plan.Op, plan.Src, plan.Dst)
-
-	start := time.Now()
-	edits, err := ApplyMvPlan(ingestRoot, plan)
-	ev := Event{
-		Project:    p.ID,
-		Iteration:  iter,
-		Kind:       "mv",
-		Op:         plan.Op,
-		Source:     plan.Src,
-		Dest:       plan.Dst,
-		DurationMs: time.Since(start).Milliseconds(),
-	}
-	scaffold := func() {
-		_ = ScaffoldMvFixture(ingestRoot, report.ScaffoldDir(p.ID, opts.Seed, iter), plan.Src, plan.Dst, edits)
-	}
-
-	if err != nil {
-		fmt.Fprintf(opts.Stdout, "%s: error (%s): %v\n", label, classifyMvError(err), err)
-		return out.mvApplyOutcome(opts, report, ev, err, scaffold)
-	}
-
-	if postFails := postMvInvariants(ingestRoot, plan, opts.StrictRefs); len(postFails) > 0 {
-		ev.Outcome = "fail"
-		ev.Class = classBug
-		ev.Failures = postFails
-		fmt.Fprintf(opts.Stdout, "%s: fail (post-ingest): %v\n", label, postFails)
-		scaffold()
-		return out.bugErr(opts, report, ev, fmt.Errorf("post-mv invariants: %v", postFails))
-	}
-
-	after := RunCheck(ctx, env.session, p)
-	afterLog, _ := report.WriteRunResult(fmt.Sprintf("%s-check-after-%d", p.ID, iter), after)
-	ev.Log = afterLog
-	ev.ExitCode = after.ExitCode
-	if !after.OK() {
-		checkLabel := label + " post-check"
-		ev.Outcome = "fail"
-		ev.Class = classBug
-		ev.Error = shortRunErr(after)
-		fmt.Fprintf(opts.Stdout, "%s: fail (check exit %d)\n", label, after.ExitCode)
-		printRunFailure(opts.Stdout, opts.Verbose, checkLabel, after, report.LogPath(afterLog))
-		scaffold()
-		failErr := requireOK(checkLabel, after)
-		if afterLog != "" {
-			failErr = fmt.Errorf("%w\nfull check log: %s", failErr, filepath.Join(report.LogPath(afterLog), "full.log"))
+	case classBug:
+		// Distinguish pre-ingest failures (no plan) from apply/post/check bugs.
+		if plan.Op == "" && len(attempt.Failures) > 0 {
+			ev := Event{Project: p.ID, Iteration: iter, Kind: "mv_pre_ingest"}
+			failErr := out.ingestBug(report, ev, attempt.Err, attempt.Failures)
+			if opts.FailFast {
+				return failErr
+			}
+			return nil
 		}
-		return out.bugErr(opts, report, ev, failErr)
+		ev.Outcome = "fail"
+		ev.Class = classBug
+		if attempt.Err != nil {
+			ev.Error = attempt.Err.Error()
+		}
+		ev.Failures = attempt.Failures
+		if checkRes.Args != nil || checkRes.ExitCode != 0 || checkRes.Err != nil {
+			afterLog, _ := report.WriteRunResult(fmt.Sprintf("%s-check-after-%d", p.ID, iter), checkRes)
+			ev.Log = afterLog
+			ev.ExitCode = checkRes.ExitCode
+			printRunFailure(opts.Stdout, opts.Verbose, label+" post-check", checkRes, report.LogPath(afterLog))
+		}
+		scaffold()
+		return out.bugErr(opts, report, ev, attempt.Err)
+	case "pass":
+		fmt.Fprintf(opts.Stdout, "mv result: project=%s class=pass iteration=%d/%d op=%s\n",
+			p.ID, iter, opts.Iterations, plan.Op)
+		out.recordPass(report, ev)
+		return nil
+	default:
+		if attempt.Err != nil {
+			return attempt.Err
+		}
+		return nil
 	}
-
-	fmt.Fprintf(opts.Stdout, "%s: pass\n", label)
-	out.recordPass(report, ev)
-	return nil
 }
 
 func shortRunErr(res RunResult) string {
