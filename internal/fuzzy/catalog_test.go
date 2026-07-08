@@ -47,7 +47,7 @@ func TestLoadCatalog(t *testing.T) {
 			t.Fatalf("%s mise tools must be pinned:\n%s", p.ID, content)
 		}
 	}
-	for _, id := range []string{"workspaced", "ritm_annotation", "astro", "gson", "pesquisarr", "margea"} {
+	for _, id := range []string{"workspaced", "ritm_annotation", "astro", "gson", "kotlin", "pesquisarr", "margea"} {
 		if !ids[id] {
 			t.Fatalf("missing %s", id)
 		}

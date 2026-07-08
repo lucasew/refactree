@@ -167,6 +167,7 @@ func sessionToolEnv(abs, home string, offline bool, extra map[string]string) map
 	env["XDG_STATE_HOME"] = home + "/.local/state"
 	env["XDG_CONFIG_HOME"] = home + "/.config"
 	env["MAVEN_USER_HOME"] = home + "/.m2"
+	env["GRADLE_USER_HOME"] = home + "/.gradle"
 	if offline {
 		for k, v := range OfflineSessionEnv() {
 			env[k] = v
@@ -200,6 +201,7 @@ func hostEnvFromDataDir(abs, dataDir string, offline bool, projectEnv []string) 
 		"XDG_STATE_HOME":            filepath.Join(dataDir, "mise-state"),
 		"XDG_CONFIG_HOME":           filepath.Join(dataDir, "mise-config"),
 		"MAVEN_USER_HOME":           filepath.Join(dataDir, "m2"),
+		"GRADLE_USER_HOME":          filepath.Join(dataDir, "gradle"),
 	}
 	_ = os.MkdirAll(filepath.Join(dataDir, "host-home"), 0o755)
 	_ = os.MkdirAll(filepath.Join(dataDir, "go"), 0o755)
