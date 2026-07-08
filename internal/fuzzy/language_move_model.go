@@ -68,6 +68,9 @@ func moveModelForLanguage(language string) (languageMoveModel, error) {
 		return jvmMoveModel{}, nil
 	case "javascript":
 		return ecmaMoveModel{}, nil
+	case "svelte":
+		// Component file = module (same lattice as ECMA file modules).
+		return ecmaMoveModel{}, nil
 	default:
 		return nil, errUnsupportedLanguage(language)
 	}

@@ -79,7 +79,7 @@ Catalog language today: **`javascript`** (all ECMA extensions under one id for n
 
 Shared: module lattice (file = module), import resolve, move driver, extract.
 
-**Out of scope:** Vue, Astro. Svelte not wired.
+**Svelte:** language id `svelte` (`.svelte`); script blocks re-parsed as ECMA. Not under FamilyECMA id list until shared deliberately. Vue/Astro still out of scope.
 
 ### JVM (`ingest.FamilyJVM`)
 

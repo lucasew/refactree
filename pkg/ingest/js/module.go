@@ -2,6 +2,7 @@ package js
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -902,4 +903,45 @@ func nodeModuleCandidates(importerAbsDir, pkgName string) []string {
 	}
 
 	return out
+}
+
+// GrammarNameForScriptLang maps a <script lang="..."> attribute to a tree-sitter grammar name.
+// Empty or "js" → javascript; "ts" / "typescript" → typescript.
+func GrammarNameForScriptLang(langAttr string) string {
+	switch strings.ToLower(strings.TrimSpace(langAttr)) {
+	case "", "js", "javascript":
+		return "javascript"
+	case "ts", "typescript":
+		return "typescript"
+	default:
+		// Unknown (e.g. coffee): fall back to javascript parse attempt.
+		return "javascript"
+	}
+}
+
+// ExtractECMAScript parses script source with the named grammar ("javascript" or
+// "typescript") and returns a FileExtract whose byte offsets are relative to
+// script (not a parent SFC). Language on the extract is "javascript" (ECMA family).
+func ExtractECMAScript(script []byte, grammarName, relPath string) (*ingest.FileExtract, error) {
+	if grammarName == "" {
+		grammarName = "javascript"
+	}
+	lang, ok := grammar.Get(grammarName)
+	if !ok {
+		return nil, fmt.Errorf("unknown grammar %q", grammarName)
+	}
+	parser := grammar.NewParser()
+	defer parser.Delete()
+	if !parser.SetLanguage(lang) {
+		return nil, fmt.Errorf("failed to set grammar %q", grammarName)
+	}
+	tree := parser.ParseString(string(script))
+	defer tree.Delete()
+	fe := extractECMA(tree.RootNode(), script, relPath)
+	return fe, nil
+}
+
+// ResolveECMAImport resolves a path or node module specifier using ECMA rules.
+func ResolveECMAImport(sourcePath string, ctx ingest.ImportResolveContext) string {
+	return (languageDriver{}).ResolveImport(sourcePath, ctx)
 }

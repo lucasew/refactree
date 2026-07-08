@@ -20,6 +20,7 @@ func TestLanguageForFile(t *testing.T) {
 		{file: "main.ts", lang: "javascript", ok: true},
 		{file: "Button.tsx", lang: "javascript", ok: true},
 		{file: "icon.jsx", lang: "javascript", ok: true},
+		{file: "SearchBar.svelte", lang: "svelte", ok: true},
 		{file: "Main.java", lang: "java", ok: true},
 		{file: "README.md", lang: "", ok: false},
 		{file: "App.vue", lang: "", ok: false},
