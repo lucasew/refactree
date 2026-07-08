@@ -8,7 +8,7 @@ require (
 	github.com/charmbracelet/glamour v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
 	github.com/docker/docker v28.0.1+incompatible
-	github.com/lucasew/ccgo-tree-sitter v0.0.0-20260626005224-7dc673d0041b
+	github.com/lucasew/ccgo-tree-sitter v0.0.0-20260708155645-5b69645abf68
 	github.com/pelletier/go-toml/v2 v2.2.4
 	github.com/spf13/cobra v1.10.2
 	github.com/testcontainers/testcontainers-go v0.37.0
