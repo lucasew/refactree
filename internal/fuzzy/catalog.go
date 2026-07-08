@@ -91,6 +91,19 @@ type catalogFile struct {
 	Projects map[string]Project `toml:"projects"`
 }
 
+// DefaultCatalog is testdata/fuzzy/projects.toml, loaded once at package init
+// (sorted by slug). Tests and harness defaults read from here; use LoadCatalog
+// only for alternate paths (temp fixtures, filters).
+var DefaultCatalog []Project
+
+func init() {
+	projects, err := LoadCatalog(DefaultCatalogPath())
+	if err != nil {
+		panic("fuzzy: load DefaultCatalog: " + err.Error())
+	}
+	DefaultCatalog = projects
+}
+
 // LoadCatalog reads and validates projects.toml.
 // Projects are keyed by slug: [projects.<slug>].
 func LoadCatalog(path string) ([]Project, error) {
