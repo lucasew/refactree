@@ -8,7 +8,7 @@ Tool to do queries on symbols and some refactorings like move and rename items i
 - Refactorings must check for every reference and referee and make a plan that makes the code work the same way. We don't alter logic, only structure
 - Parsers for each language give a list of things and usages
   - import os; os.system("Hello, world") -> Uses the python lookup mechanism to find the implementation of "os", then the implementation of "system" and add the edge on the graph
-  - Parsers are made based on the tree-sitter conversion to Golang: https://github.com/lucasew/ccgo-tree-sitter/
+  - Parsers are made based on the tree-sitter conversion to Golang: https://github.com/modernc-tree-sitter/ccgo-tree-sitter/
     - Using the scm query language is not forbidden if the code is able to filter the noise
 - All subcommands have `-v/--verbose` to switch the slog level from info to verbose/debug, the highest one there
 
