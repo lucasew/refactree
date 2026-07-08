@@ -39,7 +39,8 @@ func TestCatalogFuzzCampaign(t *testing.T) {
 		t.Fatalf("catalog canvas not warm (run: mise run fuzzy:prefetch): %v", err)
 	}
 
-	seed := int64(1)
+	// Fresh seed each run unless RFT_FUZZY_SEED is set (repro).
+	seed := time.Now().UnixNano()
 	if s := strings.TrimSpace(os.Getenv("RFT_FUZZY_SEED")); s != "" {
 		n, err := strconv.ParseInt(s, 10, 64)
 		if err != nil {
@@ -49,9 +50,18 @@ func TestCatalogFuzzCampaign(t *testing.T) {
 	}
 	rng := rand.New(rand.NewSource(seed))
 
+	// Shuffle project order so we do not always start on the same catalog slug
+	// even when the RNG first draw would land on index 0.
+	order := make([]int, len(canvas.Projects))
+	for i := range order {
+		order[i] = i
+	}
+	rng.Shuffle(len(order), func(i, j int) { order[i], order[j] = order[j], order[i] })
+
 	deadline := time.Now().Add(budget)
 	t.Logf("catalog campaign: projects=%d budget=%s iterations_cap=%d seed=%d work_root=%s no_isolate=%v",
 		len(canvas.Projects), budget, iterations, seed, DefaultWorkRoot(), noIsolate)
+	t.Logf("repro: RFT_FUZZY_SEED=%d", seed)
 
 	for attempt := 1; ; attempt++ {
 		if iterations > 0 && attempt > iterations {
@@ -63,7 +73,8 @@ func TestCatalogFuzzCampaign(t *testing.T) {
 			return
 		}
 
-		projectIdx := rng.Intn(len(canvas.Projects))
+		// Round-robin across shuffled projects, then random PlanInput per attempt.
+		projectIdx := order[(attempt-1)%len(order)]
 		in := PlanInputFromRand(rng)
 		p := canvas.Project(projectIdx)
 		name := fmt.Sprintf("attempt=%d project=%s op_idx=%d entity_idx=%d entropy=%d file_idx=%d",
