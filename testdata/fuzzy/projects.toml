@@ -99,6 +99,81 @@ run = [
 description = "Run unit tests for the astro package"
 run = "pnpm --filter astro run test:unit -- --verbose"
 
+[projects.pesquisarr]
+url = "https://github.com/lucasew/pesquisarr.git"
+ref = "85d7dbff4fb83238306a804f3f196f1b23e15b13"
+# Astro + Svelte app; catalog language is ECMA (id "javascript") for .ts/.js move/check.
+# .svelte is co-located but selected only when project language is "svelte".
+language = "javascript"
+root = "."
+ingest_roots = ["src"]
+preserve_globs = ["node_modules"]
+
+[projects.pesquisarr.mv]
+enabled = true
+grains = ["declaration", "module"]
+
+[projects.pesquisarr.isolate]
+setup_network = true
+check_network = false
+
+[projects.pesquisarr.mise.tools]
+node = "26.3.0"
+
+[projects.pesquisarr.mise.tasks.setup]
+description = "npm ci (postinstall: patch-package + paraglide); offline when RFT_FUZZY_OFFLINE=1"
+run = [
+  """
+  if [ "${RFT_FUZZY_OFFLINE:-}" = 1 ]; then
+    npm ci --offline
+  else
+    npm ci
+  fi
+  """,
+  "test -d node_modules",
+]
+
+[projects.pesquisarr.mise.tasks.test]
+description = "Unit tests (vitest non-watch)"
+run = "npm run test:unit -- --run"
+
+[projects.margea]
+url = "https://github.com/lucasew/margea.git"
+ref = "5a26fbc380d67c2804ae03f85958c551b0e4baf5"
+# Astro + React/TS app. ECMA language id covers .ts/.tsx move targets.
+language = "javascript"
+root = "."
+ingest_roots = ["src"]
+preserve_globs = ["node_modules"]
+
+[projects.margea.mv]
+enabled = true
+grains = ["declaration", "module"]
+
+[projects.margea.isolate]
+setup_network = true
+check_network = false
+
+[projects.margea.mise.tools]
+node = "25.4.0"
+
+[projects.margea.mise.tasks.setup]
+description = "npm ci; offline when RFT_FUZZY_OFFLINE=1"
+run = [
+  """
+  if [ "${RFT_FUZZY_OFFLINE:-}" = 1 ]; then
+    npm ci --offline
+  else
+    npm ci
+  fi
+  """,
+  "test -d node_modules",
+]
+
+[projects.margea.mise.tasks.test]
+description = "ESLint (Playwright e2e needs browsers; not used as fuzzy check)"
+run = "npx eslint ."
+
 [projects.gson]
 url = "https://github.com/google/gson.git"
 ref = "c9f3fd55854a743b66f857ace3c7b268ea3e2ef7"
