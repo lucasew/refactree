@@ -116,10 +116,6 @@ github.com/kylelemons/godebug v1.1.0 h1:RPNrshWIDI6G2gRW9EHilWtl7Z6Sb1BR0xunSBf0
 github.com/kylelemons/godebug v1.1.0/go.mod h1:9/0rRGxNHcop5bhtWyNeEfOS8JIWk580+fNqagV/RAw=
 github.com/lucasb-eyer/go-colorful v1.3.0 h1:2/yBRLdWBZKrf7gB40FoiKfAWYQ0lqNcbuQwVHXptag=
 github.com/lucasb-eyer/go-colorful v1.3.0/go.mod h1:R4dSotOR9KMtayYi1e77YzuveK+i7ruzyGqttikkLy0=
-github.com/lucasew/ccgo-tree-sitter v0.0.0-20260626005727-df492fbfcd9f h1:LSgUQOF3iGMhrrKj/h1v+aMkx4eoDtk3hhBttHUxWHI=
-github.com/lucasew/ccgo-tree-sitter v0.0.0-20260626005727-df492fbfcd9f/go.mod h1:PX70XHG75OmMlC2eRuKdPFKgajSH6ge/fcLETsAWNEA=
-github.com/lucasew/ccgo-tree-sitter v0.0.0-20260708181852-0a468d2ae225 h1:5n3d6sHdNFo10nMDe0xZ3GsW4EDO9qu8Z9oNWsCk/qQ=
-github.com/lucasew/ccgo-tree-sitter v0.0.0-20260708181852-0a468d2ae225/go.mod h1:b9zNEBBMFgYix3cHJn1XtI28+xZ6gq9FUs7BF92u7LE=
 github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 h1:6E+4a0GO5zZEnZ81pIr0yLvtUWk2if982qA3F3QD6H4=
 github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0/go.mod h1:zJYVVT2jmtg6P3p1VtQj7WsuWi/y4VnjVBn7F8KPB3I=
 github.com/magiconair/properties v1.8.10 h1:s31yESBquKXCV9a/ScB3ESkOjUYYv+X0rg8SYxI99mE=
@@ -145,6 +141,8 @@ github.com/moby/sys/userns v0.1.0 h1:tVLXkFOxVu9A64/yh59slHVv9ahO9UIev4JZusOLG/g
 github.com/moby/sys/userns v0.1.0/go.mod h1:IHUYgu/kao6N8YZlp9Cf444ySSvCmDlmzUcYfDHOl28=
 github.com/moby/term v0.5.0 h1:xt8Q1nalod/v7BqbG21f8mQPqH+xAaC9C3N3wfWbVP0=
 github.com/moby/term v0.5.0/go.mod h1:8FzsFHVUBGZdbDsJw/ot+X+d5HLUbvklYLJ9uGfcI3Y=
+github.com/modernc-tree-sitter/ccgo-tree-sitter v0.0.0-20260708182349-0f0de68fbd82 h1:hluoY7TAKcU0IK0dGP3YfmIDy9wPkBqNp7R4az9SUyQ=
+github.com/modernc-tree-sitter/ccgo-tree-sitter v0.0.0-20260708182349-0f0de68fbd82/go.mod h1:XzoDIyp0YE2PTjH4WbXkk5lxZPXMjhyIKqAt0g+uMg0=
 github.com/morikuni/aec v1.0.0 h1:nP9CBfwrvYnBRgY6qfDQkygYDmYwOilePFkwzv4dU8A=
 github.com/morikuni/aec v1.0.0/go.mod h1:BbKIizmSmc5MMPqRYbxO4ZU0S0+P200+tUnFx7PXmsc=
 github.com/muesli/ansi v0.0.0-20230316100256-276c6243b2f6 h1:ZK8zHtRHOkbHy6Mmr5D264iyp3TiX5OmNcI5cIARiQI=
