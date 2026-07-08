@@ -50,7 +50,7 @@ func TestHostSessionOfflineEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close(context.Background())
-	res := s.Run(context.Background(), []string{"sh", "-c", "test \"$RFT_FUZZY_OFFLINE\" = 1 && test \"$GOPROXY\" = off && test \"$MISE_GPG_VERIFY\" = false && test \"$MISE_NODE_GPG_VERIFY\" = false && echo ok-offline"})
+	res := s.Run(context.Background(), []string{"sh", "-c", "test \"$RFT_FUZZY_OFFLINE\" = 1 && test \"$GOPROXY\" = off && test \"$MISE_GPG_VERIFY\" = false && test \"$MISE_NODE_GPG_VERIFY\" = false && test \"$MISE_NPM_PACKAGE_MANAGER\" = npm && echo ok-offline"})
 	if !res.OK() {
 		t.Fatalf("offline env: %#v\n%s%s", res, res.Stdout, res.Stderr)
 	}
@@ -72,12 +72,12 @@ func TestSessionSetsMiseGpgVerifyOff(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close(context.Background())
-	res := s.Run(context.Background(), []string{"sh", "-c", "printf '%s %s' \"$MISE_GPG_VERIFY\" \"$MISE_NODE_GPG_VERIFY\""})
+	res := s.Run(context.Background(), []string{"sh", "-c", "printf '%s %s %s' \"$MISE_GPG_VERIFY\" \"$MISE_NODE_GPG_VERIFY\" \"$MISE_NPM_PACKAGE_MANAGER\""})
 	if !res.OK() {
 		t.Fatalf("%#v\n%s%s", res, res.Stdout, res.Stderr)
 	}
-	if got := strings.TrimSpace(res.Stdout); got != "false false" {
-		t.Fatalf("got %q want %q", got, "false false")
+	if got := strings.TrimSpace(res.Stdout); got != "false false npm" {
+		t.Fatalf("got %q want %q", got, "false false npm")
 	}
 }
 

@@ -152,6 +152,8 @@ func sessionToolEnv(abs, home string, offline bool, extra map[string]string) map
 	// core:node only checks node.gpg_verify (see mise node plugin).
 	env["MISE_GPG_VERIFY"] = "false"
 	env["MISE_NODE_GPG_VERIFY"] = "false"
+	// npm:* tools: use node/npm backend, not bun/aqua (host mise often prefers bun).
+	env["MISE_NPM_PACKAGE_MANAGER"] = "npm"
 	env["MISE_TRUSTED_CONFIG_PATHS"] = strings.Join([]string{abs, home, home + "/.config/mise", "/mise"}, ":")
 	env["MISE_DATA_DIR"] = home + "/.local/share/mise"
 	env["MISE_CACHE_DIR"] = home + "/.cache/mise"
@@ -184,6 +186,7 @@ func hostEnvFromDataDir(abs, dataDir string, offline bool, projectEnv []string) 
 		"MISE_VERBOSE":              "1",
 		"MISE_GPG_VERIFY":           "false",
 		"MISE_NODE_GPG_VERIFY":      "false",
+		"MISE_NPM_PACKAGE_MANAGER":  "npm",
 		"MISE_TRUSTED_CONFIG_PATHS": abs + ":" + filepath.Join(dataDir, "host-home") + ":" + filepath.Join(dataDir, "mise-config"),
 		"MISE_DATA_DIR":             filepath.Join(dataDir, "mise"),
 		"MISE_CACHE_DIR":            filepath.Join(dataDir, "mise-cache"),

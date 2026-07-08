@@ -27,7 +27,7 @@ run = "go test -count=1 ./..."
 
 [projects.ritm_annotation]
 url = "https://github.com/lucasew-graveyard/ritm_annotation.git"
-ref = "b7998abbfc8581c2344c00b54a4ddd68d4cbcf3c"
+ref = "761fbed250379c99b5e71309b18284dc037ec302"
 language = "python"
 root = "."
 ingest_roots = ["ritm_annotation"]
