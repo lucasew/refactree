@@ -296,6 +296,7 @@ func extractJSExport(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 		}
 	}
 }
+
 // extractJSLocalExportClause is JS-only: `export { a, b as c }` and the common
 // bundler form `export { createIntegration as default }` (sets DefaultExport for core).
 func extractJSLocalExportClause(fe *ingest.FileExtract, clause *grammar.Node, source []byte) {
@@ -657,6 +658,7 @@ func resolveJSFileOnDisk(baseAbs string, preferPackageMain bool) (string, bool) 
 
 	return "", false
 }
+
 // packageJSON mirrors the fields Node consults when resolving a package entrypoint.
 type packageJSON struct {
 	Main    string          `json:"main"`
@@ -946,7 +948,6 @@ func ExtractECMAScript(script []byte, grammarName, relPath string) (*ingest.File
 func ResolveECMAImport(sourcePath string, ctx ingest.ImportResolveContext) string {
 	return (languageDriver{}).ResolveImport(sourcePath, ctx)
 }
-
 
 // ExtractECMAExpressionUsages parses a short expression (markup {…}, attribute
 // values, #each/#if heads) and returns identifier/member usages with offsets

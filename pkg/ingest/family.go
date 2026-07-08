@@ -18,9 +18,9 @@ const (
 )
 
 var (
-	familyMu        sync.RWMutex
-	familyByLang    = map[string]string{} // language id → family
-	langsByFamily   = map[string][]string{}
+	familyMu      sync.RWMutex
+	familyByLang  = map[string]string{} // language id → family
+	langsByFamily = map[string][]string{}
 )
 
 // RegisterLanguageFamily records that language belongs to family.
@@ -124,4 +124,3 @@ func appendUnique(slice []string, v string) []string {
 	}
 	return append(slice, v)
 }
-

@@ -108,7 +108,7 @@ func TestPrepareReuseIsIdempotent(t *testing.T) {
 		ID:            "demo",
 		URL:           remote,
 		Ref:           ref,
-		Family:      "go",
+		Family:        "go",
 		Root:          ".",
 		PreserveGlobs: []string{"vendor"},
 	}
@@ -171,7 +171,7 @@ func TestPrepareOfflineRequiresPreserveSnapshot(t *testing.T) {
 	}
 	p := fuzzy.Project{
 		ID:            "local",
-		Family:      "go",
+		Family:        "go",
 		LocalPath:     local,
 		PreserveGlobs: []string{"node_modules"},
 	}

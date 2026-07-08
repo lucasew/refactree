@@ -71,7 +71,7 @@ type Project struct {
 	ID            string         `toml:"-"` // map key under [projects.<slug>]
 	URL           string         `toml:"url"`
 	Ref           string         `toml:"ref"`
-	Family        string         `toml:"family"` // ingest family id (ecma, jvm, go, …)
+	Family        string         `toml:"family"`             // ingest family id (ecma, jvm, go, …)
 	Language      string         `toml:"language,omitempty"` // rejected if set (use family)
 	Root          string         `toml:"root"`
 	Mise          map[string]any `toml:"mise"`       // embedded mise.toml root ([projects.<slug>.mise]…)

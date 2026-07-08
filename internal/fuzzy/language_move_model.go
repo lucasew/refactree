@@ -31,7 +31,7 @@ const (
 
 // MoveNode is an enumerable source at a grain.
 type MoveNode struct {
-	Grain     Grain
+	Grain Grain
 	// Reference is a full path reference (with symbol for declaration grain).
 	Reference string
 	// Path is the slash path with leading ./ (file or directory).
