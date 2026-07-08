@@ -15,6 +15,10 @@ type LanguageRules struct {
 	// DirectoryModule reports whether a directory can be treated as a symbol
 	// container (for example path:./dir::Symbol).
 	DirectoryModule bool
+	// Family groups related surfaces that share a module lattice (for example
+	// FamilyJVM for java; FamilyECMA for javascript). Empty means standalone.
+	// Prefer honest language ids per surface; use Family for shared behavior.
+	Family string
 }
 
 var (
@@ -34,16 +38,17 @@ func RegisterLanguageRules(name string, rules LanguageRules) {
 	normalized := LanguageRules{
 		DirectoryModule: rules.DirectoryModule,
 		Extensions:      normalizeExtensions(rules.Extensions),
+		Family:          strings.TrimSpace(rules.Family),
 	}
 
 	languageRulesMu.Lock()
-	defer languageRulesMu.Unlock()
-
 	if _, exists := languageRulesByKey[name]; exists {
+		languageRulesMu.Unlock()
 		panic(fmt.Sprintf("ingest: language rules %q already registered", name))
 	}
 	for _, ext := range normalized.Extensions {
 		if owner, exists := languageByExt[ext]; exists && owner != name {
+			languageRulesMu.Unlock()
 			panic(fmt.Sprintf("ingest: extension %q already registered by %q", ext, owner))
 		}
 	}
@@ -51,6 +56,13 @@ func RegisterLanguageRules(name string, rules LanguageRules) {
 	languageRulesByKey[name] = normalized
 	for _, ext := range normalized.Extensions {
 		languageByExt[ext] = name
+	}
+	family := normalized.Family
+	languageRulesMu.Unlock()
+
+	// Family map uses its own lock; register after rules are visible.
+	if family != "" {
+		RegisterLanguageFamily(name, family)
 	}
 }
 

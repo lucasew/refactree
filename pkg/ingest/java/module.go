@@ -15,10 +15,13 @@ import (
 )
 
 func init() {
+	// JVM family platform: Java is the only surface today. Kotlin (and others)
+	// register as separate language ids under FamilyJVM when added — not as "java".
 	ingest.RegisterLanguageDriver("java", languageDriver{})
 	ingest.RegisterLanguageRules("java", ingest.LanguageRules{
 		Extensions:      []string{".java"},
 		DirectoryModule: true,
+		Family:          ingest.FamilyJVM,
 	})
 	ingest.RegisterReferenceProvider("java", referenceProvider{})
 }

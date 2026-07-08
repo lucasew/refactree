@@ -51,15 +51,23 @@ type languageMoveModel interface {
 }
 
 func moveModelForLanguage(language string) (languageMoveModel, error) {
+	// Prefer family lattice when registered (jvm, ecma, …).
+	switch ingest.FamilyForLanguage(language) {
+	case ingest.FamilyJVM:
+		return jvmMoveModel{}, nil
+	case ingest.FamilyECMA:
+		return ecmaMoveModel{}, nil
+	}
 	switch language {
 	case "go":
 		return goMoveModel{}, nil
-	case "java":
-		return javaMoveModel{}, nil
 	case "python":
 		return pythonMoveModel{}, nil
+	case "java":
+		// Fallback if family registration order fails in tests.
+		return jvmMoveModel{}, nil
 	case "javascript":
-		return javascriptMoveModel{}, nil
+		return ecmaMoveModel{}, nil
 	default:
 		return nil, errUnsupportedLanguage(language)
 	}
@@ -118,23 +126,24 @@ func (goMoveModel) ListNodes(result *ingest.Result, grain Grain, projectLanguage
 	}
 }
 
-// --- Java: package directory is the module. ---
+// --- JVM family: package directory is the module; file is layout. ---
+// Surfaces: java today; kotlin later under FamilyJVM with its own language id.
 
-type javaMoveModel struct{}
+type jvmMoveModel struct{}
 
-func (javaMoveModel) Grains() []Grain {
+func (jvmMoveModel) Grains() []Grain {
 	return []Grain{GrainDeclaration, GrainPackage}
 }
 
-func (javaMoveModel) ModuleKey(filePath string) string {
+func (jvmMoveModel) ModuleKey(filePath string) string {
 	return dirKey(filePath)
 }
 
-func (m javaMoveModel) SameModule(pathA, pathB string) bool {
+func (m jvmMoveModel) SameModule(pathA, pathB string) bool {
 	return m.ModuleKey(pathA) == m.ModuleKey(pathB)
 }
 
-func (javaMoveModel) ListNodes(result *ingest.Result, grain Grain, projectLanguage string) []MoveNode {
+func (jvmMoveModel) ListNodes(result *ingest.Result, grain Grain, projectLanguage string) []MoveNode {
 	switch grain {
 	case GrainDeclaration:
 		return listDeclarationNodes(result, projectLanguage)
@@ -174,24 +183,23 @@ func (pythonMoveModel) ListNodes(result *ingest.Result, grain Grain, projectLang
 	}
 }
 
-// --- ECMA family (language id "javascript"): JS/TS/TSX/JSX; file is the module. ---
-// Vue/Astro are not ingested. Component/SFC roles may be tagged later; not grains.
+// --- ECMA family: file is the module (JS/TS/TSX/JSX). Vue/Astro out of scope. ---
 
-type javascriptMoveModel struct{}
+type ecmaMoveModel struct{}
 
-func (javascriptMoveModel) Grains() []Grain {
+func (ecmaMoveModel) Grains() []Grain {
 	return []Grain{GrainDeclaration, GrainModule}
 }
 
-func (javascriptMoveModel) ModuleKey(filePath string) string {
+func (ecmaMoveModel) ModuleKey(filePath string) string {
 	return normalizePath(filePath)
 }
 
-func (m javascriptMoveModel) SameModule(pathA, pathB string) bool {
+func (m ecmaMoveModel) SameModule(pathA, pathB string) bool {
 	return m.ModuleKey(pathA) == m.ModuleKey(pathB)
 }
 
-func (javascriptMoveModel) ListNodes(result *ingest.Result, grain Grain, projectLanguage string) []MoveNode {
+func (ecmaMoveModel) ListNodes(result *ingest.Result, grain Grain, projectLanguage string) []MoveNode {
 	switch grain {
 	case GrainDeclaration:
 		return listDeclarationNodes(result, projectLanguage)
@@ -213,7 +221,7 @@ func listDeclarationNodes(result *ingest.Result, projectLanguage string) []MoveN
 		}
 		rel := strings.TrimPrefix(ref.Path, "./")
 		lang, ok := ingest.LanguageForFile(rel)
-		if !ok || lang != projectLanguage {
+		if !ok || !ingest.LanguageMatchesProject(lang, projectLanguage) {
 			continue
 		}
 		if isFuzzSymbol(ref.Symbol) {
@@ -236,7 +244,7 @@ func listDeclarationNodes(result *ingest.Result, projectLanguage string) []MoveN
 func listPackageNodes(result *ingest.Result, projectLanguage string) []MoveNode {
 	dirs := map[string]bool{}
 	for _, f := range result.Files {
-		if f.Language != projectLanguage {
+		if !ingest.LanguageMatchesProject(f.Language, projectLanguage) {
 			continue
 		}
 		rel := strings.TrimPrefix(f.Path, "./")
@@ -266,7 +274,7 @@ func listPackageNodes(result *ingest.Result, projectLanguage string) []MoveNode 
 func listModuleFileNodes(result *ingest.Result, projectLanguage string) []MoveNode {
 	var out []MoveNode
 	for _, f := range result.Files {
-		if f.Language != projectLanguage {
+		if !ingest.LanguageMatchesProject(f.Language, projectLanguage) {
 			continue
 		}
 		p := f.Path
@@ -305,7 +313,7 @@ func dirKey(filePath string) string {
 func listLanguageFiles(result *ingest.Result, projectLanguage string) []string {
 	var files []string
 	for _, f := range result.Files {
-		if f.Language != projectLanguage {
+		if !ingest.LanguageMatchesProject(f.Language, projectLanguage) {
 			continue
 		}
 		p := f.Path

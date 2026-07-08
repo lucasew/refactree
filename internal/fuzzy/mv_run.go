@@ -159,12 +159,12 @@ func placementMenu(grain Grain, model languageMoveModel, result *ingest.Result, 
 		sameFiles := filesInModule(result, model, projectLanguage, modKey)
 		// Offer layout if same-module has another file OR we can create a new layout file
 		// (always true for directory modules; for file-modules layout is impossible).
-		if _, isFileModule := model.(javascriptMoveModel); isFileModule {
+		if _, isFileModule := model.(ecmaMoveModel); isFileModule {
 			// module == file: layout cannot differ from module boundary
 		} else if _, isPy := model.(pythonMoveModel); isPy {
 			// Python declaration lives in a file-module; moving to another file is module placement.
 		} else {
-			// go / java: layout within package
+			// go / jvm: layout within package
 			menu = append(menu, PlacementLayout)
 		}
 		if len(modulesOtherThan(result, model, projectLanguage, modKey)) > 0 || len(sameFiles) > 1 {
@@ -348,7 +348,7 @@ func newModulePathForDeclaration(model languageMoveModel, srcPath string, entrop
 	// Go/Java: new directory (new package) + same basename.
 	// JS/Python file-module model: new file path (new module).
 	switch model.(type) {
-	case goMoveModel, javaMoveModel:
+	case goMoveModel, jvmMoveModel:
 		rel := strings.TrimPrefix(srcPath, "./")
 		dir := path.Dir(rel)
 		base := filepath.Base(rel)

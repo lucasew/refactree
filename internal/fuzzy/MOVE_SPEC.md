@@ -63,9 +63,13 @@ Rename combined with container change in one plan is out of scope.
 
 Relocate the whole file module (`module` or `new_module` placements) via path references without symbols.
 
-## ECMA family (catalog language `javascript`)
+## Language families
 
-Ingest language id remains **`javascript`** for the ECMA family:
+Families group honest language ids that share a module lattice. See `ingest.Family*`.
+
+### ECMA (`ingest.FamilyECMA`)
+
+Catalog language today: **`javascript`** (all ECMA extensions under one id for now).
 
 | Extensions | Tree-sitter grammar |
 |---|---|
@@ -73,6 +77,17 @@ Ingest language id remains **`javascript`** for the ECMA family:
 | `.ts` | typescript |
 | `.tsx` `.jsx` | tsx |
 
-Shared: module lattice (file = module), import resolve (path + node_modules), move driver, extract of functions/classes/exports plus TS interface/type/enum.
+Shared: module lattice (file = module), import resolve, move driver, extract.
 
-**Out of scope:** Vue, Astro (and other SFCs until explicitly added). Svelte grammar exists upstream but is not wired yet.
+**Out of scope:** Vue, Astro. Svelte not wired.
+
+### JVM (`ingest.FamilyJVM`)
+
+| Language id | Extensions | Status |
+|---|---|---|
+| `java` | `.java` | implemented |
+| `kotlin` | `.kt` / `.kts` | **not registered** (platform ready; needs grammar + surface) |
+
+Shared lattice (fuzzer `jvmMoveModel`): package directory = module; declaration = types/members; file = layout.
+
+Catalog projects use honest `language = "java"`. When Kotlin is added, register `language = "kotlin"` with `Family: FamilyJVM` — do not label Kotlin as `java`.

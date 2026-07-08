@@ -13,8 +13,10 @@ import (
 	"github.com/lucasew/refactree/pkg/ingest"
 )
 
-// ECMA family: one ingest language id ("javascript") for JS/TS/TSX/JSX module graphs.
-// Grammars differ by extension; extract/move/resolve are shared. Vue/Astro are out of scope.
+// ECMA family: language id remains "javascript" for the current surface bundle
+// (JS/TS/TSX/JSX). Grammars differ by extension; extract/move/resolve are shared.
+// Prefer FamilyECMA for lattice sharing. Vue/Astro are out of scope.
+// Future: split honest surface ids (typescript, tsx) under the same family.
 var ecmaExtensions = []string{".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"}
 
 func init() {
@@ -22,6 +24,7 @@ func init() {
 	ingest.RegisterLanguageRules("javascript", ingest.LanguageRules{
 		Extensions:      append([]string(nil), ecmaExtensions...),
 		DirectoryModule: false,
+		Family:          ingest.FamilyECMA,
 	})
 	ingest.RegisterReferenceProvider("node", referenceProvider{})
 }

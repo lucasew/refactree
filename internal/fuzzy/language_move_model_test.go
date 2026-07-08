@@ -24,21 +24,38 @@ func TestGoMoveModelGrainsAndSameModule(t *testing.T) {
 	}
 }
 
-func TestJavascriptMoveModelFileIsModule(t *testing.T) {
+func TestJVMMoveModelFromJavaLanguage(t *testing.T) {
+	t.Parallel()
+	m, err := moveModelForLanguage("java")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.(jvmMoveModel); !ok {
+		t.Fatalf("java should use jvmMoveModel, got %T", m)
+	}
+	if !m.SameModule("./com/foo/A.java", "./com/foo/B.java") {
+		t.Fatal("same package dir is same module on jvm")
+	}
+}
+
+func TestECMAMoveModelFileIsModule(t *testing.T) {
 	t.Parallel()
 	m, err := moveModelForLanguage("javascript")
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, ok := m.(ecmaMoveModel); !ok {
+		t.Fatalf("javascript should use ecmaMoveModel, got %T", m)
+	}
 	if m.SameModule("./a.js", "./b.js") {
-		t.Fatal("different files are different modules in javascript")
+		t.Fatal("different files are different modules in ecma")
 	}
 	if !m.SameModule("./a.js", "./a.js") {
 		t.Fatal("same file should be same module")
 	}
 	for _, g := range m.Grains() {
 		if g == GrainPackage {
-			t.Fatal("javascript should not list package grain by default")
+			t.Fatal("ecma should not list package grain by default")
 		}
 	}
 }
