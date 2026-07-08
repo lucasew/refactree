@@ -1,5 +1,5 @@
 # Fuzzy harness (internal/fuzzy only — not linked into the rft binary).
-# Local fixtures + unit tests always run. Catalog prefetch (network-heavy) is opt-in.
+# Setup/check run on the host (RFT_FUZZY_NO_ISOLATE=1); no testcontainers in this job.
 name: Fuzzy
 
 on:
@@ -30,6 +30,8 @@ jobs:
           CI: "true"
           MISE_EXPERIMENTAL: "1"
           RFT_FUZZY_WORK_ROOT: ${{ github.workspace }}/.cache/rft-fuzzy
+          # Host setup/check (no Docker/testcontainers). CI=true satisfies the allow guard.
+          RFT_FUZZY_NO_ISOLATE: "1"
         run: mise run fuzzy:prefetch
 
       - name: Fuzzy harness tests
@@ -37,6 +39,7 @@ jobs:
           CI: "true"
           MISE_EXPERIMENTAL: "1"
           RFT_FUZZY_WORK_ROOT: ${{ github.workspace }}/.cache/rft-fuzzy
+          RFT_FUZZY_NO_ISOLATE: "1"
         run: mise run fuzzy:run
 
       - name: Upload fuzzy work-root on failure
