@@ -6,10 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar"
-	_ "github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/python"
 	"github.com/lucasew/refactree/pkg/ingest"
 	pythonref "github.com/lucasew/refactree/pkg/reference/python"
+	"github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar"
+	_ "github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/python"
 )
 
 func init() {

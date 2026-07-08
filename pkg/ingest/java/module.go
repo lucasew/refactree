@@ -7,11 +7,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar"
-	_ "github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/java"
 	"github.com/lucasew/refactree/pkg/ingest"
 	refpkg "github.com/lucasew/refactree/pkg/reference"
 	javaref "github.com/lucasew/refactree/pkg/reference/java"
+	"github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar"
+	_ "github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/java"
 )
 
 func init() {
