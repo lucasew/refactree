@@ -136,8 +136,13 @@ func lastPathComponent(s string) string {
 // returned as the second value so the caller can include it in the extraction.
 func findJSDecl(root *grammar.Node, nameStart uint32) (decl *grammar.Node, export *grammar.Node) {
 	declTypes := map[string]bool{
-		"function_declaration": true,
-		"class_declaration":    true,
+		"function_declaration":           true,
+		"generator_function_declaration": true,
+		"class_declaration":              true,
+		"abstract_class_declaration":     true,
+		"interface_declaration":          true,
+		"type_alias_declaration":         true,
+		"enum_declaration":               true,
 	}
 
 	for i := uint32(0); i < root.ChildCount(); i++ {

@@ -62,3 +62,17 @@ Rename combined with container change in one plan is out of scope.
 ## Module grain (file-as-module)
 
 Relocate the whole file module (`module` or `new_module` placements) via path references without symbols.
+
+## ECMA family (catalog language `javascript`)
+
+Ingest language id remains **`javascript`** for the ECMA family:
+
+| Extensions | Tree-sitter grammar |
+|---|---|
+| `.js` `.mjs` `.cjs` | javascript |
+| `.ts` | typescript |
+| `.tsx` `.jsx` | tsx |
+
+Shared: module lattice (file = module), import resolve (path + node_modules), move driver, extract of functions/classes/exports plus TS interface/type/enum.
+
+**Out of scope:** Vue, Astro (and other SFCs until explicitly added). Svelte grammar exists upstream but is not wired yet.

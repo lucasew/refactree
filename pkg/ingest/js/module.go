@@ -8,13 +8,19 @@ import (
 
 	"github.com/lucasew/ccgo-tree-sitter/grammar"
 	_ "github.com/lucasew/ccgo-tree-sitter/grammar/javascript"
+	_ "github.com/lucasew/ccgo-tree-sitter/grammar/tsx"
+	_ "github.com/lucasew/ccgo-tree-sitter/grammar/typescript"
 	"github.com/lucasew/refactree/pkg/ingest"
 )
+
+// ECMA family: one ingest language id ("javascript") for JS/TS/TSX/JSX module graphs.
+// Grammars differ by extension; extract/move/resolve are shared. Vue/Astro are out of scope.
+var ecmaExtensions = []string{".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"}
 
 func init() {
 	ingest.RegisterLanguageDriver("javascript", languageDriver{})
 	ingest.RegisterLanguageRules("javascript", ingest.LanguageRules{
-		Extensions:      []string{".js", ".mjs", ".cjs"},
+		Extensions:      append([]string(nil), ecmaExtensions...),
 		DirectoryModule: false,
 	})
 	ingest.RegisterReferenceProvider("node", referenceProvider{})
@@ -24,17 +30,33 @@ type languageDriver struct{}
 
 func (languageDriver) Language() string { return "javascript" }
 
-// TreeSitterGrammar maps .js/.mjs/.cjs (and grammar.GetByExtension misses) to
-// the registered "javascript" grammar.
+// TreeSitterGrammar selects the ECMA surface grammar for filename.
+// .js/.mjs/.cjs → javascript; .ts → typescript; .tsx/.jsx → tsx.
 func (languageDriver) TreeSitterGrammar(filename string) (grammar.Language, bool) {
-	if lang, ok := grammar.GetByExtension(filename); ok {
-		return lang, true
+	return grammarForECMAFile(filename)
+}
+
+func grammarForECMAFile(filename string) (grammar.Language, bool) {
+	ext := strings.ToLower(filepath.Ext(filename))
+	switch ext {
+	case ".ts":
+		return grammar.Get("typescript")
+	case ".tsx", ".jsx":
+		// tsx grammar covers JSX; no separate jsx grammar in the pin.
+		return grammar.Get("tsx")
+	case ".js", ".mjs", ".cjs":
+		return grammar.Get("javascript")
+	default:
+		if lang, ok := grammar.GetByExtension(filename); ok {
+			return lang, true
+		}
+		return grammar.Get("javascript")
 	}
-	return grammar.Get("javascript")
 }
 
 func (languageDriver) Extract(root *grammar.Node, source []byte, relPath string) *ingest.FileExtract {
-	return extractJavaScript(root, source, relPath)
+	// Shared ECMA extract (JS + TS/TSX node shapes we care about).
+	return extractECMA(root, source, relPath)
 }
 
 func (languageDriver) ResolveImport(sourcePath string, ctx ingest.ImportResolveContext) string {
@@ -161,25 +183,32 @@ func resolveNodeImport(spec string, ctx ingest.ImportResolveContext) (string, bo
 	return nodeSymbolicRef(spec), true
 }
 
-func extractJavaScript(root *grammar.Node, source []byte, path string) *ingest.FileExtract {
+func extractECMA(root *grammar.Node, source []byte, path string) *ingest.FileExtract {
 	fe := &ingest.FileExtract{Language: "javascript", Path: path}
 
 	for i := uint32(0); i < root.ChildCount(); i++ {
-		extractJSTopLevel(fe, root.Child(i), source)
+		extractECMATopLevel(fe, root.Child(i), source)
 	}
 
 	return fe
 }
 
-func extractJSTopLevel(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
+// extractJavaScript is kept as a thin alias for older call sites/tests.
+func extractJavaScript(root *grammar.Node, source []byte, path string) *ingest.FileExtract {
+	return extractECMA(root, source, path)
+}
+
+func extractECMATopLevel(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 	if n == nil {
 		return
 	}
 	switch n.Type() {
-	case "function_declaration":
+	case "function_declaration", "generator_function_declaration":
 		extractJSFunc(fe, n, source)
-	case "class_declaration":
+	case "class_declaration", "abstract_class_declaration":
 		extractJSClass(fe, n, source)
+	case "interface_declaration", "type_alias_declaration", "enum_declaration":
+		extractTSNamedType(fe, n, source)
 	case "lexical_declaration", "variable_declaration":
 		extractJSVarDecl(fe, n, source, "")
 	case "expression_statement":
@@ -191,6 +220,19 @@ func extractJSTopLevel(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 	}
 }
 
+// extractTSNamedType records TypeScript interface / type alias / enum names.
+func extractTSNamedType(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
+	nameNode := ingest.ChildByField(n, "name")
+	if nameNode == nil {
+		return
+	}
+	fe.Entities = append(fe.Entities, ingest.EntityDef{
+		Name:      ingest.NodeText(nameNode, source),
+		StartByte: nameNode.StartByte(),
+		EndByte:   nameNode.EndByte(),
+		Exported:  true,
+	})
+}
 func extractJSExport(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 	// export … from "…" / export * from "…" — barrel hop; source field is on the export_statement.
 	if srcNode := ingest.ChildByField(n, "source"); srcNode != nil {
@@ -218,20 +260,22 @@ func extractJSExport(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 	for j := uint32(0); j < n.ChildCount(); j++ {
 		inner := n.Child(j)
 		switch inner.Type() {
-		case "function_declaration":
+		case "function_declaration", "generator_function_declaration":
 			extractJSFunc(fe, inner, source)
 			if isDefault {
 				if nameNode := ingest.ChildByField(inner, "name"); nameNode != nil {
 					fe.DefaultExport = ingest.NodeText(nameNode, source)
 				}
 			}
-		case "class_declaration":
+		case "class_declaration", "abstract_class_declaration":
 			extractJSClass(fe, inner, source)
 			if isDefault {
 				if nameNode := ingest.ChildByField(inner, "name"); nameNode != nil {
 					fe.DefaultExport = ingest.NodeText(nameNode, source)
 				}
 			}
+		case "interface_declaration", "type_alias_declaration", "enum_declaration":
+			extractTSNamedType(fe, inner, source)
 		case "lexical_declaration", "variable_declaration":
 			extractJSVarDecl(fe, inner, source, "")
 		case "identifier":
@@ -247,7 +291,6 @@ func extractJSExport(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 		}
 	}
 }
-
 // extractJSLocalExportClause is JS-only: `export { a, b as c }` and the common
 // bundler form `export { createIntegration as default }` (sets DefaultExport for core).
 func extractJSLocalExportClause(fe *ingest.FileExtract, clause *grammar.Node, source []byte) {
@@ -557,18 +600,27 @@ func resolveKnownJSPath(rel string, knownFiles map[string]bool) (string, bool) {
 	if knownFiles[rel] {
 		return ingest.FileRef("./" + rel), true
 	}
-	for _, ext := range []string{".js", ".mjs", ".cjs"} {
+	for _, ext := range ecmaResolveExtensions {
 		if knownFiles[rel+ext] {
 			return ingest.FileRef("./" + rel + ext), true
 		}
 	}
-	for _, indexName := range []string{"index.js", "index.mjs", "index.cjs"} {
+	for _, indexName := range ecmaIndexNames {
 		p := filepath.ToSlash(filepath.Join(rel, indexName))
 		if knownFiles[p] {
 			return ingest.FileRef("./" + p), true
 		}
 	}
 	return "", false
+}
+
+// ecmaResolveExtensions is the order ECMA/TS-style resolution tries for bare paths.
+var ecmaResolveExtensions = []string{".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"}
+
+// ecmaIndexNames are directory entry candidates (JS then TS).
+var ecmaIndexNames = []string{
+	"index.js", "index.mjs", "index.cjs",
+	"index.ts", "index.tsx", "index.jsx",
 }
 
 func resolveJSFileOnDisk(baseAbs string, preferPackageMain bool) (string, bool) {
@@ -583,7 +635,7 @@ func resolveJSFileOnDisk(baseAbs string, preferPackageMain bool) (string, bool) 
 			}
 		}
 
-		for _, indexName := range []string{"index.js", "index.mjs", "index.cjs"} {
+		for _, indexName := range ecmaIndexNames {
 			candidate := filepath.Join(baseAbs, indexName)
 			if st2, err := os.Stat(candidate); err == nil && !st2.IsDir() {
 				return candidate, true
@@ -591,7 +643,7 @@ func resolveJSFileOnDisk(baseAbs string, preferPackageMain bool) (string, bool) 
 		}
 	}
 
-	for _, ext := range []string{".js", ".mjs", ".cjs"} {
+	for _, ext := range ecmaResolveExtensions {
 		candidate := baseAbs + ext
 		if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
 			return candidate, true
@@ -600,7 +652,6 @@ func resolveJSFileOnDisk(baseAbs string, preferPackageMain bool) (string, bool) 
 
 	return "", false
 }
-
 // packageJSON mirrors the fields Node consults when resolving a package entrypoint.
 type packageJSON struct {
 	Main    string          `json:"main"`
@@ -662,8 +713,8 @@ func resolvePackageEntrypoint(pkgRoot, subpath string) (string, bool) {
 		}
 	}
 
-	// 5. index.* convention.
-	for _, indexName := range []string{"index.js", "index.mjs", "index.cjs"} {
+	// 5. index.* convention (JS then TS).
+	for _, indexName := range ecmaIndexNames {
 		candidate := filepath.Join(pkgRoot, indexName)
 		if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
 			return candidate, true

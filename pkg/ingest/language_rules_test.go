@@ -17,8 +17,13 @@ func TestLanguageForFile(t *testing.T) {
 		{file: "main.js", lang: "javascript", ok: true},
 		{file: "main.mjs", lang: "javascript", ok: true},
 		{file: "main.cjs", lang: "javascript", ok: true},
+		{file: "main.ts", lang: "javascript", ok: true},
+		{file: "Button.tsx", lang: "javascript", ok: true},
+		{file: "icon.jsx", lang: "javascript", ok: true},
 		{file: "Main.java", lang: "java", ok: true},
 		{file: "README.md", lang: "", ok: false},
+		{file: "App.vue", lang: "", ok: false},
+		{file: "Page.astro", lang: "", ok: false},
 	}
 
 	for _, tc := range cases {

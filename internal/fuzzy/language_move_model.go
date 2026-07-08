@@ -174,7 +174,8 @@ func (pythonMoveModel) ListNodes(result *ingest.Result, grain Grain, projectLang
 	}
 }
 
-// --- JavaScript: file is the module. ---
+// --- ECMA family (language id "javascript"): JS/TS/TSX/JSX; file is the module. ---
+// Vue/Astro are not ingested. Component/SFC roles may be tagged later; not grains.
 
 type javascriptMoveModel struct{}
 
