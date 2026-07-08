@@ -11,10 +11,13 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
-// MvConfig controls which move operations the harness may attempt.
+// MvConfig controls which move grains (and optional placements) the harness may attempt.
 type MvConfig struct {
-	Enabled bool     `toml:"enabled"`
-	Ops     []string `toml:"ops"`
+	Enabled    bool     `toml:"enabled"`
+	Grains     []string `toml:"grains"`
+	Placements []string `toml:"placements,omitempty"`
+	// Ops is rejected if present (legacy key removed in grain cutover).
+	Ops []string `toml:"ops,omitempty"`
 }
 
 // DefaultMiseImage is the pinned testcontainers image (digest, not a floating tag).
@@ -170,14 +173,27 @@ func validateProject(p *Project) error {
 	if len(p.Check) == 0 && p.CheckTask == "" && p.LocalPath == "" {
 		return fmt.Errorf("check_task, check, or [projects.%s.mise] with default test task is required", p.ID)
 	}
-	if p.Mv.Enabled && len(p.Mv.Ops) == 0 {
-		return fmt.Errorf("mv.enabled requires at least one op")
+	if len(p.Mv.Ops) > 0 {
+		return fmt.Errorf("mv.ops removed; use mv.grains (and optional mv.placements)")
 	}
-	for _, op := range p.Mv.Ops {
-		switch op {
-		case "rename", "cross_file", "package":
+	if p.Mv.Enabled && len(p.Mv.Grains) == 0 {
+		return fmt.Errorf("mv.enabled requires at least one grain")
+	}
+	for _, grain := range p.Mv.Grains {
+		switch Grain(grain) {
+		case GrainDeclaration, GrainModule, GrainPackage:
 		default:
-			return fmt.Errorf("unknown mv op %q", op)
+			return fmt.Errorf("unknown mv grain %q", grain)
+		}
+		if p.Language != "" && !grainAllowed(p.Language, Grain(grain)) {
+			return fmt.Errorf("grain %q not valid for language %s", grain, p.Language)
+		}
+	}
+	for _, placement := range p.Mv.Placements {
+		switch Placement(placement) {
+		case PlacementRename, PlacementLayout, PlacementModule, PlacementNewModule, PlacementPackage:
+		default:
+			return fmt.Errorf("unknown mv placement %q", placement)
 		}
 	}
 	if err := validateIsolateImage(p.Isolate.Image); err != nil {

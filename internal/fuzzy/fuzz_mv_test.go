@@ -82,17 +82,17 @@ func TestCatalogFuzzCampaign(t *testing.T) {
 		projectIdx := rng.Intn(len(canvas.Projects))
 		in := PlanInputFromRand(rng)
 		p := canvas.Project(projectIdx)
-		name := fmt.Sprintf("attempt=%d project=%s op_idx=%d entity_idx=%d entropy=%d file_idx=%d",
-			attempt, p.ID, in.OpIndex, in.EntityIndex, in.Entropy, in.FileIndex)
+		name := fmt.Sprintf("attempt=%d project=%s grain_idx=%d source_idx=%d placement_idx=%d peer_idx=%d entropy=%d",
+			attempt, p.ID, in.GrainIndex, in.SourceIndex, in.PlacementIndex, in.PeerIndex, in.Entropy)
 
 		t.Run(name, func(t *testing.T) {
 			scaffold := filepath.Join(scaffoldRoot,
-				fmt.Sprintf("%s-a%d-op%d-e%d-n%d", p.ID, attempt, in.OpIndex, in.EntityIndex, in.Entropy))
+				fmt.Sprintf("%s-a%d-g%d-s%d-p%d-n%d", p.ID, attempt, in.GrainIndex, in.SourceIndex, in.PlacementIndex, in.Entropy))
 
 			// Full choose/result lines to the test log (visible with -v).
 			res := canvas.Attempt(t.Context(), projectIdx, in, scaffold)
-			t.Logf("result class=%s plan op=%s\n  src=%s\n  dst=%s\n  err=%v\n  scaffold=%s",
-				res.Class, res.Plan.Op, res.Plan.Src, res.Plan.Dst, res.Err, scaffold)
+			t.Logf("result class=%s placement=%s\n  source=%s\n  destination=%s\n  err=%v\n  scaffold=%s",
+				res.Class, res.Plan.Placement, res.Plan.Source, res.Plan.Destination, res.Err, scaffold)
 
 			switch res.Class {
 			case classUnsupported, "pass", classEnv:
@@ -101,8 +101,8 @@ func TestCatalogFuzzCampaign(t *testing.T) {
 				}
 				return
 			case classBug:
-				t.Fatalf("BUG catalog=%s op=%s\n  src=%s\n  dst=%s\n  err=%v\n  scaffold=%s (curate into testdata/mv)",
-					p.ID, res.Plan.Op, res.Plan.Src, res.Plan.Dst, res.Err, scaffold)
+				t.Fatalf("BUG catalog=%s placement=%s\n  source=%s\n  destination=%s\n  err=%v\n  scaffold=%s (curate into testdata/mv)",
+					p.ID, res.Plan.Placement, res.Plan.Source, res.Plan.Destination, res.Err, scaffold)
 			default:
 				t.Fatalf("unexpected class %q: %v", res.Class, res.Err)
 			}
@@ -168,22 +168,24 @@ func TestCatalogMvSeedCorpus(t *testing.T) {
 	}
 	var seeds []seed
 	for i := range canvas.Projects {
+		// GrainIndex / PlacementIndex cover declaration+package (or module) menus.
+		// SourceIndex / PeerIndex / Entropy vary source and destinations.
 		seeds = append(seeds,
-			seed{i, PlanInput{OpIndex: 0, EntityIndex: 0, Entropy: 1, FileIndex: 0}},
-			seed{i, PlanInput{OpIndex: 1, EntityIndex: 1, Entropy: 2, FileIndex: 1}},
-			seed{i, PlanInput{OpIndex: 2, EntityIndex: 3, Entropy: 4, FileIndex: 2}},
+			seed{i, PlanInput{GrainIndex: 0, SourceIndex: 0, PlacementIndex: 0, PeerIndex: 0, Entropy: 1}},
+			seed{i, PlanInput{GrainIndex: 0, SourceIndex: 1, PlacementIndex: 1, PeerIndex: 1, Entropy: 2}},
+			seed{i, PlanInput{GrainIndex: 1, SourceIndex: 0, PlacementIndex: 0, PeerIndex: 2, Entropy: 4}},
 		)
 	}
 
 	for _, s := range seeds {
 		s := s
 		p := canvas.Project(s.projectIdx)
-		name := fmt.Sprintf("%s/op%d_ent%d", p.ID, s.in.OpIndex, s.in.EntityIndex)
+		name := fmt.Sprintf("%s/grain%d_placement%d_source%d", p.ID, s.in.GrainIndex, s.in.PlacementIndex, s.in.SourceIndex)
 		t.Run(name, func(t *testing.T) {
 			scaffold := filepath.Join(os.TempDir(), "rft-fuzzy-fuzz-fail", name)
 			res := canvas.Attempt(t.Context(), s.projectIdx, s.in, scaffold)
-			t.Logf("class=%s op=%s src=%s dst=%s err=%v",
-				res.Class, res.Plan.Op, res.Plan.Src, res.Plan.Dst, res.Err)
+			t.Logf("class=%s placement=%s source=%s destination=%s err=%v",
+				res.Class, res.Plan.Placement, res.Plan.Source, res.Plan.Destination, res.Err)
 			switch res.Class {
 			case classUnsupported, "pass", classEnv:
 				if res.Class == classEnv && res.Err != nil {
@@ -191,8 +193,8 @@ func TestCatalogMvSeedCorpus(t *testing.T) {
 				}
 				return
 			case classBug:
-				t.Fatalf("catalog=%s plan=%s %s -> %s: %v (scaffold %s)",
-					p.ID, res.Plan.Op, res.Plan.Src, res.Plan.Dst, res.Err, scaffold)
+				t.Fatalf("catalog=%s placement=%s %s -> %s: %v (scaffold %s)",
+					p.ID, res.Plan.Placement, res.Plan.Source, res.Plan.Destination, res.Err, scaffold)
 			default:
 				t.Fatalf("unexpected class %q: %v", res.Class, res.Err)
 			}

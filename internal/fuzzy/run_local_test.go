@@ -251,7 +251,7 @@ ingest_roots = ["."]
 
 [projects.local_go.mv]
 enabled = true
-ops = ["rename", "cross_file"]
+grains = ["declaration"]
 
 [projects.local_go.isolate]
 setup_network = true

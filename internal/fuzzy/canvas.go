@@ -25,7 +25,7 @@ func LoadCatalogCanvas(catalogPath string) ([]Project, error) {
 		if !p.Mv.Enabled {
 			continue
 		}
-		if len(p.Mv.Ops) == 0 {
+		if len(p.Mv.Grains) == 0 {
 			continue
 		}
 		out = append(out, p)
@@ -122,7 +122,7 @@ func (c *CatalogCanvas) Attempt(ctx context.Context, projectIdx int, in PlanInpu
 	}
 	p := c.Project(projectIdx)
 
-	runID := fmt.Sprintf("gofuzz-%d-%d-%d-%d", projectIdx, in.OpIndex, in.EntityIndex, in.Entropy)
+	runID := fmt.Sprintf("gofuzz-%d-%d-%d-%d-%d", projectIdx, in.GrainIndex, in.SourceIndex, in.PlacementIndex, in.Entropy)
 	workDir, commit, err := c.Workspace.Prepare(p, runID, PrepareOptions{Offline: c.Offline, Reuse: false})
 	if err != nil {
 		return MvAttemptResult{Class: classEnv, Err: fmt.Errorf("prepare %s: %w", p.ID, err)}
@@ -166,14 +166,14 @@ func (c *CatalogCanvas) Attempt(ctx context.Context, projectIdx int, in PlanInpu
 	if !check.OK() {
 		detail := formatRunFailureDetail(check, 4096)
 		res.Class = classBug
-		res.Err = fmt.Errorf("catalog check after %s %s -> %s: %s", res.Plan.Op, res.Plan.Src, res.Plan.Dst, detail)
+		res.Err = fmt.Errorf("catalog check after %s %s -> %s: %s", res.Plan.Placement, res.Plan.Source, res.Plan.Destination, detail)
 		fmt.Fprintf(log, "mv result: project=%s class=bug catalog_check=%s\n", p.ID, shortRunErr(check))
 		if scaffoldDir != "" {
 			_ = ScaffoldAttempt(ingestRoot, scaffoldDir, res)
 		}
 		return res
 	}
-	fmt.Fprintf(log, "mv result: project=%s class=pass op=%s (catalog check ok)\n", p.ID, res.Plan.Op)
+	fmt.Fprintf(log, "mv result: project=%s class=pass placement=%s (catalog check ok)\n", p.ID, res.Plan.Placement)
 	return res
 }
 

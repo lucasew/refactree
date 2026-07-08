@@ -19,23 +19,26 @@ func TestPlanInputDeterministicPick(t *testing.T) {
 	p := Project{
 		ID:       "unit",
 		Language: "go",
-		Mv:       MvConfig{Enabled: true, Ops: []string{"rename"}},
+		Mv:       MvConfig{Enabled: true, Grains: []string{"declaration"}},
 	}
 	result, fails, err := RunIngestOnRoot(work, InvariantOptions{})
 	if err != nil || len(fails) > 0 {
 		t.Fatalf("ingest: err=%v fails=%v", err, fails)
 	}
-	in := PlanInput{OpIndex: 0, EntityIndex: 0, Entropy: 42, FileIndex: 0}
-	a, err := pickMvPlanWith(in, p, work, result, nil)
+	in := PlanInput{GrainIndex: 0, SourceIndex: 0, PlacementIndex: 0, PeerIndex: 0, Entropy: 42}
+	a, err := pickMvPlanWith(in, p, work, result)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := pickMvPlanWith(in, p, work, result, nil)
+	b, err := pickMvPlanWith(in, p, work, result)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if a != b {
 		t.Fatalf("same PlanInput produced different plans: %+v vs %+v", a, b)
+	}
+	if a.Placement != PlacementRename {
+		t.Fatalf("expected rename placement, got %s plan=%+v", a.Placement, a)
 	}
 }
 
@@ -58,8 +61,8 @@ func TestLoadCatalogCanvasMvEnabled(t *testing.T) {
 		if !p.Mv.Enabled {
 			t.Fatalf("canvas included mv-disabled project %s", p.ID)
 		}
-		if len(p.Mv.Ops) == 0 {
-			t.Fatalf("canvas project %s has empty ops", p.ID)
+		if len(p.Mv.Grains) == 0 {
+			t.Fatalf("canvas project %s has empty grains", p.ID)
 		}
 	}
 }

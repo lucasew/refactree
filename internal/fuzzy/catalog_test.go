@@ -172,3 +172,28 @@ check = ["true"]
 		t.Fatal("expected invalid slug error")
 	}
 }
+
+func TestMvOpsRejected(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	catalog := filepath.Join(dir, "projects.toml")
+	data := `
+[projects.x]
+language = "go"
+local_path = "/tmp/x"
+ingest_roots = ["."]
+[projects.x.mv]
+enabled = true
+ops = ["rename"]
+[projects.x.mise.tools]
+go = "1.26.4"
+[projects.x.mise.tasks.test]
+run = "true"
+`
+	if err := os.WriteFile(catalog, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fuzzy.LoadCatalog(catalog); err == nil {
+		t.Fatal("expected mv.ops rejection")
+	}
+}

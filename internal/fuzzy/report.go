@@ -36,7 +36,7 @@ type Event struct {
 	Project    string             `json:"project"`
 	Iteration  int                `json:"iteration,omitempty"`
 	Kind       string             `json:"kind"`
-	Op         string             `json:"op,omitempty"`
+	Placement  string             `json:"placement,omitempty"`
 	Source     string             `json:"source,omitempty"`
 	Dest       string             `json:"destination,omitempty"`
 	Outcome    string             `json:"outcome"`

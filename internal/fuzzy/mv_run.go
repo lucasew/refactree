@@ -3,6 +3,7 @@ package fuzzy
 import (
 	"fmt"
 	"math/rand"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -12,31 +13,34 @@ import (
 // MvRunOptions configures move fuzzing.
 type MvRunOptions struct {
 	StrictRefs bool
-	Ops        []string
+	Grains     []string
 }
 
-type mvPlan struct {
-	Op  string
-	Src string
-	Dst string
+// movePlan is the logged plan: placement plus source/destination references.
+type movePlan struct {
+	Placement   Placement
+	Source      string
+	Destination string
 }
 
 // PlanInput is the minimizable decision surface shared by catalog RNG iterations
 // and Go native fuzz (testing.F). Indices are taken mod available options.
 type PlanInput struct {
-	OpIndex     uint8
-	EntityIndex uint32
-	Entropy     uint32
-	FileIndex   uint32
+	GrainIndex     uint8
+	SourceIndex    uint32
+	PlacementIndex uint8
+	PeerIndex      uint32
+	Entropy        uint32
 }
 
 // PlanInputFromRand draws a PlanInput from a seeded RNG (catalog ModeMv/ModeRun).
 func PlanInputFromRand(rng *rand.Rand) PlanInput {
 	return PlanInput{
-		OpIndex:     uint8(rng.Intn(256)),
-		EntityIndex: uint32(rng.Uint32()),
-		Entropy:     uint32(rng.Uint32()),
-		FileIndex:   uint32(rng.Uint32()),
+		GrainIndex:     uint8(rng.Intn(256)),
+		SourceIndex:    uint32(rng.Uint32()),
+		PlacementIndex: uint8(rng.Intn(256)),
+		PeerIndex:      uint32(rng.Uint32()),
+		Entropy:        uint32(rng.Uint32()),
 	}
 }
 
@@ -52,6 +56,9 @@ func classifyMvError(err error) string {
 		"no entity found",
 		"must both include symbols",
 		"package move requires",
+		"no movable",
+		"no placement",
+		"no source nodes",
 	}
 	for _, s := range unsupported {
 		if strings.Contains(msg, s) {
@@ -61,112 +68,299 @@ func classifyMvError(err error) string {
 	return "bug"
 }
 
-func pickMvPlan(rng *rand.Rand, p Project, root string, result *ingest.Result, ops []string) (mvPlan, error) {
-	return pickMvPlanWith(PlanInputFromRand(rng), p, root, result, ops)
+func pickMvPlan(rng *rand.Rand, p Project, root string, result *ingest.Result) (movePlan, error) {
+	return pickMvPlanWith(PlanInputFromRand(rng), p, root, result)
 }
 
-func pickMvPlanWith(in PlanInput, p Project, root string, result *ingest.Result, ops []string) (mvPlan, error) {
-	if len(ops) == 0 {
-		ops = p.Mv.Ops
+func pickMvPlanWith(in PlanInput, p Project, root string, result *ingest.Result) (movePlan, error) {
+	_ = root
+	model, err := moveModelForLanguage(p.Language)
+	if err != nil {
+		return movePlan{}, err
 	}
-	if len(ops) == 0 {
-		return mvPlan{}, fmt.Errorf("no mv ops configured")
-	}
-	op := ops[int(in.OpIndex)%len(ops)]
 
-	var entities []ingest.Entity
+	grains, err := resolveProjectGrains(p, model)
+	if err != nil {
+		return movePlan{}, err
+	}
+	grain := grains[int(in.GrainIndex)%len(grains)]
+
+	nodes := model.ListNodes(result, grain, p.Language)
+	if len(nodes) == 0 {
+		return movePlan{}, fmt.Errorf("no source nodes for grain %s language %s", grain, p.Language)
+	}
+	source := nodes[int(in.SourceIndex)%len(nodes)]
+
+	placements := placementMenu(grain, model, result, p.Language, source)
+	if len(p.Mv.Placements) > 0 {
+		placements = filterPlacements(placements, p.Mv.Placements)
+	}
+	if len(placements) == 0 {
+		return movePlan{}, fmt.Errorf("no placements for grain %s", grain)
+	}
+	placement := placements[int(in.PlacementIndex)%len(placements)]
+
+	return materializeMovePlan(in, model, result, p.Language, source, placement)
+}
+
+func resolveProjectGrains(p Project, model languageMoveModel) ([]Grain, error) {
+	allowed := model.Grains()
+	if len(p.Mv.Grains) == 0 {
+		return nil, fmt.Errorf("no mv grains configured")
+	}
+	var out []Grain
+	for _, name := range p.Mv.Grains {
+		g := Grain(name)
+		ok := false
+		for _, a := range allowed {
+			if a == g {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return nil, fmt.Errorf("grain %q not valid for language %s", name, p.Language)
+		}
+		out = append(out, g)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no mv grains configured")
+	}
+	return out, nil
+}
+
+func filterPlacements(menu []Placement, allow []string) []Placement {
+	set := map[string]bool{}
+	for _, a := range allow {
+		set[a] = true
+	}
+	var out []Placement
+	for _, p := range menu {
+		if set[string(p)] {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// placementMenu lists valid placements for this source node.
+func placementMenu(grain Grain, model languageMoveModel, result *ingest.Result, projectLanguage string, source MoveNode) []Placement {
+	switch grain {
+	case GrainPackage:
+		return []Placement{PlacementPackage}
+	case GrainModule:
+		return []Placement{PlacementModule, PlacementNewModule}
+	case GrainDeclaration:
+		var menu []Placement
+		menu = append(menu, PlacementRename)
+		// layout: only when the language can place a declaration in another file
+		// inside the same module (Go/Java packages with multiple files, or new file).
+		modKey := model.ModuleKey(source.Path)
+		sameFiles := filesInModule(result, model, projectLanguage, modKey)
+		// Offer layout if same-module has another file OR we can create a new layout file
+		// (always true for directory modules; for file-modules layout is impossible).
+		if _, isFileModule := model.(javascriptMoveModel); isFileModule {
+			// module == file: layout cannot differ from module boundary
+		} else if _, isPy := model.(pythonMoveModel); isPy {
+			// Python declaration lives in a file-module; moving to another file is module placement.
+		} else {
+			// go / java: layout within package
+			menu = append(menu, PlacementLayout)
+		}
+		if len(modulesOtherThan(result, model, projectLanguage, modKey)) > 0 || len(sameFiles) > 1 {
+			menu = append(menu, PlacementModule)
+		} else if len(listLanguageFiles(result, projectLanguage)) > 1 {
+			menu = append(menu, PlacementModule)
+		}
+		menu = append(menu, PlacementNewModule)
+		return menu
+	default:
+		return nil
+	}
+}
+
+func materializeMovePlan(in PlanInput, model languageMoveModel, result *ingest.Result, projectLanguage string, source MoveNode, placement Placement) (movePlan, error) {
+	switch source.Grain {
+	case GrainPackage:
+		return materializePackagePlan(in, source, placement)
+	case GrainModule:
+		return materializeModuleFilePlan(in, result, model, projectLanguage, source, placement)
+	case GrainDeclaration:
+		return materializeDeclarationPlan(in, model, result, projectLanguage, source, placement)
+	default:
+		return movePlan{}, fmt.Errorf("unsupported grain %s", source.Grain)
+	}
+}
+
+func materializePackagePlan(in PlanInput, source MoveNode, placement Placement) (movePlan, error) {
+	if placement != PlacementPackage {
+		return movePlan{}, fmt.Errorf("placement %s not valid for package grain", placement)
+	}
+	srcDir := strings.TrimSuffix(source.Path, "/")
+	dstDir := fmt.Sprintf("%s_fuzz_%x", srcDir, in.Entropy&0xffff)
+	return movePlan{
+		Placement:   PlacementPackage,
+		Source:      pathReference(srcDir),
+		Destination: pathReference(dstDir),
+	}, nil
+}
+
+func materializeModuleFilePlan(in PlanInput, result *ingest.Result, model languageMoveModel, projectLanguage string, source MoveNode, placement Placement) (movePlan, error) {
+	srcPath := source.Path
+	var dstPath string
+	switch placement {
+	case PlacementModule:
+		// Peer file path in another module (another file).
+		files := listLanguageFiles(result, projectLanguage)
+		var peers []string
+		for _, f := range files {
+			if !model.SameModule(f, srcPath) {
+				peers = append(peers, f)
+			}
+		}
+		if len(peers) == 0 {
+			// Fall back to new module path beside source.
+			dstPath = newSiblingPath(srcPath, in.Entropy)
+			placement = PlacementNewModule
+		} else {
+			// Relocate source file to a new path next to a peer (same dir as peer, new name).
+			peer := peers[int(in.PeerIndex)%len(peers)]
+			ext := filepath.Ext(srcPath)
+			base := strings.TrimSuffix(filepath.Base(srcPath), filepath.Ext(srcPath))
+			dstPath = "./" + path.Join(path.Dir(strings.TrimPrefix(peer, "./")), fmt.Sprintf("%s_fuzz_%x%s", base, in.Entropy&0xffff, ext))
+		}
+	case PlacementNewModule:
+		dstPath = newSiblingPath(srcPath, in.Entropy)
+	default:
+		return movePlan{}, fmt.Errorf("placement %s not valid for module grain", placement)
+	}
+	return movePlan{
+		Placement:   placement,
+		Source:      pathReference(srcPath),
+		Destination: pathReference(dstPath),
+	}, nil
+}
+
+func materializeDeclarationPlan(in PlanInput, model languageMoveModel, result *ingest.Result, projectLanguage string, source MoveNode, placement Placement) (movePlan, error) {
 	symbolNames := map[string]bool{}
-	filesByLang := map[string][]string{}
-	for _, f := range result.Files {
-		if f.Language == p.Language {
-			filesByLang[f.Language] = append(filesByLang[f.Language], f.Path)
-		}
-	}
-	for _, e := range result.Entities {
-		ref := ingest.ParseReference(e.Reference)
-		if ref.Provider != "path" || ref.Symbol == "" {
-			continue
-		}
-		rel := strings.TrimPrefix(ref.Path, "./")
-		lang, ok := ingest.LanguageForFile(rel)
-		if !ok || lang != p.Language {
-			continue
-		}
-		if strings.HasPrefix(ref.Symbol, "fuzz_") || strings.HasPrefix(ref.Symbol, "Fuzz") || strings.HasPrefix(ref.Symbol, "FUZZ") {
-			continue
-		}
-		entities = append(entities, e)
-		symbolNames[ref.Symbol] = true
-	}
-	if len(entities) == 0 {
-		return mvPlan{}, fmt.Errorf("no movable entities for language %s", p.Language)
+	for _, n := range listDeclarationNodes(result, projectLanguage) {
+		symbolNames[n.Symbol] = true
 	}
 
-	ent := entities[int(in.EntityIndex)%len(entities)]
-	srcRef := ingest.ParseReference(ent.Reference)
-	srcPath := srcRef.Path
-	if !strings.HasPrefix(srcPath, "./") {
-		srcPath = "./" + srcPath
-	}
+	srcPath := source.Path
+	srcSymbol := source.Symbol
+	modKey := model.ModuleKey(srcPath)
 
-	switch op {
-	case "rename":
-		leaf := srcRef.Symbol
+	switch placement {
+	case PlacementRename:
+		leaf := srcSymbol
 		if i := strings.LastIndex(leaf, "."); i >= 0 {
 			leaf = leaf[i+1:]
 		}
 		leaf = strings.TrimPrefix(leaf, "*")
 		name := uniqueSymbolFrom(in.Entropy, symbolNames, leaf)
-		// Preserve qualifiers for nested symbols (e.g. Java Type.method).
-		if i := strings.LastIndex(srcRef.Symbol, "."); i >= 0 {
-			name = srcRef.Symbol[:i+1] + name
+		if i := strings.LastIndex(srcSymbol, "."); i >= 0 {
+			name = srcSymbol[:i+1] + name
 		}
-		symbolNames[name] = true
-		return mvPlan{
-			Op:  op,
-			Src: ent.Reference,
-			Dst: ingest.SymbolRef(srcPath, name),
+		return movePlan{
+			Placement:   PlacementRename,
+			Source:      source.Reference,
+			Destination: ingest.SymbolRef(srcPath, name),
 		}, nil
-	case "cross_file":
-		files := filesByLang[p.Language]
-		if len(files) == 0 {
-			return mvPlan{}, fmt.Errorf("no destination files")
-		}
-		var dstPath string
-		for tries := uint32(0); tries < 16; tries++ {
-			cand := files[int(in.FileIndex+tries)%len(files)]
-			if !strings.HasPrefix(cand, "./") {
-				cand = "./" + cand
-			}
-			if cand != srcPath {
-				dstPath = cand
-				break
-			}
-		}
+
+	case PlacementLayout:
+		// Same module, different layout file, keep name.
+		sameFiles := filesInModule(result, model, projectLanguage, modKey)
+		dstPath := peerFileInModule(sameFiles, srcPath, in.PeerIndex)
 		if dstPath == "" {
-			// new sibling file
-			ext := filepath.Ext(srcPath)
-			base := strings.TrimSuffix(filepath.Base(srcPath), ext)
-			dstPath = "./" + filepath.ToSlash(filepath.Join(filepath.Dir(strings.TrimPrefix(srcPath, "./")), fmt.Sprintf("%s_fuzz_%x%s", base, in.Entropy&0xffff, ext)))
+			dstPath = newLayoutFileInModule(srcPath, in.Entropy)
 		}
-		return mvPlan{
-			Op:  op,
-			Src: ent.Reference,
-			Dst: ingest.SymbolRef(dstPath, srcRef.Symbol),
+		return movePlan{
+			Placement:   PlacementLayout,
+			Source:      source.Reference,
+			Destination: ingest.SymbolRef(dstPath, srcSymbol),
 		}, nil
-	case "package":
-		srcDir := "./" + filepath.ToSlash(filepath.Dir(strings.TrimPrefix(srcPath, "./")))
-		if srcDir == "./." || srcDir == "./" {
-			return mvPlan{}, fmt.Errorf("entity not in a package directory")
+
+	case PlacementModule:
+		// Different existing module, keep name.
+		others := modulesOtherThan(result, model, projectLanguage, modKey)
+		var dstPath string
+		if len(others) == 0 {
+			// No other module: try any other file (different path).
+			for _, f := range listLanguageFiles(result, projectLanguage) {
+				if f != srcPath {
+					dstPath = f
+					break
+				}
+			}
+			if dstPath == "" {
+				return movePlan{}, fmt.Errorf("no existing peer module for placement module")
+			}
+		} else {
+			targetMod := others[int(in.PeerIndex)%len(others)]
+			dstPath = fileInModuleKey(result, model, projectLanguage, targetMod, in.PeerIndex)
+			if dstPath == "" {
+				return movePlan{}, fmt.Errorf("no file in peer module %s", targetMod)
+			}
 		}
-		dstDir := fmt.Sprintf("%s_fuzz_%x", strings.TrimSuffix(srcDir, "/"), in.Entropy&0xffff)
-		return mvPlan{
-			Op:  op,
-			Src: "path:" + strings.TrimSuffix(srcDir, "/"),
-			Dst: "path:" + dstDir,
+		return movePlan{
+			Placement:   PlacementModule,
+			Source:      source.Reference,
+			Destination: ingest.SymbolRef(dstPath, srcSymbol),
 		}, nil
+
+	case PlacementNewModule:
+		dstPath := newModulePathForDeclaration(model, srcPath, in.Entropy)
+		return movePlan{
+			Placement:   PlacementNewModule,
+			Source:      source.Reference,
+			Destination: ingest.SymbolRef(dstPath, srcSymbol),
+		}, nil
+
 	default:
-		return mvPlan{}, fmt.Errorf("unknown op %q", op)
+		return movePlan{}, fmt.Errorf("placement %s not valid for declaration grain", placement)
+	}
+}
+
+func pathReference(p string) string {
+	if !strings.HasPrefix(p, "./") {
+		p = "./" + strings.TrimPrefix(p, "/")
+	}
+	return "path:" + p
+}
+
+func newSiblingPath(srcPath string, entropy uint32) string {
+	ext := filepath.Ext(srcPath)
+	base := strings.TrimSuffix(filepath.Base(srcPath), ext)
+	dir := path.Dir(strings.TrimPrefix(srcPath, "./"))
+	name := fmt.Sprintf("%s_fuzz_%x%s", base, entropy&0xffff, ext)
+	if dir == "." {
+		return "./" + name
+	}
+	return "./" + path.Join(dir, name)
+}
+
+func newLayoutFileInModule(srcPath string, entropy uint32) string {
+	return newSiblingPath(srcPath, entropy)
+}
+
+func newModulePathForDeclaration(model languageMoveModel, srcPath string, entropy uint32) string {
+	// Go/Java: new directory (new package) + same basename.
+	// JS/Python file-module model: new file path (new module).
+	switch model.(type) {
+	case goMoveModel, javaMoveModel:
+		rel := strings.TrimPrefix(srcPath, "./")
+		dir := path.Dir(rel)
+		base := filepath.Base(rel)
+		parent := path.Dir(dir)
+		pkg := path.Base(dir)
+		newPkg := fmt.Sprintf("%s_fuzz_%x", pkg, entropy&0xffff)
+		if parent == "." {
+			return "./" + path.Join(newPkg, base)
+		}
+		return "./" + path.Join(parent, newPkg, base)
+	default:
+		return newSiblingPath(srcPath, entropy)
 	}
 }
 
@@ -190,11 +384,9 @@ func formatFuzzName(styleHint string, n int) string {
 		return "FUZZ_" + strings.ToUpper(hex)
 	}
 	if strings.ToUpper(styleHint[:1]) == styleHint[:1] && strings.ToLower(styleHint[1:]) != styleHint[1:] {
-		// PascalCase
 		return "Fuzz" + hex
 	}
 	if strings.ToLower(styleHint[:1]) == styleHint[:1] && !strings.Contains(styleHint, "_") {
-		// camelCase — ErrorProne accepts lowerCamelCase for non-immutable statics.
 		return "fuzz" + hex
 	}
 	if strings.ToUpper(styleHint) == styleHint {
@@ -204,8 +396,8 @@ func formatFuzzName(styleHint string, n int) string {
 }
 
 // ApplyMvPlan runs Rename+ApplyEdits and returns edits.
-func ApplyMvPlan(root string, plan mvPlan) ([]ingest.Edit, error) {
-	edits, err := ingest.Rename(root, plan.Src, plan.Dst)
+func ApplyMvPlan(root string, plan movePlan) ([]ingest.Edit, error) {
+	edits, err := ingest.Rename(root, plan.Source, plan.Destination)
 	if err != nil {
 		return nil, err
 	}
@@ -215,7 +407,7 @@ func ApplyMvPlan(root string, plan mvPlan) ([]ingest.Edit, error) {
 	return edits, nil
 }
 
-func postMvInvariants(root string, plan mvPlan, strict bool) []InvariantFailure {
+func postMvInvariants(root string, plan movePlan, strict bool) []InvariantFailure {
 	result, err := ingest.Ingest(root)
 	if err != nil {
 		return []InvariantFailure{{Check: "post_ingest", Message: err.Error()}}
@@ -225,14 +417,15 @@ func postMvInvariants(root string, plan mvPlan, strict bool) []InvariantFailure 
 	for _, e := range result.Entities {
 		entityRefs[e.Reference] = true
 	}
-	dst := ingest.ParseReference(plan.Dst)
-	if plan.Op == "package" {
+	dst := ingest.ParseReference(plan.Destination)
+	// Package/module file relocate (no symbol): skip declaration presence checks.
+	if plan.Placement == PlacementPackage || dst.Symbol == "" {
 		return fails
 	}
-	if entityRefs[plan.Src] {
-		fails = append(fails, InvariantFailure{Check: "source_removed", Message: plan.Src + " still present"})
+	if entityRefs[plan.Source] {
+		fails = append(fails, InvariantFailure{Check: "source_removed", Message: plan.Source + " still present"})
 	}
-	if dst.Symbol != "" && !entityRefs[plan.Dst] {
+	if dst.Symbol != "" && !entityRefs[plan.Destination] {
 		found := false
 		for ref := range entityRefs {
 			r := ingest.ParseReference(ref)
@@ -242,7 +435,7 @@ func postMvInvariants(root string, plan mvPlan, strict bool) []InvariantFailure 
 			}
 		}
 		if !found {
-			fails = append(fails, InvariantFailure{Check: "dest_present", Message: plan.Dst + " missing"})
+			fails = append(fails, InvariantFailure{Check: "dest_present", Message: plan.Destination + " missing"})
 		}
 	}
 	return fails

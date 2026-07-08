@@ -40,7 +40,7 @@ type Options struct {
 	StrictRefs      bool
 	FailFast        bool
 	Verbose         bool
-	Ops             []string
+	Grains          []string // optional override of project mv grains
 	Stdout          io.Writer
 	Stderr          io.Writer
 }
@@ -417,8 +417,8 @@ func runMvIteration(ctx context.Context, opts Options, p Project, rng *rand.Rand
 	label := fmt.Sprintf("mv[%d/%d]", iter, opts.Iterations)
 	ingestRoot := primaryIngestRoot(p, env.workDir)
 	in := PlanInputFromRand(rng)
-	if len(opts.Ops) > 0 {
-		p.Mv.Ops = append([]string(nil), opts.Ops...)
+	if len(opts.Grains) > 0 {
+		p.Mv.Grains = append([]string(nil), opts.Grains...)
 	}
 
 	// afterCheck runs the catalog project check so choose/result lines stay in one place.
@@ -436,12 +436,12 @@ func runMvIteration(ctx context.Context, opts Options, p Project, rng *rand.Rand
 		Project:   p.ID,
 		Iteration: iter,
 		Kind:      "mv",
-		Op:        plan.Op,
-		Source:    plan.Src,
-		Dest:      plan.Dst,
+		Placement: string(plan.Placement),
+		Source:    plan.Source,
+		Dest:      plan.Destination,
 	}
 	scaffold := func() {
-		_ = ScaffoldMvFixture(ingestRoot, report.ScaffoldDir(p.ID, opts.Seed, iter), plan.Src, plan.Dst, attempt.Edits)
+		_ = ScaffoldMvFixture(ingestRoot, report.ScaffoldDir(p.ID, opts.Seed, iter), plan.Source, plan.Destination, attempt.Edits)
 	}
 
 	switch attempt.Class {
@@ -449,7 +449,7 @@ func runMvIteration(ctx context.Context, opts Options, p Project, rng *rand.Rand
 		errMsg := "unsupported"
 		if attempt.Err != nil {
 			errMsg = attempt.Err.Error()
-		} else if plan.Op == "" {
+		} else if plan.Placement == "" {
 			errMsg = "pick failed"
 		}
 		out.recordUnsupported(report, Event{
@@ -459,14 +459,14 @@ func runMvIteration(ctx context.Context, opts Options, p Project, rng *rand.Rand
 			Outcome:   "skip",
 			Class:     classUnsupported,
 			Error:     errMsg,
-			Op:        plan.Op,
-			Source:    plan.Src,
-			Dest:      plan.Dst,
+			Placement: string(plan.Placement),
+			Source:    plan.Source,
+			Dest:      plan.Destination,
 		})
 		return nil
 	case classBug:
 		// Distinguish pre-ingest failures (no plan) from apply/post/check bugs.
-		if plan.Op == "" && len(attempt.Failures) > 0 {
+		if plan.Placement == "" && len(attempt.Failures) > 0 {
 			ev := Event{Project: p.ID, Iteration: iter, Kind: "mv_pre_ingest"}
 			failErr := out.ingestBug(report, ev, attempt.Err, attempt.Failures)
 			if opts.FailFast {
@@ -489,8 +489,8 @@ func runMvIteration(ctx context.Context, opts Options, p Project, rng *rand.Rand
 		scaffold()
 		return out.bugErr(opts, report, ev, attempt.Err)
 	case "pass":
-		fmt.Fprintf(opts.Stdout, "mv result: project=%s class=pass iteration=%d/%d op=%s\n",
-			p.ID, iter, opts.Iterations, plan.Op)
+		fmt.Fprintf(opts.Stdout, "mv result: project=%s class=pass iteration=%d/%d placement=%s\n",
+			p.ID, iter, opts.Iterations, plan.Placement)
 		out.recordPass(report, ev)
 		return nil
 	default:

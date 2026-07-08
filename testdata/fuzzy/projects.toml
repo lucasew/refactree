@@ -8,7 +8,7 @@ preserve_globs = []
 
 [projects.workspaced.mv]
 enabled = true
-ops = ["rename", "cross_file", "package"]
+grains = ["declaration", "package"]
 
 [projects.workspaced.isolate]
 setup_network = true
@@ -35,7 +35,7 @@ preserve_globs = [".venv", ".uv"]
 
 [projects.ritm_annotation.mv]
 enabled = true
-ops = ["rename", "cross_file", "package"]
+grains = ["declaration", "module", "package"]
 
 [projects.ritm_annotation.isolate]
 setup_network = true
@@ -70,7 +70,7 @@ preserve_globs = ["node_modules", ".pnpm-store"]
 
 [projects.astro.mv]
 enabled = true
-ops = ["rename", "cross_file"]
+grains = ["declaration", "module"]
 
 [projects.astro.isolate]
 setup_network = true
@@ -111,7 +111,7 @@ preserve_globs = []
 
 [projects.gson.mv]
 enabled = true
-ops = ["rename", "cross_file", "package"]
+grains = ["declaration", "package"]
 
 [projects.gson.isolate]
 setup_network = true
