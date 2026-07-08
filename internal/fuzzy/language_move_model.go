@@ -43,58 +43,63 @@ type MoveNode struct {
 // languageMoveModel describes grains and module boundaries for one language.
 type languageMoveModel interface {
 	Grains() []Grain
-	ListNodes(result *ingest.Result, grain Grain, projectLanguage string) []MoveNode
+	// ListNodes enumerates sources; projectFamily is the catalog family id.
+	ListNodes(result *ingest.Result, grain Grain, projectFamily string) []MoveNode
 	// SameModule reports whether two paths (./rel) share a module boundary.
 	SameModule(pathA, pathB string) bool
 	// ModuleKey returns a stable module identity for a file path (./rel).
 	ModuleKey(filePath string) string
 }
 
-func moveModelForLanguage(language string) (languageMoveModel, error) {
-	// Prefer family lattice when registered (jvm, ecma, …).
-	switch ingest.FamilyForLanguage(language) {
+func moveModelForFamily(family string) (languageMoveModel, error) {
+	switch family {
 	case ingest.FamilyJVM:
 		return jvmMoveModel{}, nil
 	case ingest.FamilyECMA:
+		// JS/TS/TSX/JSX/Svelte: file (or .svelte SFC) is the module.
 		return ecmaMoveModel{}, nil
-	}
-	switch language {
-	case "go":
+	case ingest.FamilyGo:
 		return goMoveModel{}, nil
-	case "python":
+	case ingest.FamilyPython:
 		return pythonMoveModel{}, nil
-	case "java":
-		// Fallback if family registration order fails in tests.
-		return jvmMoveModel{}, nil
-	case "javascript":
-		return ecmaMoveModel{}, nil
-	case "svelte":
-		// Component file = module (same lattice as ECMA file modules).
-		return ecmaMoveModel{}, nil
+	case ingest.FamilyNix:
+		return nil, errUnsupportedFamily(family)
 	default:
-		return nil, errUnsupportedLanguage(language)
+		return nil, errUnsupportedFamily(family)
 	}
+}
+
+// moveModelForLanguage resolves via the language's registered family.
+func moveModelForLanguage(language string) (languageMoveModel, error) {
+	if f := ingest.FamilyForLanguage(language); f != "" {
+		return moveModelForFamily(f)
+	}
+	return nil, errUnsupportedLanguage(language)
 }
 
 func errUnsupportedLanguage(language string) error {
 	return &moveModelError{msg: "unsupported project language for move model: " + language}
 }
 
+func errUnsupportedFamily(family string) error {
+	return &moveModelError{msg: "unsupported project family for move model: " + family}
+}
+
 type moveModelError struct{ msg string }
 
 func (e *moveModelError) Error() string { return e.msg }
 
-// defaultGrainsForLanguage is the full grain set when catalog does not filter.
-func defaultGrainsForLanguage(language string) []Grain {
-	m, err := moveModelForLanguage(language)
+// defaultGrainsForFamily is the full grain set for a catalog family.
+func defaultGrainsForFamily(family string) []Grain {
+	m, err := moveModelForFamily(family)
 	if err != nil {
 		return nil
 	}
 	return m.Grains()
 }
 
-func grainAllowed(language string, grain Grain) bool {
-	for _, g := range defaultGrainsForLanguage(language) {
+func grainAllowedForFamily(family string, grain Grain) bool {
+	for _, g := range defaultGrainsForFamily(family) {
 		if g == grain {
 			return true
 		}
@@ -118,12 +123,12 @@ func (m goMoveModel) SameModule(pathA, pathB string) bool {
 	return m.ModuleKey(pathA) == m.ModuleKey(pathB)
 }
 
-func (goMoveModel) ListNodes(result *ingest.Result, grain Grain, projectLanguage string) []MoveNode {
+func (goMoveModel) ListNodes(result *ingest.Result, grain Grain, projectFamily string) []MoveNode {
 	switch grain {
 	case GrainDeclaration:
-		return listDeclarationNodes(result, projectLanguage)
+		return listDeclarationNodes(result, projectFamily)
 	case GrainPackage:
-		return listPackageNodes(result, projectLanguage)
+		return listPackageNodes(result, projectFamily)
 	default:
 		return nil
 	}
@@ -146,12 +151,12 @@ func (m jvmMoveModel) SameModule(pathA, pathB string) bool {
 	return m.ModuleKey(pathA) == m.ModuleKey(pathB)
 }
 
-func (jvmMoveModel) ListNodes(result *ingest.Result, grain Grain, projectLanguage string) []MoveNode {
+func (jvmMoveModel) ListNodes(result *ingest.Result, grain Grain, projectFamily string) []MoveNode {
 	switch grain {
 	case GrainDeclaration:
-		return listDeclarationNodes(result, projectLanguage)
+		return listDeclarationNodes(result, projectFamily)
 	case GrainPackage:
-		return listPackageNodes(result, projectLanguage)
+		return listPackageNodes(result, projectFamily)
 	default:
 		return nil
 	}
@@ -173,20 +178,20 @@ func (m pythonMoveModel) SameModule(pathA, pathB string) bool {
 	return m.ModuleKey(pathA) == m.ModuleKey(pathB)
 }
 
-func (pythonMoveModel) ListNodes(result *ingest.Result, grain Grain, projectLanguage string) []MoveNode {
+func (pythonMoveModel) ListNodes(result *ingest.Result, grain Grain, projectFamily string) []MoveNode {
 	switch grain {
 	case GrainDeclaration:
-		return listDeclarationNodes(result, projectLanguage)
+		return listDeclarationNodes(result, projectFamily)
 	case GrainModule:
-		return listModuleFileNodes(result, projectLanguage)
+		return listModuleFileNodes(result, projectFamily)
 	case GrainPackage:
-		return listPackageNodes(result, projectLanguage)
+		return listPackageNodes(result, projectFamily)
 	default:
 		return nil
 	}
 }
 
-// --- ECMA family: file is the module (JS/TS/TSX/JSX). Vue/Astro out of scope. ---
+// --- ECMA family: file is the module (JS/TS/TSX/JSX/Svelte). Vue/Astro out of scope. ---
 
 type ecmaMoveModel struct{}
 
@@ -202,12 +207,12 @@ func (m ecmaMoveModel) SameModule(pathA, pathB string) bool {
 	return m.ModuleKey(pathA) == m.ModuleKey(pathB)
 }
 
-func (ecmaMoveModel) ListNodes(result *ingest.Result, grain Grain, projectLanguage string) []MoveNode {
+func (ecmaMoveModel) ListNodes(result *ingest.Result, grain Grain, projectFamily string) []MoveNode {
 	switch grain {
 	case GrainDeclaration:
-		return listDeclarationNodes(result, projectLanguage)
+		return listDeclarationNodes(result, projectFamily)
 	case GrainModule:
-		return listModuleFileNodes(result, projectLanguage)
+		return listModuleFileNodes(result, projectFamily)
 	default:
 		return nil
 	}
@@ -215,7 +220,7 @@ func (ecmaMoveModel) ListNodes(result *ingest.Result, grain Grain, projectLangua
 
 // --- shared listing ---
 
-func listDeclarationNodes(result *ingest.Result, projectLanguage string) []MoveNode {
+func listDeclarationNodes(result *ingest.Result, projectFamily string) []MoveNode {
 	var out []MoveNode
 	for _, e := range result.Entities {
 		ref := ingest.ParseReference(e.Reference)
@@ -224,7 +229,7 @@ func listDeclarationNodes(result *ingest.Result, projectLanguage string) []MoveN
 		}
 		rel := strings.TrimPrefix(ref.Path, "./")
 		lang, ok := ingest.LanguageForFile(rel)
-		if !ok || !ingest.LanguageMatchesProject(lang, projectLanguage) {
+		if !ok || !ingest.LanguageInFamily(lang, projectFamily) {
 			continue
 		}
 		if isFuzzSymbol(ref.Symbol) {
@@ -244,10 +249,10 @@ func listDeclarationNodes(result *ingest.Result, projectLanguage string) []MoveN
 	return out
 }
 
-func listPackageNodes(result *ingest.Result, projectLanguage string) []MoveNode {
+func listPackageNodes(result *ingest.Result, projectFamily string) []MoveNode {
 	dirs := map[string]bool{}
 	for _, f := range result.Files {
-		if !ingest.LanguageMatchesProject(f.Language, projectLanguage) {
+		if !ingest.LanguageInFamily(f.Language, projectFamily) {
 			continue
 		}
 		rel := strings.TrimPrefix(f.Path, "./")
@@ -274,10 +279,10 @@ func listPackageNodes(result *ingest.Result, projectLanguage string) []MoveNode 
 	return out
 }
 
-func listModuleFileNodes(result *ingest.Result, projectLanguage string) []MoveNode {
+func listModuleFileNodes(result *ingest.Result, projectFamily string) []MoveNode {
 	var out []MoveNode
 	for _, f := range result.Files {
-		if !ingest.LanguageMatchesProject(f.Language, projectLanguage) {
+		if !ingest.LanguageInFamily(f.Language, projectFamily) {
 			continue
 		}
 		p := f.Path
@@ -313,10 +318,10 @@ func dirKey(filePath string) string {
 	return d
 }
 
-func listLanguageFiles(result *ingest.Result, projectLanguage string) []string {
+func listLanguageFiles(result *ingest.Result, projectFamily string) []string {
 	var files []string
 	for _, f := range result.Files {
-		if !ingest.LanguageMatchesProject(f.Language, projectLanguage) {
+		if !ingest.LanguageInFamily(f.Language, projectFamily) {
 			continue
 		}
 		p := f.Path
@@ -329,9 +334,9 @@ func listLanguageFiles(result *ingest.Result, projectLanguage string) []string {
 	return files
 }
 
-func filesInModule(result *ingest.Result, model languageMoveModel, projectLanguage, moduleKey string) []string {
+func filesInModule(result *ingest.Result, model languageMoveModel, projectFamily, moduleKey string) []string {
 	var files []string
-	for _, f := range listLanguageFiles(result, projectLanguage) {
+	for _, f := range listLanguageFiles(result, projectFamily) {
 		if model.ModuleKey(f) == moduleKey {
 			files = append(files, f)
 		}
@@ -339,10 +344,10 @@ func filesInModule(result *ingest.Result, model languageMoveModel, projectLangua
 	return files
 }
 
-func modulesOtherThan(result *ingest.Result, model languageMoveModel, projectLanguage, moduleKey string) []string {
+func modulesOtherThan(result *ingest.Result, model languageMoveModel, projectFamily, moduleKey string) []string {
 	seen := map[string]bool{}
 	var keys []string
-	for _, f := range listLanguageFiles(result, projectLanguage) {
+	for _, f := range listLanguageFiles(result, projectFamily) {
 		k := model.ModuleKey(f)
 		if k == "" || k == moduleKey || seen[k] {
 			continue
@@ -369,8 +374,8 @@ func peerFileInModule(files []string, sourcePath string, peerIndex uint32) strin
 }
 
 // fileInModuleKey picks a representative file path for an existing module key.
-func fileInModuleKey(result *ingest.Result, model languageMoveModel, projectLanguage, moduleKey string, peerIndex uint32) string {
-	files := filesInModule(result, model, projectLanguage, moduleKey)
+func fileInModuleKey(result *ingest.Result, model languageMoveModel, projectFamily, moduleKey string, peerIndex uint32) string {
+	files := filesInModule(result, model, projectFamily, moduleKey)
 	if len(files) == 0 {
 		return ""
 	}

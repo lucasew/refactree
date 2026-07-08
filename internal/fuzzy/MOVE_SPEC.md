@@ -66,20 +66,19 @@ Relocate the whole file module (`module` or `new_module` placements) via path re
 ## Language families
 
 Families group honest language ids that share a module lattice. See `ingest.Family*`.
+Catalog projects select by **`family`** (not a single language id): `family = "ecma"`, `family = "jvm"`, etc.
 
 ### ECMA (`ingest.FamilyECMA`)
 
-Catalog language today: **`javascript`** (all ECMA extensions under one id for now).
+Catalog: **`family = "ecma"`**. Surfaces under this family share the file-as-module lattice
+(import/export). Vue/Astro remain out of scope.
 
-| Extensions | Tree-sitter grammar |
-|---|---|
-| `.js` `.mjs` `.cjs` | javascript |
-| `.ts` | typescript |
-| `.tsx` `.jsx` | tsx |
+| Language id | Extensions | Tree-sitter grammar |
+|---|---|---|
+| `javascript` | `.js` `.mjs` `.cjs` `.ts` `.tsx` `.jsx` | javascript / typescript / tsx |
+| `svelte` | `.svelte` | svelte (script bodies re-parsed as ECMA) |
 
-Shared: module lattice (file = module), import resolve, move driver, extract.
-
-**Svelte:** language id `svelte` (`.svelte`); script blocks re-parsed as ECMA. Not under FamilyECMA id list until shared deliberately. Vue/Astro still out of scope.
+Shared: module lattice (file / SFC = module), import resolve, move driver (`ecmaMoveModel`), extract.
 
 ### JVM (`ingest.FamilyJVM`)
 
@@ -90,4 +89,5 @@ Shared: module lattice (file = module), import resolve, move driver, extract.
 
 Shared lattice (fuzzer `jvmMoveModel`): package directory = module; declaration = types/members; file = layout.
 
-Catalog projects use honest `language = "java"`. When Kotlin is added, register `language = "kotlin"` with `Family: FamilyJVM` — do not label Kotlin as `java`.
+Catalog: **`family = "jvm"`**. When Kotlin is added, register language id `kotlin` with
+`Family: FamilyJVM` — do not invent a separate catalog family for Kotlin.

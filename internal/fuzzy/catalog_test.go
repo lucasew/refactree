@@ -27,7 +27,7 @@ func TestLoadCatalog(t *testing.T) {
 	ids := map[string]bool{}
 	for _, p := range projects {
 		ids[p.ID] = true
-		if p.Language == "" || !fuzzy.HasEmbeddedMise(p) {
+		if p.Family == "" || !fuzzy.HasEmbeddedMise(p) {
 			t.Fatalf("invalid project %#v", p)
 		}
 		if p.CheckTask != "test" || p.SetupTask != "setup" {
@@ -71,7 +71,7 @@ func TestMiseToolsMustBePinned(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			data := fmt.Sprintf(`
 [projects.x]
-language = "go"
+family = "go"
 local_path = "/tmp/x"
 ingest_roots = ["."]
 [projects.x.mise.tools]
@@ -95,7 +95,7 @@ func TestIsolateImageRejectsLatest(t *testing.T) {
 	catalog := filepath.Join(dir, "projects.toml")
 	data := `
 [projects.x]
-language = "go"
+family = "go"
 local_path = "/tmp/x"
 ingest_roots = ["."]
 [projects.x.isolate]
@@ -132,7 +132,7 @@ func TestValidateLocalProjectLegacyCheck(t *testing.T) {
 	catalog := filepath.Join(dir, "projects.toml")
 	data := `
 [projects.local]
-language = "go"
+family = "go"
 local_path = "/tmp/x"
 check = ["true"]
 ingest_roots = ["."]
@@ -160,7 +160,7 @@ func TestInvalidSlugRejected(t *testing.T) {
 	catalog := filepath.Join(dir, "projects.toml")
 	data := `
 [projects."bad slug"]
-language = "go"
+family = "go"
 local_path = "/tmp/x"
 check = ["true"]
 `
@@ -179,7 +179,7 @@ func TestMvOpsRejected(t *testing.T) {
 	catalog := filepath.Join(dir, "projects.toml")
 	data := `
 [projects.x]
-language = "go"
+family = "go"
 local_path = "/tmp/x"
 ingest_roots = ["."]
 [projects.x.mv]

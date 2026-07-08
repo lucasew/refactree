@@ -6,12 +6,15 @@ import (
 	"sync"
 )
 
-// Well-known language families. Surfaces (java, kotlin, …) register under a family
-// so move/module models and multi-file projects can share lattice behavior while
-// keeping honest per-file language ids.
+// Well-known language families. Surfaces register under a family so move/module
+// models and catalog projects select by family (not a single language id).
+// Singleton families (go, python, …) equal the sole surface language id.
 const (
-	FamilyJVM  = "jvm"  // Java today; Kotlin later
-	FamilyECMA = "ecma" // JavaScript / TypeScript / TSX / JSX
+	FamilyJVM    = "jvm"    // Java today; Kotlin later
+	FamilyECMA   = "ecma"   // JS / TS / TSX / JSX / Svelte (import-export module model)
+	FamilyGo     = "go"     // Go only
+	FamilyPython = "python" // Python only
+	FamilyNix    = "nix"    // Nix only
 )
 
 var (
@@ -87,16 +90,30 @@ func SameFamily(a, b string) bool {
 	return fa != "" && fa == fb
 }
 
-// LanguageMatchesProject reports whether a file's language belongs to a catalog
-// project language (exact match or same family).
-func LanguageMatchesProject(fileLanguage, projectLanguage string) bool {
-	if fileLanguage == "" || projectLanguage == "" {
+// LanguageInFamily reports whether fileLanguage is a surface in projectFamily.
+func LanguageInFamily(fileLanguage, projectFamily string) bool {
+	if fileLanguage == "" || projectFamily == "" {
 		return false
 	}
-	if fileLanguage == projectLanguage {
-		return true
+	if f := FamilyForLanguage(fileLanguage); f != "" {
+		return f == projectFamily
 	}
-	return SameFamily(fileLanguage, projectLanguage)
+	// Unfamilied language: treat language id as a singleton family.
+	return fileLanguage == projectFamily
+}
+
+// LanguageMatchesProject is a deprecated name for LanguageInFamily when the
+// second argument is a family id (catalog projects use family, not language).
+func LanguageMatchesProject(fileLanguage, projectFamily string) bool {
+	return LanguageInFamily(fileLanguage, projectFamily)
+}
+
+// IsKnownFamily reports whether any language has registered under family.
+func IsKnownFamily(family string) bool {
+	familyMu.RLock()
+	defer familyMu.RUnlock()
+	_, ok := langsByFamily[family]
+	return ok
 }
 
 func appendUnique(slice []string, v string) []string {

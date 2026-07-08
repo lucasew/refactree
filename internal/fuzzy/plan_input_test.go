@@ -17,9 +17,9 @@ func TestPlanInputDeterministicPick(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := Project{
-		ID:       "unit",
-		Language: "go",
-		Mv:       MvConfig{Enabled: true, Grains: []string{"declaration"}},
+		ID:     "unit",
+		Family: "go",
+		Mv:     MvConfig{Enabled: true, Grains: []string{"declaration"}},
 	}
 	result, fails, err := RunIngestOnRoot(work, InvariantOptions{})
 	if err != nil || len(fails) > 0 {

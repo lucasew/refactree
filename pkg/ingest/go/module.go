@@ -21,6 +21,7 @@ func init() {
 	ingest.RegisterLanguageRules("go", ingest.LanguageRules{
 		Extensions:      []string{".go"},
 		DirectoryModule: true,
+		Family:          ingest.FamilyGo,
 	})
 	ingest.RegisterReferenceProvider("go", referenceProvider{})
 }

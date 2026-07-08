@@ -17,6 +17,7 @@ func init() {
 	ingest.RegisterLanguageRules("python", ingest.LanguageRules{
 		Extensions:      []string{".py"},
 		DirectoryModule: false,
+		Family:          ingest.FamilyPython,
 	})
 	ingest.RegisterReferenceProvider("python", referenceProvider{})
 }

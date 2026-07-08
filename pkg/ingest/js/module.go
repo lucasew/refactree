@@ -16,6 +16,7 @@ import (
 
 // ECMA family: language id remains "javascript" for the current surface bundle
 // (JS/TS/TSX/JSX). Grammars differ by extension; extract/move/resolve are shared.
+// Svelte is a separate surface id under FamilyECMA (see pkg/ingest/svelte).
 // Prefer FamilyECMA for lattice sharing. Vue/Astro are out of scope.
 // Future: split honest surface ids (typescript, tsx) under the same family.
 var ecmaExtensions = []string{".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"}

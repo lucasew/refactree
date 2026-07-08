@@ -21,6 +21,7 @@ func init() {
 	ingest.RegisterLanguageRules("svelte", ingest.LanguageRules{
 		Extensions:      []string{".svelte"},
 		DirectoryModule: false,
+		Family:          ingest.FamilyECMA, // SFC surface; same import/export lattice as JS/TS
 	})
 }
 

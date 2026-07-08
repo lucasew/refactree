@@ -15,7 +15,7 @@ func TestEnsureBareOfflineRequiresCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := fuzzy.Project{ID: "demo", URL: "https://example.com/demo.git", Ref: "main", Language: "go"}
+	p := fuzzy.Project{ID: "demo", URL: "https://example.com/demo.git", Ref: "main", Family: "go"}
 	_, _, err = ws.Prepare(p, "1", fuzzy.PrepareOptions{Offline: true})
 	if err == nil {
 		t.Fatal("expected offline prepare without cache to fail")
@@ -31,7 +31,7 @@ func TestPrepareOfflineUsesBareCacheWithoutFetch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := fuzzy.Project{ID: "demo", URL: remote, Ref: ref, Language: "go", Root: "."}
+	p := fuzzy.Project{ID: "demo", URL: remote, Ref: ref, Family: "go", Root: "."}
 
 	onlineDir, commit, err := ws.Prepare(p, "online", fuzzy.PrepareOptions{})
 	if err != nil {
@@ -108,7 +108,7 @@ func TestPrepareReuseIsIdempotent(t *testing.T) {
 		ID:            "demo",
 		URL:           remote,
 		Ref:           ref,
-		Language:      "go",
+		Family:      "go",
 		Root:          ".",
 		PreserveGlobs: []string{"vendor"},
 	}
@@ -171,7 +171,7 @@ func TestPrepareOfflineRequiresPreserveSnapshot(t *testing.T) {
 	}
 	p := fuzzy.Project{
 		ID:            "local",
-		Language:      "go",
+		Family:      "go",
 		LocalPath:     local,
 		PreserveGlobs: []string{"node_modules"},
 	}

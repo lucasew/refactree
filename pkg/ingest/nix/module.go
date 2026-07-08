@@ -19,6 +19,7 @@ func init() {
 	ingest.RegisterLanguageRules("nix", ingest.LanguageRules{
 		Extensions:      []string{".nix"},
 		DirectoryModule: false,
+		Family:          ingest.FamilyNix,
 	})
 	ingest.RegisterReferenceProvider("nix", referenceProvider{})
 }

@@ -6,6 +6,7 @@ import (
 	"github.com/lucasew/refactree/pkg/ingest"
 	_ "github.com/lucasew/refactree/pkg/ingest/java"
 	_ "github.com/lucasew/refactree/pkg/ingest/js"
+	_ "github.com/lucasew/refactree/pkg/ingest/svelte"
 )
 
 func TestJVMFamilyJavaOnly(t *testing.T) {
@@ -24,19 +25,48 @@ func TestJVMFamilyJavaOnly(t *testing.T) {
 	}
 }
 
-func TestECMAFamilyJavascript(t *testing.T) {
+func TestECMAFamilyJavascriptAndSvelte(t *testing.T) {
 	if got := ingest.FamilyForLanguage("javascript"); got != ingest.FamilyECMA {
 		t.Fatalf("javascript family=%q want %q", got, ingest.FamilyECMA)
 	}
+	if got := ingest.FamilyForLanguage("svelte"); got != ingest.FamilyECMA {
+		t.Fatalf("svelte family=%q want %q", got, ingest.FamilyECMA)
+	}
+	langs := ingest.LanguagesInFamily(ingest.FamilyECMA)
+	hasJS, hasSvelte := false, false
+	for _, l := range langs {
+		if l == "javascript" {
+			hasJS = true
+		}
+		if l == "svelte" {
+			hasSvelte = true
+		}
+	}
+	if !hasJS || !hasSvelte {
+		t.Fatalf("ecma surfaces=%v want javascript and svelte", langs)
+	}
+	if !ingest.SameFamily("javascript", "svelte") {
+		t.Fatal("javascript and svelte must share FamilyECMA")
+	}
 }
 
-func TestLanguageMatchesProjectSameFamily(t *testing.T) {
-	if !ingest.LanguageMatchesProject("java", "java") {
-		t.Fatal("exact match")
+func TestLanguageInFamilyCatalogFamily(t *testing.T) {
+	// Catalog projects use family ids (jvm, ecma), not language ids.
+	if !ingest.LanguageInFamily("java", ingest.FamilyJVM) {
+		t.Fatal("java ∈ jvm")
 	}
-	// When kotlin joins jvm, LanguageMatchesProject("kotlin", "java") should become true.
-	if ingest.LanguageMatchesProject("kotlin", "java") {
-		t.Fatal("kotlin not registered; must not match java project yet")
+	if ingest.LanguageInFamily("java", "java") {
+		t.Fatal("java is not its own family id; catalog uses family=jvm")
+	}
+	if !ingest.LanguageInFamily("javascript", ingest.FamilyECMA) {
+		t.Fatal("javascript ∈ ecma")
+	}
+	if !ingest.LanguageInFamily("svelte", ingest.FamilyECMA) {
+		t.Fatal("svelte ∈ ecma")
+	}
+	// When kotlin joins jvm, LanguageInFamily("kotlin", FamilyJVM) becomes true.
+	if ingest.LanguageInFamily("kotlin", ingest.FamilyJVM) {
+		t.Fatal("kotlin not registered; must not match jvm yet")
 	}
 	if !ingest.SameFamily("java", "java") {
 		t.Fatal("same language is same family")
@@ -50,5 +80,9 @@ func TestFamilyForFileJava(t *testing.T) {
 	}
 	if _, ok := ingest.FamilyForFile("Foo.kt"); ok {
 		t.Fatal("kt has no family until registered")
+	}
+	f, ok = ingest.FamilyForFile("App.svelte")
+	if !ok || f != ingest.FamilyECMA {
+		t.Fatalf("FamilyForFile svelte: %q ok=%v", f, ok)
 	}
 }

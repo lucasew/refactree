@@ -74,7 +74,7 @@ func pickMvPlan(rng *rand.Rand, p Project, root string, result *ingest.Result) (
 
 func pickMvPlanWith(in PlanInput, p Project, root string, result *ingest.Result) (movePlan, error) {
 	_ = root
-	model, err := moveModelForLanguage(p.Language)
+	model, err := moveModelForFamily(p.Family)
 	if err != nil {
 		return movePlan{}, err
 	}
@@ -85,13 +85,13 @@ func pickMvPlanWith(in PlanInput, p Project, root string, result *ingest.Result)
 	}
 	grain := grains[int(in.GrainIndex)%len(grains)]
 
-	nodes := model.ListNodes(result, grain, p.Language)
+	nodes := model.ListNodes(result, grain, p.Family)
 	if len(nodes) == 0 {
-		return movePlan{}, fmt.Errorf("no source nodes for grain %s language %s", grain, p.Language)
+		return movePlan{}, fmt.Errorf("no source nodes for grain %s family %s", grain, p.Family)
 	}
 	source := nodes[int(in.SourceIndex)%len(nodes)]
 
-	placements := placementMenu(grain, model, result, p.Language, source)
+	placements := placementMenu(grain, model, result, p.Family, source)
 	if len(p.Mv.Placements) > 0 {
 		placements = filterPlacements(placements, p.Mv.Placements)
 	}
@@ -100,7 +100,7 @@ func pickMvPlanWith(in PlanInput, p Project, root string, result *ingest.Result)
 	}
 	placement := placements[int(in.PlacementIndex)%len(placements)]
 
-	return materializeMovePlan(in, model, result, p.Language, source, placement)
+	return materializeMovePlan(in, model, result, p.Family, source, placement)
 }
 
 func resolveProjectGrains(p Project, model languageMoveModel) ([]Grain, error) {
@@ -119,7 +119,7 @@ func resolveProjectGrains(p Project, model languageMoveModel) ([]Grain, error) {
 			}
 		}
 		if !ok {
-			return nil, fmt.Errorf("grain %q not valid for language %s", name, p.Language)
+			return nil, fmt.Errorf("grain %q not valid for family %s", name, p.Family)
 		}
 		out = append(out, g)
 	}
@@ -144,7 +144,7 @@ func filterPlacements(menu []Placement, allow []string) []Placement {
 }
 
 // placementMenu lists valid placements for this source node.
-func placementMenu(grain Grain, model languageMoveModel, result *ingest.Result, projectLanguage string, source MoveNode) []Placement {
+func placementMenu(grain Grain, model languageMoveModel, result *ingest.Result, projectFamily string, source MoveNode) []Placement {
 	switch grain {
 	case GrainPackage:
 		return []Placement{PlacementPackage}
@@ -156,7 +156,7 @@ func placementMenu(grain Grain, model languageMoveModel, result *ingest.Result, 
 		// layout: only when the language can place a declaration in another file
 		// inside the same module (Go/Java packages with multiple files, or new file).
 		modKey := model.ModuleKey(source.Path)
-		sameFiles := filesInModule(result, model, projectLanguage, modKey)
+		sameFiles := filesInModule(result, model, projectFamily, modKey)
 		// Offer layout if same-module has another file OR we can create a new layout file
 		// (always true for directory modules; for file-modules layout is impossible).
 		if _, isFileModule := model.(ecmaMoveModel); isFileModule {
@@ -167,9 +167,9 @@ func placementMenu(grain Grain, model languageMoveModel, result *ingest.Result, 
 			// go / jvm: layout within package
 			menu = append(menu, PlacementLayout)
 		}
-		if len(modulesOtherThan(result, model, projectLanguage, modKey)) > 0 || len(sameFiles) > 1 {
+		if len(modulesOtherThan(result, model, projectFamily, modKey)) > 0 || len(sameFiles) > 1 {
 			menu = append(menu, PlacementModule)
-		} else if len(listLanguageFiles(result, projectLanguage)) > 1 {
+		} else if len(listLanguageFiles(result, projectFamily)) > 1 {
 			menu = append(menu, PlacementModule)
 		}
 		menu = append(menu, PlacementNewModule)
@@ -179,14 +179,14 @@ func placementMenu(grain Grain, model languageMoveModel, result *ingest.Result, 
 	}
 }
 
-func materializeMovePlan(in PlanInput, model languageMoveModel, result *ingest.Result, projectLanguage string, source MoveNode, placement Placement) (movePlan, error) {
+func materializeMovePlan(in PlanInput, model languageMoveModel, result *ingest.Result, projectFamily string, source MoveNode, placement Placement) (movePlan, error) {
 	switch source.Grain {
 	case GrainPackage:
 		return materializePackagePlan(in, source, placement)
 	case GrainModule:
-		return materializeModuleFilePlan(in, result, model, projectLanguage, source, placement)
+		return materializeModuleFilePlan(in, result, model, projectFamily, source, placement)
 	case GrainDeclaration:
-		return materializeDeclarationPlan(in, model, result, projectLanguage, source, placement)
+		return materializeDeclarationPlan(in, model, result, projectFamily, source, placement)
 	default:
 		return movePlan{}, fmt.Errorf("unsupported grain %s", source.Grain)
 	}
@@ -205,13 +205,13 @@ func materializePackagePlan(in PlanInput, source MoveNode, placement Placement) 
 	}, nil
 }
 
-func materializeModuleFilePlan(in PlanInput, result *ingest.Result, model languageMoveModel, projectLanguage string, source MoveNode, placement Placement) (movePlan, error) {
+func materializeModuleFilePlan(in PlanInput, result *ingest.Result, model languageMoveModel, projectFamily string, source MoveNode, placement Placement) (movePlan, error) {
 	srcPath := source.Path
 	var dstPath string
 	switch placement {
 	case PlacementModule:
 		// Peer file path in another module (another file).
-		files := listLanguageFiles(result, projectLanguage)
+		files := listLanguageFiles(result, projectFamily)
 		var peers []string
 		for _, f := range files {
 			if !model.SameModule(f, srcPath) {
@@ -241,9 +241,9 @@ func materializeModuleFilePlan(in PlanInput, result *ingest.Result, model langua
 	}, nil
 }
 
-func materializeDeclarationPlan(in PlanInput, model languageMoveModel, result *ingest.Result, projectLanguage string, source MoveNode, placement Placement) (movePlan, error) {
+func materializeDeclarationPlan(in PlanInput, model languageMoveModel, result *ingest.Result, projectFamily string, source MoveNode, placement Placement) (movePlan, error) {
 	symbolNames := map[string]bool{}
-	for _, n := range listDeclarationNodes(result, projectLanguage) {
+	for _, n := range listDeclarationNodes(result, projectFamily) {
 		symbolNames[n.Symbol] = true
 	}
 
@@ -270,7 +270,7 @@ func materializeDeclarationPlan(in PlanInput, model languageMoveModel, result *i
 
 	case PlacementLayout:
 		// Same module, different layout file, keep name.
-		sameFiles := filesInModule(result, model, projectLanguage, modKey)
+		sameFiles := filesInModule(result, model, projectFamily, modKey)
 		dstPath := peerFileInModule(sameFiles, srcPath, in.PeerIndex)
 		if dstPath == "" {
 			dstPath = newLayoutFileInModule(srcPath, in.Entropy)
@@ -283,11 +283,11 @@ func materializeDeclarationPlan(in PlanInput, model languageMoveModel, result *i
 
 	case PlacementModule:
 		// Different existing module, keep name.
-		others := modulesOtherThan(result, model, projectLanguage, modKey)
+		others := modulesOtherThan(result, model, projectFamily, modKey)
 		var dstPath string
 		if len(others) == 0 {
 			// No other module: try any other file (different path).
-			for _, f := range listLanguageFiles(result, projectLanguage) {
+			for _, f := range listLanguageFiles(result, projectFamily) {
 				if f != srcPath {
 					dstPath = f
 					break
@@ -298,7 +298,7 @@ func materializeDeclarationPlan(in PlanInput, model languageMoveModel, result *i
 			}
 		} else {
 			targetMod := others[int(in.PeerIndex)%len(others)]
-			dstPath = fileInModuleKey(result, model, projectLanguage, targetMod, in.PeerIndex)
+			dstPath = fileInModuleKey(result, model, projectFamily, targetMod, in.PeerIndex)
 			if dstPath == "" {
 				return movePlan{}, fmt.Errorf("no file in peer module %s", targetMod)
 			}

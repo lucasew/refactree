@@ -51,7 +51,7 @@ func TestSetupCheckArgvDefaultsFromMiseTable(t *testing.T) {
 	catalog := filepath.Join(dir, "projects.toml")
 	data := `
 [projects.x]
-language = "go"
+family = "go"
 local_path = "/tmp/x"
 ingest_roots = ["."]
 [projects.x.mv]

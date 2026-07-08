@@ -242,7 +242,7 @@ func localGoCatalog(t *testing.T, preserve []string) (catalog string, local stri
 	catalog = filepath.Join(t.TempDir(), "projects.toml")
 	data := fmt.Sprintf(`
 [projects.local_go]
-language = "go"
+family = "go"
 local_path = %q
 root = "."
 setup_task = "-"

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/lucasew/refactree/pkg/ingest"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -70,7 +71,8 @@ type Project struct {
 	ID            string         `toml:"-"` // map key under [projects.<slug>]
 	URL           string         `toml:"url"`
 	Ref           string         `toml:"ref"`
-	Language      string         `toml:"language"`
+	Family        string         `toml:"family"` // ingest family id (ecma, jvm, go, …)
+	Language      string         `toml:"language,omitempty"` // rejected if set (use family)
 	Root          string         `toml:"root"`
 	Mise          map[string]any `toml:"mise"`       // embedded mise.toml root ([projects.<slug>.mise]…)
 	SetupTask     string         `toml:"setup_task"` // default "setup" when mise embedded; "-" skips
@@ -150,8 +152,14 @@ func validateProject(p *Project) error {
 			return fmt.Errorf("ref is required")
 		}
 	}
-	if p.Language == "" {
-		return fmt.Errorf("language is required")
+	if p.Language != "" {
+		return fmt.Errorf("project.language removed; use project.family")
+	}
+	if p.Family == "" {
+		return fmt.Errorf("family is required")
+	}
+	if !ingest.IsKnownFamily(p.Family) {
+		return fmt.Errorf("unknown family %q (register surfaces with LanguageRules.Family)", p.Family)
 	}
 	if p.Root == "" {
 		p.Root = "."
@@ -185,8 +193,8 @@ func validateProject(p *Project) error {
 		default:
 			return fmt.Errorf("unknown mv grain %q", grain)
 		}
-		if p.Language != "" && !grainAllowed(p.Language, Grain(grain)) {
-			return fmt.Errorf("grain %q not valid for language %s", grain, p.Language)
+		if !grainAllowedForFamily(p.Family, Grain(grain)) {
+			return fmt.Errorf("grain %q not valid for family %s", grain, p.Family)
 		}
 	}
 	for _, placement := range p.Mv.Placements {

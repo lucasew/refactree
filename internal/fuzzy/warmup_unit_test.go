@@ -45,7 +45,7 @@ func TestPrefetchNoOpWhenWarm(t *testing.T) {
 	catalog := filepath.Join(t.TempDir(), "projects.toml")
 	data := `
 [projects.local_go]
-language = "go"
+family = "go"
 local_path = "` + local + `"
 root = "."
 setup_task = "-"

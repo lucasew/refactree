@@ -1,7 +1,7 @@
 [projects.workspaced]
 url = "https://github.com/lucasew/workspaced.git"
 ref = "ac8f8483d9931adac8697b5f0c71e19840bd28a3"
-language = "go"
+family = "go"
 root = "."
 ingest_roots = ["."]
 preserve_globs = []
@@ -28,7 +28,7 @@ run = "go test -count=1 ./..."
 [projects.ritm_annotation]
 url = "https://github.com/lucasew-graveyard/ritm_annotation.git"
 ref = "761fbed250379c99b5e71309b18284dc037ec302"
-language = "python"
+family = "python"
 root = "."
 ingest_roots = ["ritm_annotation"]
 preserve_globs = [".venv", ".uv"]
@@ -62,7 +62,7 @@ run = "uv run ruff check -v ."
 [projects.astro]
 url = "https://github.com/withastro/astro.git"
 ref = "6929e4034fcc7e11d96d0327b5d8ca126ae826ef"
-language = "javascript"
+family = "ecma"
 root = "."
 # packages/compiler was removed from this monorepo pin; main package is packages/astro.
 ingest_roots = ["packages/astro"]
@@ -102,9 +102,8 @@ run = "pnpm --filter astro run test:unit -- --verbose"
 [projects.pesquisarr]
 url = "https://github.com/lucasew/pesquisarr.git"
 ref = "85d7dbff4fb83238306a804f3f196f1b23e15b13"
-# Astro + Svelte app; catalog language is ECMA (id "javascript") for .ts/.js move/check.
-# .svelte is co-located but selected only when project language is "svelte".
-language = "javascript"
+# Astro + Svelte app; family=ecma covers .ts/.js/.svelte (and other ECMA surfaces).
+family = "ecma"
 root = "."
 ingest_roots = ["src"]
 preserve_globs = ["node_modules"]
@@ -140,8 +139,8 @@ run = "npm run test:unit -- --run"
 [projects.margea]
 url = "https://github.com/lucasew/margea.git"
 ref = "5a26fbc380d67c2804ae03f85958c551b0e4baf5"
-# Astro + React/TS app. ECMA language id covers .ts/.tsx move targets.
-language = "javascript"
+# Astro + React/TS app; family=ecma covers .ts/.tsx move targets.
+family = "ecma"
 root = "."
 ingest_roots = ["src"]
 preserve_globs = ["node_modules"]
@@ -177,7 +176,7 @@ run = "npx eslint ."
 [projects.gson]
 url = "https://github.com/google/gson.git"
 ref = "c9f3fd55854a743b66f857ace3c7b268ea3e2ef7"
-language = "java"
+family = "jvm"
 root = "."
 ingest_roots = ["gson"]
 # Do not preserve target/: package moves invalidate compiled outputs and

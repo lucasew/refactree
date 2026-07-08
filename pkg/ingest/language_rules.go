@@ -16,8 +16,9 @@ type LanguageRules struct {
 	// container (for example path:./dir::Symbol).
 	DirectoryModule bool
 	// Family groups related surfaces that share a module lattice (for example
-	// FamilyJVM for java; FamilyECMA for javascript). Empty means standalone.
-	// Prefer honest language ids per surface; use Family for shared behavior.
+	// FamilyJVM for java; FamilyECMA for javascript and svelte). Empty means
+	// standalone. Prefer honest language ids per surface; use Family for shared
+	// behavior and catalog project selection.
 	Family string
 }
 
