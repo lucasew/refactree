@@ -146,7 +146,7 @@ func (c *CatalogCanvas) Attempt(ctx context.Context, projectIdx int, in PlanInpu
 	defer func() { _ = session.Close(ctx) }()
 
 	if setup := RunSetup(ctx, session, p); !setup.OK() {
-		return MvAttemptResult{Class: classEnv, Err: fmt.Errorf("setup %s: %s", p.ID, shortRunErr(setup))}
+		return MvAttemptResult{Class: classEnv, Err: fmt.Errorf("setup %s: %s", p.ID, formatRunFailureDetail(setup, 4096))}
 	}
 
 	ingestRoot := primaryIngestRoot(p, workDir)
@@ -164,8 +164,9 @@ func (c *CatalogCanvas) Attempt(ctx context.Context, projectIdx int, in PlanInpu
 
 	check := RunCheck(ctx, session, p)
 	if !check.OK() {
+		detail := formatRunFailureDetail(check, 4096)
 		res.Class = classBug
-		res.Err = fmt.Errorf("catalog check after %s %s -> %s: %s", res.Plan.Op, res.Plan.Src, res.Plan.Dst, shortRunErr(check))
+		res.Err = fmt.Errorf("catalog check after %s %s -> %s: %s", res.Plan.Op, res.Plan.Src, res.Plan.Dst, detail)
 		fmt.Fprintf(log, "mv result: project=%s class=bug catalog_check=%s\n", p.ID, shortRunErr(check))
 		if scaffoldDir != "" {
 			_ = ScaffoldAttempt(ingestRoot, scaffoldDir, res)

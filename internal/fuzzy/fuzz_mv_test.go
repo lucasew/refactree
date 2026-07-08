@@ -23,7 +23,7 @@ import (
 //
 //	FUZZTIME          wall budget (Go duration, e.g. 10m, 30s). Default 1m if set empty with campaign forced.
 //	RFT_FUZZY_ITERATIONS  optional hard cap on attempts (0 = only time budget)
-//	RFT_FUZZY_SEED        RNG seed (default 1)
+//	RFT_FUZZY_SEED        RNG seed (default: time-based; logged for repro)
 func TestCatalogFuzzCampaign(t *testing.T) {
 	budget, iterations, ok := campaignBudget()
 	if !ok {
@@ -31,7 +31,8 @@ func TestCatalogFuzzCampaign(t *testing.T) {
 	}
 
 	noIsolate := truthy(os.Getenv("RFT_FUZZY_NO_ISOLATE"))
-	canvas, err := NewCatalogCanvas(DefaultWorkRoot(), DefaultCatalogPath(), noIsolate)
+	workRoot := DefaultWorkRoot()
+	canvas, err := NewCatalogCanvas(workRoot, DefaultCatalogPath(), noIsolate)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,10 +56,17 @@ func TestCatalogFuzzCampaign(t *testing.T) {
 		ids[i] = p.ID
 	}
 
+	// Durable scaffolds land under work-root so CI artifacts include them.
+	scaffoldRoot := filepath.Join(workRoot, "reports", "campaign-scaffolds")
+	if err := os.MkdirAll(scaffoldRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
 	deadline := time.Now().Add(budget)
 	t.Logf("catalog campaign: projects=%d %v budget=%s iterations_cap=%d seed=%d work_root=%s no_isolate=%v",
-		len(canvas.Projects), ids, budget, iterations, seed, DefaultWorkRoot(), noIsolate)
+		len(canvas.Projects), ids, budget, iterations, seed, workRoot, noIsolate)
 	t.Logf("repro: RFT_FUZZY_SEED=%d", seed)
+	t.Logf("scaffolds: %s", scaffoldRoot)
 
 	for attempt := 1; ; attempt++ {
 		if iterations > 0 && attempt > iterations {
@@ -78,8 +86,8 @@ func TestCatalogFuzzCampaign(t *testing.T) {
 			attempt, p.ID, in.OpIndex, in.EntityIndex, in.Entropy, in.FileIndex)
 
 		t.Run(name, func(t *testing.T) {
-			scaffold := filepath.Join(os.TempDir(), "rft-fuzzy-fuzz-fail",
-				fmt.Sprintf("%s-%d-%d-%d", p.ID, in.OpIndex, in.EntityIndex, in.Entropy))
+			scaffold := filepath.Join(scaffoldRoot,
+				fmt.Sprintf("%s-a%d-op%d-e%d-n%d", p.ID, attempt, in.OpIndex, in.EntityIndex, in.Entropy))
 
 			// Full choose/result lines to the test log (visible with -v).
 			res := canvas.Attempt(t.Context(), projectIdx, in, scaffold)

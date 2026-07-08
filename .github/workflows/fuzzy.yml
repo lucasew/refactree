@@ -1,5 +1,9 @@
 # Fuzzy harness (internal/fuzzy only — not linked into the rft binary).
-# Setup/check run on the host (RFT_FUZZY_NO_ISOLATE=1); no testcontainers in this job.
+# Host setup/check (RFT_FUZZY_NO_ISOLATE=1); no testcontainers.
+#
+# Two jobs so catalog warmup cannot block the cheap unit suite:
+#   fuzzy-unit    — go test without requiring a warm catalog work-root
+#   fuzzy-catalog — prefetch all catalog projects (network; may fail independently)
 name: Fuzzy
 
 on:
@@ -10,14 +14,28 @@ on:
     branches:
       - master
   workflow_dispatch:
-    inputs:
-      catalog_warmup:
-        description: "Also run full catalog prefetch (needs network; long)"
-        type: boolean
-        default: false
+
+env:
+  CI: "true"
+  MISE_EXPERIMENTAL: "1"
+  RFT_FUZZY_NO_ISOLATE: "1"
 
 jobs:
-  fuzzy:
+  fuzzy-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4
+
+      - name: Fuzzy unit / local harness tests
+        env:
+          # Private work-root for this job; catalog tests skip when not warm.
+          RFT_FUZZY_WORK_ROOT: ${{ github.workspace }}/.cache/rft-fuzzy-unit
+        run: mise run fuzzy:run
+
+  fuzzy-catalog:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -27,26 +45,22 @@ jobs:
 
       - name: Catalog prefetch warmup
         env:
-          CI: "true"
-          MISE_EXPERIMENTAL: "1"
           RFT_FUZZY_WORK_ROOT: ${{ github.workspace }}/.cache/rft-fuzzy
-          # Host setup/check (no Docker/testcontainers). CI=true satisfies the allow guard.
-          RFT_FUZZY_NO_ISOLATE: "1"
         run: mise run fuzzy:prefetch
 
-      - name: Fuzzy harness tests
+      - name: Catalog seed matrix (warm work-root)
         env:
-          CI: "true"
-          MISE_EXPERIMENTAL: "1"
           RFT_FUZZY_WORK_ROOT: ${{ github.workspace }}/.cache/rft-fuzzy
-          RFT_FUZZY_NO_ISOLATE: "1"
-        run: mise run fuzzy:run
+        # Fixed seeds only — not the long FUZZTIME campaign (manual/local).
+        run: go test ./internal/fuzzy -run '^TestCatalogMvSeedCorpus$' -count=1 -timeout 0 -v
 
       - name: Upload fuzzy work-root on failure
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: rft-fuzzy-work-root
-          path: ${{ github.workspace }}/.cache/rft-fuzzy
+          path: |
+            ${{ github.workspace }}/.cache/rft-fuzzy
+            ${{ github.workspace }}/.cache/rft-fuzzy/reports
           if-no-files-found: ignore
           retention-days: 7

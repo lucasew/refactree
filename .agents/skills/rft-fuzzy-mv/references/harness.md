@@ -10,10 +10,13 @@ The harness lives only under `internal/fuzzy` (not linked into the `rft` binary)
 
 # Mise tasks (only two)
 ```bash
-mise run fuzzy:prefetch   # warm work-root (network + Docker unless RFT_FUZZY_NO_ISOLATE=1)
-mise run fuzzy:run        # go test ./internal/fuzzy (FuzzMvOneOp skips if cold)
-FUZZTIME=30s mise run fuzzy:run   # native mutator on catalog canvas
+mise run fuzzy:prefetch   # warm work-root (network; host if RFT_FUZZY_NO_ISOLATE=1)
+mise run fuzzy:run        # unit/local; catalog seed matrix skips if cold
+FUZZTIME=10m mise run fuzzy:run   # TestCatalogFuzzCampaign (catalog RNG; full fail context)
 ```
+
+CI: `fuzzy-unit` always runs unit tests; `fuzzy-catalog` prefetches + seed matrix separately
+so one catalog setup failure cannot hide unit regressions.
 
 Second prefetch on the same work-root should print `prefetch: no-op (work-root warm)`.
 

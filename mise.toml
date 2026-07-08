@@ -31,14 +31,13 @@ goreleaser release --clean
 '''
 
 # Fuzzy harness (internal/fuzzy only — not in the rft binary).
-#   mise run fuzzy:prefetch   # warm catalog work-root (network + Docker unless NO_ISOLATE)
-#   mise run fuzzy:run        # go test ./internal/fuzzy
-# Optional: FUZZTIME=30s mise run fuzzy:run  → native mutator on FuzzMvOneOp
+#   mise run fuzzy:prefetch   # warm catalog work-root (network; host if RFT_FUZZY_NO_ISOLATE=1)
+#   mise run fuzzy:run        # unit/local tests (catalog seeds skip if cold)
+#   FUZZTIME=10m mise run fuzzy:run  # TestCatalogFuzzCampaign (catalog RNG stress)
 #
 # Work-root: pin RFT_FUZZY_WORK_ROOT before the go test process (init reads it once).
-# If unset, tasks default to ${XDG_CACHE_HOME:-$HOME/.cache}/rft-fuzzy so prefetch
-# and run share a durable path. Plain `go test` without the env uses a private
-# temp dir via TestMain so unit tests never touch that cache.
+# Default when unset in tasks: ${XDG_CACHE_HOME:-$HOME/.cache}/rft-fuzzy
+# Plain `go test` without the env uses a private temp dir via TestMain.
 
 [tasks."fuzzy:prefetch"]
 description = "Warm catalog work-root for offline/catalog canvas runs."
