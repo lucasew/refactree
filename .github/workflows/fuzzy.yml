@@ -54,13 +54,16 @@ jobs:
         # Fixed seeds only — not the long FUZZTIME campaign (manual/local).
         run: go test ./internal/fuzzy -run '^TestCatalogMvSeedCorpus$' -count=1 -timeout 0 -v
 
-      - name: Upload fuzzy work-root on failure
+      # Do not upload the whole work-root: cache/, mise-data/, runs/, preserve/
+      # are multi-GB tool/git env. Keep harness-only outputs for debugging.
+      - name: Upload fuzzy failure data
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: rft-fuzzy-work-root
+          name: rft-fuzzy-failure
           path: |
-            ${{ github.workspace }}/.cache/rft-fuzzy
             ${{ github.workspace }}/.cache/rft-fuzzy/reports
+            ${{ github.workspace }}/.cache/rft-fuzzy/manifest.json
+            /tmp/rft-fuzzy-fuzz-fail
           if-no-files-found: ignore
           retention-days: 7
