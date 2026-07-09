@@ -117,17 +117,28 @@ setup_network = true
 check_network = false
 
 [projects.pesquisarr.mise.tools]
-node = "26.3.0"
+# LTS: Node 26 + nested esbuild postinstall hit ETXTBSY on GHA host setup.
+node = "22.23.1"
 
 [projects.pesquisarr.mise.tasks.setup]
-description = "npm ci (postinstall: patch-package + paraglide); offline when RFT_FUZZY_OFFLINE=1"
+description = "npm ci (postinstall: patch-package + paraglide); offline when RFT_FUZZY_OFFLINE=1; retries ETXTBSY"
 run = [
   """
   if [ "${RFT_FUZZY_OFFLINE:-}" = 1 ]; then
-    npm ci --offline
+    set -- npm ci --offline
   else
-    npm ci
+    set -- npm ci
   fi
+  # esbuild install.js spawnSync can race with the just-written binary (ETXTBSY).
+  n=0
+  until "$@"; do
+    n=$((n + 1))
+    if [ "$n" -ge 3 ]; then
+      exit 1
+    fi
+    echo "npm ci failed (try $n/3), retrying..."
+    sleep 2
+  done
   """,
   "test -d node_modules",
 ]
@@ -208,47 +219,3 @@ fi
 [projects.gson.mise.tasks.test]
 description = "Run gson module tests"
 run = "mvn -B -pl gson test"
-
-# JetBrains/kotlin monorepo (self-hosted). family=jvm; .kt surfaces land when grammar+ingest
-# are registered. Until then ingest/mv only see Java under these roots (stdlib is mostly .kt).
-[projects.kotlin]
-url = "https://github.com/JetBrains/kotlin.git"
-ref = "fea1ad8c18995b80d1ca0e3917056104613d23db" # v2.3.21
-family = "jvm"
-root = "."
-# Stdlib only: full monorepo is enormous; expand roots once the surface is stable.
-ingest_roots = ["libraries/stdlib"]
-# Gradle caches live in mise-data via GRADLE_USER_HOME; do not preserve build/.
-preserve_globs = []
-
-[projects.kotlin.mv]
-enabled = true
-grains = ["declaration", "package"]
-
-[projects.kotlin.isolate]
-setup_network = true
-check_network = false
-
-[projects.kotlin.mise.tools]
-# Toolchains auto-provision more JDKs; pin a modern host JDK for Gradle itself.
-java = "21.0.2"
-
-[projects.kotlin.mise.tasks.setup]
-description = "Compile kotlin-stdlib JVM (downloads bootstrap/deps; offline uses --offline)"
-run = """
-if [ "${RFT_FUZZY_OFFLINE:-}" = 1 ]; then
-  ./gradlew --offline --no-daemon :kotlin-stdlib:compileKotlinJvm
-else
-  ./gradlew --no-daemon :kotlin-stdlib:compileKotlinJvm
-fi
-"""
-
-[projects.kotlin.mise.tasks.test]
-description = "Re-compile kotlin-stdlib JVM (cheap structural check; expand later)"
-run = """
-if [ "${RFT_FUZZY_OFFLINE:-}" = 1 ]; then
-  ./gradlew --offline --no-daemon :kotlin-stdlib:compileKotlinJvm
-else
-  ./gradlew --no-daemon :kotlin-stdlib:compileKotlinJvm
-fi
-"""
