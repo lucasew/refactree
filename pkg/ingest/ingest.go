@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 
@@ -442,8 +443,17 @@ func ClearExtractCache() {
 	})
 }
 
+// treeSitterMu serializes tree-sitter parse + extract. The modernc/ccgo
+// bindings are not safe for concurrent parsers. Nested re-parses (e.g. Svelte
+// script bodies) run while this lock is held and must not re-acquire it.
+var treeSitterMu sync.Mutex
+
 // parseFile parses a single source file and returns its FileExtract.
 // Returns nil (no error) for unsupported file types.
+//
+// Some pure-Go tree-sitter grammars can SIGSEGV on valid source (observed on
+// Go slice/variadic patterns). SetPanicOnFault turns that into a recoverable
+// error so HTTP serve and ingest walks stay up.
 func parseFile(dir, absPath string) (*FileExtract, error) {
 	driver, ok := languageDriverForFile(absPath)
 	if !ok {
@@ -464,16 +474,33 @@ func parseFile(dir, absPath string) (*FileExtract, error) {
 		return nil, fmt.Errorf("reading %s: %w", relPath, err)
 	}
 
-	parser := grammar.NewParser()
-	defer parser.Delete()
+	treeSitterMu.Lock()
+	defer treeSitterMu.Unlock()
 
-	if !parser.SetLanguage(lang) {
-		return nil, fmt.Errorf("failed to set language for %s", relPath)
-	}
+	prevFault := debug.SetPanicOnFault(true)
+	defer debug.SetPanicOnFault(prevFault)
 
-	tree := parser.ParseString(string(source))
-	defer tree.Delete()
+	var fe *FileExtract
+	var parseErr error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				parseErr = fmt.Errorf("tree-sitter fault parsing %s: %v", relPath, r)
+			}
+		}()
 
-	root := tree.RootNode()
-	return driver.Extract(root, source, relPath), nil
+		parser := grammar.NewParser()
+		defer parser.Delete()
+
+		if !parser.SetLanguage(lang) {
+			parseErr = fmt.Errorf("failed to set language for %s", relPath)
+			return
+		}
+
+		tree := parser.ParseString(string(source))
+		defer tree.Delete()
+
+		fe = driver.Extract(tree.RootNode(), source, relPath)
+	}()
+	return fe, parseErr
 }

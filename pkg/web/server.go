@@ -4,6 +4,7 @@ import (
 	"embed"
 	"html/template"
 	"io/fs"
+	"log"
 	"net/http"
 	"strings"
 
@@ -46,7 +47,21 @@ func New(opts Options) (*Server, error) {
 
 // Handler returns the root HTTP handler.
 func (s *Server) Handler() http.Handler {
-	return s.mux
+	return recoverHandler(s.mux)
+}
+
+// recoverHandler keeps the process alive if a request panics (e.g. third-party
+// parse faults). Concurrent tree-sitter use is serialized separately in ingest.
+func recoverHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("refactree serve: panic on %s %s: %v", r.Method, r.URL.Path, rec)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) routes() {

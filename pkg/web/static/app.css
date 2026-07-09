@@ -23,7 +23,6 @@
   --space-4: 1rem;
   --space-5: 1.5rem;
   --radius: 6px;
-  --z-sticky: 10;
 }
 
 *,
@@ -67,17 +66,13 @@ pre {
 }
 
 .topbar {
-  position: sticky;
-  top: 0;
-  z-index: var(--z-sticky);
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
   gap: var(--space-3);
   padding: var(--space-3) var(--space-5);
-  background: oklch(0.14 0.01 65 / 0.92);
+  background: oklch(0.14 0.01 65);
   border-bottom: 1px solid var(--border);
-  backdrop-filter: blur(8px);
 }
 
 .brand {
