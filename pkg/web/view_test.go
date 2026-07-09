@@ -20,11 +20,11 @@ func TestLoadFile_GoProviderScope(t *testing.T) {
 	if v.Provider != "go" {
 		t.Fatalf("provider=%q", v.Provider)
 	}
-	if len(v.Siblings) == 0 {
-		t.Fatal("expected siblings in fmt package")
+	if len(v.Files) == 0 {
+		t.Fatal("expected files in fmt package")
 	}
-	// Scope rail lists symbols via full refs, not ?file=.
-	for _, s := range v.Siblings {
+	// Files tab uses full refs, not ?file=.
+	for _, s := range v.Files {
 		if strings.Contains(s.Href, "file=") {
 			t.Fatalf("unexpected file query in rail: %s", s.Href)
 		}
@@ -63,6 +63,10 @@ func TestLoadFile_PathStillWorks(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Non-language file should still appear in listings.
+	if err := os.WriteFile(filepath.Join(dir, "README"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	l, err := NewLoader(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -73,6 +77,39 @@ func TestLoadFile_PathStillWorks(t *testing.T) {
 	}
 	if len(v.Segments) == 0 {
 		t.Fatal("expected segments")
+	}
+	if len(v.Symbols) == 0 {
+		t.Fatal("expected symbols tab entries for main")
+	}
+	idx := l.LoadIndex()
+	var sawReadme bool
+	for _, it := range idx.Items {
+		if it.Name == "README" {
+			sawReadme = true
+		}
+	}
+	if !sawReadme {
+		t.Fatal("expected all files listed, including README")
+	}
+}
+
+func TestResolveUnderRoot_RejectsEscape(t *testing.T) {
+	dir := t.TempDir()
+	l, err := NewLoader(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.resolveUnderRoot("../outside"); err == nil {
+		t.Fatal("expected escape rejection")
+	}
+}
+
+func TestIsTextContent(t *testing.T) {
+	if !isTextContent([]byte("hello\n")) {
+		t.Fatal("text should pass")
+	}
+	if isTextContent([]byte{0x00, 0x01, 0x02}) {
+		t.Fatal("binary should fail")
 	}
 }
 

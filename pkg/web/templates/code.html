@@ -12,46 +12,79 @@
     {{if .Language}}<span class="badge">{{.Language}}</span>{{end}}
   </header>
   <main class="shell">
-    <aside class="rail" aria-label="Nearby files">
+    <aside class="rail" aria-label="Navigation">
       {{if .ParentHref}}
       <a class="parent-link" href="{{.ParentHref}}">↑ parent</a>
       {{end}}
-      <h1 class="rail-title">Nearby</h1>
-      {{if .Siblings}}
-      <ul class="file-list">
-        {{range .Siblings}}
-        <li>
-          <a href="{{.Href}}" class="file-link{{if .IsDir}} is-dir{{end}}{{if .Active}} is-active{{end}}">{{.Name}}</a>
-        </li>
-        {{end}}
-      </ul>
-      {{else}}
-      <p class="muted">—</p>
-      {{end}}
+
+      <div class="rail-tabs">
+        <input type="radio" name="rail-tab" id="tab-files" class="rail-tab-input" checked>
+        <input type="radio" name="rail-tab" id="tab-symbols" class="rail-tab-input">
+        <div class="rail-tab-labels" role="tablist">
+          <label for="tab-files" class="rail-tab-label" role="tab">Files</label>
+          <label for="tab-symbols" class="rail-tab-label" role="tab">Symbols</label>
+        </div>
+
+        <div class="rail-tab-panel rail-tab-files">
+          {{if .Files}}
+          <ul class="file-list">
+            {{range .Files}}
+            <li>
+              {{if .Href}}
+              <a href="{{.Href}}" class="file-link{{if .IsDir}} is-dir{{end}}{{if .Active}} is-active{{end}}">{{.Name}}</a>
+              {{else}}
+              <span class="file-link{{if .IsDir}} is-dir{{end}}">{{.Name}}</span>
+              {{end}}
+            </li>
+            {{end}}
+          </ul>
+          {{else}}
+          <p class="muted">—</p>
+          {{end}}
+        </div>
+
+        <div class="rail-tab-panel rail-tab-symbols">
+          {{if .Symbols}}
+          <ul class="sym-list">
+            {{range .Symbols}}
+            <li>
+              {{if .Href}}
+              <a href="{{.Href}}" class="sym-nav kind-{{.Kind}}" title="{{.Title}}">
+                <span class="sym-kind">{{.Kind}}</span>
+                <span class="sym-name">{{.Name}}</span>
+              </a>
+              {{else}}
+              <span class="sym-nav kind-{{.Kind}}" title="{{.Title}}">
+                <span class="sym-kind">{{.Kind}}</span>
+                <span class="sym-name">{{.Name}}</span>
+              </span>
+              {{end}}
+            </li>
+            {{end}}
+          </ul>
+          {{else}}
+          <p class="muted">No symbols for this file.</p>
+          {{end}}
+        </div>
+      </div>
     </aside>
     <section class="panel">
       {{if .Error}}
       <p class="error">{{.Error}}</p>
+      {{end}}
+      {{if .Warning}}
+      <p class="warning" role="status">{{.Warning}}</p>
+      {{end}}
+      {{if .NonText}}
+      <p class="muted">Binary or non-text file — not rendered.</p>
       {{else if .Segments}}
       <div class="code-wrap">
         <pre class="code" tabindex="0"><code>{{range .Segments}}{{if .IsLink}}<a href="{{.Href}}" class="sym-link{{if .IsDef}} sym-def{{end}}"{{if .ID}} id="{{.ID}}"{{end}} title="{{.Reference}}">{{.Text}}</a>{{else if .IsDef}}<span class="sym-def"{{if .ID}} id="{{.ID}}"{{end}} title="{{.Reference}}">{{.Text}}</span>{{else}}{{.Text}}{{end}}{{end}}</code></pre>
       </div>
-      {{else if .Siblings}}
-      <p class="lede">{{if .Provider}}Provider scope{{else}}Directory{{end}} <code>{{.Reference}}</code>. Open a child scope or symbol from the rail — every link is a full <code>provider:path::symbol</code> reference.</p>
-      {{else}}
-      <p class="muted">Nothing to show.</p>
+      {{else if not .Error}}
+      <p class="lede">{{if .Provider}}Provider scope{{else}}Directory{{end}} <code>{{.Reference}}</code>. Open a file from the Files tab — every link is a full <code>provider:path::symbol</code> reference.</p>
       {{end}}
     </section>
   </main>
-  <script>
-    (function () {
-      var id = document.body.getAttribute('data-focus');
-      if (!id) return;
-      var el = document.getElementById(id);
-      if (!el) return;
-      el.classList.add('sym-focus');
-      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    })();
-  </script>
 </body>
 </html>

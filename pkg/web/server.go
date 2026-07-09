@@ -101,7 +101,7 @@ func (s *Server) render(w http.ResponseWriter, name string, data any) {
 	}
 }
 
-// ListenAndServe starts HTTP on addr (e.g. ":8080").
+// ListenAndServe starts HTTP on addr (e.g. "127.0.0.1:8080").
 func (s *Server) ListenAndServe(addr string) error {
 	return http.ListenAndServe(addr, s.Handler())
 }
