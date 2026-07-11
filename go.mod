@@ -10,15 +10,15 @@ require (
 	github.com/docker/docker v28.0.1+incompatible
 	// Per-language modules (proxy size limits). exclude blocks monorepo placeholder v0.0.0
 	// which MVS prefers over pseudo-versions and which only works with local replaces.
-	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar v0.0.0-20260708182349-0f0de68fbd82
-	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/go v0.0.0-20260708182349-0f0de68fbd82
-	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/java v0.0.0-20260708182349-0f0de68fbd82
-	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/javascript v0.0.0-20260708182349-0f0de68fbd82
-	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/nix v0.0.0-20260708182349-0f0de68fbd82
-	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/python v0.0.0-20260708182349-0f0de68fbd82
-	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/svelte v0.0.0-20260708182349-0f0de68fbd82
-	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/tsx v0.0.0-20260708182349-0f0de68fbd82
-	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/typescript v0.0.0-20260708182349-0f0de68fbd82
+	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar v0.0.0-20260711133602-30b27f0dc6eb
+	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/go v0.0.0-20260711120206-25b68597b9af
+	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/java v0.0.0-20260711120206-25b68597b9af
+	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/javascript v0.0.0-20260711120206-25b68597b9af
+	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/nix v0.0.0-20260711133602-30b27f0dc6eb
+	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/python v0.0.0-20260711120206-25b68597b9af
+	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/svelte v0.0.0-20260711120206-25b68597b9af
+	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/tsx v0.0.0-20260711120206-25b68597b9af
+	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/typescript v0.0.0-20260711120206-25b68597b9af
 	github.com/pelletier/go-toml/v2 v2.2.4
 	github.com/spf13/cobra v1.10.2
 	github.com/testcontainers/testcontainers-go v0.37.0
