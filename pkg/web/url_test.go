@@ -34,3 +34,10 @@ func TestEncodeCodeURL_SymbolAddsAnchor(t *testing.T) {
 		t.Fatalf("decode: ok=%v got=%q", ok, got)
 	}
 }
+
+func TestEncodeCodeURLInRoot_MatchesEncodeCodeURL(t *testing.T) {
+	ref := "path:./pkg/web/url.go"
+	if got, want := EncodeCodeURLInRoot("/any/root", ref), EncodeCodeURL(ref); got != want {
+		t.Fatalf("EncodeCodeURLInRoot = %q, EncodeCodeURL = %q", got, want)
+	}
+}
