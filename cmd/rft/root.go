@@ -1,12 +1,16 @@
 package main
 
 import (
+	"log/slog"
+	"os"
+
 	"github.com/lucasew/refactree/pkg/pprof"
 	"github.com/lucasew/refactree/pkg/version"
 	"github.com/spf13/cobra"
 )
 
 type rootOptions struct {
+	verbose  bool
 	pprofDir string
 }
 
@@ -28,8 +32,8 @@ func newRootCmd() (*cobra.Command, *pprof.Profiler) {
 		Version:       version.GetBuildID(),
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		// Profiling runs only when --pprof-dir is set; hooks are no-ops otherwise.
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			configureLogging(opts.verbose)
 			profiler.Dir = opts.pprofDir
 			return profiler.Start()
 		},
@@ -38,6 +42,7 @@ func newRootCmd() (*cobra.Command, *pprof.Profiler) {
 		},
 	}
 
+	cmd.PersistentFlags().BoolVarP(&opts.verbose, "verbose", "v", false, "enable debug logging (slog)")
 	cmd.PersistentFlags().StringVar(&opts.pprofDir, "pprof-dir", "", "optional; when set, write cpu/heap/memory/goroutine/allocs pprof profiles into this directory")
 
 	cmd.AddCommand(
@@ -51,4 +56,13 @@ func newRootCmd() (*cobra.Command, *pprof.Profiler) {
 	)
 
 	return cmd, profiler
+}
+
+// configureLogging sets the process slog default: Info normally, Debug with --verbose.
+func configureLogging(verbose bool) {
+	level := slog.LevelInfo
+	if verbose {
+		level = slog.LevelDebug
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 }
