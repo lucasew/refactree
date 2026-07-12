@@ -115,8 +115,12 @@ func createBackups(dir string, edits []ingest.Edit) error {
 			return err
 		}
 		_, err = io.Copy(out, in)
-		in.Close()
-		out.Close()
+		if cerr := out.Close(); err == nil {
+			err = cerr
+		}
+		if cerr := in.Close(); err == nil {
+			err = cerr
+		}
 		if err != nil {
 			return err
 		}
@@ -140,10 +144,10 @@ func ensureEditFiles(dir string, edits []ingest.Edit) error {
 		if !os.IsNotExist(err) {
 			return err
 		}
-		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			return err
 		}
-		if err := os.WriteFile(p, []byte{}, 0644); err != nil {
+		if err := os.WriteFile(p, []byte{}, 0o644); err != nil {
 			return err
 		}
 	}
