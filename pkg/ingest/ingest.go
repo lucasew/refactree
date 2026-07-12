@@ -104,18 +104,24 @@ func ingestDir(dir string, recursive bool) (*Result, error) {
 	var extracts []*FileExtract
 
 	seenAbs := map[string]bool{}
-	err = filepath.Walk(rootAbs, func(path string, info os.FileInfo, err error) error {
+	err = filepath.WalkDir(rootAbs, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if info.IsDir() {
-			if path != rootAbs && isSkippedDirName(info.Name()) {
+		if d.IsDir() {
+			if path != rootAbs && isSkippedDirName(d.Name()) {
 				return filepath.SkipDir
 			}
 			if !recursive && path != rootAbs {
 				return filepath.SkipDir
 			}
 			return nil
+		}
+		// parseFileCached needs FileInfo for mtime cache keys; DirEntry.Info
+		// reuses the directory-read metadata when available (fewer stats).
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			return infoErr
 		}
 		fe, parseErr := parseFileCached(rootAbs, path, info)
 		if parseErr != nil {
