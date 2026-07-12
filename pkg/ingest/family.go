@@ -102,12 +102,6 @@ func LanguageInFamily(fileLanguage, projectFamily string) bool {
 	return fileLanguage == projectFamily
 }
 
-// LanguageMatchesProject is a deprecated name for LanguageInFamily when the
-// second argument is a family id (catalog projects use family, not language).
-func LanguageMatchesProject(fileLanguage, projectFamily string) bool {
-	return LanguageInFamily(fileLanguage, projectFamily)
-}
-
 // IsKnownFamily reports whether any language has registered under family.
 func IsKnownFamily(family string) bool {
 	familyMu.RLock()
