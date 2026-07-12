@@ -3,8 +3,8 @@ package pprof
 
 import (
 	"fmt"
-	"github.com/lucasew/refactree/pkg/errutil"
 	"io"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -138,11 +138,11 @@ func writeProfile(dir, name string, write func(io.Writer) error) {
 	path := filepath.Join(dir, name+".pprof")
 	f, err := os.Create(path)
 	if err != nil {
-		errutil.ReportError(fmt.Errorf("pprof: write %s: %w", path, err), nil)
+		log.Printf("pprof: write %s: %v", path, err)
 		return
 	}
 	defer func() { _ = f.Close() }()
 	if err := write(f); err != nil {
-		errutil.ReportError(fmt.Errorf("pprof: write %s: %w", path, err), nil)
+		log.Printf("pprof: write %s: %v", path, err)
 	}
 }
