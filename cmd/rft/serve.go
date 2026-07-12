@@ -9,7 +9,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func newServeCmd(root *rootOptions) *cobra.Command {
+func newServeCmd() *cobra.Command {
 	var (
 		addr string
 		dir  string

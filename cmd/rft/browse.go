@@ -6,7 +6,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func newBrowseCmd(root *rootOptions) *cobra.Command {
+func newBrowseCmd() *cobra.Command {
 	var all bool
 
 	cmd := &cobra.Command{

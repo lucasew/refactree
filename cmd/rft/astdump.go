@@ -11,7 +11,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func newASTDumpCmd(root *rootOptions) *cobra.Command {
+func newASTDumpCmd() *cobra.Command {
 	var querySource string
 	var queryFile string
 

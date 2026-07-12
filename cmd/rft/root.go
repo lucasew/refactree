@@ -7,7 +7,6 @@ import (
 )
 
 type rootOptions struct {
-	verbose  bool
 	pprofDir string
 }
 
@@ -39,17 +38,16 @@ func newRootCmd() (*cobra.Command, *pprof.Profiler) {
 		},
 	}
 
-	cmd.PersistentFlags().BoolVarP(&opts.verbose, "verbose", "v", false, "enable verbose logging")
 	cmd.PersistentFlags().StringVar(&opts.pprofDir, "pprof-dir", "", "optional; when set, write cpu/heap/memory/goroutine/allocs pprof profiles into this directory")
 
 	cmd.AddCommand(
-		newASTDumpCmd(opts),
-		newBrowseCmd(opts),
-		newLsCmd(opts),
-		newMvCmd(opts),
-		newDocCmd(opts),
-		newIngestCmd(opts),
-		newServeCmd(opts),
+		newASTDumpCmd(),
+		newBrowseCmd(),
+		newLsCmd(),
+		newMvCmd(),
+		newDocCmd(),
+		newIngestCmd(),
+		newServeCmd(),
 	)
 
 	return cmd, profiler

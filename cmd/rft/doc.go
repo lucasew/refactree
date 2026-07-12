@@ -7,7 +7,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func newDocCmd(root *rootOptions) *cobra.Command {
+func newDocCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "doc <reference>",
 		Short: "Show documentation for a reference",
