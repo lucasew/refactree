@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/lucasew/refactree/pkg/ingest"
 )
@@ -117,8 +118,18 @@ func (s *Server) render(w http.ResponseWriter, name string, data any) {
 }
 
 // ListenAndServe starts HTTP on addr (e.g. "127.0.0.1:8080").
+// Timeouts bound slowloris and hung connections; WriteTimeout is generous so
+// large annotated pages still finish.
 func (s *Server) ListenAndServe(addr string) error {
-	return http.ListenAndServe(addr, s.Handler())
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	return srv.ListenAndServe()
 }
 
 // TrimTrailingSlash is a small helper for tests/templates.
