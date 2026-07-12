@@ -225,30 +225,6 @@ func bfsNeighbors(rootAbs string, fe *FileExtract) []string {
 	return out
 }
 
-// relativeImportNeighbors follows only ./ and ../ import specs (and same for
-// reexports). Used inside vendored trees to hop barrels without listing every file.
-func relativeImportNeighbors(rootAbs string, fe *FileExtract) []string {
-	importerDir := filepath.ToSlash(filepath.Dir(fe.Path))
-	if importerDir == "." {
-		importerDir = ""
-	}
-	var out []string
-	addSpec := func(spec string) {
-		spec = strings.TrimSpace(spec)
-		if !(strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../")) {
-			return
-		}
-		out = append(out, probeImportTargets(rootAbs, importerDir, spec)...)
-	}
-	for _, imp := range fe.Imports {
-		addSpec(imp.SourcePath)
-	}
-	for _, re := range fe.Reexports {
-		addSpec(re.SourcePath)
-	}
-	return out
-}
-
 func listSourceFilesInDir(absDir string) []string {
 	if isSkippedDirName(filepath.Base(absDir)) {
 		return nil
