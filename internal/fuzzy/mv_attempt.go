@@ -38,7 +38,7 @@ func RunMvAttempt(ctx context.Context, p Project, root string, in PlanInput, str
 		return MvAttemptResult{Class: classBug, Failures: fails, Err: fmt.Errorf("pre-ingest invariants: %v", fails)}
 	}
 
-	plan, err := pickMvPlanWith(in, p, root, result)
+	plan, err := pickMvPlanWith(in, p, result)
 	if err != nil {
 		fmt.Fprintf(log, "mv choose: project=%s skip pick (grain_idx=%d source_idx=%d placement_idx=%d peer_idx=%d entropy=%d): %v\n",
 			p.ID, in.GrainIndex, in.SourceIndex, in.PlacementIndex, in.PeerIndex, in.Entropy, err)
@@ -81,7 +81,7 @@ func RunMvAttempt(ctx context.Context, p Project, root string, in PlanInput, str
 		}
 	}
 
-	return MvAttemptResult{Plan: plan, Edits: edits, Class: "pass"}
+	return MvAttemptResult{Plan: plan, Edits: edits, Class: classPass}
 }
 
 // ScaffoldAttempt writes a fixture scaffold under destDir for a failed attempt.

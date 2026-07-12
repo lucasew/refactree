@@ -62,14 +62,13 @@ func classifyMvError(err error) string {
 	}
 	for _, s := range unsupported {
 		if strings.Contains(msg, s) {
-			return "unsupported"
+			return classUnsupported
 		}
 	}
-	return "bug"
+	return classBug
 }
 
-func pickMvPlanWith(in PlanInput, p Project, root string, result *ingest.Result) (movePlan, error) {
-	_ = root
+func pickMvPlanWith(in PlanInput, p Project, result *ingest.Result) (movePlan, error) {
 	model, err := moveModelForFamily(p.Family)
 	if err != nil {
 		return movePlan{}, err

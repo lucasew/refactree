@@ -488,7 +488,7 @@ func runMvIteration(ctx context.Context, opts Options, p Project, rng *rand.Rand
 		}
 		scaffold()
 		return out.bugErr(opts, report, ev, attempt.Err)
-	case "pass":
+	case classPass:
 		fmt.Fprintf(opts.Stdout, "mv result: project=%s class=pass iteration=%d/%d placement=%s\n",
 			p.ID, iter, opts.Iterations, plan.Placement)
 		out.recordPass(report, ev)

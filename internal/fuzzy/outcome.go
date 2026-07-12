@@ -1,11 +1,15 @@
 package fuzzy
 
-import "fmt"
+import (
+	"fmt"
+	"strconv"
+)
 
 const (
 	classBug         = "bug"
 	classEnv         = "env"
 	classUnsupported = "unsupported"
+	classPass        = "pass"
 )
 
 // fuzzesMv reports whether this mode runs mv iterations.
@@ -25,7 +29,7 @@ func (m Mode) worktreeID(seed int64) (id string, reuse bool) {
 	case ModeIngest:
 		return IngestRunID, true
 	default:
-		return fmt.Sprintf("%d", seed), false
+		return strconv.FormatInt(seed, 10), false
 	}
 }
 

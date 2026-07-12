@@ -95,7 +95,7 @@ func TestCatalogFuzzCampaign(t *testing.T) {
 				res.Class, res.Plan.Placement, res.Plan.Source, res.Plan.Destination, res.Err, scaffold)
 
 			switch res.Class {
-			case classUnsupported, "pass", classEnv:
+			case classUnsupported, classPass, classEnv:
 				if res.Class == classEnv && res.Err != nil {
 					t.Logf("env soft-skip: %v", res.Err)
 				}
@@ -187,7 +187,7 @@ func TestCatalogMvSeedCorpus(t *testing.T) {
 			t.Logf("class=%s placement=%s source=%s destination=%s err=%v",
 				res.Class, res.Plan.Placement, res.Plan.Source, res.Plan.Destination, res.Err)
 			switch res.Class {
-			case classUnsupported, "pass", classEnv:
+			case classUnsupported, classPass, classEnv:
 				if res.Class == classEnv && res.Err != nil {
 					t.Log("env soft-skip: ", res.Err)
 				}
