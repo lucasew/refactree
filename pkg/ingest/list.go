@@ -154,11 +154,3 @@ func allowListedEntity(ent Entity, language string, opts SymbolListOptions) bool
 	entRef := ParseReference(ent.Reference)
 	return driver.AllowListSymbol(entRef.Symbol, opts)
 }
-
-func allowSymbolByLanguage(name, language string, opts SymbolListOptions) bool {
-	driver, ok := languageDriverForName(language)
-	if !ok {
-		return true
-	}
-	return driver.AllowListSymbol(name, opts)
-}
