@@ -1,0 +1,22 @@
+package main
+
+import (
+	"context"
+	"log/slog"
+	"testing"
+)
+
+func TestConfigureLoggingVerbose(t *testing.T) {
+	configureLogging(false)
+	if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+		t.Fatal("without verbose, debug must be disabled")
+	}
+	if !slog.Default().Enabled(context.Background(), slog.LevelInfo) {
+		t.Fatal("without verbose, info must be enabled")
+	}
+
+	configureLogging(true)
+	if !slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+		t.Fatal("with verbose, debug must be enabled")
+	}
+}
