@@ -7,7 +7,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func newLsCmd(root *rootOptions) *cobra.Command {
+func newLsCmd() *cobra.Command {
 	var all bool
 	var long bool
 	var recursive bool

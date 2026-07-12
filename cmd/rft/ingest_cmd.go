@@ -10,7 +10,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func newIngestCmd(root *rootOptions) *cobra.Command {
+func newIngestCmd() *cobra.Command {
 	var output string
 	var asJSON bool
 

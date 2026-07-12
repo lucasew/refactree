@@ -10,7 +10,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func newMvCmd(root *rootOptions) *cobra.Command {
+func newMvCmd() *cobra.Command {
 	var backup bool
 	var interactive bool
 
