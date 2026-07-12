@@ -68,10 +68,6 @@ func classifyMvError(err error) string {
 	return "bug"
 }
 
-func pickMvPlan(rng *rand.Rand, p Project, root string, result *ingest.Result) (movePlan, error) {
-	return pickMvPlanWith(PlanInputFromRand(rng), p, root, result)
-}
-
 func pickMvPlanWith(in PlanInput, p Project, root string, result *ingest.Result) (movePlan, error) {
 	_ = root
 	model, err := moveModelForFamily(p.Family)
