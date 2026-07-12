@@ -90,12 +90,12 @@ func (moveDriver) RewriteSupportFiles(rootDir string, result *ingest.Result, mov
 	newSlash := strings.ReplaceAll(newPkg, ".", "/")
 
 	var edits []ingest.Edit
-	err := filepath.Walk(rootDir, func(abs string, info os.FileInfo, err error) error {
+	err := filepath.WalkDir(rootDir, func(abs string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if info.IsDir() {
-			switch info.Name() {
+		if d.IsDir() {
+			switch d.Name() {
 			case ".git", "target", "node_modules", ".gradle", "build":
 				return filepath.SkipDir
 			}
