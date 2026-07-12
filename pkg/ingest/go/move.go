@@ -803,7 +803,7 @@ func goImportInsertEdits(file string, content []byte, paths []string) []ingest.E
 	}
 	lines := strings.Split(text, "\n")
 	offset := 0
-	for i, line := range lines {
+	for _, line := range lines {
 		if strings.HasPrefix(strings.TrimSpace(line), "import ") {
 			insertPos := offset + len(line) + 1
 			var b strings.Builder
@@ -820,7 +820,6 @@ func goImportInsertEdits(file string, content []byte, paths []string) []ingest.E
 		if strings.HasPrefix(strings.TrimSpace(line), "package ") {
 			insertPos := offset + len(line) + 1
 			// Preserve a single blank line between import and the next decl.
-			_ = i
 			return []ingest.Edit{{
 				File:      file,
 				StartByte: uint32(insertPos),
@@ -935,7 +934,7 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		return nil
 	}
 	src := ingest.ParseReference(sourceRefs[0])
-	recv, isMethod := receiverTypeName(src.Symbol)
+	_, isMethod := receiverTypeName(src.Symbol)
 	if !isMethod {
 		return nil
 	}
@@ -1032,7 +1031,7 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 			edits = append(edits, e)
 		}
 		if inOurPkg {
-			for _, e := range findInterfaceMethodEdits(rel, content, recv, oldLeaf, newLeaf) {
+			for _, e := range findInterfaceMethodEdits(rel, content, oldLeaf, newLeaf) {
 				if occ[[2]uint32{e.StartByte, e.EndByte}] {
 					continue
 				}
@@ -1302,7 +1301,9 @@ func buildStringLiteralMask(text string) []bool {
 	return mask
 }
 
-func findInterfaceMethodEdits(file string, content []byte, recvName, oldLeaf, newLeaf string) []ingest.Edit {
+// findInterfaceMethodEdits renames method oldLeaf→newLeaf on every interface
+// declaration in the file (all in-scope interfaces that declare the method).
+func findInterfaceMethodEdits(file string, content []byte, oldLeaf, newLeaf string) []ingest.Edit {
 	lang, ok := grammar.GetByExtension(file)
 	if !ok {
 		return nil
@@ -1315,25 +1316,18 @@ func findInterfaceMethodEdits(file string, content []byte, recvName, oldLeaf, ne
 	tree := parser.ParseString(string(content))
 	defer tree.Delete()
 	var edits []ingest.Edit
-	var walk func(n *grammar.Node, inIface bool, ifaceName string)
-	walk = func(n *grammar.Node, inIface bool, ifaceName string) {
+	var walk func(n *grammar.Node, inIface bool)
+	walk = func(n *grammar.Node, inIface bool) {
 		if n == nil {
 			return
 		}
 		nextIface := inIface
-		nextName := ifaceName
 		switch n.Type() {
 		case "type_spec":
-			if id := ingest.ChildByType(n, "type_identifier"); id != nil {
-				nextName = ingest.NodeText(id, content)
-			}
 			if t := ingest.ChildByField(n, "type"); t != nil && t.Type() == "interface_type" {
 				nextIface = true
 			}
 		case "method_elem", "field_declaration":
-			// Rename the method on every interface in-scope. Prefer interfaces
-			// named like the receiver when that name is known, but still update
-			// satisfied interfaces with a different type name (impl vs Driver).
 			if inIface {
 				if name := ingest.ChildByField(n, "name"); name != nil {
 					if ingest.NodeText(name, content) == oldLeaf {
@@ -1361,13 +1355,11 @@ func findInterfaceMethodEdits(file string, content []byte, recvName, oldLeaf, ne
 					}
 				}
 			}
-			_ = ifaceName
-			_ = recvName
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
-			walk(n.Child(i), nextIface, nextName)
+			walk(n.Child(i), nextIface)
 		}
 	}
-	walk(tree.RootNode(), false, "")
+	walk(tree.RootNode(), false)
 	return edits
 }
