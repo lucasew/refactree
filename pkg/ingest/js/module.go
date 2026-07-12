@@ -198,11 +198,6 @@ func extractECMA(root *grammar.Node, source []byte, path string) *ingest.FileExt
 	return fe
 }
 
-// extractJavaScript is kept as a thin alias for older call sites/tests.
-func extractJavaScript(root *grammar.Node, source []byte, path string) *ingest.FileExtract {
-	return extractECMA(root, source, path)
-}
-
 func extractECMATopLevel(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 	if n == nil {
 		return
