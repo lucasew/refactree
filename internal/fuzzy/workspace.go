@@ -491,7 +491,7 @@ func transferGlobs(srcRoot, dstRoot string, globs []string, move bool) ([]string
 }
 
 func copyDir(src, dst string) error {
-	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -503,16 +503,25 @@ func copyDir(src, dst string) error {
 			return os.MkdirAll(dst, 0o755)
 		}
 		target := filepath.Join(dst, rel)
-		if info.IsDir() {
-			return os.MkdirAll(target, info.Mode())
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
+		// Symlinks first: Type() has mode bits without a full stat; WalkDir does not follow links.
+		if d.Type()&os.ModeSymlink != 0 {
 			link, err := os.Readlink(path)
 			if err != nil {
 				return err
 			}
 			_ = os.Remove(target)
 			return os.Symlink(link, target)
+		}
+		if d.IsDir() {
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			return os.MkdirAll(target, info.Mode())
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
