@@ -430,9 +430,9 @@ func ApplyEdits(dir string, edits []Edit) error {
 					return fmt.Errorf("reading %s: %w", file, err)
 				}
 				content = []byte{}
-				// 0755 conventional for dirs created as side-effect of edit application
+				// 0o755 conventional for dirs created as side-effect of edit application
 				// (no project-wide const used yet; see review Issue 8).
-				if mkerr := os.MkdirAll(filepath.Dir(target), 0755); mkerr != nil {
+				if mkerr := os.MkdirAll(filepath.Dir(target), 0o755); mkerr != nil {
 					return fmt.Errorf("mkdir for %s: %w", file, mkerr)
 				}
 			} else {
@@ -451,7 +451,7 @@ func ApplyEdits(dir string, edits []Edit) error {
 			content = append(content[:e.StartByte], append([]byte(e.NewText), content[e.EndByte:]...)...)
 		}
 
-		if err := os.WriteFile(target, content, 0644); err != nil {
+		if err := os.WriteFile(target, content, 0o644); err != nil {
 			return fmt.Errorf("writing %s: %w", file, err)
 		}
 
