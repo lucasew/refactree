@@ -31,7 +31,7 @@ func newIngestCmd() *cobra.Command {
 				_, err := cmd.OutOrStdout().Write(payload)
 				return err
 			}
-			return os.WriteFile(output, payload, 0644)
+			return os.WriteFile(output, payload, 0o644)
 		},
 	}
 
