@@ -303,8 +303,8 @@ func pythonCommandEnv(workDir string) []string {
 	base := filepath.Join(os.TempDir(), "refactree-python")
 	uvCache := filepath.Join(base, "uv-cache")
 	xdgCache := filepath.Join(base, "xdg-cache")
-	_ = os.MkdirAll(uvCache, 0755)
-	_ = os.MkdirAll(xdgCache, 0755)
+	_ = os.MkdirAll(uvCache, 0o755)
+	_ = os.MkdirAll(xdgCache, 0o755)
 	env = append(env, "UV_CACHE_DIR="+uvCache)
 	env = append(env, "XDG_CACHE_HOME="+xdgCache)
 
