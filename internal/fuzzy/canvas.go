@@ -155,7 +155,7 @@ func (c *CatalogCanvas) Attempt(ctx context.Context, projectIdx int, in PlanInpu
 		log = os.Stdout
 	}
 	res := RunMvAttempt(ctx, p, ingestRoot, in, c.Strict, nil, log)
-	if res.Class != "pass" {
+	if res.Class != classPass {
 		if res.Class == classBug && scaffoldDir != "" {
 			_ = ScaffoldAttempt(ingestRoot, scaffoldDir, res)
 		}

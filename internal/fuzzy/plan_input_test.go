@@ -26,11 +26,11 @@ func TestPlanInputDeterministicPick(t *testing.T) {
 		t.Fatalf("ingest: err=%v fails=%v", err, fails)
 	}
 	in := PlanInput{GrainIndex: 0, SourceIndex: 0, PlacementIndex: 0, PeerIndex: 0, Entropy: 42}
-	a, err := pickMvPlanWith(in, p, work, result)
+	a, err := pickMvPlanWith(in, p, result)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := pickMvPlanWith(in, p, work, result)
+	b, err := pickMvPlanWith(in, p, result)
 	if err != nil {
 		t.Fatal(err)
 	}
