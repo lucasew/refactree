@@ -4,7 +4,7 @@ package pprof
 import (
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -138,11 +138,11 @@ func writeProfile(dir, name string, write func(io.Writer) error) {
 	path := filepath.Join(dir, name+".pprof")
 	f, err := os.Create(path)
 	if err != nil {
-		log.Printf("pprof: write %s: %v", path, err)
+		slog.Error("pprof: write failed", "path", path, "err", err)
 		return
 	}
 	defer func() { _ = f.Close() }()
 	if err := write(f); err != nil {
-		log.Printf("pprof: write %s: %v", path, err)
+		slog.Error("pprof: write failed", "path", path, "err", err)
 	}
 }
