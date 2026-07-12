@@ -1,31 +1,34 @@
 package ingest
 
-import "sort"
+import (
+	"cmp"
+	"slices"
+)
 
 // SortResult orders Files, Entities, Aliases, and Relations for stable compare.
 func SortResult(r *Result) {
 	if r == nil {
 		return
 	}
-	sort.Slice(r.Files, func(i, j int) bool {
-		return r.Files[i].Path < r.Files[j].Path
+	slices.SortFunc(r.Files, func(a, b File) int {
+		return cmp.Compare(a.Path, b.Path)
 	})
-	sort.Slice(r.Entities, func(i, j int) bool {
-		if r.Entities[i].Reference != r.Entities[j].Reference {
-			return r.Entities[i].Reference < r.Entities[j].Reference
-		}
-		return r.Entities[i].StartByte < r.Entities[j].StartByte
+	slices.SortFunc(r.Entities, func(a, b Entity) int {
+		return cmp.Or(
+			cmp.Compare(a.Reference, b.Reference),
+			cmp.Compare(a.StartByte, b.StartByte),
+		)
 	})
-	sort.Slice(r.Aliases, func(i, j int) bool {
-		if r.Aliases[i].Reference != r.Aliases[j].Reference {
-			return r.Aliases[i].Reference < r.Aliases[j].Reference
-		}
-		return r.Aliases[i].StartByte < r.Aliases[j].StartByte
+	slices.SortFunc(r.Aliases, func(a, b Alias) int {
+		return cmp.Or(
+			cmp.Compare(a.Reference, b.Reference),
+			cmp.Compare(a.StartByte, b.StartByte),
+		)
 	})
-	sort.Slice(r.Relations, func(i, j int) bool {
-		if r.Relations[i].Reference != r.Relations[j].Reference {
-			return r.Relations[i].Reference < r.Relations[j].Reference
-		}
-		return r.Relations[i].StartByte < r.Relations[j].StartByte
+	slices.SortFunc(r.Relations, func(a, b Relation) int {
+		return cmp.Or(
+			cmp.Compare(a.Reference, b.Reference),
+			cmp.Compare(a.StartByte, b.StartByte),
+		)
 	})
 }
