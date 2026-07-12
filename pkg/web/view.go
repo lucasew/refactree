@@ -145,12 +145,12 @@ func (l *Loader) LoadFile(refStr string) FileView {
 
 	if scopeRef.Provider == "" || scopeRef.Provider == "path" {
 		v.Provider = ""
-		return l.loadPathView(v, scopeRef, parsed)
+		return l.loadPathView(v, scopeRef)
 	}
 	return l.loadProviderView(v, scopeRef, focusRef, parsed)
 }
 
-func (l *Loader) loadPathView(v FileView, scopeRef ingest.Reference, parsed ingest.Reference) FileView {
+func (l *Loader) loadPathView(v FileView, scopeRef ingest.Reference) FileView {
 	rel := strings.TrimPrefix(scopeRef.Path, "./")
 	if rel == "" || rel == "." {
 		idx := l.LoadIndex()
@@ -208,7 +208,6 @@ func (l *Loader) loadPathView(v FileView, scopeRef ingest.Reference, parsed inge
 		return EncodeCodeURLInRoot(l.RootDir, r)
 	})
 	v.Symbols = symbolsForFile(rel, result, EncodeCodeURLInRoot, l.RootDir)
-	_ = parsed
 	return v
 }
 
