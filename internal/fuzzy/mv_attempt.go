@@ -26,7 +26,9 @@ type MvAttemptResult struct {
 // afterCheck is typically the catalog project's mise test/build (via Session), not fixtures.
 // log receives choose/result lines; nil defaults to os.Stdout.
 func RunMvAttempt(ctx context.Context, p Project, root string, in PlanInput, strict bool, afterCheck func(context.Context) error, log io.Writer) MvAttemptResult {
-	_ = ctx
+	if err := ctx.Err(); err != nil {
+		return MvAttemptResult{Class: classEnv, Err: err}
+	}
 	if log == nil {
 		log = os.Stdout
 	}
