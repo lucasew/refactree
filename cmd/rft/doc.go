@@ -22,12 +22,18 @@ func newDocCmd() *cobra.Command {
 			}
 
 			w := cmd.OutOrStdout()
-			fmt.Fprintf(w, "# %s\n", doc.Name)
+			if _, err := fmt.Fprintf(w, "# %s\n", doc.Name); err != nil {
+				return err
+			}
 			if doc.Signature != "" {
-				fmt.Fprintf(w, "Signature: %s\n", doc.Signature)
+				if _, err := fmt.Fprintf(w, "Signature: %s\n", doc.Signature); err != nil {
+					return err
+				}
 			}
 			if doc.DocString != "" {
-				fmt.Fprintln(w, doc.DocString)
+				if _, err := fmt.Fprintln(w, doc.DocString); err != nil {
+					return err
+				}
 			}
 
 			return nil
