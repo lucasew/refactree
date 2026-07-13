@@ -1,11 +1,12 @@
 package ingest
 
 import (
+	"cmp"
 	"fmt"
 	"os"
 	"path"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -214,8 +215,8 @@ func applyEditsToString(content string, edits []Edit) string {
 		return content
 	}
 	sorted := append([]Edit(nil), edits...)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].StartByte > sorted[j].StartByte
+	slices.SortFunc(sorted, func(a, b Edit) int {
+		return cmp.Compare(b.StartByte, a.StartByte)
 	})
 	buf := []byte(content)
 	for _, e := range sorted {
@@ -440,8 +441,8 @@ func ApplyEdits(dir string, edits []Edit) error {
 			}
 		}
 
-		sort.Slice(fileEdits, func(i, j int) bool {
-			return fileEdits[i].StartByte > fileEdits[j].StartByte
+		slices.SortFunc(fileEdits, func(a, b Edit) int {
+			return cmp.Compare(b.StartByte, a.StartByte)
 		})
 
 		for _, e := range fileEdits {
