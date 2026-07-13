@@ -72,6 +72,7 @@ func (moveDriver) ExtractDecl(filePath string, entity ingest.Entity) (ingest.Dec
 	return ingest.DeclExtract{
 		Preamble:    pkg,
 		DeclText:    declText,
+		Imports:     javaImportsNeededByDecl(source, declText),
 		RemoveStart: start,
 		RemoveEnd:   removeEnd,
 	}, nil
@@ -83,10 +84,18 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 		pkg = decl.Preamble
 	}
 
-	insertAt := uint32(0)
-	insertText := ""
 	if dstContent != nil {
-		insertAt = uint32(len(dstContent))
+		merged := ensureJavaImports(string(dstContent), decl.Imports)
+		if merged != string(dstContent) {
+			return ingest.Edit{
+				File:      dstRelPath,
+				StartByte: 0,
+				EndByte:   uint32(len(dstContent)),
+				NewText:   appendJavaDeclText(merged, decl.DeclText),
+			}
+		}
+		insertAt := uint32(len(dstContent))
+		insertText := ""
 		if len(dstContent) > 0 && dstContent[len(dstContent)-1] != '\n' {
 			insertText += "\n"
 		}
@@ -94,18 +103,200 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 			insertText += "\n"
 		}
 		insertText += decl.DeclText + "\n"
-	} else if pkg != "" {
-		insertText = fmt.Sprintf("package %s;\n\n%s\n", pkg, decl.DeclText)
-	} else {
-		insertText = decl.DeclText + "\n"
+		return ingest.Edit{
+			File:      dstRelPath,
+			StartByte: insertAt,
+			EndByte:   insertAt,
+			NewText:   insertText,
+		}
 	}
 
+	body := ""
+	if pkg != "" {
+		body = fmt.Sprintf("package %s;\n", pkg)
+	}
+	if len(decl.Imports) > 0 {
+		body = ensureJavaImports(body, decl.Imports)
+	}
 	return ingest.Edit{
 		File:      dstRelPath,
-		StartByte: insertAt,
-		EndByte:   insertAt,
-		NewText:   insertText,
+		StartByte: 0,
+		EndByte:   0,
+		NewText:   appendJavaDeclText(body, decl.DeclText),
 	}
+}
+
+func appendJavaDeclText(content, declText string) string {
+	out := content
+	if len(out) > 0 && out[len(out)-1] != '\n' {
+		out += "\n"
+	}
+	if len(out) > 0 {
+		out += "\n"
+	}
+	return out + declText + "\n"
+}
+
+// javaImportSpec is one import/import-static line from a Java source file.
+// stmt is the full statement including "import " and trailing ';'.
+type javaImportSpec struct {
+	stmt  string
+	local string // simple name used by the declaration, or "*" for wildcards
+}
+
+// javaImportsNeededByDecl returns full import statements from source whose
+// simple names appear in declText (or wildcard imports, which are always kept).
+func javaImportsNeededByDecl(source []byte, declText string) []string {
+	specs := parseJavaImportSpecs(source)
+	if len(specs) == 0 {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, spec := range specs {
+		if spec.stmt == "" || seen[spec.stmt] {
+			continue
+		}
+		if spec.local == "*" || javaIdentUsed(declText, spec.local) {
+			seen[spec.stmt] = true
+			out = append(out, spec.stmt)
+		}
+	}
+	return out
+}
+
+func parseJavaImportSpecs(source []byte) []javaImportSpec {
+	text := string(source)
+	var specs []javaImportSpec
+	lines := strings.Split(text, "\n")
+	for _, line := range lines {
+		trim := strings.TrimSpace(line)
+		if !strings.HasPrefix(trim, "import ") {
+			continue
+		}
+		// Drop trailing comments.
+		if i := strings.Index(trim, "//"); i >= 0 {
+			trim = strings.TrimSpace(trim[:i])
+		}
+		if !strings.HasSuffix(trim, ";") {
+			continue
+		}
+		body := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(strings.TrimPrefix(trim, "import ")), ";"))
+		if body == "" {
+			continue
+		}
+		local := body
+		if strings.HasPrefix(local, "static ") {
+			local = strings.TrimSpace(strings.TrimPrefix(local, "static "))
+		}
+		if strings.HasSuffix(local, ".*") {
+			local = "*"
+		} else if i := strings.LastIndex(local, "."); i >= 0 {
+			local = local[i+1:]
+		}
+		specs = append(specs, javaImportSpec{stmt: trim, local: local})
+	}
+	return specs
+}
+
+func javaIdentUsed(text, ident string) bool {
+	if ident == "" || ident == "*" {
+		return false
+	}
+	off := 0
+	for {
+		idx := strings.Index(text[off:], ident)
+		if idx < 0 {
+			return false
+		}
+		pos := off + idx
+		end := pos + len(ident)
+		if pos > 0 && isJavaIdentChar(text[pos-1]) {
+			off = end
+			continue
+		}
+		if end < len(text) && isJavaIdentChar(text[end]) {
+			off = end
+			continue
+		}
+		return true
+	}
+}
+
+// ensureJavaImports inserts missing import statements after the package clause.
+// each entry in imports is a full "import …;" statement.
+func ensureJavaImports(content string, imports []string) string {
+	if len(imports) == 0 {
+		return content
+	}
+	existing := map[string]bool{}
+	for _, spec := range parseJavaImportSpecs([]byte(content)) {
+		existing[spec.stmt] = true
+	}
+	var missing []string
+	for _, stmt := range imports {
+		stmt = strings.TrimSpace(stmt)
+		if stmt == "" || existing[stmt] {
+			continue
+		}
+		existing[stmt] = true
+		missing = append(missing, stmt)
+	}
+	if len(missing) == 0 {
+		return content
+	}
+
+	lines := strings.Split(content, "\n")
+	// Insert after package clause (and after any existing imports).
+	insertAt := 0
+	for i, line := range lines {
+		trim := strings.TrimSpace(line)
+		if strings.HasPrefix(trim, "package ") {
+			insertAt = i + 1
+			continue
+		}
+		if strings.HasPrefix(trim, "import ") {
+			insertAt = i + 1
+			continue
+		}
+		// Skip blank lines and comments only while still in the header.
+		if insertAt > 0 && (trim == "" || strings.HasPrefix(trim, "//") || strings.HasPrefix(trim, "/*") || strings.HasPrefix(trim, "*")) {
+			// Keep scanning past blanks after package/imports, but do not
+			// advance insertAt past the first non-header line.
+			if trim == "" && i == insertAt {
+				// leave insertAt so we insert before trailing blanks
+			}
+			continue
+		}
+		if insertAt > 0 && trim != "" && !strings.HasPrefix(trim, "package ") && !strings.HasPrefix(trim, "import ") {
+			break
+		}
+	}
+	// Prefer inserting before the first blank line after the last import/package.
+	for insertAt < len(lines) && strings.TrimSpace(lines[insertAt]) == "" {
+		// keep insertAt at start of blank run so we insert, then leave one blank
+		break
+	}
+
+	out := make([]string, 0, len(lines)+len(missing)+2)
+	out = append(out, lines[:insertAt]...)
+	// Ensure a blank line after package when there were no imports yet.
+	if insertAt > 0 {
+		prev := ""
+		if len(out) > 0 {
+			prev = strings.TrimSpace(out[len(out)-1])
+		}
+		if strings.HasPrefix(prev, "package ") {
+			out = append(out, "")
+		}
+	}
+	out = append(out, missing...)
+	// Ensure a blank line between imports and body when body follows immediately.
+	if insertAt < len(lines) && strings.TrimSpace(lines[insertAt]) != "" {
+		out = append(out, "")
+	}
+	out = append(out, lines[insertAt:]...)
+	return strings.Join(out, "\n")
 }
 
 func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ingest.Result, oldRef, newRef ingest.Reference) []ingest.Edit {
