@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 )
@@ -115,7 +115,7 @@ func (w *Workspace) BuildManifest(projects []Project, noIsolate bool, commits ma
 		for img := range imageSet {
 			out.Images = append(out.Images, img)
 		}
-		sort.Strings(out.Images)
+		slices.Sort(out.Images)
 	}
 	return out
 }
@@ -248,6 +248,6 @@ func RequiredImages(projects []Project) []string {
 	for img := range seen {
 		out = append(out, img)
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }
