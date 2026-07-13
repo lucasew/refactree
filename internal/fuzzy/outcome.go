@@ -2,6 +2,7 @@ package fuzzy
 
 import (
 	"fmt"
+	"log/slog"
 	"strconv"
 )
 
@@ -36,7 +37,7 @@ func (m Mode) worktreeID(seed int64) (id string, reuse bool) {
 // envErrorf records an environment failure and returns a wrapped error.
 func (out *Result) envErrorf(report *Report, project, kind, wrap string, err error) error {
 	out.EnvFails++
-	_ = report.LogEvent(Event{
+	logEvent(report, Event{
 		Project: project,
 		Kind:    kind,
 		Outcome: "error",
@@ -49,14 +50,14 @@ func (out *Result) envErrorf(report *Report, project, kind, wrap string, err err
 // recordUnsupported logs a skip/unsupported event and increments the counter.
 func (out *Result) recordUnsupported(report *Report, ev Event) {
 	out.Unsupported++
-	_ = report.LogEvent(ev)
+	logEvent(report, ev)
 }
 
 // recordPass logs a passing event and increments the counter.
 func (out *Result) recordPass(report *Report, ev Event) {
 	out.Passed++
 	ev.Outcome = "pass"
-	_ = report.LogEvent(ev)
+	logEvent(report, ev)
 }
 
 // bugErr records a bug-class event. With FailFast it returns err; otherwise nil.
@@ -66,7 +67,7 @@ func (out *Result) bugErr(opts Options, report *Report, ev Event, err error) err
 		n = 1
 	}
 	out.BugCount += n
-	_ = report.LogEvent(ev)
+	logEvent(report, ev)
 	if opts.FailFast {
 		return err
 	}
@@ -81,15 +82,25 @@ func (out *Result) ingestBug(report *Report, ev Event, err error, fails []Invari
 		ev.Class = classBug
 		ev.Error = err.Error()
 		out.BugCount++
-		_ = report.LogEvent(ev)
+		logEvent(report, ev)
 		return err
 	}
 	ev.Outcome = "fail"
 	ev.Class = classBug
 	ev.Failures = fails
 	out.BugCount += len(fails)
-	_ = report.LogEvent(ev)
+	logEvent(report, ev)
 	return fmt.Errorf("invariants: %v", fails)
+}
+
+// logEvent writes an events.jsonl line; failures are secondary and only warned.
+func logEvent(report *Report, ev Event) {
+	if report == nil {
+		return
+	}
+	if err := report.LogEvent(ev); err != nil {
+		slog.Warn("fuzzy: log event failed", "project", ev.Project, "kind", ev.Kind, "err", err)
+	}
 }
 
 // mvApplyOutcome records an ApplyMvPlan error as bug or unsupported.
