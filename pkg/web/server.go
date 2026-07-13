@@ -4,7 +4,7 @@ import (
 	"embed"
 	"html/template"
 	"io/fs"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -57,7 +57,7 @@ func recoverHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				log.Printf("refactree serve: panic on %s %s: %v", r.Method, r.URL.Path, rec)
+				slog.Error("refactree serve: panic", "method", r.Method, "path", r.URL.Path, "panic", rec)
 				http.Error(w, "internal error", http.StatusInternalServerError)
 			}
 		}()
