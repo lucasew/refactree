@@ -23,6 +23,10 @@ type SymbolInfo struct {
 
 // WalkSymbols iterates symbols in a reference scope, invoking yield for each
 // matching symbol. Returning false from yield stops iteration early.
+//
+// Listing is incremental: each source file is parsed (or served from the
+// extract cache) and its entities are yielded before the next file is
+// processed. It does not wait for a full-module Ingest/resolve graph.
 func WalkSymbols(dir, reference string, opts ListOptions, yield func(SymbolInfo) bool) error {
 	ref := ParseReference(reference)
 	ingestDir := dir
@@ -44,29 +48,85 @@ func WalkSymbols(dir, reference string, opts ListOptions, yield func(SymbolInfo)
 		refPath, refIsDir = listScopeForRef(ingestDir, ref)
 	}
 
-	result, err := IngestWithRecursion(ingestDir, providerListIngestRecursive(ref, opts))
+	// Single-file scope: parse that file only.
+	if !refIsDir && refPath != "" {
+		abs := ref.Path
+		if !filepath.IsAbs(abs) {
+			abs = filepath.Join(ingestDir, filepath.FromSlash(refPath))
+		}
+		return yieldSymbolsFromFile(ingestDir, abs, ref, refPath, refIsDir, opts, yield)
+	}
+
+	rootAbs, err := filepath.Abs(ingestDir)
 	if err != nil {
-		return err
+		rootAbs = ingestDir
 	}
 
-	langOf := map[string]string{}
-	for _, f := range result.Files {
-		langOf[f.Path] = f.Language
+	// Directory / module scope: walk and yield as each file is parsed.
+	// Skip full Ingest (no import-target expansion, no resolve graph).
+	recursive := providerListIngestRecursive(ref, opts)
+	return filepath.WalkDir(rootAbs, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if path != rootAbs && isSkippedDirName(d.Name()) {
+				return filepath.SkipDir
+			}
+			if !recursive && path != rootAbs {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			return infoErr
+		}
+		stop, yerr := yieldSymbolsFromFileInfo(rootAbs, path, info, ref, refPath, refIsDir, recursive, opts, yield)
+		if yerr != nil {
+			return yerr
+		}
+		if stop {
+			return filepath.SkipAll
+		}
+		return nil
+	})
+}
+
+// yieldSymbolsFromFile parses one file and yields matching symbols.
+func yieldSymbolsFromFile(rootAbs, absPath string, ref Reference, refPath string, refIsDir bool, opts ListOptions, yield func(SymbolInfo) bool) error {
+	recursive := providerListIngestRecursive(ref, opts)
+	_, err := yieldSymbolsFromFileInfo(rootAbs, absPath, nil, ref, refPath, refIsDir, recursive, opts, yield)
+	return err
+}
+
+func yieldSymbolsFromFileInfo(rootAbs, absPath string, info os.FileInfo, ref Reference, refPath string, refIsDir, recursive bool, opts ListOptions, yield func(SymbolInfo) bool) (stop bool, err error) {
+	fe, err := parseFileCached(rootAbs, absPath, info)
+	if err != nil {
+		return false, err
+	}
+	if fe == nil {
+		return false, nil
 	}
 
-	for _, ent := range result.Entities {
-		entRef := ParseReference(ent.Reference)
+	for _, entDef := range fe.Entities {
+		entPath := strings.TrimPrefix(filepath.ToSlash(fe.Path), "./")
+		entRef := ParseReference(SymbolRef("./"+entPath, entDef.Name))
 
 		if ref.Symbol != "" && entRef.Symbol != ref.Symbol {
 			continue
 		}
-
-		entPath := strings.TrimPrefix(entRef.Path, "./")
-		if !matchesListPathScope(entPath, refPath, refIsDir, opts.Recursive) {
+		if !matchesListPathScope(entPath, refPath, refIsDir, recursive) {
 			continue
 		}
 
-		language := langOf[entPath]
+		ent := Entity{
+			Reference: entRef.String(),
+			StartByte: entDef.StartByte,
+			EndByte:   entDef.EndByte,
+			Exported:  entDef.Exported,
+		}
+		language := fe.Language
 		if !providerAllowListEntity(ref, entRef, entPath, language, opts) {
 			continue
 		}
@@ -85,11 +145,10 @@ func WalkSymbols(dir, reference string, opts ListOptions, yield func(SymbolInfo)
 		out.Entity.Reference = out.Reference.String()
 
 		if !yield(out) {
-			break
+			return true, nil
 		}
 	}
-
-	return nil
+	return false, nil
 }
 
 func listScopeForRef(dir string, ref Reference) (refPath string, refIsDir bool) {

@@ -40,7 +40,7 @@ Tool to do queries on symbols and some refactorings like move and rename items i
   - directory / module ref (no symbol): interactive picker scoped to entities under that container, then open the selection
 - Interactive picker:
   - default backend shells out to `fzf` (must be on PATH); pluggable later
-  - candidates are streamed into fzf stdin as symbols are discovered (not fully buffered first)
+  - candidates are streamed into fzf stdin as symbols are discovered (parse each file on demand; not a full-module ingest first)
   - each candidate line is the full reference string (e.g. `path:./pkg/foo.go::Bar`)
   - `-a`: include normally hidden symbols (same idea as `ls`)
 - Editor selection (first wins): `--editor` flag, `RFT_EDITOR`, `$VISUAL`, `$EDITOR`; hard error if none

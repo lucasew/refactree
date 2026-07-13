@@ -425,13 +425,11 @@ func ClearExtractCache() {
 	})
 }
 
-// treeSitterMu serializes tree-sitter parse + extract. The modernc/ccgo
-// bindings are not safe for concurrent parsers. Nested re-parses (e.g. Svelte
-// script bodies) run while this lock is held and must not re-acquire it.
-var treeSitterMu sync.Mutex
-
 // parseFile parses a single source file and returns its FileExtract.
 // Returns nil (no error) for unsupported file types.
+//
+// grammar.Parser serializes its own native handle; callers need no external
+// parse lock (prefer one Parser per goroutine under parallel load).
 //
 // Some pure-Go tree-sitter grammars can SIGSEGV on valid source (observed on
 // Go slice/variadic patterns). SetPanicOnFault turns that into a recoverable
@@ -455,9 +453,6 @@ func parseFile(dir, absPath string) (*FileExtract, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", relPath, err)
 	}
-
-	treeSitterMu.Lock()
-	defer treeSitterMu.Unlock()
 
 	prevFault := debug.SetPanicOnFault(true)
 	defer debug.SetPanicOnFault(prevFault)
