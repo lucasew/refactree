@@ -419,7 +419,16 @@ func (s *Session) execScript(ctx context.Context, scriptBody string) RunResult {
 		return res
 	}
 	if reader != nil {
-		_, _ = io.Copy(capture, reader)
+		if _, err := io.Copy(capture, reader); err != nil {
+			res.Stdout = outBuf.String()
+			res.ExitCode = 1
+			if code != 0 {
+				res.Err = fmt.Errorf("exit status %d (also copy output: %w)", code, err)
+			} else {
+				res.Err = fmt.Errorf("copy exec output: %w", err)
+			}
+			return res
+		}
 	}
 	// Multiplexed output is combined; keep stderr field empty and put all in Stdout.
 	res.Stdout = outBuf.String()
