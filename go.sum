@@ -151,6 +151,8 @@ github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/javascript v0.0.0-202607
 github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/javascript v0.0.0-20260711120206-25b68597b9af/go.mod h1:q3jNbonaYF7qEEmvLDnNpXvcLziWNjAuH3sB6k+c0Ao=
 github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/nix v0.0.0-20260711133602-30b27f0dc6eb h1:m72oNVlfc9Yz126j5hvozxUJIjOGS5UgND37oj6fnaw=
 github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/nix v0.0.0-20260711133602-30b27f0dc6eb/go.mod h1:p8q3hzkqZhJ5TIE9AVcfpI9RBaPp00eEUIoqObifnR4=
+github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/nix v0.0.0-20260713012702-2dc998b4359f h1:PLRLixQyAm8RSUBPq1U68DQpmjjpuhDCv1AjJeJL6cI=
+github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/nix v0.0.0-20260713012702-2dc998b4359f/go.mod h1:p8q3hzkqZhJ5TIE9AVcfpI9RBaPp00eEUIoqObifnR4=
 github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/python v0.0.0-20260711120206-25b68597b9af h1:g3LiKhDoqWk8pkxfXz0xmY8HI3kPSUQnL7oGcQiR+LU=
 github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/python v0.0.0-20260711120206-25b68597b9af/go.mod h1:RjDvWVcACiYDfoazPLrQpQMJUm7d1gT8sti56GNNVz0=
 github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/svelte v0.0.0-20260711120206-25b68597b9af h1:EI0R+n/3AI0hVmTGlMa55pzSrIOdIyyJ24n5C8wpjX8=

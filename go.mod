@@ -14,7 +14,7 @@ require (
 	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/go v0.0.0-20260711120206-25b68597b9af
 	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/java v0.0.0-20260711120206-25b68597b9af
 	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/javascript v0.0.0-20260711120206-25b68597b9af
-	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/nix v0.0.0-20260711133602-30b27f0dc6eb
+	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/nix v0.0.0-20260713012702-2dc998b4359f
 	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/python v0.0.0-20260711120206-25b68597b9af
 	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/svelte v0.0.0-20260711120206-25b68597b9af
 	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/tsx v0.0.0-20260711120206-25b68597b9af
