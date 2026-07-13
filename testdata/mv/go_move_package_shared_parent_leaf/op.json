@@ -1,0 +1,4 @@
+{
+  "source": "path:./cmd/app/driver/wallpaper",
+  "destination": "path:./cmd/app/driver/wallpaper_fuzz"
+}

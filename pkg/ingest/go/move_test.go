@@ -66,3 +66,21 @@ func TestFindPathSegmentOccurrencesInStrings(t *testing.T) {
 		t.Fatalf("expected no cas substring hits, got %+v", edits)
 	}
 }
+
+// Shared parent leaf (…/driver/wallpaper under cmd vs pkg) must not both rewrite
+// when only cmd/…/driver/wallpaper is moved — parentDir is the full prefix.
+func TestFindPathSegmentWithFullParentPath(t *testing.T) {
+	content := []byte(`package p
+import (
+	"example/cmd/app/driver/wallpaper"
+	"example/pkg/driver/wallpaper"
+	_ "example/pkg/driver/wallpaper/feh"
+)
+`)
+	edits := findPathSegmentOccurrencesInStringsWithParent(
+		"f.go", content, "wallpaper", "wallpaper_fuzz", "cmd/app/driver",
+	)
+	if len(edits) != 1 {
+		t.Fatalf("want 1 edit for cmd tree only, got %+v", edits)
+	}
+}
