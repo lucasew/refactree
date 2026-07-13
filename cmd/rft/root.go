@@ -48,6 +48,7 @@ func newRootCmd() (*cobra.Command, *pprof.Profiler) {
 	cmd.AddCommand(
 		newASTDumpCmd(),
 		newBrowseCmd(),
+		newEditCmd(),
 		newLsCmd(),
 		newMvCmd(),
 		newDocCmd(),

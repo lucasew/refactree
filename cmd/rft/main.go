@@ -1,15 +1,27 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 )
 
+type exitCoder interface {
+	ExitCode() int
+}
+
 func main() {
 	if err := Execute(); err != nil {
-		if _, err := fmt.Fprintln(os.Stderr, err); err != nil {
-			os.Exit(1)
+		code := 1
+		var ec exitCoder
+		if errors.As(err, &ec) {
+			code = ec.ExitCode()
 		}
-		os.Exit(1)
+		if msg := err.Error(); msg != "" {
+			if _, printErr := fmt.Fprintln(os.Stderr, err); printErr != nil {
+				os.Exit(1)
+			}
+		}
+		os.Exit(code)
 	}
 }
