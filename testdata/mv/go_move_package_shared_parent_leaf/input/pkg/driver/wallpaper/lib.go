@@ -1,0 +1,3 @@
+package wallpaper
+
+func Set() {}
