@@ -8,6 +8,7 @@ import (
 func newEditCmd() *cobra.Command {
 	var all bool
 	var editor string
+	var dir string
 
 	cmd := &cobra.Command{
 		Use:   "edit [reference]",
@@ -19,7 +20,7 @@ func newEditCmd() *cobra.Command {
 				input = args[0]
 			}
 			return edit.Run(edit.Options{
-				BaseDir:       ".",
+				BaseDir:       dir,
 				Input:         input,
 				IncludeHidden: all,
 				EditorBin:     editor,
@@ -29,5 +30,6 @@ func newEditCmd() *cobra.Command {
 
 	cmd.Flags().BoolVarP(&all, "all", "a", false, "include normally hidden symbols in the picker")
 	cmd.Flags().StringVar(&editor, "editor", "", "editor binary (overrides RFT_EDITOR, VISUAL, EDITOR)")
+	cmd.Flags().StringVarP(&dir, "dir", "C", ".", "project root to edit under")
 	return cmd
 }

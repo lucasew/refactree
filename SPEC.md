@@ -43,6 +43,7 @@ Tool to do queries on symbols and some refactorings like move and rename items i
   - candidates are streamed into fzf stdin as symbols are discovered (parse each file on demand; not a full-module ingest first)
   - each candidate line is the full reference string (e.g. `path:./pkg/foo.go::Bar`)
   - `-a`: include normally hidden symbols (same idea as `ls`)
+- `-C` / `--dir`: project root (default `.`), same idea as `serve`
 - Editor selection (first wins): `--editor` flag, `RFT_EDITOR`, `$VISUAL`, `$EDITOR`; hard error if none
 - Editor argv (default, swappable via interface later): single argument `path:line:column`
   - line is 1-based; column is 1-based for the editor
