@@ -52,7 +52,9 @@ func (p *Profiler) Start() error {
 		return fmt.Errorf("pprof: create cpu profile: %w", err)
 	}
 	if err := pprof.StartCPUProfile(f); err != nil {
-		_ = f.Close()
+		if cerr := f.Close(); cerr != nil {
+			slog.Error("pprof: close cpu profile failed", "err", cerr)
+		}
 		return fmt.Errorf("pprof: start cpu profile: %w", err)
 	}
 	p.cpuFile = f
@@ -80,7 +82,9 @@ func (p *Profiler) Stop() {
 
 		if p.cpuFile != nil {
 			pprof.StopCPUProfile()
-			_ = p.cpuFile.Close()
+			if err := p.cpuFile.Close(); err != nil {
+				slog.Error("pprof: close cpu profile failed", "err", err)
+			}
 			p.cpuFile = nil
 		}
 
@@ -141,7 +145,11 @@ func writeProfile(dir, name string, write func(io.Writer) error) {
 		slog.Error("pprof: write failed", "path", path, "err", err)
 		return
 	}
-	defer func() { _ = f.Close() }()
+	defer func() {
+		if err := f.Close(); err != nil {
+			slog.Error("pprof: close failed", "path", path, "err", err)
+		}
+	}()
 	if err := write(f); err != nil {
 		slog.Error("pprof: write failed", "path", path, "err", err)
 	}
