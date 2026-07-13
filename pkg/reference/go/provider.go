@@ -7,7 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -152,7 +152,7 @@ func resolveModuleCachePackageDir(pkgPath string) (string, bool) {
 		if len(matches) == 0 {
 			continue
 		}
-		sort.Strings(matches)
+		slices.Sort(matches)
 		for j := len(matches) - 1; j >= 0; j-- {
 			candidate := matches[j]
 			if subPath != "" {
