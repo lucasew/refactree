@@ -55,7 +55,7 @@ type Result struct {
 }
 
 // Run executes the fuzzy harness.
-func Run(ctx context.Context, opts Options) (*Result, error) {
+func Run(ctx context.Context, opts Options) (out *Result, err error) {
 	if err := normalizeOptions(&opts); err != nil {
 		return nil, err
 	}
@@ -136,7 +136,11 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer report.Close()
+	defer func() {
+		if cerr := report.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+	}()
 	fmt.Fprintf(opts.Stdout, "report: %s\n", report.Dir)
 	fmt.Fprintf(opts.Stdout, "work-root: %s\n", ws.Root)
 
@@ -153,7 +157,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	if opts.Mode.fuzzesMv() {
 		rng = rand.New(rand.NewSource(opts.Seed))
 	}
-	out := &Result{ReportDir: report.Dir}
+	out = &Result{ReportDir: report.Dir}
 	commits := map[string]string{}
 
 	for _, p := range projects {
