@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -589,11 +589,11 @@ func (m *browseModel) buildItems() ([]list.Item, error) {
 			}
 		}
 
-		sort.Slice(dirs, func(i, j int) bool { return dirs[i].title < dirs[j].title })
+		slices.SortFunc(dirs, func(a, b browseItem) int { return strings.Compare(a.title, b.title) })
 		for _, it := range dirs {
 			items = append(items, it)
 		}
-		sort.Slice(modules, func(i, j int) bool { return modules[i].title < modules[j].title })
+		slices.SortFunc(modules, func(a, b browseItem) int { return strings.Compare(a.title, b.title) })
 		for _, it := range modules {
 			items = append(items, it)
 		}
@@ -681,7 +681,7 @@ func (m *browseModel) buildProviderItems() ([]list.Item, error) {
 					targetRef: ingest.Reference{Provider: m.providerRef.Provider, Path: childPath}.String(),
 				})
 			}
-			sort.Slice(packages, func(i, j int) bool { return packages[i].title < packages[j].title })
+			slices.SortFunc(packages, func(a, b browseItem) int { return strings.Compare(a.title, b.title) })
 			for _, pkg := range packages {
 				items = append(items, pkg)
 			}
