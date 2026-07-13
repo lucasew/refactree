@@ -39,7 +39,7 @@ func RunIngestProject(p Project, workDir string, opts InvariantOptions, report *
 			return fmt.Errorf("ingest invariants failed for %s (%s): %v", p.ID, rel, fails)
 		}
 		ev.Outcome = "pass"
-		_ = report.LogEvent(ev)
+		logEvent(report, ev)
 	}
 	return nil
 }

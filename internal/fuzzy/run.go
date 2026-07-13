@@ -170,7 +170,7 @@ func Run(ctx context.Context, opts Options) (out *Result, err error) {
 				fmt.Fprintf(opts.Stdout, "== project %s ==\nprefetch: skip (already warm)\n", p.ID)
 				commits[p.ID] = commit
 				out.Passed++
-				_ = report.LogEvent(Event{Project: p.ID, Kind: "prefetch_skip", Outcome: "pass", Error: commit})
+				logEvent(report, Event{Project: p.ID, Kind: "prefetch_skip", Outcome: "pass", Error: commit})
 				continue
 			}
 		}
@@ -289,7 +289,7 @@ func openProjectEnv(ctx context.Context, opts Options, p Project, ws *Workspace,
 		return nil, out.envErrorf(report, p.ID, "prepare", "prepare", err)
 	}
 	report.Meta.Commit = commit
-	_ = report.LogEvent(Event{Project: p.ID, Kind: "prepare", Outcome: "pass", Error: commit})
+	logEvent(report, Event{Project: p.ID, Kind: "prepare", Outcome: "pass", Error: commit})
 
 	root := ProjectRoot(workDir, p)
 	if err := ApplyProjectMise(p, root); err != nil {
@@ -337,12 +337,12 @@ func logCommandResult(opts Options, p Project, report *Report, out *Result, res 
 		ev.Outcome = "error"
 		ev.Class = classEnv
 		ev.Error = shortRunErr(res)
-		_ = report.LogEvent(ev)
+		logEvent(report, ev)
 		return err
 	}
 	if kind != "setup" || len(SetupArgv(p)) > 0 {
 		ev.Outcome = "pass"
-		_ = report.LogEvent(ev)
+		logEvent(report, ev)
 	}
 	return nil
 }
@@ -353,7 +353,7 @@ func finishPrefetch(opts Options, p Project, ws *Workspace, runner Runner, env *
 	}
 	if len(p.PreserveGlobs) > 0 {
 		snap := ws.preservePath(p.ID)
-		_ = report.LogEvent(Event{Project: p.ID, Kind: "preserve_snapshot", Outcome: "pass", Error: snap})
+		logEvent(report, Event{Project: p.ID, Kind: "preserve_snapshot", Outcome: "pass", Error: snap})
 		fmt.Fprintf(opts.Stdout, "preserve snapshot: %s\n", snap)
 	}
 	out.Passed++
