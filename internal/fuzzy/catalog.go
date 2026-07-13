@@ -2,10 +2,11 @@ package fuzzy
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/lucasew/refactree/pkg/ingest"
@@ -118,11 +119,7 @@ func LoadCatalog(path string) ([]Project, error) {
 	if len(file.Projects) == 0 {
 		return nil, fmt.Errorf("parse catalog %s: no [projects.<slug>] entries", path)
 	}
-	slugs := make([]string, 0, len(file.Projects))
-	for slug := range file.Projects {
-		slugs = append(slugs, slug)
-	}
-	sort.Strings(slugs)
+	slugs := slices.Sorted(maps.Keys(file.Projects))
 	out := make([]Project, 0, len(slugs))
 	for _, slug := range slugs {
 		p := file.Projects[slug]
@@ -234,11 +231,7 @@ func validateMiseTools(mise map[string]any) error {
 	if !ok {
 		return fmt.Errorf("[projects.<slug>.mise.tools] must be a table")
 	}
-	names := make([]string, 0, len(tools))
-	for name := range tools {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(tools))
 	for _, name := range names {
 		ver, err := toolVersionString(tools[name])
 		if err != nil {
