@@ -535,7 +535,6 @@ func stripUnusedJSImports(file string, content []byte, decl ingest.DeclExtract) 
 			masked[i] = ' '
 		}
 	}
-	restText := string(masked)
 
 	// For each import used by the declaration, check if any of its local
 	// names are still referenced in the rest of the file.
@@ -563,7 +562,7 @@ func stripUnusedJSImports(file string, content []byte, decl ingest.DeclExtract) 
 			}
 		}
 	}
-	restText = string(masked)
+	restText := string(masked)
 
 	var edits []ingest.Edit
 	for _, stmt := range stmts {
