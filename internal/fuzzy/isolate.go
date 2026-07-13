@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/user"
@@ -431,13 +432,25 @@ func (s *Session) execScript(ctx context.Context, scriptBody string) RunResult {
 
 // Run is a one-shot helper that starts a session, runs argv, and closes it.
 // Prefer StartSession when setup and check must share state.
-func (r Runner) Run(ctx context.Context, cfg IsolateConfig, dir, imageKey string, argv []string, network bool) RunResult {
+func (r Runner) Run(ctx context.Context, cfg IsolateConfig, dir, imageKey string, argv []string, network bool) (res RunResult) {
 	s, err := r.StartSession(ctx, cfg, dir, imageKey, network)
 	if err != nil {
 		return RunResult{Err: err, ExitCode: 1, Args: append([]string(nil), argv...)}
 	}
-	defer func() { _ = s.Close(ctx) }()
-	return s.Run(ctx, argv)
+	defer func() {
+		if cerr := s.Close(ctx); cerr != nil {
+			if res.Err == nil {
+				res.Err = cerr
+				if res.ExitCode == 0 {
+					res.ExitCode = 1
+				}
+			} else {
+				slog.Warn("fuzzy: session close failed", "err", cerr)
+			}
+		}
+	}()
+	res = s.Run(ctx, argv)
+	return res
 }
 
 func (r Runner) miseDataDir(imageKey string) string {
