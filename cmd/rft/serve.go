@@ -31,7 +31,9 @@ elsewhere. Does not open a browser.`,
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "refactree serve  root=%s  addr=%s  %s\n", dir, addr, listenURL(addr))
+			if _, err := fmt.Fprintf(cmd.OutOrStdout(), "refactree serve  root=%s  addr=%s  %s\n", dir, addr, listenURL(addr)); err != nil {
+				return err
+			}
 			return srv.ListenAndServe(addr)
 		},
 	}
