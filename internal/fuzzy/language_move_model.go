@@ -235,6 +235,12 @@ func listDeclarationNodes(result *ingest.Result, projectFamily string) []MoveNod
 		if isFuzzSymbol(ref.Symbol) {
 			continue
 		}
+		// Go init() functions are runtime-invoked, cannot be called directly,
+		// and multiple init()s coexist per package. They must not be renamed
+		// or moved as ordinary declarations.
+		if projectFamily == ingest.FamilyGo && ref.Symbol == "init" {
+			continue
+		}
 		path := ref.Path
 		if !strings.HasPrefix(path, "./") {
 			path = "./" + path

@@ -1,0 +1,40 @@
+{
+  "files": [
+    {
+      "language": "javascript",
+      "path": "helper.jsx"
+    },
+    {
+      "language": "javascript",
+      "path": "main.jsx"
+    }
+  ],
+  "entities": [
+    {
+      "reference": "path:./helper.jsx::Greeting",
+      "start_byte": 16,
+      "end_byte": 24
+    },
+    {
+      "reference": "path:./main.jsx::App",
+      "start_byte": 47,
+      "end_byte": 50
+    }
+  ],
+  "aliases": [
+    {
+      "reference": "path:./main.jsx",
+      "start_byte": 9,
+      "end_byte": 17,
+      "target": "path:./helper.jsx::Greeting"
+    }
+  ],
+  "relations": [
+    {
+      "reference": "path:./main.jsx::App",
+      "start_byte": 65,
+      "end_byte": 73,
+      "target": "path:./helper.jsx::Greeting"
+    }
+  ]
+}

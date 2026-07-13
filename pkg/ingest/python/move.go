@@ -322,6 +322,22 @@ func findPythonDecl(root *grammar.Node, nameStart uint32) *grammar.Node {
 				return child
 			}
 		}
+		// Module-level assignments: `logger = logging.getLogger(...)`.
+		// The entity extractor records the left-hand identifier; match it here.
+		if child.Type() == "assignment" || child.Type() == "augmented_assignment" {
+			if left := ingest.ChildByField(child, "left"); left != nil && left.StartByte() == nameStart {
+				return child
+			}
+		}
+		// Assignments may be wrapped in expression_statement.
+		if child.Type() == "expression_statement" && child.ChildCount() > 0 {
+			inner := child.Child(0)
+			if inner.Type() == "assignment" || inner.Type() == "augmented_assignment" {
+				if left := ingest.ChildByField(inner, "left"); left != nil && left.StartByte() == nameStart {
+					return child // return the expression_statement as the declaration span
+				}
+			}
+		}
 	}
 	return nil
 }

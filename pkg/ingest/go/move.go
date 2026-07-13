@@ -675,7 +675,15 @@ func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src
 	dstRel := strings.TrimPrefix(dst.Path, "./")
 	oldDir := dirOf(srcRel)
 	newDir := dirOf(dstRel)
-	if oldDir == "" || newDir == "" || oldDir == newDir {
+
+	// Same-package layout moves still need unused import cleanup on the source file.
+	if oldDir == newDir {
+		if srcContent, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(srcRel))); err == nil {
+			return stripUnusedSourceImports(srcRel, srcContent, decl), nil
+		}
+		return nil, nil
+	}
+	if oldDir == "" || newDir == "" {
 		return nil, nil
 	}
 
