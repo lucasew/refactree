@@ -1,0 +1,4 @@
+{
+  "source": "path:./pkga/a.go::Load",
+  "destination": "path:./pkgb/b.go::Load"
+}
