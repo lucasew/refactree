@@ -1,0 +1,21 @@
+{
+  "files": [
+    {
+      "language": "javascript",
+      "path": "main.js"
+    }
+  ],
+  "entities": [
+    {
+      "reference": "path:./main.js::Resource",
+      "start_byte": 6,
+      "end_byte": 14
+    },
+    {
+      "reference": "path:./main.js::Resource.close",
+      "start_byte": 19,
+      "end_byte": 24
+    }
+  ],
+  "relations": []
+}

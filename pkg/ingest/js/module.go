@@ -425,6 +425,11 @@ func extractJSClass(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 		if methodNameNode == nil {
 			continue
 		}
+		// Skip computed property names (e.g. [Symbol.asyncDispose]) — they are
+		// runtime-determined and cannot be statically refactored.
+		if methodNameNode.Type() == "computed_property_name" {
+			continue
+		}
 
 		methodShort := ingest.NodeText(methodNameNode, source)
 		methodName := className + "." + methodShort
@@ -530,40 +535,61 @@ func extractJSNamespaceImport(fe *ingest.FileExtract, n *grammar.Node, source []
 }
 
 func walkJSUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
-	if n.Type() == "call_expression" {
+	switch n.Type() {
+	case "call_expression":
 		funcNode := ingest.ChildByField(n, "function")
 		if funcNode != nil {
-			switch funcNode.Type() {
-			case "identifier":
-				fe.Usages = append(fe.Usages, ingest.UsageDef{
-					Scope:     scope,
-					Name:      ingest.NodeText(funcNode, source),
-					StartByte: funcNode.StartByte(),
-					EndByte:   funcNode.EndByte(),
-				})
-			case "member_expression":
-				obj := ingest.ChildByField(funcNode, "object")
-				prop := ingest.ChildByField(funcNode, "property")
-				if obj != nil && prop != nil {
-					fe.Usages = append(fe.Usages, ingest.UsageDef{
-						Scope:         scope,
-						Name:          ingest.NodeText(prop, source),
-						StartByte:     prop.StartByte(),
-						EndByte:       prop.EndByte(),
-						Qualifier:     ingest.NodeText(obj, source),
-						QualStartByte: obj.StartByte(),
-						QualEndByte:   obj.EndByte(),
-					})
-				}
-			}
+			emitJSIdentifierUsage(fe, funcNode, source, scope)
 		}
 		if args := ingest.ChildByField(n, "arguments"); args != nil {
 			walkJSUsages(fe, args, source, scope)
 		}
 		return
+	case "jsx_self_closing_element", "jsx_opening_element":
+		// JSX elements are component invocations: <Component /> or <Component>.
+		// Emit a usage for the component name so renames and moves track them.
+		if nameNode := ingest.ChildByField(n, "name"); nameNode != nil {
+			emitJSIdentifierUsage(fe, nameNode, source, scope)
+		}
+		// Walk attribute values for nested usages (e.g. onClick={handler}).
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			child := n.Child(i)
+			if child.Type() == "jsx_attribute" {
+				walkJSUsages(fe, child, source, scope)
+			}
+		}
+		return
 	}
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		walkJSUsages(fe, n.Child(i), source, scope)
+	}
+}
+
+// emitJSIdentifierUsage records a usage for a function/component reference node.
+// Handles both plain identifiers and member expressions (pkg.Component).
+func emitJSIdentifierUsage(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
+	switch n.Type() {
+	case "identifier":
+		fe.Usages = append(fe.Usages, ingest.UsageDef{
+			Scope:     scope,
+			Name:      ingest.NodeText(n, source),
+			StartByte: n.StartByte(),
+			EndByte:   n.EndByte(),
+		})
+	case "member_expression":
+		obj := ingest.ChildByField(n, "object")
+		prop := ingest.ChildByField(n, "property")
+		if obj != nil && prop != nil {
+			fe.Usages = append(fe.Usages, ingest.UsageDef{
+				Scope:         scope,
+				Name:          ingest.NodeText(prop, source),
+				StartByte:     prop.StartByte(),
+				EndByte:       prop.EndByte(),
+				Qualifier:     ingest.NodeText(obj, source),
+				QualStartByte: obj.StartByte(),
+				QualEndByte:   obj.EndByte(),
+			})
+		}
 	}
 }
 
