@@ -145,6 +145,8 @@ github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar v0.0.0-20260711133602-30
 github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar v0.0.0-20260711133602-30b27f0dc6eb/go.mod h1:jR96Nqj1lVnP2eTRrbQnHUoSJ3uzijfhErwZhSi+bnk=
 github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/go v0.0.0-20260711120206-25b68597b9af h1:AkAbpy26HrNGabvEDVG4kTB2ORdUe3BFfEUFt8G/2+o=
 github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/go v0.0.0-20260711120206-25b68597b9af/go.mod h1:yToVHO1BKzVhZ9FrYDf994Bk76/0Kej2OLjwNY+mRYI=
+github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/go v0.0.0-20260713012702-2dc998b4359f h1:oXYDeel/dQB+Vs4rE8N9P/2tAJLsJHHBNO2BL8UVY1U=
+github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/go v0.0.0-20260713012702-2dc998b4359f/go.mod h1:yToVHO1BKzVhZ9FrYDf994Bk76/0Kej2OLjwNY+mRYI=
 github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/java v0.0.0-20260711120206-25b68597b9af h1:jQ16MSU7edBrrE6XMuMZYJFAnhIHEF1nTeSloax39sk=
 github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/java v0.0.0-20260711120206-25b68597b9af/go.mod h1:NiRO49hGjAssee2ozzyo7yHk1czq24xXpVVzS5YQjXY=
 github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/javascript v0.0.0-20260711120206-25b68597b9af h1:Y+qXfZnAbNKfG/HQYrxXR2+7tdXXj2keZ07V/YDLbVU=
