@@ -268,13 +268,16 @@ run = "true"
 
 func copyTree(t *testing.T, src, dst string) {
 	t.Helper()
-	err := filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+	err := filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		rel, _ := filepath.Rel(src, path)
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
 		target := filepath.Join(dst, rel)
-		if info.IsDir() {
+		if d.IsDir() {
 			return os.MkdirAll(target, 0o755)
 		}
 		data, err := os.ReadFile(path)
