@@ -41,6 +41,13 @@ func TestWriteRunResultFullOutput(t *testing.T) {
 	if string(gotErr) != stderr {
 		t.Fatal("stderr.log mismatch")
 	}
+	meta, err := os.ReadFile(filepath.Join(rep.LogPath(rel), "meta.json"))
+	if err != nil {
+		t.Fatalf("meta.json: %v", err)
+	}
+	if !strings.Contains(string(meta), `"exit_code": 1`) {
+		t.Fatalf("meta.json missing exit_code: %q", meta)
+	}
 }
 
 type errStatus int
