@@ -3,8 +3,9 @@
 package annotate
 
 import (
+	"cmp"
 	"html"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/lucasew/refactree/pkg/ingest"
@@ -149,14 +150,14 @@ func Apply(source []byte, spans []Span) []Segment {
 		return []Segment{{Text: string(source)}}
 	}
 
-	sort.Slice(spans, func(i, j int) bool {
-		if spans[i].Start != spans[j].Start {
-			return spans[i].Start < spans[j].Start
+	slices.SortFunc(spans, func(a, b Span) int {
+		if c := cmp.Compare(a.Start, b.Start); c != 0 {
+			return c
 		}
-		if spans[i].Priority != spans[j].Priority {
-			return spans[i].Priority > spans[j].Priority
+		if c := cmp.Compare(b.Priority, a.Priority); c != 0 {
+			return c
 		}
-		return spans[i].End > spans[j].End
+		return cmp.Compare(b.End, a.End)
 	})
 
 	chosen := make([]Span, 0, len(spans))
@@ -172,7 +173,9 @@ func Apply(source []byte, spans []Span) []Segment {
 		cursor = s.End
 	}
 
-	sort.Slice(chosen, func(i, j int) bool { return chosen[i].Start < chosen[j].Start })
+	slices.SortFunc(chosen, func(a, b Span) int {
+		return cmp.Compare(a.Start, b.Start)
+	})
 
 	var out []Segment
 	var pos uint32
