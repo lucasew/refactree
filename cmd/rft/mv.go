@@ -61,13 +61,21 @@ func newMvCmd() *cobra.Command {
 
 			if interactive {
 				w := cmd.ErrOrStderr()
-				fmt.Fprintf(w, "Edit plan (%d edits):\n", len(edits))
-				for _, e := range edits {
-					fmt.Fprintf(w, "  %s [%d:%d] → %q\n", e.File, e.StartByte, e.EndByte, e.NewText)
+				if _, err := fmt.Fprintf(w, "Edit plan (%d edits):\n", len(edits)); err != nil {
+					return err
 				}
-				fmt.Fprint(w, "Apply? [y/N] ")
+				for _, e := range edits {
+					if _, err := fmt.Fprintf(w, "  %s [%d:%d] → %q\n", e.File, e.StartByte, e.EndByte, e.NewText); err != nil {
+						return err
+					}
+				}
+				if _, err := fmt.Fprint(w, "Apply? [y/N] "); err != nil {
+					return err
+				}
 				var answer string
-				fmt.Fscan(cmd.InOrStdin(), &answer)
+				if _, err := fmt.Fscan(cmd.InOrStdin(), &answer); err != nil {
+					return err
+				}
 				if answer != "y" && answer != "Y" {
 					return fmt.Errorf("cancelled")
 				}
