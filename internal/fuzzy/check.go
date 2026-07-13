@@ -124,7 +124,9 @@ func printRunFailure(w io.Writer, verbose bool, label string, res RunResult, log
 	// interactive runs are not tripled (live + dump + returned error).
 	fmt.Fprintf(w, "%s failed (exit %d): %v\n", label, res.ExitCode, res.Err)
 	if verbose {
-		_, _ = io.WriteString(w, formatRunOutput(res))
+		if _, err := io.WriteString(w, formatRunOutput(res)); err != nil {
+			fmt.Fprintf(w, "also failed writing command output: %v\n", err)
+		}
 	}
 	if logAbs != "" {
 		fmt.Fprintf(w, "full check log: %s\n", filepath.Join(logAbs, "full.log"))
