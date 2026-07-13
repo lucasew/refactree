@@ -1,10 +1,11 @@
 package web
 
 import (
+	"cmp"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -394,8 +395,8 @@ func symbolsForFileMapped(fileRel string, result *ingest.Result, codeURL func(re
 		})
 	}
 
-	sort.SliceStable(rows, func(i, j int) bool {
-		return rows[i].start < rows[j].start
+	slices.SortStableFunc(rows, func(a, b row) int {
+		return cmp.Compare(a.start, b.start)
 	})
 	out := make([]SymItem, len(rows))
 	for i := range rows {
@@ -678,11 +679,14 @@ func isTextContent(b []byte) bool {
 }
 
 func sortNav(items []NavItem) {
-	sort.Slice(items, func(i, j int) bool {
-		if items[i].IsDir != items[j].IsDir {
-			return items[i].IsDir
+	slices.SortFunc(items, func(a, b NavItem) int {
+		if a.IsDir != b.IsDir {
+			if a.IsDir {
+				return -1
+			}
+			return 1
 		}
-		return items[i].Name < items[j].Name
+		return strings.Compare(a.Name, b.Name)
 	})
 }
 
