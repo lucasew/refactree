@@ -3,7 +3,7 @@ package fuzzy
 import (
 	"path"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/lucasew/refactree/pkg/ingest"
@@ -266,7 +266,7 @@ func listPackageNodes(result *ingest.Result, projectFamily string) []MoveNode {
 	for d := range dirs {
 		keys = append(keys, d)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 	var out []MoveNode
 	for _, d := range keys {
 		p := "./" + d
@@ -330,7 +330,7 @@ func listLanguageFiles(result *ingest.Result, projectFamily string) []string {
 		}
 		files = append(files, p)
 	}
-	sort.Strings(files)
+	slices.Sort(files)
 	return files
 }
 
@@ -355,7 +355,7 @@ func modulesOtherThan(result *ingest.Result, model languageMoveModel, projectFam
 		seen[k] = true
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 	return keys
 }
 
