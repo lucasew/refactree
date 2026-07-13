@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"sync"
@@ -110,7 +111,7 @@ func (c *CatalogCanvas) Project(i int) Project {
 //
 // Serialized: bare git caches are not safe for concurrent worktree add/remove
 // (Go fuzz workers share this canvas).
-func (c *CatalogCanvas) Attempt(ctx context.Context, projectIdx int, in PlanInput, scaffoldDir string) MvAttemptResult {
+func (c *CatalogCanvas) Attempt(ctx context.Context, projectIdx int, in PlanInput, scaffoldDir string) (res MvAttemptResult) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -143,10 +144,19 @@ func (c *CatalogCanvas) Attempt(ctx context.Context, projectIdx int, in PlanInpu
 	if err != nil {
 		return MvAttemptResult{Class: classEnv, Err: fmt.Errorf("session %s: %w", p.ID, err)}
 	}
-	defer func() { _ = session.Close(ctx) }()
+	defer func() {
+		if cerr := session.Close(ctx); cerr != nil {
+			if res.Class == classPass {
+				res = MvAttemptResult{Class: classEnv, Err: fmt.Errorf("session close %s: %w", p.ID, cerr)}
+			} else {
+				slog.Warn("fuzzy: session close failed", "project", p.ID, "err", cerr)
+			}
+		}
+	}()
 
 	if setup := RunSetup(ctx, session, p); !setup.OK() {
-		return MvAttemptResult{Class: classEnv, Err: fmt.Errorf("setup %s: %s", p.ID, formatRunFailureDetail(setup, 4096))}
+		res = MvAttemptResult{Class: classEnv, Err: fmt.Errorf("setup %s: %s", p.ID, formatRunFailureDetail(setup, 4096))}
+		return res
 	}
 
 	ingestRoot := primaryIngestRoot(p, workDir)
@@ -154,7 +164,7 @@ func (c *CatalogCanvas) Attempt(ctx context.Context, projectIdx int, in PlanInpu
 	if log == nil {
 		log = os.Stdout
 	}
-	res := RunMvAttempt(ctx, p, ingestRoot, in, c.Strict, nil, log)
+	res = RunMvAttempt(ctx, p, ingestRoot, in, c.Strict, nil, log)
 	if res.Class != classPass {
 		if res.Class == classBug && scaffoldDir != "" {
 			_ = ScaffoldAttempt(ingestRoot, scaffoldDir, res)
