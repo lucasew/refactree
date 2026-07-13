@@ -21,19 +21,23 @@ func newLsCmd() *cobra.Command {
 			dir, ref := scope.Dir, scope.Reference
 
 			w := cmd.OutOrStdout()
+			var writeErr error
 			err := ingest.WalkSymbols(dir, ref.String(), ingest.ListOptions{
 				IncludeHidden: all,
 				Recursive:     recursive,
 			}, func(sym ingest.SymbolInfo) bool {
 				if long {
-					fmt.Fprintf(w, "%s\t%d\t%d\n",
+					_, writeErr = fmt.Fprintf(w, "%s\t%d\t%d\n",
 						sym.Entity.Reference, sym.Entity.StartByte, sym.Entity.EndByte)
 				} else {
-					fmt.Fprintln(w, sym.Reference.Symbol)
+					_, writeErr = fmt.Fprintln(w, sym.Reference.Symbol)
 				}
-				return true
+				return writeErr == nil
 			})
-			return err
+			if err != nil {
+				return err
+			}
+			return writeErr
 		},
 	}
 
