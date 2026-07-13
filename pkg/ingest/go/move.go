@@ -697,6 +697,15 @@ func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src
 	if strings.HasPrefix(leaf, "Test") && strings.HasSuffix(srcRel, "_test.go") && !strings.HasSuffix(dstRel, "_test.go") {
 		return nil, fmt.Errorf("moving test function %s into non-test file %s is not supported", leaf, dstRel)
 	}
+	// Go methods must live in the type's package; moving the type alone breaks them.
+	if packageHasMethodsOf(result, oldDir, leaf) {
+		return nil, fmt.Errorf("cross-package move of type %s with methods in package is not supported", leaf)
+	}
+	// Declaration bodies that still reference same-package symbols would leave
+	// undefined names at the destination (imports only cover other packages).
+	if dep := packageLocalDepInDecl(result, oldDir, leaf, decl.DeclText); dep != "" {
+		return nil, fmt.Errorf("cross-package move of %s still depends on same-package symbol %s is not supported", leaf, dep)
+	}
 
 	var edits []ingest.Edit
 	if srcContent, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(srcRel))); err == nil {
@@ -754,6 +763,68 @@ func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src
 		edits = append(edits, goImportInsertEdits(fileRel, content, []string{newImportPath})...)
 	}
 	return edits, nil
+}
+
+// packageHasMethodsOf reports whether pkgDir declares methods whose receiver
+// type leaf is typeName (e.g. *Session.Close or Session.Group).
+func packageHasMethodsOf(result *ingest.Result, pkgDir, typeName string) bool {
+	if result == nil || typeName == "" {
+		return false
+	}
+	for _, ent := range result.Entities {
+		ref := ingest.ParseReference(ent.Reference)
+		rel := strings.TrimPrefix(ref.Path, "./")
+		if dirOf(rel) != pkgDir {
+			continue
+		}
+		if methodReceiverType(ref.Symbol) == typeName {
+			return true
+		}
+	}
+	return false
+}
+
+// methodReceiverType returns the type name for a method symbol like
+// "*Session.Close" or "Session.Group", or "" if not a method symbol.
+func methodReceiverType(symbol string) string {
+	if symbol == "" || !strings.Contains(symbol, ".") {
+		return ""
+	}
+	recv, _, ok := strings.Cut(symbol, ".")
+	if !ok || recv == "" {
+		return ""
+	}
+	return strings.TrimPrefix(recv, "*")
+}
+
+// packageLocalDepInDecl returns the first package-scope symbol in pkgDir (other
+// than movedLeaf) whose identifier appears in declText, or "".
+func packageLocalDepInDecl(result *ingest.Result, pkgDir, movedLeaf, declText string) string {
+	if result == nil || declText == "" {
+		return ""
+	}
+	// Stable order: scan entities as listed.
+	seen := map[string]bool{movedLeaf: true}
+	for _, ent := range result.Entities {
+		ref := ingest.ParseReference(ent.Reference)
+		rel := strings.TrimPrefix(ref.Path, "./")
+		if dirOf(rel) != pkgDir {
+			continue
+		}
+		sym := ref.Symbol
+		if sym == "" || strings.Contains(sym, ".") {
+			continue // skip empty and method symbols
+		}
+		name := strings.TrimPrefix(sym, "*")
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		if goIdentUsed(declText, name) {
+			return name
+		}
+	}
+	return ""
 }
 
 func readGoModulePath(rootDir string) (string, error) {

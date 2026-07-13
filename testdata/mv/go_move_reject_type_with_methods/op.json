@@ -1,0 +1,4 @@
+{
+  "source": "path:./pkga/a.go::Session",
+  "destination": "path:./pkgb/b.go::Session"
+}
