@@ -110,11 +110,11 @@ func copyDir(t *testing.T, src, dst string) {
 // compareDir asserts every file in expected/ matches the corresponding file in got/.
 func compareDir(t *testing.T, expectedDir, gotDir string) {
 	t.Helper()
-	err := filepath.Walk(expectedDir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.WalkDir(expectedDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if info.IsDir() {
+		if d.IsDir() {
 			return nil
 		}
 		rel, err := filepath.Rel(expectedDir, path)
