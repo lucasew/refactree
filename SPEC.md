@@ -31,6 +31,26 @@ Tool to do queries on symbols and some refactorings like move and rename items i
 - Just the doc, and if it makes sense the signature of functions
 - `# name\nSignature: $signature\n$actual_docstring`
 
+### Subcommand: edit
+- Opens the definition of a reference in `$EDITOR` (or jumps to a file), blocking until the editor exits
+- Argument modes:
+  - no args: interactive picker over all entities under cwd, then open the selection
+  - symbol ref (`::what`): canonicalize (barrels, re-exports, aliases — same as navigation elsewhere) then open the defining entity
+  - file ref (no symbol): open that file at line 1 column 1
+  - directory / module ref (no symbol): interactive picker scoped to entities under that container, then open the selection
+- Interactive picker:
+  - default backend shells out to `fzf` (must be on PATH); pluggable later
+  - each candidate line is the full reference string (e.g. `path:./pkg/foo.go::Bar`)
+  - `-a`: include normally hidden symbols (same idea as `ls`)
+- Editor selection (first wins): `--editor` flag, `RFT_EDITOR`, `$VISUAL`, `$EDITOR`; hard error if none
+- Editor argv (default, swappable via interface later): single argument `path:line:column`
+  - line is 1-based; column is 1-based for the editor
+  - definition position: entity `StartByte` converted with `grammar.LineIndex` from ccgo-tree-sitter (`LineColumnAt` is 1-based line / 0-based byte column; pass column+1 to the editor)
+  - file-only open: `path:1:1`
+- Success is silent on stdout; propagate the editor process exit code
+- Hard errors (non-zero, clear stderr): unresolvable symbol after canonicalize, missing file, missing editor, missing `fzf` when a picker is required
+- Equivalent semantic of opening a target for editing in general; add flags on demand, don't invent useless flags
+
 ## Concept: reference
 - References something
 - Format: provider:where::what
