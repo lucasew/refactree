@@ -1,0 +1,4 @@
+{
+  "source": "path:./a/Helper.java::Helper",
+  "destination": "path:./b/Utils.java::Helper"
+}
