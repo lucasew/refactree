@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -252,13 +253,21 @@ type projectEnv struct {
 	session  *Session
 }
 
-func runProject(ctx context.Context, opts Options, p Project, ws *Workspace, runner Runner, rng *rand.Rand, report *Report, out *Result, commits map[string]string) error {
+func runProject(ctx context.Context, opts Options, p Project, ws *Workspace, runner Runner, rng *rand.Rand, report *Report, out *Result, commits map[string]string) (err error) {
 	fmt.Fprintf(opts.Stdout, "== project %s ==\n", p.ID)
 	env, err := openProjectEnv(ctx, opts, p, ws, runner, report, out)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = env.session.Close(ctx) }()
+	defer func() {
+		if cerr := env.session.Close(ctx); cerr != nil {
+			if err == nil {
+				err = cerr
+			} else {
+				slog.Warn("fuzzy: session close failed", "project", p.ID, "err", cerr)
+			}
+		}
+	}()
 	if commits != nil {
 		commits[p.ID] = env.commit
 	}
