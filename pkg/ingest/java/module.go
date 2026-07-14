@@ -162,17 +162,8 @@ func (referenceProvider) AllowDocEntity(_ ingest.Reference, _ ingest.Reference, 
 }
 
 func joinProviderPath(base, name string) string {
-	base = strings.Trim(base, "/")
-	name = strings.Trim(name, "/")
-	base = strings.ReplaceAll(base, "/", ".")
-	name = strings.ReplaceAll(name, "/", ".")
-	if base == "" {
-		return name
-	}
-	if name == "" {
-		return base
-	}
-	return base + "." + name
+	// Java package paths use dots; reuse slash join then convert.
+	return strings.ReplaceAll(refpkg.JoinProviderPath(base, name), "/", ".")
 }
 
 func dirHasJavaSourcesRecursive(dir string) bool {
