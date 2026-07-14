@@ -24,7 +24,7 @@ func (pathReferenceProvider) Resolve(spec string, ctx ImportResolveContext) (str
 		return "", false
 	}
 
-	rel := relImportPath(ctx.ImporterPath, spec)
+	rel := RelImportPath(ctx.ImporterPath, spec)
 	if rel == "" {
 		return "", false
 	}
@@ -40,7 +40,7 @@ func (pathReferenceProvider) Resolve(spec string, ctx ImportResolveContext) (str
 	candidate := filepath.Join(rootAbs, filepath.FromSlash(rel))
 	resolved, ok := resolveJSFileOnDisk(candidate, false)
 	if ok {
-		return pathRefForAbs(rootAbs, resolved), true
+		return PathRefForAbs(rootAbs, resolved), true
 	}
 
 	return FileRef("./" + rel), true

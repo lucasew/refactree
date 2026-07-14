@@ -388,7 +388,7 @@ func resolveNixPathImport(spec string, ctx ingest.ImportResolveContext) (string,
 		return "", false
 	}
 
-	rel := relImportPath(ctx.ImporterPath, spec)
+	rel := ingest.RelImportPath(ctx.ImporterPath, spec)
 	if rel == "" {
 		return "", false
 	}
@@ -403,7 +403,7 @@ func resolveNixPathImport(spec string, ctx ingest.ImportResolveContext) (string,
 	}
 	candidate := filepath.Join(rootAbs, filepath.FromSlash(rel))
 	if resolved, ok := resolveNixPathOnDisk(candidate); ok {
-		return pathRefForAbs(rootAbs, resolved), true
+		return ingest.PathRefForAbs(rootAbs, resolved), true
 	}
 
 	return ingest.FileRef("./" + rel), true
@@ -434,36 +434,6 @@ func resolveNixPathOnDisk(baseAbs string) (string, bool) {
 }
 
 var osStat = os.Stat
-
-func pathRefForAbs(rootDir, absPath string) string {
-	rootAbs, err := filepath.Abs(rootDir)
-	if err != nil {
-		return ingest.FileRef(filepath.ToSlash(absPath))
-	}
-	abs, err := filepath.Abs(absPath)
-	if err != nil {
-		return ingest.FileRef(filepath.ToSlash(absPath))
-	}
-
-	rel, err := filepath.Rel(rootAbs, abs)
-	if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return ingest.FileRef("./" + filepath.ToSlash(rel))
-	}
-	return ingest.FileRef(filepath.ToSlash(abs))
-}
-
-func relImportPath(importerPath, spec string) string {
-	importerDir := filepath.ToSlash(filepath.Dir(importerPath))
-	if importerDir == "." {
-		importerDir = ""
-	}
-	if strings.HasPrefix(spec, "/") {
-		return strings.TrimPrefix(filepath.ToSlash(spec), "/")
-	}
-	joined := filepath.ToSlash(filepath.Clean(filepath.Join(importerDir, spec)))
-	joined = strings.TrimPrefix(joined, "./")
-	return joined
-}
 
 func normalizeProviderSpec(spec string) string {
 	spec = strings.TrimSpace(spec)

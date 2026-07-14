@@ -139,7 +139,9 @@ func providerAllowDocEntity(ref Reference, entRef Reference, entPath, language s
 	return policy.AllowDocEntity(ref, entRef, entPath, language)
 }
 
-func pathRefForAbs(rootDir, absPath string) string {
+// PathRefForAbs returns a path: reference for absPath relative to rootDir when
+// possible, otherwise an absolute path: reference.
+func PathRefForAbs(rootDir, absPath string) string {
 	rootAbs, err := filepath.Abs(rootDir)
 	if err != nil {
 		return FileRef(filepath.ToSlash(absPath))
@@ -156,7 +158,8 @@ func pathRefForAbs(rootDir, absPath string) string {
 	return FileRef(filepath.ToSlash(abs))
 }
 
-func relImportPath(importerPath, spec string) string {
+// RelImportPath joins a relative import spec against the importer file path.
+func RelImportPath(importerPath, spec string) string {
 	importerDir := filepath.ToSlash(filepath.Dir(importerPath))
 	if importerDir == "." {
 		importerDir = ""
