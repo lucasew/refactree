@@ -331,45 +331,6 @@ func isPythonIdentChar(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
 }
 
-// rewritePythonDottedModule replaces whole occurrences of oldMod with newMod.
-// Boundaries are letters/digits/underscore so `pkg.mod` matches inside
-// `from pkg.mod import` without matching `pkg.mod2` or `mypkg.mod`.
-func rewritePythonDottedModule(fileRelPath string, content []byte, oldMod, newMod string) []ingest.Edit {
-	if oldMod == "" || oldMod == newMod {
-		return nil
-	}
-	text := string(content)
-	var edits []ingest.Edit
-	off := 0
-	for {
-		idx := strings.Index(text[off:], oldMod)
-		if idx < 0 {
-			break
-		}
-		start := off + idx
-		end := start + len(oldMod)
-		if !isPythonIdentBoundary(text, start-1) || !isPythonIdentBoundary(text, end) {
-			off = start + 1
-			continue
-		}
-		edits = append(edits, ingest.Edit{
-			File:      fileRelPath,
-			StartByte: uint32(start),
-			EndByte:   uint32(end),
-			NewText:   newMod,
-		})
-		off = end
-	}
-	return edits
-}
-
-func isPythonIdentBoundary(text string, i int) bool {
-	if i < 0 || i >= len(text) {
-		return true
-	}
-	return !isPythonIdentChar(text[i])
-}
-
 // rewritePythonSymbolImport rewrites a Python import statement from the old
 // module to the new module. It uses the Result's alias data to find the
 // exact import module strings used in this file to refer to the source module,
