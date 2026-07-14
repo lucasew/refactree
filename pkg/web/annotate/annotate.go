@@ -4,7 +4,6 @@ package annotate
 
 import (
 	"cmp"
-	"html"
 	"slices"
 	"strings"
 
@@ -223,11 +222,6 @@ func symbolAnchorID(ref string) string {
 		return ""
 	}
 	return AnchorID(ref)
-}
-
-// Escape segments for direct template use when not using html/template auto-escape on fields.
-func EscapeText(s string) string {
-	return html.EscapeString(s)
 }
 
 func normalizePath(p string) string {
