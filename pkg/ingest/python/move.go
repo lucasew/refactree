@@ -32,39 +32,34 @@ func (moveDriver) ExtractDecl(filePath string, entity ingest.Entity) (ingest.Dec
 	start := declNode.StartByte()
 	end := declNode.EndByte()
 	// Include leading indentation on the first line so nested methods remove cleanly.
-	lineStart := start
-	for lineStart > 0 && source[lineStart-1] != '\n' && source[lineStart-1] != '\r' {
-		if source[lineStart-1] != ' ' && source[lineStart-1] != '\t' {
-			break
-		}
-		lineStart--
-	}
+	lineStart := pythonLeadingIndentStart(source, start)
 	declText := string(source[lineStart:end])
 	// Nested methods/classes carry class-body indent; normalize to column 0 for insert.
-	if lineStart < start {
+	nested := lineStart < start
+	if nested {
 		declText = dedentPythonBlock(declText)
 	}
 
-	// Remove up to two trailing newlines.
-	removeEnd := end
-	for removeEnd < uint32(len(source)) && (source[removeEnd] == '\n' || source[removeEnd] == '\r') {
-		removeEnd++
-		if removeEnd-end >= 2 {
-			break
-		}
-	}
+	removeStart, removeEnd := pythonTrailingNewlineEnd(source, lineStart, end)
 
 	// Qualified entity names (Class.method) need a class shell when inserted into a
 	// new module; stash the outer class in Preamble for InsertDecl.
 	preamble := ""
-	if className := pythonOuterClass(ingest.ParseReference(entity.Reference).Symbol); className != "" && lineStart < start {
+	if className := pythonOuterClass(ingest.ParseReference(entity.Reference).Symbol); className != "" && nested {
 		preamble = className
+		// Last method (or only body stmt) would leave `class C:` with no body —
+		// a SyntaxError. Drop the whole empty class instead.
+		if classNode := pythonEnclosingClass(root, declNode); classNode != nil {
+			if body := ingest.ChildByField(classNode, "body"); body != nil && pythonBodyEmptyAfterRemove(body, declNode) {
+				removeStart, removeEnd = pythonTrailingNewlineEnd(source, pythonLeadingIndentStart(source, classNode.StartByte()), classNode.EndByte())
+			}
+		}
 	}
 
 	return ingest.DeclExtract{
 		Preamble:    preamble,
 		DeclText:    declText,
-		RemoveStart: lineStart,
+		RemoveStart: removeStart,
 		RemoveEnd:   removeEnd,
 	}, nil
 }
@@ -78,7 +73,8 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 	if decl.Preamble != "" {
 		className := decl.Preamble
 		if dstContent == nil || !pythonSourceHasClass(dstContent, className) {
-			text = "class " + className + ":\n" + indentPythonBlock(decl.DeclText, "    ")
+			indent := pythonDetectIndentUnit(decl.DeclText)
+			text = "class " + className + ":\n" + indentPythonBlock(decl.DeclText, indent)
 			if dstContent == nil {
 				return ingest.Edit{
 					File:      dstRelPath,
@@ -87,25 +83,12 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 					NewText:   text + "\n",
 				}
 			}
-		} else if at, ok := pythonClassBodyInsertAt(dstContent, className); ok {
-			// Insert indented method into the existing class body.
-			insertAt = at
-			insertText := indentPythonBlock(decl.DeclText, "    ")
-			if at > 0 && dstContent[at-1] != '\n' {
-				insertText = "\n" + insertText
-			}
-			if !strings.HasSuffix(insertText, "\n") {
-				insertText += "\n"
-			}
-			return ingest.Edit{
-				File:      dstRelPath,
-				StartByte: insertAt,
-				EndByte:   insertAt,
-				NewText:   insertText,
-			}
+		} else if edit, ok := pythonInsertIntoClassBody(dstRelPath, dstContent, className, decl.DeclText); ok {
+			return edit
 		} else {
 			// Class present but body boundary not found: append a second class block.
-			text = "class " + className + ":\n" + indentPythonBlock(decl.DeclText, "    ")
+			indent := pythonDetectIndentUnit(decl.DeclText)
+			text = "class " + className + ":\n" + indentPythonBlock(decl.DeclText, indent)
 		}
 	}
 
@@ -659,6 +642,130 @@ func indentPythonBlock(block, indent string) string {
 	return strings.Join(lines, "\n")
 }
 
+// pythonLeadingIndentStart walks left from pos through spaces/tabs on the same line.
+func pythonLeadingIndentStart(source []byte, pos uint32) uint32 {
+	for pos > 0 && source[pos-1] != '\n' && source[pos-1] != '\r' {
+		if source[pos-1] != ' ' && source[pos-1] != '\t' {
+			break
+		}
+		pos--
+	}
+	return pos
+}
+
+// pythonTrailingNewlineEnd extends end through up to two trailing newlines.
+func pythonTrailingNewlineEnd(source []byte, start, end uint32) (uint32, uint32) {
+	removeEnd := end
+	for removeEnd < uint32(len(source)) && (source[removeEnd] == '\n' || source[removeEnd] == '\r') {
+		removeEnd++
+		if removeEnd-end >= 2 {
+			break
+		}
+	}
+	return start, removeEnd
+}
+
+// pythonEnclosingClass returns the innermost class_definition whose body
+// contains decl (by byte range).
+func pythonEnclosingClass(root, decl *grammar.Node) *grammar.Node {
+	if root == nil || decl == nil {
+		return nil
+	}
+	var found *grammar.Node
+	var walk func(*grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type() == "class_definition" {
+			if body := ingest.ChildByField(n, "body"); body != nil {
+				if decl.StartByte() >= body.StartByte() && decl.EndByte() <= body.EndByte() {
+					found = n
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	return found
+}
+
+// pythonBodyEmptyAfterRemove reports whether body has no named statements left
+// once remove is taken out.
+func pythonBodyEmptyAfterRemove(body, remove *grammar.Node) bool {
+	if body == nil {
+		return true
+	}
+	for i := uint32(0); i < body.NamedChildCount(); i++ {
+		c := body.NamedChild(i)
+		if c == nil || c.IsNull() {
+			continue
+		}
+		// Exact match or fully covered by the removed span.
+		if c.StartByte() == remove.StartByte() && c.EndByte() == remove.EndByte() {
+			continue
+		}
+		if c.StartByte() >= remove.StartByte() && c.EndByte() <= remove.EndByte() {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// pythonDetectIndentUnit picks a class-body indent from a column-0 declaration
+// block (first nested line's leading whitespace), defaulting to four spaces.
+func pythonDetectIndentUnit(block string) string {
+	for _, line := range strings.Split(block, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+		if indent != "" {
+			return indent
+		}
+	}
+	return "    "
+}
+
+// pythonLineIndent returns the leading spaces/tabs on the line containing pos.
+func pythonLineIndent(source []byte, pos uint32) string {
+	lineStart := pos
+	for lineStart > 0 && source[lineStart-1] != '\n' && source[lineStart-1] != '\r' {
+		lineStart--
+	}
+	i := lineStart
+	for i < uint32(len(source)) && (source[i] == ' ' || source[i] == '\t') {
+		i++
+	}
+	if i <= pos {
+		return string(source[lineStart:i])
+	}
+	return string(source[lineStart:pos])
+}
+
+// pythonClassBodyIndent returns the indent used by statements in the named
+// class body, or "" if it cannot be determined.
+func pythonClassBodyIndent(source []byte, classNode *grammar.Node) string {
+	body := ingest.ChildByField(classNode, "body")
+	if body == nil {
+		return ""
+	}
+	for i := uint32(0); i < body.NamedChildCount(); i++ {
+		c := body.NamedChild(i)
+		if c == nil || c.IsNull() {
+			continue
+		}
+		indent := pythonLineIndent(source, c.StartByte())
+		if indent != "" {
+			return indent
+		}
+	}
+	return ""
+}
+
 // pythonSourceHasClass reports whether content defines a class with the given name.
 func pythonSourceHasClass(content []byte, className string) bool {
 	pf, err := ingest.ParseSource(content, "memory.py", "python")
@@ -671,23 +778,57 @@ func pythonSourceHasClass(content []byte, className string) bool {
 	return pythonFindClass(pf.Root, pf.Source, className) != nil
 }
 
-// pythonClassBodyInsertAt returns the byte offset just before the end of the
-// named class's body (suitable for inserting a nested method).
-func pythonClassBodyInsertAt(content []byte, className string) (uint32, bool) {
-	pf, err := ingest.ParseSource(content, "memory.py", "python")
+// pythonInsertIntoClassBody inserts declText into an existing class body,
+// matching the destination class's indent style. If the body is only `pass`,
+// the pass is replaced.
+func pythonInsertIntoClassBody(dstRelPath string, dstContent []byte, className, declText string) (ingest.Edit, bool) {
+	pf, err := ingest.ParseSource(dstContent, "memory.py", "python")
 	if err != nil {
-		return 0, false
+		return ingest.Edit{}, false
 	}
 	defer pf.Close()
 	classNode := pythonFindClass(pf.Root, pf.Source, className)
 	if classNode == nil {
-		return 0, false
+		return ingest.Edit{}, false
 	}
 	body := ingest.ChildByField(classNode, "body")
 	if body == nil {
-		return 0, false
+		return ingest.Edit{}, false
 	}
-	return body.EndByte(), true
+
+	indent := pythonClassBodyIndent(pf.Source, classNode)
+	if indent == "" {
+		indent = pythonDetectIndentUnit(declText)
+	}
+	insertText := indentPythonBlock(declText, indent)
+	if !strings.HasSuffix(insertText, "\n") {
+		insertText += "\n"
+	}
+
+	// Body is only `pass`: replace it with the method (cosmetic cleanup).
+	if body.NamedChildCount() == 1 {
+		only := body.NamedChild(0)
+		if only != nil && only.Type() == "pass_statement" {
+			passStart := pythonLeadingIndentStart(pf.Source, only.StartByte())
+			return ingest.Edit{
+				File:      dstRelPath,
+				StartByte: passStart,
+				EndByte:   body.EndByte(),
+				NewText:   insertText,
+			}, true
+		}
+	}
+
+	at := body.EndByte()
+	if at > 0 && at <= uint32(len(dstContent)) && dstContent[at-1] != '\n' {
+		insertText = "\n" + insertText
+	}
+	return ingest.Edit{
+		File:      dstRelPath,
+		StartByte: at,
+		EndByte:   at,
+		NewText:   insertText,
+	}, true
 }
 
 func pythonFindClass(n *grammar.Node, source []byte, className string) *grammar.Node {
