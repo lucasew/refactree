@@ -1,0 +1,4 @@
+{
+  "source": "path:./pkg/a/utils.py",
+  "destination": "path:./pkg/a/utils_fuzz.py"
+}
