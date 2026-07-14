@@ -34,13 +34,7 @@ func runSessionTask(ctx context.Context, session *Session, p Project, argv []str
 // formatRunOutput returns accumulated command logs for display.
 // Go test dumps are noisy; compiler/test failure lines are lifted to the top.
 func formatRunOutput(res RunResult) string {
-	combined := res.Stdout
-	if res.Stderr != "" {
-		if combined != "" && !strings.HasSuffix(combined, "\n") {
-			combined += "\n"
-		}
-		combined += res.Stderr
-	}
+	combined := mergeRunOutput(res.Stdout, res.Stderr)
 	highlights := extractFailureHighlights(combined)
 
 	var b strings.Builder
