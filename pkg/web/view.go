@@ -488,7 +488,7 @@ func (l *Loader) listProviderFiles(scopeRef ingest.Reference, scope refpkg.Scope
 				for _, e := range entries {
 					name := e.Name()
 					if e.IsDir() {
-						childPath := joinProviderPath(scopeRef.Path, name)
+						childPath := refpkg.JoinProviderPath(scopeRef.Path, name)
 						items = append(items, NavItem{
 							Name:  name + "/",
 							Href:  EncodeCodeURL(ingest.Reference{Provider: scopeRef.Provider, Path: childPath}.String()),
@@ -498,7 +498,7 @@ func (l *Loader) listProviderFiles(scopeRef ingest.Reference, scope refpkg.Scope
 					}
 					// Files under provider dir: link as path under scope dir is not used;
 					// list name only if we can form a provider child path.
-					childPath := joinProviderPath(scopeRef.Path, name)
+					childPath := refpkg.JoinProviderPath(scopeRef.Path, name)
 					items = append(items, NavItem{
 						Name: name,
 						Href: EncodeCodeURL(ingest.Reference{Provider: scopeRef.Provider, Path: childPath}.String()),
@@ -595,18 +595,6 @@ func parentProviderPath(path string) string {
 		return ""
 	}
 	return parent
-}
-
-func joinProviderPath(base, name string) string {
-	base = strings.Trim(base, "/")
-	name = strings.Trim(name, "/")
-	if base == "" {
-		return name
-	}
-	if name == "" {
-		return base
-	}
-	return base + "/" + name
 }
 
 // resolveUnderRoot joins rel to the serve root and ensures the result stays under

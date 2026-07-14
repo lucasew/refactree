@@ -18,3 +18,17 @@ func TestLastPathComponent(t *testing.T) {
 		}
 	}
 }
+
+func TestJoinProviderPath(t *testing.T) {
+	cases := []struct{ base, name, want string }{
+		{"", "a", "a"},
+		{"a", "", "a"},
+		{"a/b", "c", "a/b/c"},
+		{"/a/", "/b/", "a/b"},
+	}
+	for _, tc := range cases {
+		if got := JoinProviderPath(tc.base, tc.name); got != tc.want {
+			t.Errorf("JoinProviderPath(%q,%q)=%q want %q", tc.base, tc.name, got, tc.want)
+		}
+	}
+}

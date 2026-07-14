@@ -11,3 +11,17 @@ func LastPathComponent(s string) string {
 	}
 	return s
 }
+
+// JoinProviderPath joins slash-separated provider path segments, ignoring empty
+// parts and trimming surrounding slashes from each argument.
+func JoinProviderPath(base, name string) string {
+	base = strings.Trim(base, "/")
+	name = strings.Trim(name, "/")
+	if base == "" {
+		return name
+	}
+	if name == "" {
+		return base
+	}
+	return base + "/" + name
+}
