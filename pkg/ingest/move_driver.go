@@ -121,7 +121,7 @@ func moveDriverForLanguage(lang string) (MoveDriver, bool) {
 
 // packageMovePlannerFor picks a PackageMovePlanner for files under srcDir.
 func packageMovePlannerFor(result *Result, srcDir string) (PackageMovePlanner, bool) {
-	srcDir = strings.TrimSuffix(strings.TrimPrefix(srcDir, "./"), "/")
+	srcDir = CleanRelDir(srcDir)
 	seen := map[string]bool{}
 	for _, f := range result.Files {
 		rel := strings.TrimPrefix(f.Path, "./")

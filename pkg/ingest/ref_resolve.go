@@ -49,7 +49,7 @@ func canonicalSourceReference(dir string, result *Result, ref Reference) (Refere
 		return ref, nil
 	}
 
-	dirRel := strings.TrimSuffix(strings.TrimPrefix(ref.Path, "./"), "/")
+	dirRel := CleanRelDir(ref.Path)
 	prefix := dirRel
 	if prefix != "" {
 		prefix += "/"
@@ -154,7 +154,7 @@ func canonicalDestinationReference(dir string, result *Result, srcRef, dstRef Re
 		return dstRef, fmt.Errorf("unsupported source language %q for directory destination", srcLang)
 	}
 
-	dstDirRel := strings.TrimSuffix(strings.TrimPrefix(dstRef.Path, "./"), "/")
+	dstDirRel := CleanRelDir(dstRef.Path)
 	dstRelFile := driver.DestinationFileInDirectory(dstDirRel, srcRef)
 	if dstRelFile == "" {
 		return dstRef, fmt.Errorf("driver %q does not provide directory destination mapping", srcLang)

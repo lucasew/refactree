@@ -14,8 +14,8 @@ import (
 // src/test/java, src/main/java-templates, ...); moving only one root leaves
 // PackageLocation errors when package clauses are rewritten elsewhere.
 func (moveDriver) ExpandPackageDirs(result *ingest.Result, srcDir, dstDir string) [][2]string {
-	srcDir = strings.TrimSuffix(strings.TrimPrefix(srcDir, "./"), "/")
-	dstDir = strings.TrimSuffix(strings.TrimPrefix(dstDir, "./"), "/")
+	srcDir = ingest.CleanRelDir(srcDir)
+	dstDir = ingest.CleanRelDir(dstDir)
 	pairs := [][2]string{{srcDir, dstDir}}
 
 	srcSuffix, ok := sourceRootSuffix(srcDir)
@@ -29,7 +29,7 @@ func (moveDriver) ExpandPackageDirs(result *ingest.Result, srcDir, dstDir string
 
 	seen := map[string]bool{srcDir: true}
 	addPair := func(pkgDir string) {
-		pkgDir = strings.TrimSuffix(strings.TrimPrefix(pkgDir, "./"), "/")
+		pkgDir = ingest.CleanRelDir(pkgDir)
 		if pkgDir == "" || seen[pkgDir] {
 			return
 		}
