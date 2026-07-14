@@ -59,15 +59,18 @@ func (moveDriver) ExtractDecl(filePath string, entity ingest.Entity) (ingest.Dec
 	var removeStart, removeEnd uint32
 
 	if result.Grouped {
-		// Grouped type declaration: extract just the matching type_spec.
-		// The output should be a standalone "type X struct {...}" declaration.
-		// Dedent by one tab level since the spec was inside type (...).
-		spec := result.TypeSpec
+		// Grouped type/var/const: extract just the matching spec as a standalone
+		// "type|var|const X ..." declaration. Dedent one tab level from the group.
+		spec := result.Spec
+		keyword := result.Keyword
+		if keyword == "" {
+			keyword = "type"
+		}
 		specText := string(source[spec.StartByte():spec.EndByte()])
-		declText = "type " + dedentOnce(specText)
+		declText = keyword + " " + dedentOnce(specText)
 		removeStart = spec.StartByte()
 		removeEnd = spec.EndByte()
-		// Remove trailing whitespace/newlines up to the next type_spec or ')'.
+		// Remove trailing whitespace/newlines up to the next spec or ')'.
 		for removeEnd < uint32(len(source)) && (source[removeEnd] == '\n' || source[removeEnd] == '\r' || source[removeEnd] == '\t' || source[removeEnd] == ' ') {
 			removeEnd++
 		}
@@ -588,13 +591,14 @@ func dirOf(p string) string {
 	return p[:i]
 }
 
-// goDeclResult holds the matched declaration node and, for grouped type
-// declarations, the individual type_spec that matched (when the declaration
-// contains multiple specs).
+// goDeclResult holds the matched declaration node and, for grouped type/var/const
+// declarations, the individual spec that matched (when the declaration contains
+// multiple specs).
 type goDeclResult struct {
-	Node     *grammar.Node // the top-level declaration or type_spec
-	Grouped  bool          // true when part of a type (...) group
-	TypeSpec *grammar.Node // non-nil for grouped type declarations
+	Node    *grammar.Node // the top-level declaration
+	Grouped bool          // true when part of a type|var|const (...) group
+	Spec    *grammar.Node // non-nil for grouped type/var/const declarations
+	Keyword string        // "type", "var", or "const" when Grouped
 }
 
 // findGoDecl returns the declaration containing the entity whose name starts at nameStart.
@@ -625,13 +629,79 @@ func findGoDecl(root *grammar.Node, nameStart uint32) *goDeclResult {
 			}
 			if matchedSpec != nil {
 				if specCount > 1 {
-					return &goDeclResult{Node: child, Grouped: true, TypeSpec: matchedSpec}
+					return &goDeclResult{Node: child, Grouped: true, Spec: matchedSpec, Keyword: "type"}
+				}
+				return &goDeclResult{Node: child}
+			}
+		}
+		if child.Type() == "var_declaration" || child.Type() == "const_declaration" {
+			keyword := "var"
+			if child.Type() == "const_declaration" {
+				keyword = "const"
+			}
+			specs := goVarConstSpecs(child)
+			var matchedSpec *grammar.Node
+			for _, spec := range specs {
+				if goSpecNameStartsAt(spec, nameStart) {
+					matchedSpec = spec
+					break
+				}
+			}
+			if matchedSpec != nil {
+				if len(specs) > 1 {
+					return &goDeclResult{Node: child, Grouped: true, Spec: matchedSpec, Keyword: keyword}
 				}
 				return &goDeclResult{Node: child}
 			}
 		}
 	}
 	return nil
+}
+
+// goVarConstSpecs returns var_spec/const_spec children of a var_declaration or
+// const_declaration, including those nested under var_spec_list/const_spec_list.
+func goVarConstSpecs(decl *grammar.Node) []*grammar.Node {
+	specType := "var_spec"
+	listType := "var_spec_list"
+	if decl.Type() == "const_declaration" {
+		specType = "const_spec"
+		listType = "const_spec_list"
+	}
+	var specs []*grammar.Node
+	for i := uint32(0); i < decl.ChildCount(); i++ {
+		child := decl.Child(i)
+		switch child.Type() {
+		case specType:
+			specs = append(specs, child)
+		case listType:
+			for j := uint32(0); j < child.ChildCount(); j++ {
+				spec := child.Child(j)
+				if spec.Type() == specType {
+					specs = append(specs, spec)
+				}
+			}
+		}
+	}
+	return specs
+}
+
+// goSpecNameStartsAt reports whether a var_spec/const_spec declares a name whose
+// identifier starts at nameStart (single name or identifier_list entry).
+func goSpecNameStartsAt(spec *grammar.Node, nameStart uint32) bool {
+	nameNode := ingest.ChildByField(spec, "name")
+	if nameNode == nil {
+		return false
+	}
+	if nameNode.Type() == "identifier" {
+		return nameNode.StartByte() == nameStart
+	}
+	for i := uint32(0); i < nameNode.ChildCount(); i++ {
+		c := nameNode.Child(i)
+		if c.Type() == "identifier" && c.StartByte() == nameStart {
+			return true
+		}
+	}
+	return false
 }
 
 func (moveDriver) ExpandRenameSources(result *ingest.Result, sourceRef string) []string {
