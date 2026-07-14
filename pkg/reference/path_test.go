@@ -32,3 +32,20 @@ func TestJoinProviderPath(t *testing.T) {
 		}
 	}
 }
+
+func TestParentProviderPath(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"fmt", ""},
+		{"net/http", "net"},
+		{"github.com/lucasew/refactree/cmd/rft", "github.com/lucasew/refactree/cmd"},
+		{"", ""},
+		{"/a/b/", "a"},
+	}
+	for _, tc := range cases {
+		if got := ParentProviderPath(tc.in); got != tc.want {
+			t.Errorf("ParentProviderPath(%q)=%q want %q", tc.in, got, tc.want)
+		}
+	}
+}

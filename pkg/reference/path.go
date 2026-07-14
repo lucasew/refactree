@@ -1,6 +1,9 @@
 package reference
 
-import "strings"
+import (
+	"path/filepath"
+	"strings"
+)
 
 // LastPathComponent returns the final segment of a slash-separated path.
 // A single trailing slash is ignored so "pkg/foo/" and "pkg/foo" agree.
@@ -24,4 +27,18 @@ func JoinProviderPath(base, name string) string {
 		return base
 	}
 	return base + "/" + name
+}
+
+// ParentProviderPath returns the parent slash-separated provider path, or "" at
+// the root (single segment, empty, or ".").
+func ParentProviderPath(path string) string {
+	path = strings.Trim(path, "/")
+	if path == "" {
+		return ""
+	}
+	parent := filepath.ToSlash(filepath.Dir(filepath.FromSlash(path)))
+	if parent == "." {
+		return ""
+	}
+	return parent
 }

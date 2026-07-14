@@ -59,23 +59,7 @@ func TestBrowseSetCurrentRel_RejectsOutsideRoot(t *testing.T) {
 	}
 }
 
-func TestParentProviderPath(t *testing.T) {
-	cases := []struct {
-		in   string
-		want string
-	}{
-		{"fmt", ""},
-		{"net/http", "net"},
-		{"github.com/lucasew/refactree/cmd/rft", "github.com/lucasew/refactree/cmd"},
-		{"", ""},
-	}
-	for _, tc := range cases {
-		got := parentProviderPath(tc.in)
-		if got != tc.want {
-			t.Fatalf("parentProviderPath(%q)=%q want %q", tc.in, got, tc.want)
-		}
-	}
-}
+
 
 func TestNewBrowseModelFromReference_GoProvider(t *testing.T) {
 	model, err := newBrowseModelFromReference(ingest.ParseReference("go:fmt"), false)
