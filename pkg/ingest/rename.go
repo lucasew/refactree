@@ -107,7 +107,7 @@ func planSymbolRename(dir string, result *Result, sourceRefs []string, destSymbo
 	}
 	// Relations often target language providers (go:mod/pkg::Sym) while entities
 	// are path:./pkg/file.go::Sym. Expand so cross-package qualified calls rename.
-	sourceSet := expandRenameSourceSet(result, sourceRefs)
+	sourceSet := expandRenameSourceSet(dir, result, sourceRefs)
 	var edits []Edit
 	// Spans store the identifier leaf (e.g. "toJson"), while references may be
 	// qualified ("Gson.toJson"). Always rewrite source text with the leaf.
@@ -200,7 +200,8 @@ func dedupeEdits(edits []Edit) []Edit {
 
 // expandRenameSourceSet adds language-provider targets (e.g. go:mod/pkg::Sym)
 // that refer to the same package-scoped symbols as the path: entity refs.
-func expandRenameSourceSet(result *Result, sourceRefs []string) map[string]bool {
+// rootDir is the ingest root (for reading go.mod module path when matching go: targets).
+func expandRenameSourceSet(rootDir string, result *Result, sourceRefs []string) map[string]bool {
 	sourceSet := map[string]bool{}
 	type want struct {
 		pkgDir string
@@ -228,6 +229,7 @@ func expandRenameSourceSet(result *Result, sourceRefs []string) map[string]bool 
 	if len(wants) == 0 || result == nil {
 		return sourceSet
 	}
+	modulePath := readModulePathForRename(rootDir)
 	add := func(target string) {
 		if target == "" || sourceSet[target] {
 			return
@@ -240,7 +242,7 @@ func expandRenameSourceSet(result *Result, sourceRefs []string) map[string]bool 
 			if t.Symbol != w.symbol {
 				continue
 			}
-			if targetMatchesPackageSymbol(t, w.pkgDir) {
+			if targetMatchesPackageSymbol(t, w.pkgDir, modulePath) {
 				sourceSet[target] = true
 				return
 			}
@@ -255,10 +257,13 @@ func expandRenameSourceSet(result *Result, sourceRefs []string) map[string]bool 
 	return sourceSet
 }
 
-// targetMatchesPackageSymbol reports whether ref names symbol in package pkgDir
-// (relative module path, e.g. "pkg/db"). Works for path: and go:/python:-style
-// import paths that end with that package directory.
-func targetMatchesPackageSymbol(ref Reference, pkgDir string) bool {
+// targetMatchesPackageSymbol reports whether ref names a symbol in package pkgDir
+// (relative to the module root, e.g. "pkg/db").
+// For path: refs, compares file directory. For language providers (go:, …),
+// matches the module import path modulePath+"/"+pkgDir exactly when modulePath
+// is known — never bare trailing-segment suffix matches (db vs pkg/db) and never
+// empty pkgDir against arbitrary single-segment imports (fmt, os, …).
+func targetMatchesPackageSymbol(ref Reference, pkgDir, modulePath string) bool {
 	if ref.Provider == "path" || ref.Provider == "" {
 		dir := path.Dir(strings.TrimPrefix(ref.Path, "./"))
 		if dir == "." {
@@ -267,10 +272,43 @@ func targetMatchesPackageSymbol(ref Reference, pkgDir string) bool {
 		return dir == pkgDir
 	}
 	p := strings.Trim(ref.Path, "/")
-	if pkgDir == "" {
-		return p != "" && !strings.Contains(p, "/")
+	if modulePath != "" {
+		want := modulePath
+		if pkgDir != "" {
+			want = modulePath + "/" + pkgDir
+		}
+		return p == want
 	}
-	return p == pkgDir || strings.HasSuffix(p, "/"+pkgDir)
+	// No module path available: only exact pkgDir equality (no suffix / empty root).
+	if pkgDir == "" {
+		return false
+	}
+	return p == pkgDir
+}
+
+// readModulePathForRename returns the go.mod module path for rootDir, or "".
+func readModulePathForRename(rootDir string) string {
+	if rootDir == "" {
+		return ""
+	}
+	dir := rootDir
+	for {
+		data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+		if err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "module ") {
+					return strings.TrimSpace(strings.TrimPrefix(line, "module "))
+				}
+			}
+			return ""
+		}
+		parent := filepath.Dir(dir)
+		if parent == "" || parent == dir {
+			return ""
+		}
+		dir = parent
+	}
 }
 
 // symbolNameLeaf returns the identifier text written at a definition/use span.

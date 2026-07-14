@@ -1,3 +1,3 @@
-package lib
+package db
 
 func FuzzCtx() string { return "ok" }
