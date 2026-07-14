@@ -86,4 +86,3 @@ func ScopeReferenceForView(ref string) ingest.Reference {
 	}
 	return r
 }
-
