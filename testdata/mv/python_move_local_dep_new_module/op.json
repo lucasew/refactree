@@ -1,0 +1,4 @@
+{
+  "source": "path:./models.py::create_config",
+  "destination": "path:./factory.py::create_config"
+}
