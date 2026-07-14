@@ -2,6 +2,7 @@ package edit
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -30,7 +31,11 @@ func TestPathLineColumnEditor_NilFileFieldsUseProcessStdio(t *testing.T) {
 }
 
 func TestPathLineColumnEditor_EchoExitZero(t *testing.T) {
-	ed := PathLineColumnEditor{Bin: "/run/current-system/sw/bin/echo"}
+	echo, err := exec.LookPath("echo")
+	if err != nil {
+		t.Skip("echo not on PATH")
+	}
+	ed := PathLineColumnEditor{Bin: echo}
 	if err := ed.Open(Location{Path: "/tmp/x.go", Line: 1, Column: 1}); err != nil {
 		t.Fatalf("echo editor should exit 0, got %v", err)
 	}
