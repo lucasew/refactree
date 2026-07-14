@@ -1,0 +1,4 @@
+{
+  "source": "path:./pkg/a/mod.py",
+  "destination": "path:./pkg/b/mod.py"
+}
