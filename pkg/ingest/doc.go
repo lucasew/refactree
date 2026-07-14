@@ -33,7 +33,7 @@ func DocFor(dir, reference string) (*DocResult, error) {
 		return nil, fmt.Errorf("provider doc reference requires symbol (::name): %s", reference)
 	}
 
-	result, err := Ingest(dir)
+	result, err := ProjectResult(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +59,7 @@ func DocFor(dir, reference string) (*DocResult, error) {
 }
 
 func docForProviderSymbol(ref Reference, target ProviderSymbolTarget) (*DocResult, error) {
-	result, err := IngestWithRecursion(target.Dir, providerDocIngestRecursive(ref))
+	result, err := DirResult(target.Dir, providerDocIngestRecursive(ref))
 	if err != nil {
 		return nil, err
 	}

@@ -43,7 +43,7 @@ func TestIngest(t *testing.T) {
 				t.Fatalf("parsing expected.json: %v", err)
 			}
 
-			got, err := ingest.Ingest(dir)
+			got, err := ingest.ProjectResult(dir)
 			if err != nil {
 				t.Fatalf("ingest: %v", err)
 			}

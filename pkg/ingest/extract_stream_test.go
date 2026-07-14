@@ -92,15 +92,15 @@ func TestWalkExtracts_StopEarly(t *testing.T) {
 	}
 }
 
-func TestIngest_UsesSpine(t *testing.T) {
+func TestProjectResult_UsesSpine(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "main.go"), "package main\n\nfunc main() {}\n")
-	got, err := ingest.Ingest(dir)
+	got, err := ingest.ProjectResult(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got.Entities) == 0 {
-		t.Fatal("expected entities from Ingest wrapper")
+		t.Fatal("expected entities from ProjectResult")
 	}
 	_ = os.ErrNotExist
 }

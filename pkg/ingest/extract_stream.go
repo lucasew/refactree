@@ -139,6 +139,34 @@ func MaterializeSource(src ExtractSource, opts MaterializeOptions) (*Result, err
 	return Materialize(root, extracts, opts), nil
 }
 
+// ProjectResult is full-Dir Materialize with ExpandImports (mv, fuzzy, fixtures).
+func ProjectResult(root string) (*Result, error) {
+	return MaterializeSource(ExtractSource{
+		Kind:      ExtractDir,
+		Root:      root,
+		Recursive: true,
+	}, MaterializeOptions{ExpandImports: true})
+}
+
+// DirResult is Dir Materialize with ExpandImports (optional recursion).
+func DirResult(root string, recursive bool) (*Result, error) {
+	return MaterializeSource(ExtractSource{
+		Kind:      ExtractDir,
+		Root:      root,
+		Recursive: recursive,
+	}, MaterializeOptions{ExpandImports: true})
+}
+
+// SeedResult is Seed BFS Materialize without ExpandImports (serve, file hops).
+func SeedResult(root, seedPath string) (*Result, error) {
+	return MaterializeSource(ExtractSource{
+		Kind:  ExtractSeed,
+		Root:  root,
+		Paths: []string{seedPath},
+	}, MaterializeOptions{ExpandImports: false})
+}
+
+
 func absRoot(root string) (string, error) {
 	if root == "" {
 		root = "."

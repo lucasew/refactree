@@ -22,7 +22,7 @@ func EncodeCodeURL(ref string) string {
 // The rootDir parameter is kept for call-site stability and possible future use;
 // it is currently ignored. Encoding matches EncodeCodeURL(ref).
 //
-// CanonicalizeReference is deliberately not used here: it runs IngestForFile,
+// CanonicalizeReference is deliberately not used here: it runs Seed Materialize,
 // and chasing import aliases into node_modules can take tens of seconds per
 // hyperlink during annotate. The page request already canonicalizes the primary
 // ref; link targets use the references produced by the current ingest result.

@@ -403,7 +403,7 @@ func ApplyMvPlan(root string, plan movePlan) ([]ingest.Edit, error) {
 }
 
 func postMvInvariants(root string, plan movePlan, strict bool) []InvariantFailure {
-	result, err := ingest.Ingest(root)
+	result, err := ingest.ProjectResult(root)
 	if err != nil {
 		return []InvariantFailure{{Check: "post_ingest", Message: err.Error()}}
 	}

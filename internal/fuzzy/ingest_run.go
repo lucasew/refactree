@@ -9,7 +9,7 @@ import (
 
 // RunIngestOnRoot ingests one directory and checks invariants.
 func RunIngestOnRoot(root string, opts InvariantOptions) (result *ingest.Result, fails []InvariantFailure, err error) {
-	result, err = ingest.Ingest(root)
+	result, err = ingest.ProjectResult(root)
 	if err != nil {
 		return nil, nil, err
 	}

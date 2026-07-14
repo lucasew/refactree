@@ -31,7 +31,7 @@ function handleSearch(event: Event) {
 	if err := os.WriteFile(filepath.Join(dir, "SearchBar.svelte"), []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	result, err := ingest.Ingest(dir)
+	result, err := ingest.ProjectResult(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

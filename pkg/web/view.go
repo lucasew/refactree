@@ -198,7 +198,7 @@ func (l *Loader) loadPathView(v FileView, scopeRef ingest.Reference) FileView {
 	}
 
 	// Inspection only: BFS from this file (peers + import targets), not whole-tree walk.
-	result, err := ingest.IngestForFile(l.RootDir, abs)
+	result, err := ingest.SeedResult(l.RootDir, abs)
 	if err != nil {
 		v.Warning = err.Error()
 		v.Segments = []annotate.Segment{{Text: string(source)}}
@@ -225,7 +225,7 @@ func (l *Loader) loadProviderView(v FileView, scopeRef ingest.Reference, focusRe
 
 	v.RootDir = scope.Dir
 
-	result, err := ingest.IngestWithRecursion(scope.Dir, false)
+	result, err := ingest.DirResult(scope.Dir, false)
 	if err != nil {
 		v.Warning = err.Error()
 		// Still try to list children without symbols from ingest.
@@ -263,7 +263,7 @@ func (l *Loader) loadProviderView(v FileView, scopeRef ingest.Reference, focusRe
 
 	// Re-ingest from the concrete file so annotate gets peer/import neighbors.
 	focused := result
-	if f, err := ingest.IngestForFile(scope.Dir, abs); err == nil {
+	if f, err := ingest.SeedResult(scope.Dir, abs); err == nil {
 		focused = f
 	} else if v.Warning == "" {
 		v.Warning = err.Error()

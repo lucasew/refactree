@@ -41,7 +41,7 @@ func newIngestCmd() *cobra.Command {
 }
 
 func collectExpectedIngest(dir string) (*ingest.Result, error) {
-	result, err := ingest.Ingest(dir)
+	result, err := ingest.ProjectResult(dir)
 	if err != nil {
 		return nil, err
 	}

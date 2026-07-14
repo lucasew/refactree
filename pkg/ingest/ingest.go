@@ -9,36 +9,6 @@ import (
 	"sync"
 )
 
-// Ingest is Dir WalkExtracts + Materialize(ExpandImports) over the whole tree.
-// Prefer MaterializeSource / WalkExtracts at new call sites (SPEC spine).
-func Ingest(dir string) (*Result, error) {
-	return MaterializeSource(ExtractSource{
-		Kind:      ExtractDir,
-		Root:      dir,
-		Recursive: true,
-	}, MaterializeOptions{ExpandImports: true})
-}
-
-// IngestWithRecursion is Dir WalkExtracts + Materialize(ExpandImports).
-// Prefer MaterializeSource at new call sites.
-func IngestWithRecursion(dir string, recursive bool) (*Result, error) {
-	return MaterializeSource(ExtractSource{
-		Kind:      ExtractDir,
-		Root:      dir,
-		Recursive: recursive,
-	}, MaterializeOptions{ExpandImports: true})
-}
-
-// IngestForFile is Seed WalkExtracts + Materialize without import expand.
-// Prefer MaterializeSource(ExtractSeed) at new call sites.
-func IngestForFile(rootDir, seedPath string) (*Result, error) {
-	return MaterializeSource(ExtractSource{
-		Kind:  ExtractSeed,
-		Root:  rootDir,
-		Paths: []string{seedPath},
-	}, MaterializeOptions{ExpandImports: false})
-}
-
 // appendImportTargetExtracts parses files referenced by imports/reexports when
 // the language driver resolves them to a path under rootAbs (including a single
 // node_modules entry). Does not recurse into dependency trees.
