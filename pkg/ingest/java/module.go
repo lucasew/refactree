@@ -4,7 +4,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/lucasew/refactree/pkg/ingest"
@@ -140,9 +139,7 @@ func (referenceProvider) ListScopeChildren(ref ingest.Reference, rootDir string,
 			Kind: refpkg.ScopeChildFile,
 		})
 	}
-	slices.SortFunc(children, func(a, b refpkg.ScopeChild) int {
-		return strings.Compare(a.Ref.Path, b.Ref.Path)
-	})
+	refpkg.SortScopeChildrenByPath(children)
 	return children, true, nil
 }
 
