@@ -135,7 +135,7 @@ func componentNameFromPath(relPath string) string {
 
 func mergeScript(fe *ingest.FileExtract, scriptEl *grammar.Node, source []byte, relPath string) {
 	langAttr := scriptLangAttr(scriptEl, source)
-	raw := childByType(scriptEl, "raw_text")
+	raw := ingest.ChildByType(scriptEl, "raw_text")
 	if raw == nil {
 		return
 	}
@@ -254,7 +254,7 @@ func isAllDigits(s string) bool {
 }
 
 func scriptLangAttr(scriptEl *grammar.Node, source []byte) string {
-	startTag := childByType(scriptEl, "start_tag")
+	startTag := ingest.ChildByType(scriptEl, "start_tag")
 	if startTag == nil {
 		return ""
 	}
@@ -263,31 +263,18 @@ func scriptLangAttr(scriptEl *grammar.Node, source []byte) string {
 		if attr.Type() != "attribute" {
 			continue
 		}
-		nameN := childByType(attr, "attribute_name")
+		nameN := ingest.ChildByType(attr, "attribute_name")
 		if nameN == nil || !strings.EqualFold(ingest.NodeText(nameN, source), "lang") {
 			continue
 		}
-		if q := childByType(attr, "quoted_attribute_value"); q != nil {
-			if v := childByType(q, "attribute_value"); v != nil {
+		if q := ingest.ChildByType(attr, "quoted_attribute_value"); q != nil {
+			if v := ingest.ChildByType(q, "attribute_value"); v != nil {
 				return ingest.NodeText(v, source)
 			}
 		}
-		if v := childByType(attr, "attribute_value"); v != nil {
+		if v := ingest.ChildByType(attr, "attribute_value"); v != nil {
 			return ingest.NodeText(v, source)
 		}
 	}
 	return ""
-}
-
-func childByType(n *grammar.Node, typ string) *grammar.Node {
-	if n == nil {
-		return nil
-	}
-	for i := uint32(0); i < n.ChildCount(); i++ {
-		c := n.Child(i)
-		if c != nil && c.Type() == typ {
-			return c
-		}
-	}
-	return nil
 }
