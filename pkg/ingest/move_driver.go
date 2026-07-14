@@ -22,6 +22,19 @@ type DeclExtract struct {
 	RemoveEnd uint32
 }
 
+// AppendDeclText appends declText to content with blank-line separation.
+// Ensures content ends with a newline before the blank line when non-empty.
+func AppendDeclText(content, declText string) string {
+	out := content
+	if len(out) > 0 && out[len(out)-1] != '\n' {
+		out += "\n"
+	}
+	if len(out) > 0 {
+		out += "\n"
+	}
+	return out + declText + "\n"
+}
+
 // MoveDriver defines language-specific operations for cross-file moves.
 // Each language registers one via RegisterMoveDriver.
 type MoveDriver interface {

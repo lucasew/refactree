@@ -76,7 +76,7 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 				File:      dstRelPath,
 				StartByte: 0,
 				EndByte:   uint32(len(dstContent)),
-				NewText:   appendJavaDeclText(merged, decl.DeclText),
+				NewText:   ingest.AppendDeclText(merged, decl.DeclText),
 			}
 		}
 		insertAt := uint32(len(dstContent))
@@ -107,19 +107,8 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 		File:      dstRelPath,
 		StartByte: 0,
 		EndByte:   0,
-		NewText:   appendJavaDeclText(body, decl.DeclText),
+		NewText:   ingest.AppendDeclText(body, decl.DeclText),
 	}
-}
-
-func appendJavaDeclText(content, declText string) string {
-	out := content
-	if len(out) > 0 && out[len(out)-1] != '\n' {
-		out += "\n"
-	}
-	if len(out) > 0 {
-		out += "\n"
-	}
-	return out + declText + "\n"
 }
 
 // javaImportSpec is one import/import-static line from a Java source file.

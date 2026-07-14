@@ -98,7 +98,7 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 				File:      dstRelPath,
 				StartByte: 0,
 				EndByte:   uint32(len(dstContent)),
-				NewText:   appendDeclText(merged, decl.DeclText),
+				NewText:   ingest.AppendDeclText(merged, decl.DeclText),
 			}
 		}
 		insertAt = uint32(len(dstContent))
@@ -121,7 +121,7 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 		if len(decl.Imports) > 0 {
 			body = ensureGoImports(body, decl.Imports)
 		}
-		insertText = appendDeclText(body, decl.DeclText)
+		insertText = ingest.AppendDeclText(body, decl.DeclText)
 	}
 
 	return ingest.Edit{
@@ -130,17 +130,6 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 		EndByte:   insertAt,
 		NewText:   insertText,
 	}
-}
-
-func appendDeclText(content, declText string) string {
-	out := content
-	if len(out) > 0 && out[len(out)-1] != '\n' {
-		out += "\n"
-	}
-	if len(out) > 0 {
-		out += "\n"
-	}
-	return out + declText + "\n"
 }
 
 // goImportsNeededByDecl returns import paths from the source file whose local
