@@ -1,7 +1,6 @@
 package fuzzy_test
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -16,6 +15,9 @@ import (
 //
 //	RFT_FUZZY_WARMUP=1 go test ./internal/fuzzy -run '^TestPrefetchWarmup$' -count=1 -timeout 0 -v
 //
+// Prefetch uses t.Context() so host mise/uv children are cancelled when the test
+// ends or the go test timeout fires (CommandContext on the harness path).
+//
 // Optional: RFT_FUZZY_WORK_ROOT, RFT_FUZZY_NO_ISOLATE=1, RFT_FUZZY_PROJECT=slug,...
 //
 // After this, catalog tests should use WorkRoot: fuzzy.DefaultWorkRoot() and Offline: true.
@@ -23,8 +25,9 @@ func TestPrefetchWarmup(t *testing.T) {
 	if !truthyEnv("RFT_FUZZY_WARMUP") {
 		t.Skip("set RFT_FUZZY_WARMUP=1 to run catalog prefetch warmup")
 	}
+	ctx := t.Context()
 	start := time.Now()
-	root, err := fuzzy.PrefetchOnce(context.Background())
+	root, err := fuzzy.PrefetchOnce(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +38,7 @@ func TestPrefetchWarmup(t *testing.T) {
 
 	// Second call must be a cheap no-op (warm check only).
 	start = time.Now()
-	root2, err := fuzzy.PrefetchOnce(context.Background())
+	root2, err := fuzzy.PrefetchOnce(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
