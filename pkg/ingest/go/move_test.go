@@ -6,12 +6,9 @@ import (
 	"strings"
 	"testing"
 
-<<<<<<< HEAD
 	"github.com/lucasew/refactree/pkg/ingest"
 )
 
-|||||||
-=======
 func TestMethodReceiverType_StripsGenericArgs(t *testing.T) {
 	cases := []struct {
 		symbol string
@@ -53,7 +50,6 @@ func TestGoIdentUsed_SkipsCommentsAndStrings(t *testing.T) {
 	}
 }
 
->>>>>>> master
 func TestFindSelectorLeafEdits_SkipsCommentApostrophe(t *testing.T) {
 	content := []byte("package wallpaper\n\nfunc Wrap() error {\n\t// Ignore errors if service doesn't exist\n\treturn d.SetStatic(ctx, path)\n}\n")
 	edits := findSelectorLeafEdits("facade.go", content, "SetStatic", "Fuzz", nil)
@@ -78,7 +74,6 @@ func TestFindPathSegmentOccurrencesInStrings(t *testing.T) {
 	}
 }
 
-<<<<<<< HEAD
 func TestExtractDeclVarConstFromGroup(t *testing.T) {
 	dir := t.TempDir()
 	src := "package apps\n\nimport \"errors\"\n\nvar (\n\tErrNoVersions   = errors.New(\"no versions found\")\n\tErrNoGoVersions = ErrNoVersions\n)\n"
@@ -128,8 +123,6 @@ func TestExtractDeclVarConstFromGroup(t *testing.T) {
 	}
 }
 
-|||||||
-=======
 // Shared parent leaf (…/driver/wallpaper under cmd vs pkg) must not both rewrite
 // when only cmd/…/driver/wallpaper is moved — parentDir is the full prefix.
 func TestFindPathSegmentWithFullParentPath(t *testing.T) {
@@ -147,5 +140,3 @@ import (
 		t.Fatalf("want 1 edit for cmd tree only, got %+v", edits)
 	}
 }
-
->>>>>>> master
