@@ -54,14 +54,6 @@ func NewResolver(rootDir string) *Resolver {
 	return refpkg.NewResolver(rootDir)
 }
 
-func resolveProviderSymbolTarget(ref Reference) (ProviderSymbolTarget, bool, error) {
-	return NewResolver("").ResolveSymbolTarget(ref)
-}
-
-func resolveProviderScopeTarget(ref Reference) (ProviderScopeTarget, bool, error) {
-	return NewResolver("").ResolveScopeTarget(ref)
-}
-
 func providerListIngestRecursive(ref Reference, opts ListOptions) bool {
 	if ref.Provider == "" || ref.Provider == "path" {
 		return opts.Recursive

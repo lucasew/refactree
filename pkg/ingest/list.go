@@ -32,7 +32,7 @@ func WalkSymbols(dir, reference string, opts ListOptions, yield func(SymbolInfo)
 	refIsDir := false
 
 	if ref.Provider != "" && ref.Provider != "path" {
-		scope, ok, err := resolveProviderScopeTarget(ref)
+		scope, ok, err := NewResolver("").ResolveScopeTarget(ref)
 		if err != nil {
 			return err
 		}

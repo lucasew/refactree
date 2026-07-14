@@ -23,7 +23,7 @@ func DocFor(dir, reference string) (*DocResult, error) {
 	rawRef := ParseReference(reference)
 	if rawRef.Provider != "" && rawRef.Provider != "path" {
 		if rawRef.Symbol != "" {
-			target, ok, err := resolveProviderSymbolTarget(rawRef)
+			target, ok, err := NewResolver("").ResolveSymbolTarget(rawRef)
 			if err != nil {
 				return nil, err
 			}

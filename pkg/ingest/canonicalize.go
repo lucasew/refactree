@@ -219,7 +219,7 @@ func ingestForCanonicalize(rootAbs string, ref Reference) (*Result, bool) {
 			}, MaterializeOptions{ExpandImports: false})
 			return result, err == nil
 		}
-		// File hop: Seed BFS (same neighborhood as historical IngestForFile).
+		// File hop: Seed BFS.
 		result, err := MaterializeSource(ExtractSource{
 			Kind:  ExtractSeed,
 			Root:  rootAbs,

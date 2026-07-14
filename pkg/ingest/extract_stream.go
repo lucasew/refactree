@@ -22,7 +22,7 @@ const (
 	// ExtractDir walks a directory tree (skip rules + recursive policy).
 	ExtractDir ExtractKind = iota
 	// ExtractSeed BFS-expands from seed file paths (neighbors + import probes).
-	// Used for serve annotate and canonicalize file hops (historical IngestForFile).
+	// Used for serve annotate and canonicalize file hops.
 	ExtractSeed
 	// ExtractHop parses only the given path(s) with no neighbor BFS.
 	// Used for single-file list scope.

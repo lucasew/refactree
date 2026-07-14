@@ -77,20 +77,3 @@ func (r *Resolver) ResolveScopeChildren(ref Reference, includeHidden bool) ([]Sc
 	return childrenProvider.ListScopeChildren(ref, r.RootDir, includeHidden)
 }
 
-// ResolveSymbolTarget resolves with an empty project root (process cwd only).
-// Prefer NewResolver(root).ResolveSymbolTarget when a project dir is known.
-func ResolveSymbolTarget(ref Reference) (SymbolTarget, bool, error) {
-	return NewResolver("").ResolveSymbolTarget(ref)
-}
-
-// ResolveScopeTarget resolves with an empty project root (process cwd only).
-// Prefer NewResolver(root).ResolveScopeTarget when a project dir is known.
-func ResolveScopeTarget(ref Reference) (ScopeTarget, bool, error) {
-	return NewResolver("").ResolveScopeTarget(ref)
-}
-
-// ResolveScopeChildren lists children with an empty project root.
-// Prefer NewResolver(root).ResolveScopeChildren when a project dir is known.
-func ResolveScopeChildren(ref Reference, includeHidden bool) ([]ScopeChild, bool, error) {
-	return NewResolver("").ResolveScopeChildren(ref, includeHidden)
-}
