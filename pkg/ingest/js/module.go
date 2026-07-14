@@ -954,14 +954,12 @@ func ExtractECMAScript(script []byte, grammarName, relPath string) (*ingest.File
 	if !ok {
 		return nil, fmt.Errorf("unknown grammar %q", grammarName)
 	}
-	parser := grammar.NewParser()
-	defer parser.Delete()
-	if !parser.SetLanguage(lang) {
-		return nil, fmt.Errorf("failed to set grammar %q", grammarName)
+	pf, err := ingest.ParseSourceLanguage(script, lang, grammarName)
+	if err != nil {
+		return nil, err
 	}
-	tree := parser.ParseString(string(script))
-	defer tree.Delete()
-	fe := extractECMA(tree.RootNode(), script, relPath)
+	defer pf.Close()
+	fe := extractECMA(pf.Root, script, relPath)
 	return fe, nil
 }
 
@@ -984,13 +982,11 @@ func ExtractECMAExpressionUsages(expr []byte, grammarName string) ([]ingest.Usag
 	if !ok {
 		return nil, fmt.Errorf("unknown grammar %q", grammarName)
 	}
-	parser := grammar.NewParser()
-	defer parser.Delete()
-	if !parser.SetLanguage(lang) {
-		return nil, fmt.Errorf("failed to set grammar %q", grammarName)
+	pf, err := ingest.ParseSourceLanguage(expr, lang, grammarName)
+	if err != nil {
+		return nil, err
 	}
-	tree := parser.ParseString(string(expr))
-	defer tree.Delete()
+	defer pf.Close()
 	var usages []ingest.UsageDef
 	var walk func(n *grammar.Node, skipIdent bool)
 	walk = func(n *grammar.Node, skipIdent bool) {
@@ -1043,7 +1039,7 @@ func ExtractECMAExpressionUsages(expr []byte, grammarName string) ([]ingest.Usag
 			walk(n.Child(i), false)
 		}
 	}
-	walk(tree.RootNode(), false)
+	walk(pf.Root, false)
 	return usages, nil
 }
 
