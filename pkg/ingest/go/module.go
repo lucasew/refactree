@@ -427,7 +427,7 @@ func extractGoImportSpec(fe *ingest.FileExtract, n *grammar.Node, source []byte)
 		startByte = aliasNode.StartByte()
 		endByte = aliasNode.EndByte()
 	} else {
-		localName = lastPathComponent(importPath)
+		localName = ingest.LastPathComponent(importPath)
 		startByte = pathContent.StartByte()
 		endByte = pathContent.EndByte()
 	}
@@ -515,11 +515,4 @@ func walkGoUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope 
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		walkGoUsages(fe, n.Child(i), source, scope)
 	}
-}
-
-func lastPathComponent(s string) string {
-	if i := strings.LastIndex(s, "/"); i >= 0 {
-		return s[i+1:]
-	}
-	return s
 }

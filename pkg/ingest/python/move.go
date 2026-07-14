@@ -106,8 +106,8 @@ func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ing
 	if oldDir == "" || newDir == "" || oldDir == newDir {
 		return nil
 	}
-	oldBase := lastPathComponent(oldDir)
-	newBase := lastPathComponent(newDir)
+	oldBase := ingest.LastPathComponent(oldDir)
+	newBase := ingest.LastPathComponent(newDir)
 	if oldBase == newBase {
 		return nil
 	}
@@ -277,8 +277,8 @@ func buildReplacementModule(importMod, oldMod, newMod string) string {
 	}
 	// Relative import: replace stem
 	if strings.HasPrefix(importMod, ".") {
-		oldStem := lastPathComponent(strings.ReplaceAll(oldMod, ".", "/"))
-		newStem := lastPathComponent(strings.ReplaceAll(newMod, ".", "/"))
+		oldStem := ingest.LastPathComponent(strings.ReplaceAll(oldMod, ".", "/"))
+		newStem := ingest.LastPathComponent(strings.ReplaceAll(newMod, ".", "/"))
 		if strings.HasSuffix(importMod, oldStem) {
 			return importMod[:len(importMod)-len(oldStem)] + newStem
 		}
@@ -298,14 +298,7 @@ func pythonModuleFromPath(p string) string {
 func pythonFileStem(p string) string {
 	p = strings.TrimSuffix(p, ".py")
 	p = strings.TrimSuffix(p, "/__init__")
-	return lastPathComponent(p)
-}
-
-func lastPathComponent(s string) string {
-	if i := strings.LastIndex(s, "/"); i >= 0 {
-		return s[i+1:]
-	}
-	return s
+	return ingest.LastPathComponent(p)
 }
 
 // findPythonDecl returns the top-level declaration node whose name starts at nameStart.

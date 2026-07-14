@@ -125,7 +125,7 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 	} else {
 		pkgName := decl.Preamble
 		if pkgName == "" {
-			pkgName = lastPathComponent(strings.TrimSuffix(dstRelPath, ".go"))
+			pkgName = ingest.LastPathComponent(strings.TrimSuffix(dstRelPath, ".go"))
 			if i := strings.LastIndex(pkgName, "/"); i >= 0 {
 				pkgName = pkgName[i+1:]
 			}
@@ -281,7 +281,7 @@ func parseGoImportLine(s string) (goImportSpec, bool) {
 	}
 	p := pathPart[1 : 1+end]
 	if local == "" {
-		local = lastPathComponent(p)
+		local = ingest.LastPathComponent(p)
 	}
 	return goImportSpec{local: local, path: p}, true
 }
@@ -506,8 +506,8 @@ func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ing
 	edits = findPathSegmentOccurrencesInStrings(fileRelPath, content, oldDir, newDir)
 
 	if len(edits) == 0 {
-		oldBase := lastPathComponent(oldDir)
-		newBase := lastPathComponent(newDir)
+		oldBase := ingest.LastPathComponent(oldDir)
+		newBase := ingest.LastPathComponent(newDir)
 		if cp := ingest.CommonPathPrefix(oldDir, newDir); cp != "" {
 			if rel := strings.Trim(strings.TrimPrefix(newDir, cp), "/"); rel != "" {
 				newBase = rel
@@ -525,8 +525,8 @@ func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ing
 	// For package moves, the qualifier comes from the `package` directive and is handled
 	// separately by planPackageMove's declaredName logic.
 	if oldRef.Symbol != "" {
-		oldQual := lastPathComponent(oldDir)
-		newQual := lastPathComponent(newDir)
+		oldQual := ingest.LastPathComponent(oldDir)
+		newQual := ingest.LastPathComponent(newDir)
 		if oldQual != newQual {
 			qualEdits := findQualifierDotOccurrences(fileRelPath, content, oldQual, newQual)
 			edits = append(edits, qualEdits...)
@@ -849,7 +849,7 @@ func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src
 		return edits, nil
 	}
 
-	newQual := lastPathComponent(newDir)
+	newQual := ingest.LastPathComponent(newDir)
 	modPath, err := readGoModulePath(rootDir)
 	if err != nil || modPath == "" {
 		return edits, nil

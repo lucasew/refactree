@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/lucasew/refactree/pkg/reference"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,7 +22,7 @@ type SymbolTarget struct {
 
 // ResolveImport resolves a Go import path into a canonical reference string.
 func ResolveImport(spec string, knownDirs map[string]bool) string {
-	last := lastPathComponent(spec)
+	last := reference.LastPathComponent(spec)
 	if knownDirs[last] {
 		return "path:./" + last
 	}
@@ -207,11 +208,4 @@ func escapeModulePath(s string) string {
 		b.WriteByte(c)
 	}
 	return b.String()
-}
-
-func lastPathComponent(s string) string {
-	if i := strings.LastIndex(s, "/"); i >= 0 {
-		return s[i+1:]
-	}
-	return s
 }
