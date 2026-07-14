@@ -36,3 +36,15 @@ func TestParseSourceFileUnsupported(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestParseSource(t *testing.T) {
+	content := []byte("package p\n")
+	pf, err := ParseSource(content, "x.go", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pf.Close()
+	if pf.Root == nil || string(pf.Source) != string(content) {
+		t.Fatal("bad parse")
+	}
+}
