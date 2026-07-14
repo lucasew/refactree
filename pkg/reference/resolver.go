@@ -76,4 +76,3 @@ func (r *Resolver) ResolveScopeChildren(ref Reference, includeHidden bool) ([]Sc
 	}
 	return childrenProvider.ListScopeChildren(ref, r.RootDir, includeHidden)
 }
-

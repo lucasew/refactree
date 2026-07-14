@@ -174,7 +174,6 @@ func SeedResult(root, seedPath string) (*Result, error) {
 	}, MaterializeOptions{ExpandImports: false})
 }
 
-
 func absRoot(root string) (string, error) {
 	if root == "" {
 		root = "."
