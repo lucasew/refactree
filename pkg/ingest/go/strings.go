@@ -9,7 +9,7 @@ import (
 // findPathSegmentOccurrencesInStrings replaces oldPath with newPath only
 // inside string literals and only on import-path segment boundaries.
 func findPathSegmentOccurrencesInStrings(file string, content []byte, oldPath, newPath string) []ingest.Edit {
-	return findInStringLiterals(file, content, oldPath, newPath, true, "")
+	return findInStringLiterals(file, content, oldPath, newPath, "")
 }
 
 // findPathSegmentOccurrencesInStringsWithParent replaces a path leaf only when
@@ -18,10 +18,10 @@ func findPathSegmentOccurrencesInStrings(file string, content []byte, oldPath, n
 // packages that share a basename path like cmd/.../driver/wallpaper vs
 // pkg/.../driver/wallpaper.
 func findPathSegmentOccurrencesInStringsWithParent(file string, content []byte, leaf, newLeaf, parentDir string) []ingest.Edit {
-	return findInStringLiterals(file, content, leaf, newLeaf, true, parentDir)
+	return findInStringLiterals(file, content, leaf, newLeaf, parentDir)
 }
 
-func findInStringLiterals(file string, content []byte, oldBase, newBase string, pathSegments bool, parentDir string) []ingest.Edit {
+func findInStringLiterals(file string, content []byte, oldBase, newBase, parentDir string) []ingest.Edit {
 	if oldBase == "" || oldBase == newBase {
 		return nil
 	}
@@ -36,12 +36,9 @@ func findInStringLiterals(file string, content []byte, oldBase, newBase string, 
 			posInSeg := sOff + idx
 			pos := start + posInSeg
 			endPos := pos + len(oldBase)
-			keep := true
-			if pathSegments {
-				keep = pathSegmentBounded(seg, posInSeg, posInSeg+len(oldBase))
-				if keep && parentDir != "" {
-					keep = pathSegmentHasParent(seg, posInSeg, parentDir)
-				}
+			keep := pathSegmentBounded(seg, posInSeg, posInSeg+len(oldBase))
+			if keep && parentDir != "" {
+				keep = pathSegmentHasParent(seg, posInSeg, parentDir)
 			}
 			if keep {
 				edits = append(edits, ingest.Edit{
