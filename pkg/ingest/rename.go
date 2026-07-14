@@ -105,10 +105,9 @@ func planSymbolRename(dir string, result *Result, sourceRefs []string, destSymbo
 	if len(sourceRefs) == 0 {
 		return nil, fmt.Errorf("no source references to rename")
 	}
-	sourceSet := map[string]bool{}
-	for _, s := range sourceRefs {
-		sourceSet[s] = true
-	}
+	// Relations often target language providers (go:mod/pkg::Sym) while entities
+	// are path:./pkg/file.go::Sym. Expand so cross-package qualified calls rename.
+	sourceSet := expandRenameSourceSet(result, sourceRefs)
 	var edits []Edit
 	// Spans store the identifier leaf (e.g. "toJson"), while references may be
 	// qualified ("Gson.toJson"). Always rewrite source text with the leaf.
@@ -197,6 +196,81 @@ func dedupeEdits(edits []Edit) []Edit {
 		out = append(out, e)
 	}
 	return out
+}
+
+// expandRenameSourceSet adds language-provider targets (e.g. go:mod/pkg::Sym)
+// that refer to the same package-scoped symbols as the path: entity refs.
+func expandRenameSourceSet(result *Result, sourceRefs []string) map[string]bool {
+	sourceSet := map[string]bool{}
+	type want struct {
+		pkgDir string
+		symbol string
+	}
+	var wants []want
+	seenWant := map[want]bool{}
+	for _, s := range sourceRefs {
+		if s == "" {
+			continue
+		}
+		sourceSet[s] = true
+		ref := ParseReference(s)
+		pkgDir := path.Dir(strings.TrimPrefix(ref.Path, "./"))
+		if pkgDir == "." {
+			pkgDir = ""
+		}
+		w := want{pkgDir: pkgDir, symbol: ref.Symbol}
+		if ref.Symbol == "" || seenWant[w] {
+			continue
+		}
+		seenWant[w] = true
+		wants = append(wants, w)
+	}
+	if len(wants) == 0 || result == nil {
+		return sourceSet
+	}
+	add := func(target string) {
+		if target == "" || sourceSet[target] {
+			return
+		}
+		t := ParseReference(target)
+		if t.Symbol == "" {
+			return
+		}
+		for _, w := range wants {
+			if t.Symbol != w.symbol {
+				continue
+			}
+			if targetMatchesPackageSymbol(t, w.pkgDir) {
+				sourceSet[target] = true
+				return
+			}
+		}
+	}
+	for _, rel := range result.Relations {
+		add(rel.Target)
+	}
+	for _, a := range result.Aliases {
+		add(a.Target)
+	}
+	return sourceSet
+}
+
+// targetMatchesPackageSymbol reports whether ref names symbol in package pkgDir
+// (relative module path, e.g. "pkg/db"). Works for path: and go:/python:-style
+// import paths that end with that package directory.
+func targetMatchesPackageSymbol(ref Reference, pkgDir string) bool {
+	if ref.Provider == "path" || ref.Provider == "" {
+		dir := path.Dir(strings.TrimPrefix(ref.Path, "./"))
+		if dir == "." {
+			dir = ""
+		}
+		return dir == pkgDir
+	}
+	p := strings.Trim(ref.Path, "/")
+	if pkgDir == "" {
+		return p != "" && !strings.Contains(p, "/")
+	}
+	return p == pkgDir || strings.HasSuffix(p, "/"+pkgDir)
 }
 
 // symbolNameLeaf returns the identifier text written at a definition/use span.

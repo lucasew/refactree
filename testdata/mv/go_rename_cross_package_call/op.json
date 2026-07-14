@@ -1,0 +1,4 @@
+{
+  "source": "path:./lib/db.go::FromContext",
+  "destination": "path:./lib/db.go::FuzzCtx"
+}
