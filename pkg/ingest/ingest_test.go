@@ -20,7 +20,7 @@ import (
 	_ "github.com/lucasew/refactree/pkg/ingest/python"
 )
 
-func TestIngest(t *testing.T) {
+func TestProjectResult_Fixtures(t *testing.T) {
 	fixtureDir := filepath.Join("..", "..", "testdata", "ingest")
 	entries, err := os.ReadDir(fixtureDir)
 	if err != nil {
@@ -43,7 +43,7 @@ func TestIngest(t *testing.T) {
 				t.Fatalf("parsing expected.json: %v", err)
 			}
 
-			got, err := ingest.Ingest(dir)
+			got, err := ingest.ProjectResult(dir)
 			if err != nil {
 				t.Fatalf("ingest: %v", err)
 			}

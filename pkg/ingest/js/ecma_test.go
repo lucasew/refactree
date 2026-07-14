@@ -36,7 +36,7 @@ export const variant = "primary"
 		t.Fatal(err)
 	}
 
-	result, err := ingest.Ingest(dir)
+	result, err := ingest.ProjectResult(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

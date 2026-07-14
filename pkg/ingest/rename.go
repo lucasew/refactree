@@ -28,7 +28,7 @@ func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 		return nil, fmt.Errorf("source and destination references must both include symbols or both omit them (for package moves)")
 	}
 
-	result, err := Ingest(dir)
+	result, err := ProjectResult(dir)
 	if err != nil {
 		return nil, err
 	}

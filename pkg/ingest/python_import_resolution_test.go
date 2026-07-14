@@ -23,7 +23,7 @@ func TestIngest_PythonRelativeImportResolvesToLocalFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := ingest.Ingest(dir)
+	result, err := ingest.ProjectResult(dir)
 	if err != nil {
 		t.Fatalf("ingest failed: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestIngest_PythonAbsoluteDottedImportResolvesToLocalFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := ingest.Ingest(dir)
+	result, err := ingest.ProjectResult(dir)
 	if err != nil {
 		t.Fatalf("ingest failed: %v", err)
 	}

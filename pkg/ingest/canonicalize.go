@@ -68,7 +68,7 @@ func CanonicalizeReference(rootDir string, ref Reference) Reference {
 
 // CanonicalizeInResult walks only the provider-agnostic ingest graph (Entities,
 // Aliases). No filesystem or language driver calls — callers supply an already
-// built Result (e.g. from Ingest / IngestForFile / provider scope ingest).
+// built Result (e.g. from MaterializeSource / Seed / Dir drivers).
 //
 // Intermediate alias/entity targets may be path: refs even when the input was
 // go:/python:; use CanonicalizeReference (or projectToInputProvider) to restore
@@ -194,8 +194,8 @@ func canonicalizeDirectoryModule(rootAbs string, ref Reference) Reference {
 	return ref
 }
 
-// ingestForCanonicalize builds a Result seeded from ref so Entities/Aliases include
-// the target and its re-export/import neighborhood.
+// ingestForCanonicalize builds a Result via Hop/Seed/Dir drivers + Materialize
+// (no ExpandImports) so Entities/Aliases include the target neighborhood.
 func ingestForCanonicalize(rootAbs string, ref Reference) (*Result, bool) {
 	if ref.Provider == "" || ref.Provider == "path" {
 		rel := strings.TrimPrefix(ref.Path, "./")
@@ -211,10 +211,20 @@ func ingestForCanonicalize(rootAbs string, ref Reference) (*Result, bool) {
 			return nil, false
 		}
 		if st.IsDir() {
-			result, err := IngestWithRecursion(abs, false)
+			// Non-recursive Dir under the module directory.
+			result, err := MaterializeSource(ExtractSource{
+				Kind:      ExtractDir,
+				Root:      abs,
+				Recursive: false,
+			}, MaterializeOptions{ExpandImports: false})
 			return result, err == nil
 		}
-		result, err := IngestForFile(rootAbs, abs)
+		// File hop: Seed BFS.
+		result, err := MaterializeSource(ExtractSource{
+			Kind:  ExtractSeed,
+			Root:  rootAbs,
+			Paths: []string{abs},
+		}, MaterializeOptions{ExpandImports: false})
 		return result, err == nil
 	}
 
@@ -222,7 +232,11 @@ func ingestForCanonicalize(rootAbs string, ref Reference) (*Result, bool) {
 	if err != nil || !ok {
 		return nil, false
 	}
-	result, err := IngestWithRecursion(scope.Dir, false)
+	result, err := MaterializeSource(ExtractSource{
+		Kind:      ExtractDir,
+		Root:      scope.Dir,
+		Recursive: false,
+	}, MaterializeOptions{ExpandImports: false})
 	return result, err == nil
 }
 

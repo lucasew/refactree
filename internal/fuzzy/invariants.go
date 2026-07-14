@@ -133,7 +133,7 @@ func addFileRef(fileRefs map[string]bool, rel string) {
 
 // CheckIdempotentIngest re-ingests and compares sorted JSON.
 func CheckIdempotentIngest(dir string, first *ingest.Result) []InvariantFailure {
-	second, err := ingest.Ingest(dir)
+	second, err := ingest.ProjectResult(dir)
 	if err != nil {
 		return []InvariantFailure{{Check: "reingest", Message: err.Error()}}
 	}
