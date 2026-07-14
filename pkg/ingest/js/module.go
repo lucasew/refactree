@@ -112,7 +112,7 @@ func resolvePathImport(spec string, ctx ingest.ImportResolveContext) (string, bo
 		return "", false
 	}
 
-	rel := relImportPath(ctx.ImporterPath, spec)
+	rel := ingest.RelImportPath(ctx.ImporterPath, spec)
 	if rel == "" {
 		return "", false
 	}
@@ -128,7 +128,7 @@ func resolvePathImport(spec string, ctx ingest.ImportResolveContext) (string, bo
 	candidate := filepath.Join(rootAbs, filepath.FromSlash(rel))
 	resolved, ok := resolveJSFileOnDisk(candidate, false)
 	if ok {
-		return pathRefForAbs(rootAbs, resolved), true
+		return ingest.PathRefForAbs(rootAbs, resolved), true
 	}
 
 	return ingest.FileRef("./" + rel), true
@@ -169,7 +169,7 @@ func resolveNodeImport(spec string, ctx ingest.ImportResolveContext) (string, bo
 
 		// Prefer package.json entrypoints (exports / module / main) — same order Node uses.
 		if resolved, ok := resolvePackageEntrypoint(pkgRoot, subpath); ok {
-			return pathRefForAbs(rootAbs, resolved), true
+			return ingest.PathRefForAbs(rootAbs, resolved), true
 		}
 
 		// Fallback when there is no package.json (or no usable entry): treat as a plain path.
@@ -178,10 +178,10 @@ func resolveNodeImport(spec string, ctx ingest.ImportResolveContext) (string, bo
 			targetBase = filepath.Join(pkgRoot, filepath.FromSlash(subpath))
 		}
 		if resolved, ok := resolveJSFileOnDisk(targetBase, false); ok {
-			return pathRefForAbs(rootAbs, resolved), true
+			return ingest.PathRefForAbs(rootAbs, resolved), true
 		}
 		if st, err := os.Stat(targetBase); err == nil && st.IsDir() {
-			return pathRefForAbs(rootAbs, targetBase), true
+			return ingest.PathRefForAbs(rootAbs, targetBase), true
 		}
 	}
 
@@ -591,36 +591,6 @@ func emitJSIdentifierUsage(fe *ingest.FileExtract, n *grammar.Node, source []byt
 			})
 		}
 	}
-}
-
-func pathRefForAbs(rootDir, absPath string) string {
-	rootAbs, err := filepath.Abs(rootDir)
-	if err != nil {
-		return ingest.FileRef(filepath.ToSlash(absPath))
-	}
-	abs, err := filepath.Abs(absPath)
-	if err != nil {
-		return ingest.FileRef(filepath.ToSlash(absPath))
-	}
-
-	rel, err := filepath.Rel(rootAbs, abs)
-	if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return ingest.FileRef("./" + filepath.ToSlash(rel))
-	}
-	return ingest.FileRef(filepath.ToSlash(abs))
-}
-
-func relImportPath(importerPath, spec string) string {
-	importerDir := filepath.ToSlash(filepath.Dir(importerPath))
-	if importerDir == "." {
-		importerDir = ""
-	}
-	if strings.HasPrefix(spec, "/") {
-		return strings.TrimPrefix(filepath.ToSlash(spec), "/")
-	}
-	joined := filepath.ToSlash(filepath.Clean(filepath.Join(importerDir, spec)))
-	joined = strings.TrimPrefix(joined, "./")
-	return joined
 }
 
 func resolveKnownJSPath(rel string, knownFiles map[string]bool) (string, bool) {
