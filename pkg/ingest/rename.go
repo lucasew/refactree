@@ -111,8 +111,8 @@ func planSymbolRename(dir string, result *Result, sourceRefs []string, destSymbo
 	var edits []Edit
 	// Spans store the identifier leaf (e.g. "toJson"), while references may be
 	// qualified ("Gson.toJson"). Always rewrite source text with the leaf.
-	newText := symbolNameLeaf(destSymbol)
-	oldLeaf := symbolNameLeaf(ParseReference(sourceRefs[0]).Symbol)
+	newText := SymbolLeaf(destSymbol)
+	oldLeaf := SymbolLeaf(ParseReference(sourceRefs[0]).Symbol)
 
 	// 1. Rename each related entity definition. Destination symbol qualifiers
 	// stay aligned with each source entity's receiver prefix.
@@ -311,9 +311,9 @@ func readModulePathForRename(rootDir string) string {
 	}
 }
 
-// symbolNameLeaf returns the identifier text written at a definition/use span.
-// Qualified symbols use "." separators; Go pointer receivers may prefix "*".
-func symbolNameLeaf(symbol string) string {
+// SymbolLeaf returns the identifier text written at a definition/use span.
+// Qualified symbols use "." separators; pointer receivers may prefix "*".
+func SymbolLeaf(symbol string) string {
 	leaf := symbol
 	if i := strings.LastIndex(leaf, "."); i >= 0 {
 		leaf = leaf[i+1:]

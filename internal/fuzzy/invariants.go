@@ -64,10 +64,10 @@ func CheckInvariants(dir string, result *ingest.Result, opts InvariantOptions) [
 		rel := strings.TrimPrefix(ref.Path, "./")
 		fails = append(fails, checkSpan("entity_span", e.Reference, e.StartByte, e.EndByte, fileSizes[rel])...)
 		if ref.Symbol != "" {
-			if text, ok := readSpan(dir, rel, e.StartByte, e.EndByte); ok && text != symbolLeaf(ref.Symbol) {
+			if text, ok := readSpan(dir, rel, e.StartByte, e.EndByte); ok && text != ingest.SymbolLeaf(ref.Symbol) {
 				fails = append(fails, InvariantFailure{
 					Check:   "entity_text",
-					Message: fmt.Sprintf("%s span %q != symbol leaf %q (from %q)", e.Reference, text, symbolLeaf(ref.Symbol), ref.Symbol),
+					Message: fmt.Sprintf("%s span %q != symbol leaf %q (from %q)", e.Reference, text, ingest.SymbolLeaf(ref.Symbol), ref.Symbol),
 				})
 			}
 		}
@@ -185,16 +185,6 @@ func checkSpan(check, ref string, start, end uint32, size int) []InvariantFailur
 		return []InvariantFailure{{Check: check, Message: fmt.Sprintf("%s: end %d > file size %d", ref, end, size)}}
 	}
 	return nil
-}
-
-// symbolLeaf returns the identifier text expected at an entity span.
-// Qualified symbols use "." separators; Go pointer receivers may prefix "*".
-func symbolLeaf(symbol string) string {
-	leaf := symbol
-	if i := strings.LastIndex(leaf, "."); i >= 0 {
-		leaf = leaf[i+1:]
-	}
-	return strings.TrimPrefix(leaf, "*")
 }
 
 func readSpan(dir, rel string, start, end uint32) (string, bool) {
