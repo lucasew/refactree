@@ -1,7 +1,6 @@
 package fuzzy
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -66,7 +65,7 @@ run = "true"
 		t.Fatal(err)
 	}
 
-	ctx := context.Background()
+	ctx := t.Context()
 	root, err := Prefetch(ctx, PrefetchOptions{
 		WorkRoot:    workRoot,
 		CatalogPath: catalog,
