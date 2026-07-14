@@ -1192,6 +1192,9 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 	if scopePrefix != "" {
 		ourPkgDirs[scopePrefix] = true
 	}
+	// Receiver types we are renaming (*T.m / T.m). Same-package ExtraRename
+	// must not rewrite t.m on a different concrete type that also defines m.
+	ourReceivers := map[string]bool{}
 	for _, s := range sourceRefs {
 		sourceSet[s] = true
 		ref := ingest.ParseReference(s)
@@ -1199,6 +1202,43 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		if d := dirOf(rel); d != "" {
 			pkgDirs[d] = true
 			ourPkgDirs[d] = true
+		}
+		if recv, ok := receiverTypeName(ref.Symbol); ok {
+			ourReceivers[recv] = true
+		}
+	}
+	// Other concrete types that define a method with the same leaf (entity graph
+	// first; AST scan below fills gaps when ingest misses a method entity).
+	foreignReceivers := map[string]bool{}
+	for _, ent := range result.Entities {
+		if sourceSet[ent.Reference] {
+			continue
+		}
+		ref := ingest.ParseReference(ent.Reference)
+		if symbolLeaf(ref.Symbol) != oldLeaf {
+			continue
+		}
+		if recv, ok := receiverTypeName(ref.Symbol); ok && !ourReceivers[recv] {
+			foreignReceivers[recv] = true
+		}
+	}
+	// Cheap fail-closed assist: scan package AST for same-leaf methods not in ourReceivers.
+	for _, f := range result.Files {
+		if f.Language != "go" {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Path, "./")
+		if !ourPkgDirs[dirOf(rel)] {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		for _, recv := range methodReceiversWithLeaf(content, oldLeaf) {
+			if !ourReceivers[recv] {
+				foreignReceivers[recv] = true
+			}
 		}
 	}
 	occupied := map[string]map[[2]uint32]bool{}
@@ -1267,9 +1307,24 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 			}
 			selectorEdits = findSelectorLeafEdits(rel, content, oldLeaf, newLeaf, allowed)
 		}
+		// Filter same-package renames by the *call target* type (selector receiver),
+		// not the enclosing method's receiver — so package-level helpers and
+		// cross-type calls inside foreign methods are handled correctly.
+		var callTargetType func(leafStart uint32) (string, bool)
+		if len(foreignReceivers) > 0 && (inOurPkg || relatedFiles[rel]) {
+			callTargetType = selectorCallTargetTypeFunc(content)
+		}
 		for _, e := range selectorEdits {
 			if occ[[2]uint32{e.StartByte, e.EndByte}] {
 				continue
+			}
+			if callTargetType != nil {
+				if typ, ok := callTargetType(e.StartByte); ok {
+					typ = strings.TrimPrefix(typ, "*")
+					if foreignReceivers[typ] && !ourReceivers[typ] {
+						continue
+					}
+				}
 			}
 			edits = append(edits, e)
 		}
@@ -1283,6 +1338,378 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		}
 	}
 	return edits
+}
+
+// methodReceiversWithLeaf returns receiver type names (star-stripped) of methods
+// named leaf in content. Used to augment foreignReceivers when the entity graph
+// is incomplete.
+func methodReceiversWithLeaf(content []byte, leaf string) []string {
+	if leaf == "" {
+		return nil
+	}
+	lang, ok := grammar.GetByExtension(".go")
+	if !ok {
+		return nil
+	}
+	parser := grammar.NewParser()
+	if !parser.SetLanguage(lang) {
+		parser.Delete()
+		return nil
+	}
+	tree := parser.ParseString(string(content))
+	if tree == nil {
+		parser.Delete()
+		return nil
+	}
+	var out []string
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type() == "method_declaration" {
+			if name := ingest.ChildByField(n, "name"); name != nil && ingest.NodeText(name, content) == leaf {
+				if recv := methodDeclReceiverType(n, content); recv != "" {
+					out = append(out, recv)
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(tree.RootNode())
+	tree.Delete()
+	parser.Delete()
+	return out
+}
+
+// identTypeBinding maps an identifier to a concrete type within a byte span.
+type identTypeBinding struct {
+	start, end uint32 // scope of the binding
+	name       string
+	typ        string
+}
+
+// selectorCallTargetTypeFunc returns a lookup for the concrete type of the
+// selector receiver expression at a leaf-identifier start byte (the char after
+// '.' in recv.Leaf). Resolves method receiver params and simple local bindings
+// (t := &T{}, var t *T, …). ok=false when the type cannot be determined.
+func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, bool) {
+	var bindings []identTypeBinding
+	lang, ok := grammar.GetByExtension(".go")
+	if !ok {
+		return func(uint32) (string, bool) { return "", false }
+	}
+	parser := grammar.NewParser()
+	if !parser.SetLanguage(lang) {
+		parser.Delete()
+		return func(uint32) (string, bool) { return "", false }
+	}
+	tree := parser.ParseString(string(content))
+	if tree == nil {
+		parser.Delete()
+		return func(uint32) (string, bool) { return "", false }
+	}
+
+	// Collect method/function scopes and local typed bindings.
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil {
+			return
+		}
+		switch n.Type() {
+		case "method_declaration":
+			recvType := methodDeclReceiverType(n, content)
+			recvName := methodDeclReceiverName(n, content)
+			if recvType != "" && recvName != "" {
+				bindings = append(bindings, identTypeBinding{n.StartByte(), n.EndByte(), recvName, recvType})
+			}
+			// Locals inside the method body.
+			if body := ingest.ChildByField(n, "body"); body != nil {
+				collectLocalTypeBindings(body, content, &bindings)
+			}
+		case "function_declaration":
+			if body := ingest.ChildByField(n, "body"); body != nil {
+				collectLocalTypeBindings(body, content, &bindings)
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(tree.RootNode())
+	tree.Delete()
+	parser.Delete()
+
+	return func(leafStart uint32) (string, bool) {
+		recvName := selectorReceiverIdent(content, leafStart)
+		if recvName == "" {
+			return "", false
+		}
+		// Prefer the innermost binding covering leafStart.
+		var best *identTypeBinding
+		for i := range bindings {
+			b := &bindings[i]
+			if b.name != recvName {
+				continue
+			}
+			if leafStart < b.start || leafStart >= b.end {
+				continue
+			}
+			if best == nil || (b.end-b.start) < (best.end-best.start) {
+				best = b
+			}
+		}
+		if best == nil {
+			return "", false
+		}
+		return best.typ, true
+	}
+}
+
+// selectorReceiverIdent returns the identifier immediately before '.' at leafStart.
+func selectorReceiverIdent(content []byte, leafStart uint32) string {
+	if leafStart == 0 {
+		return ""
+	}
+	text := string(content)
+	dot := int(leafStart) - 1
+	if dot < 0 || text[dot] != '.' {
+		return ""
+	}
+	recvEnd := dot
+	recvStart := dot - 1
+	if recvStart < 0 || !isIdentChar(text[recvStart]) {
+		return ""
+	}
+	for recvStart > 0 && isIdentChar(text[recvStart-1]) {
+		recvStart--
+	}
+	return text[recvStart:recvEnd]
+}
+
+// methodDeclReceiverName returns the receiver parameter identifier, if any.
+func methodDeclReceiverName(method *grammar.Node, content []byte) string {
+	recv := ingest.ChildByField(method, "receiver")
+	if recv == nil {
+		return ""
+	}
+	var nameNode *grammar.Node
+	var findName func(n *grammar.Node)
+	findName = func(n *grammar.Node) {
+		if n == nil || nameNode != nil {
+			return
+		}
+		// parameter_declaration name field, or first identifier before the type.
+		if n.Type() == "parameter_declaration" {
+			if nm := ingest.ChildByField(n, "name"); nm != nil {
+				nameNode = nm
+				return
+			}
+			// Some grammars expose name as identifier child.
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				c := n.Child(i)
+				if c.Type() == "identifier" {
+					nameNode = c
+					return
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			findName(n.Child(i))
+		}
+	}
+	findName(recv)
+	if nameNode == nil {
+		return ""
+	}
+	return ingest.NodeText(nameNode, content)
+}
+
+// methodDeclReceiverType returns the type name of a method_declaration receiver
+// (pointer star stripped), e.g. "*claudeTool" / "claudeTool" → "claudeTool".
+func methodDeclReceiverType(method *grammar.Node, content []byte) string {
+	recv := ingest.ChildByField(method, "receiver")
+	if recv == nil {
+		return ""
+	}
+	// receiver is parameter_list → parameter_declaration → type
+	var typeNode *grammar.Node
+	var findType func(n *grammar.Node)
+	findType = func(n *grammar.Node) {
+		if n == nil || typeNode != nil {
+			return
+		}
+		if n.Type() == "type_identifier" || n.Type() == "pointer_type" || n.Type() == "generic_type" {
+			// Prefer the named type identifier under the type node.
+			if n.Type() == "type_identifier" {
+				typeNode = n
+				return
+			}
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				findType(n.Child(i))
+			}
+			return
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			findType(n.Child(i))
+		}
+	}
+	findType(recv)
+	if typeNode == nil {
+		return ""
+	}
+	return strings.TrimPrefix(ingest.NodeText(typeNode, content), "*")
+}
+
+// collectLocalTypeBindings appends simple local typed bindings under node
+// (short_var_declaration / var_spec) into bindings with the body's end as scope.
+func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]identTypeBinding) {
+	if node == nil {
+		return
+	}
+	scopeEnd := node.EndByte()
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil {
+			return
+		}
+		switch n.Type() {
+		case "short_var_declaration":
+			// left := right — extract names from left, type from right (&T{} / T{}).
+			names := identListNames(ingest.ChildByField(n, "left"), content)
+			typ := typeNameFromRHS(ingest.ChildByField(n, "right"), content)
+			if typ != "" {
+				for _, name := range names {
+					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, typ})
+				}
+			}
+		case "var_spec":
+			names := identListNames(ingest.ChildByField(n, "name"), content)
+			if len(names) == 0 {
+				// name may be a single identifier field.
+				if nm := ingest.ChildByField(n, "name"); nm != nil && nm.Type() == "identifier" {
+					names = []string{ingest.NodeText(nm, content)}
+				}
+			}
+			typ := typeNameFromTypeNode(ingest.ChildByField(n, "type"), content)
+			if typ == "" {
+				typ = typeNameFromRHS(ingest.ChildByField(n, "value"), content)
+			}
+			if typ != "" {
+				for _, name := range names {
+					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, typ})
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(node)
+}
+
+func identListNames(n *grammar.Node, content []byte) []string {
+	if n == nil {
+		return nil
+	}
+	var names []string
+	if n.Type() == "identifier" {
+		return []string{ingest.NodeText(n, content)}
+	}
+	var walk func(x *grammar.Node)
+	walk = func(x *grammar.Node) {
+		if x == nil {
+			return
+		}
+		if x.Type() == "identifier" {
+			names = append(names, ingest.NodeText(x, content))
+			return
+		}
+		for i := uint32(0); i < x.ChildCount(); i++ {
+			walk(x.Child(i))
+		}
+	}
+	walk(n)
+	return names
+}
+
+// typeNameFromRHS extracts T from &T{}, T{}, new(T), (*T)(nil)-ish forms.
+func typeNameFromRHS(n *grammar.Node, content []byte) string {
+	if n == nil {
+		return ""
+	}
+	// expression_list → first child
+	if n.Type() == "expression_list" && n.ChildCount() > 0 {
+		return typeNameFromRHS(n.Child(0), content)
+	}
+	switch n.Type() {
+	case "unary_expression":
+		// &T{}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			if t := typeNameFromRHS(n.Child(i), content); t != "" {
+				return t
+			}
+		}
+	case "composite_literal":
+		if t := ingest.ChildByField(n, "type"); t != nil {
+			return typeNameFromTypeNode(t, content)
+		}
+	case "call_expression":
+		// new(T) / make — function is "new"
+		if fn := ingest.ChildByField(n, "function"); fn != nil && ingest.NodeText(fn, content) == "new" {
+			if args := ingest.ChildByField(n, "arguments"); args != nil && args.ChildCount() > 0 {
+				// argument_list children
+				for i := uint32(0); i < args.ChildCount(); i++ {
+					if t := typeNameFromTypeNode(args.Child(i), content); t != "" {
+						return t
+					}
+				}
+			}
+		}
+	case "type_conversion_expression", "type_assertion_expression":
+		if t := ingest.ChildByField(n, "type"); t != nil {
+			return typeNameFromTypeNode(t, content)
+		}
+	}
+	return typeNameFromTypeNode(n, content)
+}
+
+func typeNameFromTypeNode(n *grammar.Node, content []byte) string {
+	if n == nil {
+		return ""
+	}
+	if n.Type() == "type_identifier" {
+		return strings.TrimPrefix(ingest.NodeText(n, content), "*")
+	}
+	if n.Type() == "pointer_type" || n.Type() == "generic_type" || n.Type() == "qualified_type" {
+		var id *grammar.Node
+		var find func(x *grammar.Node)
+		find = func(x *grammar.Node) {
+			if x == nil || id != nil {
+				return
+			}
+			if x.Type() == "type_identifier" {
+				id = x
+				return
+			}
+			for i := uint32(0); i < x.ChildCount(); i++ {
+				find(x.Child(i))
+			}
+		}
+		find(n)
+		if id != nil {
+			return strings.TrimPrefix(ingest.NodeText(id, content), "*")
+		}
+	}
+	// Search shallowly for a type_identifier.
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		if t := typeNameFromTypeNode(n.Child(i), content); t != "" {
+			return t
+		}
+	}
+	return ""
 }
 
 // interfaceNamesWithMethod returns interface type names in ourPkgDirs that

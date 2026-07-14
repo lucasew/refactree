@@ -1,0 +1,4 @@
+{
+  "source": "path:./pkg/apps/claude.go::*claudeTool.fetchManifest",
+  "destination": "path:./pkg/apps/claude.go::*claudeTool.renamed"
+}
