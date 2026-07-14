@@ -1304,8 +1304,6 @@ func (m *browseModel) scopeRefForPathRel(rel string) string {
 	return "path:./" + filepath.ToSlash(rel)
 }
 
-
-
 func browseItemForProviderChild(child refpkg.ScopeChild) browseItem {
 	ref := child.Ref.String()
 	name := filepath.Base(filepath.FromSlash(strings.Trim(child.Ref.Path, "/")))
