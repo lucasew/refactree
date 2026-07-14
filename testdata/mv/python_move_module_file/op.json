@@ -1,0 +1,4 @@
+{
+  "source": "path:./pkg/namedutils.py",
+  "destination": "path:./pkg/namedutils_fuzz.py"
+}

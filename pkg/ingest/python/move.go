@@ -99,7 +99,16 @@ func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ing
 		return rewritePythonSymbolImport(fileRelPath, content, result, oldRef, oldPath, newPath)
 	}
 
-	// For package moves, use word-boundary-aware replacement to avoid
+	// Module file renames (*.py → *.py): Python imports use the module stem
+	// (namedutils), never the filename (namedutils.py). Rewriting the file
+	// basename would no-op; rewrite the importable stem instead so
+	// `from pkg.namedutils import X`, `from .namedutils import X`, and
+	// `import namedutils` all track the move.
+	if strings.HasSuffix(oldPath, ".py") && strings.HasSuffix(newPath, ".py") {
+		return rewritePythonModuleFile(fileRelPath, content, oldPath, newPath)
+	}
+
+	// For package directory moves, use word-boundary-aware replacement to avoid
 	// corrupting identifiers that happen to contain the package name as substring.
 	oldDir := oldPath
 	newDir := newPath
@@ -112,6 +121,70 @@ func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ing
 		return nil
 	}
 	return ingest.FindAllWholeWordOccurrences(fileRelPath, content, oldBase, newBase)
+}
+
+// rewritePythonModuleFile rewrites importable module names after a .py file is
+// relocated. When the leaf stem changes (namedutils.py → namedutils_fuzz.py),
+// whole-word stem replacement covers absolute, relative, and external-prefix
+// import forms. When only the package path changes and the stem is unchanged,
+// the full dotted module path is rewritten instead.
+func rewritePythonModuleFile(fileRelPath string, content []byte, oldPath, newPath string) []ingest.Edit {
+	oldMod := pythonModuleFromPath(oldPath)
+	newMod := pythonModuleFromPath(newPath)
+	if oldMod == "" || newMod == "" || oldMod == newMod {
+		return nil
+	}
+	oldStem := pythonFileStem(oldPath)
+	newStem := pythonFileStem(newPath)
+	if oldStem == "" || newStem == "" {
+		return nil
+	}
+	if oldStem != newStem {
+		return ingest.FindAllWholeWordOccurrences(fileRelPath, content, oldStem, newStem)
+	}
+	// Same stem, different package: replace dotted module path occurrences.
+	return rewritePythonDottedModule(fileRelPath, content, oldMod, newMod)
+}
+
+// rewritePythonDottedModule replaces whole occurrences of oldMod with newMod
+// in import-ish positions. Boundaries are letters/digits/underscore so
+// `pkg.mod` matches inside `from pkg.mod import` and `import pkg.mod as x`
+// without matching `pkg.mod2` or `mypkg.mod`.
+func rewritePythonDottedModule(fileRelPath string, content []byte, oldMod, newMod string) []ingest.Edit {
+	if oldMod == "" || oldMod == newMod {
+		return nil
+	}
+	text := string(content)
+	var edits []ingest.Edit
+	off := 0
+	for {
+		idx := strings.Index(text[off:], oldMod)
+		if idx < 0 {
+			break
+		}
+		start := off + idx
+		end := start + len(oldMod)
+		if !isPythonIdentBoundary(text, start-1) || !isPythonIdentBoundary(text, end) {
+			off = start + 1
+			continue
+		}
+		edits = append(edits, ingest.Edit{
+			File:      fileRelPath,
+			StartByte: uint32(start),
+			EndByte:   uint32(end),
+			NewText:   newMod,
+		})
+		off = end
+	}
+	return edits
+}
+
+func isPythonIdentBoundary(text string, i int) bool {
+	if i < 0 || i >= len(text) {
+		return true
+	}
+	c := text[i]
+	return !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')
 }
 
 // rewritePythonSymbolImport rewrites a Python import statement from the old
