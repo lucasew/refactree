@@ -1,11 +1,9 @@
 package nix
 
 import (
-	"cmp"
 	"os"
 	"path"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/lucasew/refactree/pkg/ingest"
@@ -147,12 +145,7 @@ func (referenceProvider) ListScopeChildren(ref ingest.Reference, _ string, inclu
 		})
 	}
 
-	slices.SortFunc(children, func(a, b refpkg.ScopeChild) int {
-		if c := cmp.Compare(a.Kind, b.Kind); c != 0 {
-			return c
-		}
-		return strings.Compare(a.Ref.Path, b.Ref.Path)
-	})
+	refpkg.SortScopeChildrenByKindThenPath(children)
 	return children, true, nil
 }
 
