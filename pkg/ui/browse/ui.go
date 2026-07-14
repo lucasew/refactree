@@ -637,7 +637,7 @@ func (m *browseModel) buildProviderItems() ([]list.Item, error) {
 	m.providerDir = scope.Dir
 
 	items := make([]list.Item, 0, 32)
-	parent := parentProviderPath(m.providerRef.Path)
+	parent := refpkg.ParentProviderPath(m.providerRef.Path)
 	if parent != m.providerRef.Path {
 		items = append(items, browseItem{
 			kind:      browseItemParent,
@@ -885,7 +885,7 @@ func (m *browseModel) activateSelection() error {
 
 func (m *browseModel) goParent() error {
 	if m.mode == "provider" {
-		parent := parentProviderPath(m.providerRef.Path)
+		parent := refpkg.ParentProviderPath(m.providerRef.Path)
 		if parent == m.providerRef.Path {
 			return nil
 		}
@@ -1304,17 +1304,7 @@ func (m *browseModel) scopeRefForPathRel(rel string) string {
 	return "path:./" + filepath.ToSlash(rel)
 }
 
-func parentProviderPath(path string) string {
-	path = strings.Trim(path, "/")
-	if path == "" {
-		return ""
-	}
-	parent := filepath.ToSlash(filepath.Dir(filepath.FromSlash(path)))
-	if parent == "." {
-		return ""
-	}
-	return parent
-}
+
 
 func browseItemForProviderChild(child refpkg.ScopeChild) browseItem {
 	ref := child.Ref.String()

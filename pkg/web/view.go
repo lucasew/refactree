@@ -578,23 +578,11 @@ func (l *Loader) pathParentHref(rel string) string {
 }
 
 func providerParentHref(scopeRef ingest.Reference) string {
-	parent := parentProviderPath(scopeRef.Path)
+	parent := refpkg.ParentProviderPath(scopeRef.Path)
 	if parent == scopeRef.Path || parent == "" {
 		return "/"
 	}
 	return EncodeCodeURL(ingest.Reference{Provider: scopeRef.Provider, Path: parent}.String())
-}
-
-func parentProviderPath(path string) string {
-	path = strings.Trim(path, "/")
-	if path == "" {
-		return ""
-	}
-	parent := filepath.ToSlash(filepath.Dir(filepath.FromSlash(path)))
-	if parent == "." {
-		return ""
-	}
-	return parent
 }
 
 // resolveUnderRoot joins rel to the serve root and ensures the result stays under
