@@ -106,11 +106,6 @@ func docForEntity(dir string, result *Result, ref Reference, entity *Entity) (*D
 	relPath := strings.TrimPrefix(ref.Path, "./")
 	filePath := filepath.Join(dir, relPath)
 
-	source, err := os.ReadFile(filePath)
-	if err != nil {
-		return nil, err
-	}
-
 	var language string
 	for _, f := range result.Files {
 		if f.Path == relPath {
@@ -128,18 +123,17 @@ func docForEntity(dir string, result *Result, ref Reference, entity *Entity) (*D
 		return nil, fmt.Errorf("unsupported language for %s", filePath)
 	}
 
-	parser := grammar.NewParser()
-	defer parser.Delete()
-	if !parser.SetLanguage(lang) {
-		return nil, fmt.Errorf("failed to set language for %s", filePath)
+	source, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
 	}
+	pf, err := ParseSourceLanguage(source, lang, filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer pf.Close()
 
-	tree := parser.ParseString(string(source))
-	defer tree.Delete()
-
-	root := tree.RootNode()
-
-	return extractDocFromAST(root, source, entity.StartByte, ref.Symbol, language)
+	return extractDocFromAST(pf.Root, pf.Source, entity.StartByte, ref.Symbol, language)
 }
 
 func extractDocFromAST(root *grammar.Node, source []byte, nameStart uint32, name, language string) (*DocResult, error) {
