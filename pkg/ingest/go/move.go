@@ -1347,20 +1347,11 @@ func methodReceiversWithLeaf(content []byte, leaf string) []string {
 	if leaf == "" {
 		return nil
 	}
-	lang, ok := grammar.GetByExtension(".go")
-	if !ok {
+	pf, err := ingest.ParseSource(content, ".go", "")
+	if err != nil {
 		return nil
 	}
-	parser := grammar.NewParser()
-	if !parser.SetLanguage(lang) {
-		parser.Delete()
-		return nil
-	}
-	tree := parser.ParseString(string(content))
-	if tree == nil {
-		parser.Delete()
-		return nil
-	}
+	defer pf.Close()
 	var out []string
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
@@ -1378,9 +1369,7 @@ func methodReceiversWithLeaf(content []byte, leaf string) []string {
 			walk(n.Child(i))
 		}
 	}
-	walk(tree.RootNode())
-	tree.Delete()
-	parser.Delete()
+	walk(pf.Root)
 	return out
 }
 
@@ -1397,20 +1386,11 @@ type identTypeBinding struct {
 // (t := &T{}, var t *T, …). ok=false when the type cannot be determined.
 func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, bool) {
 	var bindings []identTypeBinding
-	lang, ok := grammar.GetByExtension(".go")
-	if !ok {
+	pf, err := ingest.ParseSource(content, ".go", "")
+	if err != nil {
 		return func(uint32) (string, bool) { return "", false }
 	}
-	parser := grammar.NewParser()
-	if !parser.SetLanguage(lang) {
-		parser.Delete()
-		return func(uint32) (string, bool) { return "", false }
-	}
-	tree := parser.ParseString(string(content))
-	if tree == nil {
-		parser.Delete()
-		return func(uint32) (string, bool) { return "", false }
-	}
+	defer pf.Close()
 
 	// Collect method/function scopes and local typed bindings.
 	var walk func(n *grammar.Node)
@@ -1438,9 +1418,7 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 			walk(n.Child(i))
 		}
 	}
-	walk(tree.RootNode())
-	tree.Delete()
-	parser.Delete()
+	walk(pf.Root)
 
 	return func(leafStart uint32) (string, bool) {
 		recvName := selectorReceiverIdent(content, leafStart)
