@@ -87,7 +87,3 @@ func ScopeReferenceForView(ref string) ingest.Reference {
 	return r
 }
 
-// FileReferenceForView is an alias kept for older call sites.
-func FileReferenceForView(ref string) ingest.Reference {
-	return ScopeReferenceForView(ref)
-}
