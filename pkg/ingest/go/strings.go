@@ -25,47 +25,8 @@ func findInStringLiterals(file string, content []byte, oldBase, newBase string, 
 	if oldBase == "" || oldBase == newBase {
 		return nil
 	}
-	text := string(content)
 	var edits []ingest.Edit
-	off := 0
-	for off < len(text) {
-		dq := strings.IndexByte(text[off:], '"')
-		rq := strings.IndexByte(text[off:], '`')
-		start := -1
-		isRaw := false
-		if dq >= 0 && (rq < 0 || dq < rq) {
-			start = off + dq
-		} else if rq >= 0 {
-			start = off + rq
-			isRaw = true
-		}
-		if start < 0 {
-			break
-		}
-		end := -1
-		if isRaw {
-			e := strings.IndexByte(text[start+1:], '`')
-			if e >= 0 {
-				end = start + 1 + e
-			}
-		} else {
-			i := start + 1
-			for i < len(text) {
-				if text[i] == '\\' && i+1 < len(text) {
-					i += 2
-					continue
-				}
-				if text[i] == '"' {
-					end = i
-					break
-				}
-				i++
-			}
-		}
-		if end < 0 {
-			break
-		}
-		seg := text[start : end+1]
+	ingest.ForEachStringLiteral(content, func(seg string, start int) bool {
 		sOff := 0
 		for {
 			idx := strings.Index(seg[sOff:], oldBase)
@@ -92,8 +53,8 @@ func findInStringLiterals(file string, content []byte, oldBase, newBase string, 
 			}
 			sOff = posInSeg + len(oldBase)
 		}
-		off = end + 1
-	}
+		return true
+	})
 	return edits
 }
 
