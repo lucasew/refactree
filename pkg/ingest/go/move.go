@@ -113,9 +113,6 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 		pkgName := decl.Preamble
 		if pkgName == "" {
 			pkgName = ingest.LastPathComponent(strings.TrimSuffix(dstRelPath, ".go"))
-			if i := strings.LastIndex(pkgName, "/"); i >= 0 {
-				pkgName = pkgName[i+1:]
-			}
 		}
 		body := fmt.Sprintf("package %s\n", pkgName)
 		if len(decl.Imports) > 0 {
@@ -685,7 +682,7 @@ func (moveDriver) ExpandRenameSources(result *ingest.Result, sourceRef string) [
 	if src.Symbol == "" {
 		return nil
 	}
-	leaf := symbolLeaf(src.Symbol)
+	leaf := ingest.SymbolLeaf(src.Symbol)
 	recv, isMethod := receiverTypeName(src.Symbol)
 	if leaf == "" {
 		return nil
@@ -701,7 +698,7 @@ func (moveDriver) ExpandRenameSources(result *ingest.Result, sourceRef string) [
 		}
 		rel := strings.TrimPrefix(ref.Path, "./")
 		entPkgDir := dirOf(rel)
-		entLeaf := symbolLeaf(ref.Symbol)
+		entLeaf := ingest.SymbolLeaf(ref.Symbol)
 		if entLeaf != leaf {
 			continue
 		}
@@ -742,14 +739,6 @@ func isExportedIdent(name string) bool {
 	}
 	r := name[0]
 	return r >= 'A' && r <= 'Z'
-}
-
-func symbolLeaf(symbol string) string {
-	leaf := symbol
-	if i := strings.LastIndex(leaf, "."); i >= 0 {
-		leaf = leaf[i+1:]
-	}
-	return strings.TrimPrefix(leaf, "*")
 }
 
 func receiverTypeName(symbol string) (string, bool) {
@@ -797,7 +786,7 @@ func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src
 		return nil, nil
 	}
 
-	leaf := symbolLeaf(src.Symbol)
+	leaf := ingest.SymbolLeaf(src.Symbol)
 	if leaf == "" {
 		return nil, nil
 	}
@@ -956,7 +945,7 @@ func packageLocalDepFromRelations(result *ingest.Result, pkgDir, movedLeaf strin
 	}
 	for _, rel := range result.Relations {
 		src := ingest.ParseReference(rel.Reference)
-		if symbolLeaf(src.Symbol) != movedLeaf {
+		if ingest.SymbolLeaf(src.Symbol) != movedLeaf {
 			continue
 		}
 		srcRel := strings.TrimPrefix(src.Path, "./")
@@ -1204,7 +1193,7 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 			continue
 		}
 		ref := ingest.ParseReference(ent.Reference)
-		if symbolLeaf(ref.Symbol) != oldLeaf {
+		if ingest.SymbolLeaf(ref.Symbol) != oldLeaf {
 			continue
 		}
 		if recv, ok := receiverTypeName(ref.Symbol); ok && !ourReceivers[recv] {
