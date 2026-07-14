@@ -130,7 +130,9 @@ func docForEntity(dir string, result *Result, ref Reference, entity *Entity) (*D
 
 	parser := grammar.NewParser()
 	defer parser.Delete()
-	parser.SetLanguage(lang)
+	if !parser.SetLanguage(lang) {
+		return nil, fmt.Errorf("failed to set language for %s", filePath)
+	}
 
 	tree := parser.ParseString(string(source))
 	defer tree.Delete()
