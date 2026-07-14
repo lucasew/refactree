@@ -40,11 +40,3 @@ func ChildByType(n *grammar.Node, typ string) *grammar.Node {
 	}
 	return nil
 }
-
-func nodeText(n *grammar.Node, source []byte) string {
-	return NodeText(n, source)
-}
-
-func childByField(n *grammar.Node, field string) *grammar.Node {
-	return ChildByField(n, field)
-}

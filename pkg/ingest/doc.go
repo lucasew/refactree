@@ -183,7 +183,7 @@ func findDeclContaining(root *grammar.Node, nameStart uint32, language string) *
 	for i := uint32(0); i < root.ChildCount(); i++ {
 		child := root.Child(i)
 		if declTypes[child.Type()] {
-			if n := childByField(child, "name"); n != nil && n.StartByte() == nameStart {
+			if n := ChildByField(child, "name"); n != nil && n.StartByte() == nameStart {
 				return child
 			}
 		}
@@ -192,7 +192,7 @@ func findDeclContaining(root *grammar.Node, nameStart uint32, language string) *
 			for j := uint32(0); j < child.ChildCount(); j++ {
 				inner := child.Child(j)
 				if declTypes[inner.Type()] {
-					if n := childByField(inner, "name"); n != nil && n.StartByte() == nameStart {
+					if n := ChildByField(inner, "name"); n != nil && n.StartByte() == nameStart {
 						return inner
 					}
 				}
@@ -213,11 +213,11 @@ func findJavaMemberDecl(n *grammar.Node, nameStart uint32, declTypes map[string]
 		return nil
 	}
 	if declTypes[n.Type()] {
-		if name := childByField(n, "name"); name != nil && name.StartByte() == nameStart {
+		if name := ChildByField(n, "name"); name != nil && name.StartByte() == nameStart {
 			return n
 		}
 	}
-	body := childByField(n, "body")
+	body := ChildByField(n, "body")
 	if body == nil {
 		return nil
 	}
@@ -231,7 +231,7 @@ func findJavaMemberDecl(n *grammar.Node, nameStart uint32, declTypes map[string]
 
 // extractSignature returns a one-line function signature.
 func extractSignature(funcNode *grammar.Node, source []byte, language string) string {
-	bodyNode := childByField(funcNode, "body")
+	bodyNode := ChildByField(funcNode, "body")
 	if bodyNode == nil {
 		return ""
 	}
@@ -260,20 +260,20 @@ func extractDocstring(root *grammar.Node, funcNode *grammar.Node, source []byte,
 // extractPythonDocstring looks for a string expression as the first
 // statement in the function body.
 func extractPythonDocstring(funcNode *grammar.Node, source []byte) string {
-	body := childByField(funcNode, "body")
+	body := ChildByField(funcNode, "body")
 	if body == nil {
 		return ""
 	}
 	for i := uint32(0); i < body.ChildCount(); i++ {
 		child := body.Child(i)
 		if child.Type() == "string" || child.Type() == "concatenated_string" {
-			return strings.Trim(nodeText(child, source), "\"'")
+			return strings.Trim(NodeText(child, source), "\"'")
 		}
 		if child.Type() == "expression_statement" {
 			if child.NamedChildCount() > 0 {
 				expr := child.NamedChild(0)
 				if expr.Type() == "string" || expr.Type() == "concatenated_string" {
-					return strings.Trim(nodeText(expr, source), "\"'")
+					return strings.Trim(NodeText(expr, source), "\"'")
 				}
 			}
 		}
