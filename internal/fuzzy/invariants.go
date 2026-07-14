@@ -139,8 +139,14 @@ func CheckIdempotentIngest(dir string, first *ingest.Result) []InvariantFailure 
 	}
 	a := cloneSorted(first)
 	b := cloneSorted(second)
-	aj, _ := json.Marshal(a)
-	bj, _ := json.Marshal(b)
+	aj, err := json.Marshal(a)
+	if err != nil {
+		return []InvariantFailure{{Check: "idempotent", Message: "marshal first: " + err.Error()}}
+	}
+	bj, err := json.Marshal(b)
+	if err != nil {
+		return []InvariantFailure{{Check: "idempotent", Message: "marshal second: " + err.Error()}}
+	}
 	if string(aj) != string(bj) {
 		return []InvariantFailure{{Check: "idempotent", Message: "second ingest diverged"}}
 	}
