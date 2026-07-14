@@ -1,0 +1,4 @@
+{
+  "source": "path:./a.py::C.foo",
+  "destination": "path:./b.py::C.foo"
+}

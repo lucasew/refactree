@@ -31,7 +31,19 @@ func (moveDriver) ExtractDecl(filePath string, entity ingest.Entity) (ingest.Dec
 
 	start := declNode.StartByte()
 	end := declNode.EndByte()
-	declText := string(source[start:end])
+	// Include leading indentation on the first line so nested methods remove cleanly.
+	lineStart := start
+	for lineStart > 0 && source[lineStart-1] != '\n' && source[lineStart-1] != '\r' {
+		if source[lineStart-1] != ' ' && source[lineStart-1] != '\t' {
+			break
+		}
+		lineStart--
+	}
+	declText := string(source[lineStart:end])
+	// Nested methods/classes carry class-body indent; normalize to column 0 for insert.
+	if lineStart < start {
+		declText = dedentPythonBlock(declText)
+	}
 
 	// Remove up to two trailing newlines.
 	removeEnd := end
@@ -42,17 +54,62 @@ func (moveDriver) ExtractDecl(filePath string, entity ingest.Entity) (ingest.Dec
 		}
 	}
 
+	// Qualified entity names (Class.method) need a class shell when inserted into a
+	// new module; stash the outer class in Preamble for InsertDecl.
+	preamble := ""
+	if className := pythonOuterClass(ingest.ParseReference(entity.Reference).Symbol); className != "" && lineStart < start {
+		preamble = className
+	}
+
 	return ingest.DeclExtract{
+		Preamble:    preamble,
 		DeclText:    declText,
-		RemoveStart: start,
+		RemoveStart: lineStart,
 		RemoveEnd:   removeEnd,
 	}, nil
 }
 
 func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.DeclExtract) ingest.Edit {
+	text := decl.DeclText
 	insertAt := uint32(0)
-	insertText := ""
 
+	// Nested method/class: re-home under its outer class when the destination is
+	// a new file or does not already define that class.
+	if decl.Preamble != "" {
+		className := decl.Preamble
+		if dstContent == nil || !pythonSourceHasClass(dstContent, className) {
+			text = "class " + className + ":\n" + indentPythonBlock(decl.DeclText, "    ")
+			if dstContent == nil {
+				return ingest.Edit{
+					File:      dstRelPath,
+					StartByte: 0,
+					EndByte:   0,
+					NewText:   text + "\n",
+				}
+			}
+		} else if at, ok := pythonClassBodyInsertAt(dstContent, className); ok {
+			// Insert indented method into the existing class body.
+			insertAt = at
+			insertText := indentPythonBlock(decl.DeclText, "    ")
+			if at > 0 && dstContent[at-1] != '\n' {
+				insertText = "\n" + insertText
+			}
+			if !strings.HasSuffix(insertText, "\n") {
+				insertText += "\n"
+			}
+			return ingest.Edit{
+				File:      dstRelPath,
+				StartByte: insertAt,
+				EndByte:   insertAt,
+				NewText:   insertText,
+			}
+		} else {
+			// Class present but body boundary not found: append a second class block.
+			text = "class " + className + ":\n" + indentPythonBlock(decl.DeclText, "    ")
+		}
+	}
+
+	insertText := ""
 	if dstContent != nil {
 		insertAt = uint32(len(dstContent))
 		if len(dstContent) > 0 && dstContent[len(dstContent)-1] != '\n' {
@@ -61,9 +118,9 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 		if len(dstContent) > 0 {
 			insertText += "\n"
 		}
-		insertText += decl.DeclText + "\n"
+		insertText += text + "\n"
 	} else {
-		insertText = decl.DeclText + "\n"
+		insertText = text + "\n"
 	}
 
 	return ingest.Edit{
@@ -520,35 +577,131 @@ func pythonFileStem(p string) string {
 	return ingest.LastPathComponent(pythonPathWithoutSuffix(p))
 }
 
-// findPythonDecl returns the top-level declaration node whose name starts at nameStart.
+// findPythonDecl returns the declaration node whose name starts at nameStart.
+// It walks nested class/function bodies so methods (Class.method) extract for
+// cross-file moves — top-level-only search left those as "declaration not found".
 func findPythonDecl(root *grammar.Node, nameStart uint32) *grammar.Node {
-	declTypes := map[string]bool{
-		"function_definition": true,
-		"class_definition":    true,
-	}
+	return findPythonDeclNode(root, nameStart)
+}
 
-	for i := uint32(0); i < root.ChildCount(); i++ {
-		child := root.Child(i)
-		if declTypes[child.Type()] {
-			if n := ingest.ChildByField(child, "name"); n != nil && n.StartByte() == nameStart {
-				return child
-			}
+func findPythonDeclNode(n *grammar.Node, nameStart uint32) *grammar.Node {
+	if n == nil {
+		return nil
+	}
+	switch n.Type() {
+	case "function_definition", "class_definition":
+		if name := ingest.ChildByField(n, "name"); name != nil && name.StartByte() == nameStart {
+			return n
 		}
-		// Module-level assignments: `logger = logging.getLogger(...)`.
-		// The entity extractor records the left-hand identifier; match it here.
-		if child.Type() == "assignment" || child.Type() == "augmented_assignment" {
-			if left := ingest.ChildByField(child, "left"); left != nil && left.StartByte() == nameStart {
-				return child
-			}
+	case "assignment", "augmented_assignment":
+		if left := ingest.ChildByField(n, "left"); left != nil && left.StartByte() == nameStart {
+			return n
 		}
-		// Assignments may be wrapped in expression_statement.
-		if child.Type() == "expression_statement" && child.ChildCount() > 0 {
-			inner := child.Child(0)
+	case "expression_statement":
+		if n.ChildCount() > 0 {
+			inner := n.Child(0)
 			if inner.Type() == "assignment" || inner.Type() == "augmented_assignment" {
 				if left := ingest.ChildByField(inner, "left"); left != nil && left.StartByte() == nameStart {
-					return child // return the expression_statement as the declaration span
+					return n
 				}
 			}
+		}
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		if found := findPythonDeclNode(n.Child(i), nameStart); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+// pythonOuterClass returns the outer class name for a qualified entity like
+// "FunctionBuilder.remove_arg", or "" for module-level symbols.
+func pythonOuterClass(entityName string) string {
+	entityName = strings.TrimSpace(entityName)
+	if i := strings.LastIndex(entityName, "."); i > 0 {
+		return entityName[:i]
+	}
+	return ""
+}
+
+// dedentPythonBlock strips the common leading indent from every line.
+func dedentPythonBlock(block string) string {
+	lines := strings.Split(block, "\n")
+	prefix := ""
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+		if prefix == "" || len(indent) < len(prefix) {
+			prefix = indent
+		}
+	}
+	if prefix == "" {
+		return block
+	}
+	for i, line := range lines {
+		lines[i] = strings.TrimPrefix(line, prefix)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// indentPythonBlock prefixes every non-empty line with indent.
+func indentPythonBlock(block, indent string) string {
+	lines := strings.Split(block, "\n")
+	for i, line := range lines {
+		if line == "" {
+			continue
+		}
+		lines[i] = indent + line
+	}
+	return strings.Join(lines, "\n")
+}
+
+// pythonSourceHasClass reports whether content defines a class with the given name.
+func pythonSourceHasClass(content []byte, className string) bool {
+	pf, err := ingest.ParseSource(content, "memory.py", "python")
+	if err != nil {
+		// Fallback: naive scan.
+		return strings.Contains(string(content), "class "+className+":") ||
+			strings.Contains(string(content), "class "+className+"(")
+	}
+	defer pf.Close()
+	return pythonFindClass(pf.Root, pf.Source, className) != nil
+}
+
+// pythonClassBodyInsertAt returns the byte offset just before the end of the
+// named class's body (suitable for inserting a nested method).
+func pythonClassBodyInsertAt(content []byte, className string) (uint32, bool) {
+	pf, err := ingest.ParseSource(content, "memory.py", "python")
+	if err != nil {
+		return 0, false
+	}
+	defer pf.Close()
+	classNode := pythonFindClass(pf.Root, pf.Source, className)
+	if classNode == nil {
+		return 0, false
+	}
+	body := ingest.ChildByField(classNode, "body")
+	if body == nil {
+		return 0, false
+	}
+	return body.EndByte(), true
+}
+
+func pythonFindClass(n *grammar.Node, source []byte, className string) *grammar.Node {
+	if n == nil {
+		return nil
+	}
+	if n.Type() == "class_definition" {
+		if name := ingest.ChildByField(n, "name"); name != nil && ingest.NodeText(name, source) == className {
+			return n
+		}
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		if found := pythonFindClass(n.Child(i), source, className); found != nil {
+			return found
 		}
 	}
 	return nil
