@@ -401,8 +401,8 @@ func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ing
 	oldPkg := packageNameForJavaDir(oldPath)
 	newPkg := packageNameForJavaDir(newPath)
 	if oldPkg == "" || newPkg == "" || oldPkg == newPkg {
-		oldBase := lastPathComponent(oldPath)
-		newBase := lastPathComponent(newPath)
+		oldBase := ingest.LastPathComponent(oldPath)
+		newBase := ingest.LastPathComponent(newPath)
 		if oldBase == "" || oldBase == newBase {
 			return nil
 		}
@@ -552,12 +552,4 @@ func rewriteJavaNameToken(fileRelPath string, content []byte, oldName, newName s
 
 func isJavaIdentChar(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '$'
-}
-
-func lastPathComponent(s string) string {
-	s = strings.TrimSuffix(s, "/")
-	if i := strings.LastIndex(s, "/"); i >= 0 {
-		return s[i+1:]
-	}
-	return s
 }

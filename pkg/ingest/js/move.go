@@ -174,8 +174,8 @@ func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ing
 	if oldDir == "" || newDir == "" || oldDir == newDir {
 		return nil
 	}
-	oldBase := lastPathComponent(oldDir)
-	newBase := lastPathComponent(newDir)
+	oldBase := ingest.LastPathComponent(oldDir)
+	newBase := ingest.LastPathComponent(newDir)
 	if oldBase == newBase {
 		return nil
 	}
@@ -365,13 +365,6 @@ func addExportKeyword(file string, content []byte, symbol string) []ingest.Edit 
 		}
 	}
 	return nil
-}
-
-func lastPathComponent(s string) string {
-	if i := strings.LastIndex(s, "/"); i >= 0 {
-		return s[i+1:]
-	}
-	return s
 }
 
 // jsImportStmt holds a parsed JS/TS import statement.

@@ -603,8 +603,8 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 	if srcDir == dstDir {
 		return nil, nil // no-op; avoids pointless I/O + self-overwrite edits
 	}
-	oldDirBase := lastPathComponent(srcDir)
-	newDirBase := lastPathComponent(dstDir)
+	oldDirBase := LastPathComponent(srcDir)
+	newDirBase := LastPathComponent(dstDir)
 	dirPairs := [][2]string{{srcDir, dstDir}}
 	var planner PackageMovePlanner
 	if p, ok := packageMovePlannerFor(result, srcDir); ok {
