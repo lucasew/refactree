@@ -104,3 +104,48 @@ func TestProjectResult_UsesSpine(t *testing.T) {
 	}
 	_ = os.ErrNotExist
 }
+
+func TestSeedResult_BFSNeighbors(t *testing.T) {
+	dir := t.TempDir()
+	// Two co-located Go files: seed one, BFS should pull the sibling.
+	mustWrite(t, filepath.Join(dir, "a.go"), "package p\n\nfunc A() {}\n")
+	mustWrite(t, filepath.Join(dir, "b.go"), "package p\n\nfunc B() {}\n")
+	res, err := ingest.SeedResult(dir, filepath.Join(dir, "a.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs := map[string]bool{}
+	for _, e := range res.Entities {
+		refs[e.Reference] = true
+	}
+	if !refs["path:./a.go::A"] {
+		t.Fatalf("missing A: %+v", res.Entities)
+	}
+	if !refs["path:./b.go::B"] {
+		t.Fatalf("seed BFS should include sibling B: %+v", res.Entities)
+	}
+}
+
+func TestDirResult_NonRecursive(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "root.go"), "package p\n\nfunc Root() {}\n")
+	mustWrite(t, filepath.Join(dir, "sub", "nested.go"), "package p\n\nfunc Nested() {}\n")
+	res, err := ingest.DirResult(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range res.Entities {
+		if e.Reference == "path:./sub/nested.go::Nested" {
+			t.Fatalf("non-recursive should omit nested: %+v", res.Entities)
+		}
+	}
+	found := false
+	for _, e := range res.Entities {
+		if e.Reference == "path:./root.go::Root" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected root entity: %+v", res.Entities)
+	}
+}

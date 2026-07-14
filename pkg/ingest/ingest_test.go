@@ -20,7 +20,7 @@ import (
 	_ "github.com/lucasew/refactree/pkg/ingest/python"
 )
 
-func TestIngest(t *testing.T) {
+func TestProjectResult_Fixtures(t *testing.T) {
 	fixtureDir := filepath.Join("..", "..", "testdata", "ingest")
 	entries, err := os.ReadDir(fixtureDir)
 	if err != nil {

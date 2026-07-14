@@ -1,3 +1,11 @@
+// Discovery and graph materialization for package ingest.
+//
+// Call sites should use:
+//   - WalkExtracts / WalkSymbols for lazy listing (no graph)
+//   - ProjectResult / DirResult / SeedResult or MaterializeSource for a *Result
+//
+// Do not reintroduce a second WalkDir+parse path beside WalkExtracts.
+
 package ingest
 
 import (
