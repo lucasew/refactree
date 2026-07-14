@@ -1313,17 +1313,12 @@ func interfaceNamesWithMethod(rootDir string, result *ingest.Result, ourPkgDirs 
 }
 
 func interfaceTypeNamesWithMethod(content []byte, methodLeaf string) []string {
-	lang, ok := grammar.GetByExtension(".go")
-	if !ok {
+	pf, err := ingest.ParseSource(content, ".go", "")
+	if err != nil {
 		return nil
 	}
-	parser := grammar.NewParser()
-	defer parser.Delete()
-	if !parser.SetLanguage(lang) {
-		return nil
-	}
-	tree := parser.ParseString(string(content))
-	defer tree.Delete()
+	defer pf.Close()
+	treeRoot := pf.Root
 	var names []string
 	var walk func(n *grammar.Node, ifaceName string, inIface bool)
 	walk = func(n *grammar.Node, ifaceName string, inIface bool) {
@@ -1350,7 +1345,7 @@ func interfaceTypeNamesWithMethod(content []byte, methodLeaf string) []string {
 			walk(n.Child(i), nextName, nextIface)
 		}
 	}
-	walk(tree.RootNode(), "", false)
+	walk(treeRoot, "", false)
 	return names
 }
 
@@ -1547,17 +1542,12 @@ func buildStringLiteralMask(text string) []bool {
 // findInterfaceMethodEdits renames method oldLeaf→newLeaf on every interface
 // declaration in the file (all in-scope interfaces that declare the method).
 func findInterfaceMethodEdits(file string, content []byte, oldLeaf, newLeaf string) []ingest.Edit {
-	lang, ok := grammar.GetByExtension(file)
-	if !ok {
+	pf, err := ingest.ParseSource(content, file, "")
+	if err != nil {
 		return nil
 	}
-	parser := grammar.NewParser()
-	defer parser.Delete()
-	if !parser.SetLanguage(lang) {
-		return nil
-	}
-	tree := parser.ParseString(string(content))
-	defer tree.Delete()
+	defer pf.Close()
+	treeRoot := pf.Root
 	var edits []ingest.Edit
 	var walk func(n *grammar.Node, inIface bool)
 	walk = func(n *grammar.Node, inIface bool) {
@@ -1603,6 +1593,6 @@ func findInterfaceMethodEdits(file string, content []byte, oldLeaf, newLeaf stri
 			walk(n.Child(i), nextIface)
 		}
 	}
-	walk(tree.RootNode(), false)
+	walk(treeRoot, false)
 	return edits
 }

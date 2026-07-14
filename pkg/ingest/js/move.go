@@ -303,18 +303,12 @@ func ensureExportedInFile(rootDir string, result *ingest.Result, fileRel, symbol
 // addExportKeyword finds a declaration of the given symbol in content and
 // prepends "export " if it is not already exported.
 func addExportKeyword(file string, content []byte, symbol string) []ingest.Edit {
-	lang, ok := grammar.GetByExtension(file)
-	if !ok {
+	pf, err := ingest.ParseSource(content, file, "")
+	if err != nil {
 		return nil
 	}
-	parser := grammar.NewParser()
-	defer parser.Delete()
-	if !parser.SetLanguage(lang) {
-		return nil
-	}
-	tree := parser.ParseString(string(content))
-	defer tree.Delete()
-	root := tree.RootNode()
+	defer pf.Close()
+	root := pf.Root
 
 	declTypes := map[string]bool{
 		"function_declaration":           true,
@@ -518,18 +512,12 @@ func stripUnusedJSImports(file string, content []byte, decl ingest.DeclExtract) 
 
 	// For each import used by the declaration, check if any of its local
 	// names are still referenced in the rest of the file.
-	lang, ok := grammar.GetByExtension(file)
-	if !ok {
+	pf, err := ingest.ParseSource(content, file, "")
+	if err != nil {
 		return nil
 	}
-	parser := grammar.NewParser()
-	defer parser.Delete()
-	if !parser.SetLanguage(lang) {
-		return nil
-	}
-	tree := parser.ParseString(string(content))
-	defer tree.Delete()
-	root := tree.RootNode()
+	defer pf.Close()
+	root := pf.Root
 
 	stmts := parseJSImportStatements(root, content)
 

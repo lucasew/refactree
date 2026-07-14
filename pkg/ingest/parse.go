@@ -33,6 +33,37 @@ func (p *ParsedFile) Close() {
 	p.Root = nil
 }
 
+// ParseSource parses content with the tree-sitter grammar for pathForLang
+// (extension-based). fallbackLang is used when the extension is unknown.
+// On success the returned ParsedFile.Source is content.
+func ParseSource(content []byte, pathForLang, fallbackLang string) (*ParsedFile, error) {
+	lang, ok := grammar.GetByExtension(pathForLang)
+	if !ok && fallbackLang != "" {
+		lang, ok = grammar.Get(fallbackLang)
+	}
+	if !ok {
+		return nil, fmt.Errorf("unsupported language for %s", pathForLang)
+	}
+	return ParseSourceLanguage(content, lang, pathForLang)
+}
+
+// ParseSourceLanguage parses content with an already-resolved language.
+// label is used only in error messages.
+func ParseSourceLanguage(content []byte, lang grammar.Language, label string) (*ParsedFile, error) {
+	parser := grammar.NewParser()
+	if !parser.SetLanguage(lang) {
+		parser.Delete()
+		return nil, fmt.Errorf("failed to set language for %s", label)
+	}
+	tree := parser.ParseString(string(content))
+	return &ParsedFile{
+		Source: content,
+		Root:   tree.RootNode(),
+		tree:   tree,
+		parser: parser,
+	}, nil
+}
+
 // ParseSourceFile reads path and parses it with the tree-sitter grammar for the
 // file extension. If the extension is unknown and fallbackLang is non-empty,
 // grammar.Get(fallbackLang) is tried (java move drivers use "java").
@@ -41,25 +72,5 @@ func ParseSourceFile(path, fallbackLang string) (*ParsedFile, error) {
 	if err != nil {
 		return nil, err
 	}
-	lang, ok := grammar.GetByExtension(path)
-	if !ok && fallbackLang != "" {
-		lang, ok = grammar.Get(fallbackLang)
-	}
-	if !ok {
-		return nil, fmt.Errorf("unsupported language for %s", path)
-	}
-
-	parser := grammar.NewParser()
-	if !parser.SetLanguage(lang) {
-		parser.Delete()
-		return nil, fmt.Errorf("failed to set language for %s", path)
-	}
-
-	tree := parser.ParseString(string(source))
-	return &ParsedFile{
-		Source: source,
-		Root:   tree.RootNode(),
-		tree:   tree,
-		parser: parser,
-	}, nil
+	return ParseSource(source, path, fallbackLang)
 }
