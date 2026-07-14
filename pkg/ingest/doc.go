@@ -16,8 +16,9 @@ type DocResult struct {
 	DocString string
 }
 
-// DocFor ingests dir, locates the given reference, and extracts its
-// signature and docstring from the source file.
+// DocFor locates the given reference and extracts its signature and docstring.
+// Path docs materialize only the target file (Seed) or package directory (Dir),
+// not the whole project. Provider docs use a scoped DirResult.
 func DocFor(dir, reference string) (*DocResult, error) {
 	rawRef := ParseReference(reference)
 	if rawRef.Provider != "" && rawRef.Provider != "path" {
@@ -33,17 +34,62 @@ func DocFor(dir, reference string) (*DocResult, error) {
 		return nil, fmt.Errorf("provider doc reference requires symbol (::name): %s", reference)
 	}
 
-	result, err := ProjectResult(dir)
+	rawRef = normalizePathReference(rawRef)
+	absPath := rawRef.Path
+	if !filepath.IsAbs(absPath) {
+		absPath = filepath.Join(dir, strings.TrimPrefix(rawRef.Path, "./"))
+	}
+
+	var result *Result
+	st, err := os.Stat(absPath)
+	if err != nil {
+		// Fall back to hop canonicalize + seed (path may need directory-module rewrite).
+		canon := CanonicalizeReference(dir, rawRef)
+		cAbs := canon.Path
+		if !filepath.IsAbs(cAbs) {
+			cAbs = filepath.Join(dir, strings.TrimPrefix(canon.Path, "./"))
+		}
+		result, err = SeedResult(dir, cAbs)
+		if err != nil {
+			return nil, err
+		}
+		return docForResultEntity(dir, result, canon)
+	}
+
+	if st.IsDir() {
+		// Package-style dir: walk only that subtree under project Root (paths stay project-relative).
+		// ExpandImports off — docs do not need a full project graph.
+		result, err = MaterializeSource(ExtractSource{
+			Kind:      ExtractDir,
+			Root:      dir,
+			Dir:       absPath,
+			Recursive: true,
+		}, MaterializeOptions{ExpandImports: false})
+		if err != nil {
+			return nil, err
+		}
+		ref, err := canonicalSourceReference(dir, result, rawRef)
+		if err != nil {
+			return nil, err
+		}
+		return docForResultEntity(dir, result, ref)
+	}
+
+	// File path: hop barrels then seed the concrete file neighborhood.
+	canon := CanonicalizeReference(dir, rawRef)
+	cAbs := canon.Path
+	if !filepath.IsAbs(cAbs) {
+		cAbs = filepath.Join(dir, strings.TrimPrefix(canon.Path, "./"))
+	}
+	result, err = SeedResult(dir, cAbs)
 	if err != nil {
 		return nil, err
 	}
+	return docForResultEntity(dir, result, canon)
+}
 
-	ref, err := canonicalSourceReference(dir, result, ParseReference(reference))
-	if err != nil {
-		return nil, err
-	}
-	reference = ref.String()
-
+func docForResultEntity(dir string, result *Result, ref Reference) (*DocResult, error) {
+	reference := ref.String()
 	var entity *Entity
 	for i := range result.Entities {
 		if result.Entities[i].Reference == reference {
@@ -51,10 +97,19 @@ func DocFor(dir, reference string) (*DocResult, error) {
 			break
 		}
 	}
+	if entity == nil && ref.Symbol != "" {
+		for i := range result.Entities {
+			er := ParseReference(result.Entities[i].Reference)
+			if er.Symbol == ref.Symbol && sameScopePath(ref, er) {
+				entity = &result.Entities[i]
+				ref = er
+				break
+			}
+		}
+	}
 	if entity == nil {
 		return nil, fmt.Errorf("entity not found: %s", reference)
 	}
-
 	return docForEntity(dir, result, ref, entity)
 }
 
