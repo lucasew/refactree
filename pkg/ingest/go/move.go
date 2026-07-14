@@ -19,25 +19,12 @@ type moveDriver struct{}
 func (moveDriver) Language() string { return "go" }
 
 func (moveDriver) ExtractDecl(filePath string, entity ingest.Entity) (ingest.DeclExtract, error) {
-	source, err := os.ReadFile(filePath)
+	pf, err := ingest.ParseSourceFile(filePath, "")
 	if err != nil {
 		return ingest.DeclExtract{}, err
 	}
-
-	lang, ok := grammar.GetByExtension(filePath)
-	if !ok {
-		return ingest.DeclExtract{}, fmt.Errorf("unsupported language for %s", filePath)
-	}
-
-	parser := grammar.NewParser()
-	defer parser.Delete()
-	if !parser.SetLanguage(lang) {
-		return ingest.DeclExtract{}, fmt.Errorf("failed to set language for %s", filePath)
-	}
-
-	tree := parser.ParseString(string(source))
-	defer tree.Delete()
-	root := tree.RootNode()
+	defer pf.Close()
+	source, root := pf.Source, pf.Root
 
 	// Extract package name.
 	pkg := ""
