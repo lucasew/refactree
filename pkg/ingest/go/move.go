@@ -286,28 +286,92 @@ func parseGoImportLine(s string) (goImportSpec, bool) {
 	return goImportSpec{local: local, path: p}, true
 }
 
+// goIdentUsed reports whether ident appears as a Go identifier in text,
+// ignoring comments and string/rune literals so comments/docs do not count
+// as real uses (imports, package-local deps, etc.).
 func goIdentUsed(text, ident string) bool {
 	if ident == "" {
 		return false
 	}
-	off := 0
-	for {
-		idx := strings.Index(text[off:], ident)
-		if idx < 0 {
-			return false
-		}
-		pos := off + idx
-		end := pos + len(ident)
-		if pos > 0 && isIdentChar(text[pos-1]) {
-			off = end
+	for i := 0; i < len(text); {
+		// Line comment.
+		if i+1 < len(text) && text[i] == '/' && text[i+1] == '/' {
+			for i < len(text) && text[i] != '\n' {
+				i++
+			}
 			continue
 		}
-		if end < len(text) && isIdentChar(text[end]) {
-			off = end
+		// Block comment.
+		if i+1 < len(text) && text[i] == '/' && text[i+1] == '*' {
+			i += 2
+			for i+1 < len(text) && !(text[i] == '*' && text[i+1] == '/') {
+				i++
+			}
+			if i+1 < len(text) {
+				i += 2
+			}
 			continue
 		}
-		return true
+		// Interpreted string.
+		if text[i] == '"' {
+			i++
+			for i < len(text) && text[i] != '"' {
+				if text[i] == '\\' && i+1 < len(text) {
+					i += 2
+					continue
+				}
+				i++
+			}
+			if i < len(text) {
+				i++
+			}
+			continue
+		}
+		// Raw string.
+		if text[i] == '`' {
+			i++
+			for i < len(text) && text[i] != '`' {
+				i++
+			}
+			if i < len(text) {
+				i++
+			}
+			continue
+		}
+		// Rune literal.
+		if text[i] == '\'' {
+			i++
+			for i < len(text) && text[i] != '\'' {
+				if text[i] == '\\' && i+1 < len(text) {
+					i += 2
+					continue
+				}
+				i++
+			}
+			if i < len(text) {
+				i++
+			}
+			continue
+		}
+		// Identifier token: match only at identifier boundaries.
+		if isIdentStart(text[i]) {
+			start := i
+			i++
+			for i < len(text) && isIdentChar(text[i]) {
+				i++
+			}
+			if text[start:i] == ident {
+				return true
+			}
+			continue
+		}
+		i++
 	}
+	return false
+}
+
+func isIdentStart(b byte) bool {
+	return b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
 func ensureGoImports(content string, paths []string) string {
@@ -767,6 +831,15 @@ func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src
 	if strings.HasPrefix(leaf, "Test") && strings.HasSuffix(srcRel, "_test.go") && !strings.HasSuffix(dstRel, "_test.go") {
 		return nil, fmt.Errorf("moving test function %s into non-test file %s is not supported", leaf, dstRel)
 	}
+	// Go methods must live in the type's package; moving the type alone breaks them.
+	if packageHasMethodsOf(result, oldDir, leaf) {
+		return nil, fmt.Errorf("cross-package move of type %s with methods in package is not supported", leaf)
+	}
+	// Declaration bodies that still reference same-package symbols would leave
+	// undefined names at the destination (imports only cover other packages).
+	if dep := packageLocalDepInDecl(result, oldDir, leaf, decl.DeclText); dep != "" {
+		return nil, fmt.Errorf("cross-package move of %s still depends on same-package symbol %s is not supported", leaf, dep)
+	}
 
 	var edits []ingest.Edit
 	if srcContent, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(srcRel))); err == nil {
@@ -824,6 +897,111 @@ func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src
 		edits = append(edits, goImportInsertEdits(fileRel, content, []string{newImportPath})...)
 	}
 	return edits, nil
+}
+
+// packageHasMethodsOf reports whether pkgDir declares methods whose receiver
+// type leaf is typeName (e.g. *Session.Close or Session.Group).
+func packageHasMethodsOf(result *ingest.Result, pkgDir, typeName string) bool {
+	if result == nil || typeName == "" {
+		return false
+	}
+	for _, ent := range result.Entities {
+		ref := ingest.ParseReference(ent.Reference)
+		rel := strings.TrimPrefix(ref.Path, "./")
+		if dirOf(rel) != pkgDir {
+			continue
+		}
+		if methodReceiverType(ref.Symbol) == typeName {
+			return true
+		}
+	}
+	return false
+}
+
+// methodReceiverType returns the base type name for a method symbol like
+// "*Session.Close", "Session.Group", or "*Set[T].Add", or "" if not a method.
+// Generic receivers keep type args in the entity name (*Set[T].Add); type
+// entities are named by the identifier only (Set), so strip […].
+func methodReceiverType(symbol string) string {
+	recv, ok := receiverTypeName(symbol)
+	if !ok {
+		return ""
+	}
+	if i := strings.IndexByte(recv, '['); i >= 0 {
+		recv = recv[:i]
+	}
+	return recv
+}
+
+// packageLocalDepInDecl returns the first package-scope symbol in pkgDir (other
+// than movedLeaf) that the moved declaration depends on, or "".
+// Prefer resolved same-package relations (precise uses); fall back to a
+// comment/string-aware identifier scan of declText for cases without usage
+// edges (e.g. type field types not recorded as relations).
+func packageLocalDepInDecl(result *ingest.Result, pkgDir, movedLeaf, declText string) string {
+	if result == nil {
+		return ""
+	}
+	if dep := packageLocalDepFromRelations(result, pkgDir, movedLeaf); dep != "" {
+		return dep
+	}
+	if declText == "" {
+		return ""
+	}
+	// Stable order: scan entities as listed.
+	seen := map[string]bool{movedLeaf: true}
+	for _, ent := range result.Entities {
+		ref := ingest.ParseReference(ent.Reference)
+		rel := strings.TrimPrefix(ref.Path, "./")
+		if dirOf(rel) != pkgDir {
+			continue
+		}
+		sym := ref.Symbol
+		if sym == "" || strings.Contains(sym, ".") {
+			continue // skip empty and method symbols
+		}
+		name := strings.TrimPrefix(sym, "*")
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		if goIdentUsed(declText, name) {
+			return name
+		}
+	}
+	return ""
+}
+
+// packageLocalDepFromRelations finds a same-package dependency via usage
+// relations scoped to movedLeaf (e.g. Load -> Helper).
+func packageLocalDepFromRelations(result *ingest.Result, pkgDir, movedLeaf string) string {
+	if result == nil || movedLeaf == "" {
+		return ""
+	}
+	for _, rel := range result.Relations {
+		src := ingest.ParseReference(rel.Reference)
+		if symbolLeaf(src.Symbol) != movedLeaf {
+			continue
+		}
+		srcRel := strings.TrimPrefix(src.Path, "./")
+		if dirOf(srcRel) != pkgDir {
+			continue
+		}
+		tgt := ingest.ParseReference(rel.Target)
+		if tgt.Symbol == "" || strings.Contains(tgt.Symbol, ".") {
+			continue
+		}
+		tgtRel := strings.TrimPrefix(tgt.Path, "./")
+		if dirOf(tgtRel) != pkgDir {
+			continue
+		}
+		name := strings.TrimPrefix(tgt.Symbol, "*")
+		if name == "" || name == movedLeaf {
+			continue
+		}
+		return name
+	}
+	return ""
 }
 
 func readGoModulePath(rootDir string) (string, error) {

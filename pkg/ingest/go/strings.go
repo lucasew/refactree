@@ -13,7 +13,10 @@ func findPathSegmentOccurrencesInStrings(file string, content []byte, oldPath, n
 }
 
 // findPathSegmentOccurrencesInStringsWithParent replaces a path leaf only when
-// the preceding segment equals parentDir's final component.
+// the immediately preceding path prefix equals parentDir in full (not just the
+// parent leaf). Using only the final parent component falsely rewrites other
+// packages that share a basename path like cmd/.../driver/wallpaper vs
+// pkg/.../driver/wallpaper.
 func findPathSegmentOccurrencesInStringsWithParent(file string, content []byte, leaf, newLeaf, parentDir string) []ingest.Edit {
 	return findInStringLiterals(file, content, leaf, newLeaf, true, parentDir)
 }
@@ -21,10 +24,6 @@ func findPathSegmentOccurrencesInStringsWithParent(file string, content []byte, 
 func findInStringLiterals(file string, content []byte, oldBase, newBase string, pathSegments bool, parentDir string) []ingest.Edit {
 	if oldBase == "" || oldBase == newBase {
 		return nil
-	}
-	parentLeaf := ""
-	if parentDir != "" {
-		parentLeaf = lastPathComponent(parentDir)
 	}
 	text := string(content)
 	var edits []ingest.Edit
@@ -80,7 +79,7 @@ func findInStringLiterals(file string, content []byte, oldBase, newBase string, 
 			if pathSegments {
 				keep = pathSegmentBounded(seg, posInSeg, posInSeg+len(oldBase))
 				if keep && parentDir != "" {
-					keep = pathSegmentHasParent(seg, posInSeg, parentLeaf)
+					keep = pathSegmentHasParent(seg, posInSeg, parentDir)
 				}
 			}
 			if keep {
@@ -108,18 +107,20 @@ func pathSegmentBounded(seg string, start, end int) bool {
 	return true
 }
 
-func pathSegmentHasParent(seg string, leafStart int, parentLeaf string) bool {
-	if parentLeaf == "" {
+// pathSegmentHasParent reports whether the path immediately before leafStart is
+// parentPath (multi-segment allowed), bounded on path-segment boundaries.
+func pathSegmentHasParent(seg string, leafStart int, parentPath string) bool {
+	if parentPath == "" {
 		return leafStart == 1
 	}
 	if leafStart < 2 || seg[leafStart-1] != '/' {
 		return false
 	}
-	parentStart := leafStart - 1 - len(parentLeaf)
+	parentStart := leafStart - 1 - len(parentPath)
 	if parentStart < 1 {
 		return false
 	}
-	if seg[parentStart:leafStart-1] != parentLeaf {
+	if seg[parentStart:leafStart-1] != parentPath {
 		return false
 	}
 	return pathSegmentBounded(seg, parentStart, leafStart-1)

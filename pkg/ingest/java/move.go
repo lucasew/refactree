@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/lucasew/refactree/pkg/ingest"
@@ -72,6 +73,7 @@ func (moveDriver) ExtractDecl(filePath string, entity ingest.Entity) (ingest.Dec
 	return ingest.DeclExtract{
 		Preamble:    pkg,
 		DeclText:    declText,
+		Imports:     javaImportsNeededByDecl(source, declText),
 		RemoveStart: start,
 		RemoveEnd:   removeEnd,
 	}, nil
@@ -83,10 +85,18 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 		pkg = decl.Preamble
 	}
 
-	insertAt := uint32(0)
-	insertText := ""
 	if dstContent != nil {
-		insertAt = uint32(len(dstContent))
+		merged := ensureJavaImports(string(dstContent), decl.Imports)
+		if merged != string(dstContent) {
+			return ingest.Edit{
+				File:      dstRelPath,
+				StartByte: 0,
+				EndByte:   uint32(len(dstContent)),
+				NewText:   appendJavaDeclText(merged, decl.DeclText),
+			}
+		}
+		insertAt := uint32(len(dstContent))
+		insertText := ""
 		if len(dstContent) > 0 && dstContent[len(dstContent)-1] != '\n' {
 			insertText += "\n"
 		}
@@ -94,18 +104,273 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 			insertText += "\n"
 		}
 		insertText += decl.DeclText + "\n"
-	} else if pkg != "" {
-		insertText = fmt.Sprintf("package %s;\n\n%s\n", pkg, decl.DeclText)
-	} else {
-		insertText = decl.DeclText + "\n"
+		return ingest.Edit{
+			File:      dstRelPath,
+			StartByte: insertAt,
+			EndByte:   insertAt,
+			NewText:   insertText,
+		}
 	}
 
+	body := ""
+	if pkg != "" {
+		body = fmt.Sprintf("package %s;\n", pkg)
+	}
+	if len(decl.Imports) > 0 {
+		body = ensureJavaImports(body, decl.Imports)
+	}
 	return ingest.Edit{
 		File:      dstRelPath,
-		StartByte: insertAt,
-		EndByte:   insertAt,
-		NewText:   insertText,
+		StartByte: 0,
+		EndByte:   0,
+		NewText:   appendJavaDeclText(body, decl.DeclText),
 	}
+}
+
+func appendJavaDeclText(content, declText string) string {
+	out := content
+	if len(out) > 0 && out[len(out)-1] != '\n' {
+		out += "\n"
+	}
+	if len(out) > 0 {
+		out += "\n"
+	}
+	return out + declText + "\n"
+}
+
+// javaImportSpec is one import/import-static line from a Java source file.
+// stmt is the full statement including "import " and trailing ';'.
+type javaImportSpec struct {
+	stmt      string
+	local     string // simple name used by the declaration, or "*" for wildcards
+	startByte int    // start of the line in source
+	endByte   int    // exclusive end (includes trailing newline when present)
+}
+
+// javaImportsNeededByDecl returns full import statements from source whose
+// simple names appear in declText.
+//
+// On-demand / static-star imports (local == "*") are always kept: we cannot
+// observe which simple names they supply. That is correct for new-file
+// destinations (gson new_module), but when merging into an existing file that
+// already has a conflicting on-demand import for the same simple name (e.g.
+// dest uses java.awt.List via java.awt.* and we carry java.util.*), the merge
+// can make List ambiguous. Prefer single-type imports in moved sources; do not
+// try to resolve star conflicts here.
+func javaImportsNeededByDecl(source []byte, declText string) []string {
+	specs := parseJavaImportSpecs(source)
+	if len(specs) == 0 {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, spec := range specs {
+		if spec.stmt == "" || seen[spec.stmt] {
+			continue
+		}
+		if spec.local == "*" || javaIdentUsed(declText, spec.local) {
+			seen[spec.stmt] = true
+			out = append(out, spec.stmt)
+		}
+	}
+	return out
+}
+
+func parseJavaImportSpecs(source []byte) []javaImportSpec {
+	text := string(source)
+	var specs []javaImportSpec
+	offset := 0
+	for offset <= len(text) {
+		nl := strings.IndexByte(text[offset:], '\n')
+		lineEnd := len(text)
+		next := len(text)
+		if nl >= 0 {
+			lineEnd = offset + nl
+			next = lineEnd + 1
+		}
+		line := text[offset:lineEnd]
+		trim := strings.TrimSpace(line)
+		if strings.HasPrefix(trim, "import ") {
+			// Drop trailing comments for parsing, keep original line for stmt span.
+			stmt := trim
+			if i := strings.Index(stmt, "//"); i >= 0 {
+				stmt = strings.TrimSpace(stmt[:i])
+			}
+			if strings.HasSuffix(stmt, ";") {
+				body := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(strings.TrimPrefix(stmt, "import ")), ";"))
+				if body != "" {
+					local := body
+					if strings.HasPrefix(local, "static ") {
+						local = strings.TrimSpace(strings.TrimPrefix(local, "static "))
+					}
+					if strings.HasSuffix(local, ".*") {
+						local = "*"
+					} else if i := strings.LastIndex(local, "."); i >= 0 {
+						local = local[i+1:]
+					}
+					end := next
+					if nl < 0 {
+						end = len(text)
+					}
+					specs = append(specs, javaImportSpec{
+						stmt:      stmt,
+						local:     local,
+						startByte: offset,
+						endByte:   end,
+					})
+				}
+			}
+		}
+		if nl < 0 {
+			break
+		}
+		offset = next
+	}
+	return specs
+}
+
+func javaIdentUsed(text, ident string) bool {
+	if ident == "" || ident == "*" {
+		return false
+	}
+	off := 0
+	for {
+		idx := strings.Index(text[off:], ident)
+		if idx < 0 {
+			return false
+		}
+		pos := off + idx
+		end := pos + len(ident)
+		if pos > 0 && isJavaIdentChar(text[pos-1]) {
+			off = end
+			continue
+		}
+		if end < len(text) && isJavaIdentChar(text[end]) {
+			off = end
+			continue
+		}
+		return true
+	}
+}
+
+// ensureJavaImports inserts missing import statements after the package clause.
+// each entry in imports is a full "import …;" statement.
+func ensureJavaImports(content string, imports []string) string {
+	if len(imports) == 0 {
+		return content
+	}
+	existing := map[string]bool{}
+	for _, spec := range parseJavaImportSpecs([]byte(content)) {
+		existing[spec.stmt] = true
+	}
+	var missing []string
+	for _, stmt := range imports {
+		stmt = strings.TrimSpace(stmt)
+		if stmt == "" || existing[stmt] {
+			continue
+		}
+		existing[stmt] = true
+		missing = append(missing, stmt)
+	}
+	if len(missing) == 0 {
+		return content
+	}
+
+	lines := strings.Split(content, "\n")
+	// Insert after package clause and any existing imports.
+	insertAt := 0
+	for i, line := range lines {
+		trim := strings.TrimSpace(line)
+		if strings.HasPrefix(trim, "package ") || strings.HasPrefix(trim, "import ") {
+			insertAt = i + 1
+			continue
+		}
+		if insertAt > 0 && trim != "" && !strings.HasPrefix(trim, "//") && !strings.HasPrefix(trim, "/*") && !strings.HasPrefix(trim, "*") {
+			// First non-header line: stop so we insert before the body.
+			break
+		}
+	}
+
+	out := make([]string, 0, len(lines)+len(missing)+2)
+	out = append(out, lines[:insertAt]...)
+	// Blank line after package when there were no imports yet.
+	if insertAt > 0 {
+		prev := ""
+		if len(out) > 0 {
+			prev = strings.TrimSpace(out[len(out)-1])
+		}
+		if strings.HasPrefix(prev, "package ") {
+			out = append(out, "")
+		}
+	}
+	out = append(out, missing...)
+	// Blank line between imports and body when body follows immediately.
+	if insertAt < len(lines) && strings.TrimSpace(lines[insertAt]) != "" {
+		out = append(out, "")
+	}
+	out = append(out, lines[insertAt:]...)
+	return strings.Join(out, "\n")
+}
+
+// FinishCrossFileMove strips source imports that were only needed by the moved decl.
+func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src, dst ingest.Reference, decl ingest.DeclExtract) ([]ingest.Edit, error) {
+	srcRel := strings.TrimPrefix(src.Path, "./")
+	srcContent, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(srcRel)))
+	if err != nil {
+		return nil, nil
+	}
+	return stripUnusedJavaImports(srcRel, srcContent, decl), nil
+}
+
+// stripUnusedJavaImports removes import statements from the source file that
+// were only used by the removed declaration (same idea as Go/JS).
+func stripUnusedJavaImports(file string, content []byte, decl ingest.DeclExtract) []ingest.Edit {
+	if len(decl.Imports) == 0 {
+		return nil
+	}
+	carried := map[string]bool{}
+	for _, stmt := range decl.Imports {
+		carried[strings.TrimSpace(stmt)] = true
+	}
+	// Mask the removed declaration so remaining body usage is visible.
+	masked := append([]byte(nil), content...)
+	for i := decl.RemoveStart; i < decl.RemoveEnd && int(i) < len(masked); i++ {
+		if masked[i] != '\n' {
+			masked[i] = ' '
+		}
+	}
+	// Mask import lines themselves so we do not count import idents as body use.
+	specs := parseJavaImportSpecs(content)
+	for _, spec := range specs {
+		for i := spec.startByte; i < spec.endByte && i < len(masked); i++ {
+			if masked[i] != '\n' {
+				masked[i] = ' '
+			}
+		}
+	}
+	rest := string(masked)
+
+	var edits []ingest.Edit
+	for _, spec := range specs {
+		if !carried[spec.stmt] {
+			continue
+		}
+		// Wildcards: cannot prove remaining body still needs them. Only strip
+		// when the simple-name path would also strip (never for "*").
+		if spec.local == "*" {
+			continue
+		}
+		if javaIdentUsed(rest, spec.local) {
+			continue
+		}
+		edits = append(edits, ingest.Edit{
+			File:      file,
+			StartByte: uint32(spec.startByte),
+			EndByte:   uint32(spec.endByte),
+			NewText:   "",
+		})
+	}
+	return edits
 }
 
 func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ingest.Result, oldRef, newRef ingest.Reference) []ingest.Edit {
