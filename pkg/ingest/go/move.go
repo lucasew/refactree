@@ -1192,6 +1192,9 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 	if scopePrefix != "" {
 		ourPkgDirs[scopePrefix] = true
 	}
+	// Receiver types we are renaming (*T.m / T.m). Same-package ExtraRename
+	// must not rewrite t.m on a different concrete type that also defines m.
+	ourReceivers := map[string]bool{}
 	for _, s := range sourceRefs {
 		sourceSet[s] = true
 		ref := ingest.ParseReference(s)
@@ -1199,6 +1202,23 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		if d := dirOf(rel); d != "" {
 			pkgDirs[d] = true
 			ourPkgDirs[d] = true
+		}
+		if recv, ok := receiverTypeName(ref.Symbol); ok {
+			ourReceivers[recv] = true
+		}
+	}
+	// Other concrete types in the graph that define a method with the same leaf.
+	foreignReceivers := map[string]bool{}
+	for _, ent := range result.Entities {
+		if sourceSet[ent.Reference] {
+			continue
+		}
+		ref := ingest.ParseReference(ent.Reference)
+		if symbolLeaf(ref.Symbol) != oldLeaf {
+			continue
+		}
+		if recv, ok := receiverTypeName(ref.Symbol); ok && !ourReceivers[recv] {
+			foreignReceivers[recv] = true
 		}
 	}
 	occupied := map[string]map[[2]uint32]bool{}
@@ -1267,9 +1287,24 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 			}
 			selectorEdits = findSelectorLeafEdits(rel, content, oldLeaf, newLeaf, allowed)
 		}
+		// Cache enclosing method receiver types for this file when filtering.
+		var recvAt func(pos uint32) (string, bool)
+		if len(foreignReceivers) > 0 && (inOurPkg || relatedFiles[rel]) {
+			recvAt = methodReceiverTypeAtFunc(content)
+		}
 		for _, e := range selectorEdits {
 			if occ[[2]uint32{e.StartByte, e.EndByte}] {
 				continue
+			}
+			// Skip t.m when inside a method of a different type that also defines m
+			// (e.g. renaming *claudeTool.fetchManifest must not touch *cmakeTool).
+			if recvAt != nil {
+				if recv, ok := recvAt(e.StartByte); ok {
+					recv = strings.TrimPrefix(recv, "*")
+					if foreignReceivers[recv] && !ourReceivers[recv] {
+						continue
+					}
+				}
 			}
 			edits = append(edits, e)
 		}
@@ -1283,6 +1318,91 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		}
 	}
 	return edits
+}
+
+// methodReceiverTypeAtFunc returns a lookup for the receiver type name of the
+// method declaration that contains a byte offset, or ok=false outside methods.
+func methodReceiverTypeAtFunc(content []byte) func(pos uint32) (string, bool) {
+	type span struct {
+		start, end uint32
+		recv       string
+	}
+	var spans []span
+	lang, ok := grammar.GetByExtension(".go")
+	if !ok {
+		return func(uint32) (string, bool) { return "", false }
+	}
+	parser := grammar.NewParser()
+	if !parser.SetLanguage(lang) {
+		parser.Delete()
+		return func(uint32) (string, bool) { return "", false }
+	}
+	tree := parser.ParseString(string(content))
+	if tree == nil {
+		parser.Delete()
+		return func(uint32) (string, bool) { return "", false }
+	}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type() == "method_declaration" {
+			if recv := methodDeclReceiverType(n, content); recv != "" {
+				spans = append(spans, span{n.StartByte(), n.EndByte(), recv})
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(tree.RootNode())
+	tree.Delete()
+	parser.Delete()
+	return func(pos uint32) (string, bool) {
+		for _, s := range spans {
+			if pos >= s.start && pos < s.end {
+				return s.recv, true
+			}
+		}
+		return "", false
+	}
+}
+
+// methodDeclReceiverType returns the type name of a method_declaration receiver
+// (pointer star stripped), e.g. "*claudeTool" / "claudeTool" → "claudeTool".
+func methodDeclReceiverType(method *grammar.Node, content []byte) string {
+	recv := ingest.ChildByField(method, "receiver")
+	if recv == nil {
+		return ""
+	}
+	// receiver is parameter_list → parameter_declaration → type
+	var typeNode *grammar.Node
+	var findType func(n *grammar.Node)
+	findType = func(n *grammar.Node) {
+		if n == nil || typeNode != nil {
+			return
+		}
+		if n.Type() == "type_identifier" || n.Type() == "pointer_type" || n.Type() == "generic_type" {
+			// Prefer the named type identifier under the type node.
+			if n.Type() == "type_identifier" {
+				typeNode = n
+				return
+			}
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				findType(n.Child(i))
+			}
+			return
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			findType(n.Child(i))
+		}
+	}
+	findType(recv)
+	if typeNode == nil {
+		return ""
+	}
+	return strings.TrimPrefix(ingest.NodeText(typeNode, content), "*")
 }
 
 // interfaceNamesWithMethod returns interface type names in ourPkgDirs that
