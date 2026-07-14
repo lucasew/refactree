@@ -503,19 +503,21 @@ func buildReplacementModule(importMod, oldMod, newMod string) string {
 	return newMod
 }
 
+// pythonPathWithoutSuffix strips .py and package __init__ suffixes from a file path.
+func pythonPathWithoutSuffix(p string) string {
+	p = strings.TrimSuffix(p, ".py")
+	return strings.TrimSuffix(p, "/__init__")
+}
+
 // pythonModuleFromPath converts a file path like "pkga/helpers.py" to
 // a Python module spec like "pkga.helpers".
 func pythonModuleFromPath(p string) string {
-	p = strings.TrimSuffix(p, ".py")
-	p = strings.TrimSuffix(p, "/__init__")
-	return strings.ReplaceAll(p, "/", ".")
+	return strings.ReplaceAll(pythonPathWithoutSuffix(p), "/", ".")
 }
 
 // pythonFileStem returns the bare module name from a path (e.g. "helpers" from "pkg/helpers.py").
 func pythonFileStem(p string) string {
-	p = strings.TrimSuffix(p, ".py")
-	p = strings.TrimSuffix(p, "/__init__")
-	return ingest.LastPathComponent(p)
+	return ingest.LastPathComponent(pythonPathWithoutSuffix(p))
 }
 
 // findPythonDecl returns the top-level declaration node whose name starts at nameStart.
