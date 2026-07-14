@@ -19,7 +19,7 @@ require (
 	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/svelte v0.0.0-20260713221032-8673315d25fc
 	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/tsx v0.0.0-20260713221032-8673315d25fc
 	github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar/typescript v0.0.0-20260713221032-8673315d25fc
-	github.com/pelletier/go-toml/v2 v2.2.4
+	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/spf13/cobra v1.10.2
 	github.com/testcontainers/testcontainers-go v0.37.0
 )
