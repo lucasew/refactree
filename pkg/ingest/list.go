@@ -24,9 +24,7 @@ type SymbolInfo struct {
 // WalkSymbols iterates symbols in a reference scope, invoking yield for each
 // matching symbol. Returning false from yield stops iteration early.
 //
-// Listing is incremental: each source file is parsed (or served from the
-// extract cache) and its entities are yielded before the next file is
-// processed. It does not wait for a full-module Ingest/resolve graph.
+// Thin convenience over WalkExtracts (no Materialize, no ExpandImports).
 func WalkSymbols(dir, reference string, opts ListOptions, yield func(SymbolInfo) bool) error {
 	ref := ParseReference(reference)
 	ingestDir := dir
@@ -48,67 +46,42 @@ func WalkSymbols(dir, reference string, opts ListOptions, yield func(SymbolInfo)
 		refPath, refIsDir = listScopeForRef(ingestDir, ref)
 	}
 
-	// Single-file scope: parse that file only.
+	recursive := providerListIngestRecursive(ref, opts)
+
+	// Single-file scope: hop parse only that file.
 	if !refIsDir && refPath != "" {
 		abs := ref.Path
 		if !filepath.IsAbs(abs) {
 			abs = filepath.Join(ingestDir, filepath.FromSlash(refPath))
 		}
-		return yieldSymbolsFromFile(ingestDir, abs, ref, refPath, refIsDir, opts, yield)
+		// Resolve once against the process cwd so relative fixture roots work.
+		if a, err := filepath.Abs(abs); err == nil {
+			abs = a
+		}
+		return WalkExtracts(ExtractSource{
+			Kind:  ExtractHop,
+			Root:  ingestDir,
+			Paths: []string{abs},
+		}, func(fe *FileExtract) bool {
+			return yieldEntitiesFromExtract(fe, ref, refPath, refIsDir, recursive, opts, yield)
+		})
 	}
 
-	rootAbs, err := filepath.Abs(ingestDir)
-	if err != nil {
-		rootAbs = ingestDir
-	}
-
-	// Directory / module scope: walk and yield as each file is parsed.
-	// Skip full Ingest (no import-target expansion, no resolve graph).
-	recursive := providerListIngestRecursive(ref, opts)
-	return filepath.WalkDir(rootAbs, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			if path != rootAbs && isSkippedDirName(d.Name()) {
-				return filepath.SkipDir
-			}
-			if !recursive && path != rootAbs {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		info, infoErr := d.Info()
-		if infoErr != nil {
-			return infoErr
-		}
-		stop, yerr := yieldSymbolsFromFileInfo(rootAbs, path, info, ref, refPath, refIsDir, recursive, opts, yield)
-		if yerr != nil {
-			return yerr
-		}
-		if stop {
-			return filepath.SkipAll
-		}
-		return nil
+	// Directory scope: stream Dir extracts.
+	return WalkExtracts(ExtractSource{
+		Kind:      ExtractDir,
+		Root:      ingestDir,
+		Recursive: recursive,
+	}, func(fe *FileExtract) bool {
+		return yieldEntitiesFromExtract(fe, ref, refPath, refIsDir, recursive, opts, yield)
 	})
 }
 
-// yieldSymbolsFromFile parses one file and yields matching symbols.
-func yieldSymbolsFromFile(rootAbs, absPath string, ref Reference, refPath string, refIsDir bool, opts ListOptions, yield func(SymbolInfo) bool) error {
-	recursive := providerListIngestRecursive(ref, opts)
-	_, err := yieldSymbolsFromFileInfo(rootAbs, absPath, nil, ref, refPath, refIsDir, recursive, opts, yield)
-	return err
-}
-
-func yieldSymbolsFromFileInfo(rootAbs, absPath string, info os.FileInfo, ref Reference, refPath string, refIsDir, recursive bool, opts ListOptions, yield func(SymbolInfo) bool) (stop bool, err error) {
-	fe, err := parseFileCached(rootAbs, absPath, info)
-	if err != nil {
-		return false, err
-	}
+// yieldEntitiesFromExtract returns false if the caller should stop WalkExtracts.
+func yieldEntitiesFromExtract(fe *FileExtract, ref Reference, refPath string, refIsDir, recursive bool, opts ListOptions, yield func(SymbolInfo) bool) bool {
 	if fe == nil {
-		return false, nil
+		return true
 	}
-
 	for _, entDef := range fe.Entities {
 		entPath := strings.TrimPrefix(filepath.ToSlash(fe.Path), "./")
 		entRef := ParseReference(SymbolRef("./"+entPath, entDef.Name))
@@ -145,10 +118,10 @@ func yieldSymbolsFromFileInfo(rootAbs, absPath string, info os.FileInfo, ref Ref
 		out.Entity.Reference = out.Reference.String()
 
 		if !yield(out) {
-			return true, nil
+			return false
 		}
 	}
-	return false, nil
+	return true
 }
 
 func listScopeForRef(dir string, ref Reference) (refPath string, refIsDir bool) {
