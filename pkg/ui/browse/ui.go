@@ -673,7 +673,7 @@ func (m *browseModel) buildProviderItems() ([]list.Item, error) {
 				if !m.includeHidden && strings.HasPrefix(name, ".") {
 					continue
 				}
-				childPath := joinProviderPath(m.providerRef.Path, name)
+				childPath := refpkg.JoinProviderPath(m.providerRef.Path, name)
 				packages = append(packages, browseItem{
 					kind:      browseItemDir,
 					title:     name + "/",
@@ -1314,18 +1314,6 @@ func parentProviderPath(path string) string {
 		return ""
 	}
 	return parent
-}
-
-func joinProviderPath(base, name string) string {
-	base = strings.Trim(base, "/")
-	name = strings.Trim(name, "/")
-	if base == "" {
-		return name
-	}
-	if name == "" {
-		return base
-	}
-	return base + "/" + name
 }
 
 func browseItemForProviderChild(child refpkg.ScopeChild) browseItem {
