@@ -2,6 +2,47 @@ package ingestgo
 
 import "testing"
 
+func TestMethodReceiverType_StripsGenericArgs(t *testing.T) {
+	cases := []struct {
+		symbol string
+		want   string
+	}{
+		{"*Session.Close", "Session"},
+		{"Session.Group", "Session"},
+		{"*Set[T].Add", "Set"},
+		{"Set[T].Len", "Set"},
+		{"*Map[K,V].Get", "Map"},
+		{"Add", ""},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := methodReceiverType(tc.symbol); got != tc.want {
+			t.Errorf("methodReceiverType(%q)=%q want %q", tc.symbol, got, tc.want)
+		}
+	}
+}
+
+func TestGoIdentUsed_SkipsCommentsAndStrings(t *testing.T) {
+	if goIdentUsed(`// Helper used elsewhere`+"\n"+`func F() {}`, "Helper") {
+		t.Fatal("line comment should not count as use")
+	}
+	if goIdentUsed(`/* Helper */`+"\n"+`func F() {}`, "Helper") {
+		t.Fatal("block comment should not count as use")
+	}
+	if goIdentUsed(`func F() string { return "Helper" }`, "Helper") {
+		t.Fatal("string literal should not count as use")
+	}
+	if goIdentUsed("func F() string { return `Helper` }", "Helper") {
+		t.Fatal("raw string should not count as use")
+	}
+	if !goIdentUsed(`func F() { Helper() }`, "Helper") {
+		t.Fatal("real call should count as use")
+	}
+	if goIdentUsed(`func Helpers() {}`, "Helper") {
+		t.Fatal("identifier prefix should not match")
+	}
+}
+
 func TestFindSelectorLeafEdits_SkipsCommentApostrophe(t *testing.T) {
 	content := []byte("package wallpaper\n\nfunc Wrap() error {\n\t// Ignore errors if service doesn't exist\n\treturn d.SetStatic(ctx, path)\n}\n")
 	edits := findSelectorLeafEdits("facade.go", content, "SetStatic", "Fuzz", nil)
