@@ -13,10 +13,13 @@ func NodeText(n *grammar.Node, source []byte) string {
 
 // ChildByField returns the first child whose field name matches, or nil.
 func ChildByField(n *grammar.Node, field string) *grammar.Node {
+	if n == nil {
+		return nil
+	}
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		if n.FieldNameForChild(i) == field {
 			c := n.Child(i)
-			if !c.IsNull() {
+			if c != nil && !c.IsNull() {
 				return c
 			}
 		}
