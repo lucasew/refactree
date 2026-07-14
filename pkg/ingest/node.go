@@ -26,9 +26,12 @@ func ChildByField(n *grammar.Node, field string) *grammar.Node {
 
 // ChildByType returns the first child whose node type matches, or nil.
 func ChildByType(n *grammar.Node, typ string) *grammar.Node {
+	if n == nil {
+		return nil
+	}
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		c := n.Child(i)
-		if c.Type() == typ {
+		if c != nil && !c.IsNull() && c.Type() == typ {
 			return c
 		}
 	}
