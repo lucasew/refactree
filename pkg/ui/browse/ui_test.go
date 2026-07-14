@@ -59,8 +59,6 @@ func TestBrowseSetCurrentRel_RejectsOutsideRoot(t *testing.T) {
 	}
 }
 
-
-
 func TestNewBrowseModelFromReference_GoProvider(t *testing.T) {
 	model, err := newBrowseModelFromReference(ingest.ParseReference("go:fmt"), false)
 	if err != nil {
