@@ -32,8 +32,14 @@ func CoerceLocalPathReference(baseDir string, ref Reference) Reference {
 	return ref
 }
 
+// CleanRelDir strips a leading "./" and trailing "/" from a relative path.
+// Used for directory keys that compare without those decorations.
+func CleanRelDir(p string) string {
+	return strings.TrimSuffix(strings.TrimPrefix(p, "./"), "/")
+}
+
 func pathJoinSlash(dir, base string) string {
-	dir = strings.TrimSuffix(strings.TrimPrefix(dir, "./"), "/")
+	dir = CleanRelDir(dir)
 	if dir == "" || dir == "." {
 		return base
 	}
