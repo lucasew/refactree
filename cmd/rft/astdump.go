@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/lucasew/refactree/pkg/ingest"
 	"github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar"
 	"github.com/spf13/cobra"
 )
@@ -45,15 +46,11 @@ func runASTDump(languageName, filename, querySource, queryFile string, output io
 		return fmt.Errorf("unsupported language: %s", languageName)
 	}
 
-	parser := grammar.NewParser()
-	defer parser.Delete()
-
-	if !parser.SetLanguage(lang) {
-		return fmt.Errorf("failed to set language")
+	pf, err := ingest.ParseSourceLanguage(source, lang, filename)
+	if err != nil {
+		return err
 	}
-
-	tree := parser.ParseString(string(source))
-	defer tree.Delete()
+	defer pf.Close()
 
 	query := querySource
 	if queryFile != "" {
@@ -64,7 +61,7 @@ func runASTDump(languageName, filename, querySource, queryFile string, output io
 		query = string(queryBytes)
 	}
 
-	root := tree.RootNode()
+	root := pf.Root
 	enc := json.NewEncoder(output)
 
 	if query != "" {
