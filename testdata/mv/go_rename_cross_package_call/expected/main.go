@@ -1,7 +1,7 @@
 package main
 
-import "example/lib"
+import "example/pkg/db"
 
 func main() {
-	_ = lib.FuzzCtx()
+	_ = db.FuzzCtx()
 }

@@ -1,4 +1,4 @@
 {
-  "source": "path:./lib/db.go::FromContext",
-  "destination": "path:./lib/db.go::FuzzCtx"
+  "source": "path:./pkg/db/db.go::FromContext",
+  "destination": "path:./pkg/db/db.go::FuzzCtx"
 }
