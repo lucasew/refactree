@@ -7,8 +7,6 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
-
-	"github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar"
 )
 
 // Ingest discovers source files under dir, parses them with tree-sitter,
@@ -466,18 +464,14 @@ func parseFile(dir, absPath string) (*FileExtract, error) {
 			}
 		}()
 
-		parser := grammar.NewParser()
-		defer parser.Delete()
-
-		if !parser.SetLanguage(lang) {
-			parseErr = fmt.Errorf("failed to set language for %s", relPath)
+		pf, err := ParseSourceLanguage(source, lang, relPath)
+		if err != nil {
+			parseErr = err
 			return
 		}
+		defer pf.Close()
 
-		tree := parser.ParseString(string(source))
-		defer tree.Delete()
-
-		fe = driver.Extract(tree.RootNode(), source, relPath)
+		fe = driver.Extract(pf.Root, source, relPath)
 	}()
 	return fe, parseErr
 }
