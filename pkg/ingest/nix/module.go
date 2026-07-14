@@ -128,7 +128,7 @@ func (referenceProvider) ListScopeChildren(ref ingest.Reference, _ string, inclu
 			continue
 		}
 
-		childRef := ingest.Reference{Provider: "nix", Path: joinProviderPath(ref.Path, name)}
+		childRef := ingest.Reference{Provider: "nix", Path: refpkg.JoinProviderPath(ref.Path, name)}
 		if entry.IsDir() {
 			children = append(children, refpkg.ScopeChild{
 				Ref:  childRef,
@@ -476,18 +476,6 @@ func normalizeProviderSpec(spec string) string {
 func nixProviderRootScope(spec string) bool {
 	spec = normalizeProviderSpec(spec)
 	return spec != "" && !strings.Contains(spec, "/")
-}
-
-func joinProviderPath(base, name string) string {
-	base = strings.Trim(base, "/")
-	name = strings.Trim(name, "/")
-	if base == "" {
-		return name
-	}
-	if name == "" {
-		return base
-	}
-	return base + "/" + name
 }
 
 func isNixSourceFile(name string) bool {

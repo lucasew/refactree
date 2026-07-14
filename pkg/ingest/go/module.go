@@ -115,7 +115,7 @@ func (referenceProvider) ListScopeChildren(ref ingest.Reference, rootDir string,
 			continue
 		}
 		children = append(children, refpkg.ScopeChild{
-			Ref:  ingest.Reference{Provider: "go", Path: joinProviderPath(ref.Path, name)},
+			Ref:  ingest.Reference{Provider: "go", Path: refpkg.JoinProviderPath(ref.Path, name)},
 			Kind: refpkg.ScopeChildDir,
 		})
 	}
@@ -145,18 +145,6 @@ func (referenceProvider) AllowDocEntity(_ ingest.Reference, _ ingest.Reference, 
 		return false
 	}
 	return !strings.HasSuffix(entPath, "_test.go")
-}
-
-func joinProviderPath(base, name string) string {
-	base = strings.Trim(base, "/")
-	name = strings.Trim(name, "/")
-	if base == "" {
-		return name
-	}
-	if name == "" {
-		return base
-	}
-	return base + "/" + name
 }
 
 func dirHasGoSources(dir string) bool {
