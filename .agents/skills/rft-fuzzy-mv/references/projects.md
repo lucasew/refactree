@@ -3,10 +3,10 @@ Machine-readable catalog: [`testdata/fuzzy/projects.toml`](../../../../testdata/
 Setup tasks honor `RFT_FUZZY_OFFLINE=1` (set by harness `--offline`) so cached deps work without registry access after prefetch.
 
 # Python
-- id: `ritm_annotation`
-- https://github.com/lucasew-graveyard/ritm_annotation
-- scoped ingest `ritm_annotation`; `mise run setup` / `mise run test`
-- preserve `.venv`, `.uv`; setup uses `uv sync --no-install-project` (no clang/cython); offline adds `--offline`
+- id: `boltons`
+- https://github.com/mahmoud/boltons
+- scoped ingest `boltons`; `mise run setup` / `mise run test`
+- preserve `.venv`, `.uv`; setup uses `uv sync --group dev`; offline adds `--offline`
 
 # Go
 - id: `workspaced`

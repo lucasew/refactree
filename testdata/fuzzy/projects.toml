@@ -25,39 +25,38 @@ run = "go mod download -x"
 description = "Run tests"
 run = "go test -count=1 ./..."
 
-[projects.ritm_annotation]
-url = "https://github.com/lucasew-graveyard/ritm_annotation.git"
-ref = "761fbed250379c99b5e71309b18284dc037ec302"
+[projects.boltons]
+url = "https://github.com/mahmoud/boltons.git"
+ref = "979fa9b613fa8c0a455ae16ea6f2ec91c11ecafe"
 family = "python"
 root = "."
-ingest_roots = ["ritm_annotation"]
+ingest_roots = ["boltons"]
 preserve_globs = [".venv", ".uv"]
 
-[projects.ritm_annotation.mv]
+[projects.boltons.mv]
 enabled = true
 grains = ["declaration", "module", "package"]
 
-[projects.ritm_annotation.isolate]
+[projects.boltons.isolate]
 setup_network = true
 check_network = false
 
-[projects.ritm_annotation.mise.tools]
+[projects.boltons.mise.tools]
 uv = "0.11.26"
 
-[projects.ritm_annotation.mise.tasks.setup]
-description = "Install dev deps without building the local cython package (offline when RFT_FUZZY_OFFLINE=1)"
+[projects.boltons.mise.tasks.setup]
+description = "Install boltons + pytest via uv (offline when RFT_FUZZY_OFFLINE=1)"
 run = """
-# --no-install-project: skip editable/cython build (needs clang/cc). ruff only needs the env.
 if [ "${RFT_FUZZY_OFFLINE:-}" = 1 ]; then
-  uv sync --extra dev --verbose --offline --no-install-project
+  uv sync --group dev --verbose --offline
 else
-  uv sync --extra dev --verbose --no-install-project
+  uv sync --group dev --verbose
 fi
 """
 
-[projects.ritm_annotation.mise.tasks.test]
-description = "Lint"
-run = "uv run ruff check -v ."
+[projects.boltons.mise.tasks.test]
+description = "Run boltons unit tests"
+run = "uv run pytest -q tests"
 
 [projects.astro]
 url = "https://github.com/withastro/astro.git"
