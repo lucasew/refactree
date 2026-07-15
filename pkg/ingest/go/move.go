@@ -673,7 +673,7 @@ func goSpecNameStartsAt(spec *grammar.Node, nameStart uint32) bool {
 	return false
 }
 
-func (moveDriver) ExpandRenameSources(result *ingest.Result, sourceRef string) []string {
+func (moveDriver) ExpandRenameSources(rootDir string, result *ingest.Result, sourceRef string) []string {
 	src := ingest.ParseReference(sourceRef)
 	if src.Symbol == "" {
 		return nil
@@ -686,6 +686,9 @@ func (moveDriver) ExpandRenameSources(result *ingest.Result, sourceRef string) [
 	srcRel := strings.TrimPrefix(src.Path, "./")
 	srcPkgDir := dirOf(srcRel)
 	scopePrefix := methodRenameScopePrefix(srcRel)
+	// Interface method → expand to same-leaf methods (implementors + sibling ifaces)
+	// in the package tree so concrete defs and call sites rename together.
+	ifaceExpand := isMethod && goTypeIsInterface(rootDir, result, srcPkgDir, recv)
 	var extra []string
 	for _, ent := range result.Entities {
 		ref := ingest.ParseReference(ent.Reference)
@@ -701,12 +704,17 @@ func (moveDriver) ExpandRenameSources(result *ingest.Result, sourceRef string) [
 		if isMethod {
 			entRecv, entMethod := receiverTypeName(ref.Symbol)
 			if entMethod {
-				if entRecv != recv {
+				if ifaceExpand {
+					// Any Type.leaf in the package / sibling scope under the iface tree.
+					if entPkgDir != srcPkgDir &&
+						(scopePrefix == "" || (entPkgDir != scopePrefix && !strings.HasPrefix(rel, scopePrefix+"/"))) {
+						continue
+					}
+				} else if entRecv != recv {
 					continue
-				}
-				// Same impl package or sibling packages under the interface tree.
-				if entPkgDir != srcPkgDir &&
+				} else if entPkgDir != srcPkgDir &&
 					(scopePrefix == "" || (entPkgDir != scopePrefix && !strings.HasPrefix(rel, scopePrefix+"/"))) {
+					// Same impl package or sibling packages under the interface tree.
 					continue
 				}
 			} else if ref.Symbol == leaf {
@@ -727,6 +735,63 @@ func (moveDriver) ExpandRenameSources(result *ingest.Result, sourceRef string) [
 		}
 	}
 	return extra
+}
+
+// goTypeIsInterface reports whether typeName is declared as an interface in pkgDir.
+func goTypeIsInterface(rootDir string, result *ingest.Result, pkgDir, typeName string) bool {
+	if typeName == "" || result == nil {
+		return false
+	}
+	for _, f := range result.Files {
+		if f.Language != "go" {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Path, "./")
+		if dirOf(rel) != pkgDir {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		if typeIsInterfaceInFile(content, typeName) {
+			return true
+		}
+	}
+	return false
+}
+
+// typeIsInterfaceInFile reports whether typeName is declared as interface in content.
+func typeIsInterfaceInFile(content []byte, typeName string) bool {
+	if typeName == "" {
+		return false
+	}
+	pf, err := ingest.ParseSource(content, ".go", "")
+	if err != nil {
+		return false
+	}
+	defer pf.Close()
+	var found bool
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || found {
+			return
+		}
+		if n.Type() == "type_spec" {
+			id := ingest.ChildByType(n, "type_identifier")
+			if id != nil && ingest.NodeText(id, content) == typeName {
+				if t := ingest.ChildByField(n, "type"); t != nil && t.Type() == "interface_type" {
+					found = true
+					return
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(pf.Root)
+	return found
 }
 
 func isExportedIdent(name string) bool {
@@ -1188,6 +1253,9 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 	}
 	// Other concrete types that define a method with the same leaf (entity graph
 	// first; AST scan below fills gaps when ingest misses a method entity).
+	// Interface method entities (Type.Method on interface types) are co-renamed
+	// via findInterfaceMethodEdits, not competing foreign receivers — treating
+	// them as foreign would skip interface-typed selectors (var d Driver; d.M()).
 	foreignReceivers := map[string]bool{}
 	for _, ent := range result.Entities {
 		if sourceSet[ent.Reference] {
@@ -1198,6 +1266,10 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 			continue
 		}
 		if recv, ok := receiverTypeName(ref.Symbol); ok && !ourReceivers[recv] {
+			entPkg := dirOf(strings.TrimPrefix(ref.Path, "./"))
+			if goTypeIsInterface(rootDir, result, entPkg, recv) {
+				continue
+			}
 			foreignReceivers[recv] = true
 		}
 	}

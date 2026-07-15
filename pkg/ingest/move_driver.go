@@ -57,7 +57,7 @@ type MoveDriver interface {
 // symbol rename to related entities that must change together (for example a
 // Go interface method and all implementations in the same package tree).
 type RenameExpander interface {
-	ExpandRenameSources(result *Result, sourceRef string) []string
+	ExpandRenameSources(rootDir string, result *Result, sourceRef string) []string
 }
 
 // CrossFileMoveFinisher is an optional MoveDriver capability for extra edits
