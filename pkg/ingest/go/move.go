@@ -1345,13 +1345,28 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 			selectorEdits = findSelectorLeafEdits(rel, content, oldLeaf, newLeaf, nil)
 		} else if importsRelated {
 			// External importers: package qualifiers for our pkgs plus variables
-			// typed as imported interfaces that carry this method (var d a.Driver).
+			// typed as imported interfaces that carry this method (var d a.Driver)
+			// or as our concrete receiver types (b pkga.Box / b := pkga.Box{}).
 			// Never b.Unrelated{}.WriteImage or b.WriteImage on foreign packages.
 			allowed := importLocalsForPackages(content, pkgDirs)
 			ifaceNames := interfaceNamesWithMethod(rootDir, result, ourPkgDirs, oldLeaf)
 			for local := range importLocalsForPackages(content, pkgDirs) {
 				for _, iface := range ifaceNames {
 					for name := range varsTypedAsImported(content, local, iface) {
+						allowed[name] = true
+					}
+				}
+				// Concrete receivers: same importLocal.Type patterns as interfaces,
+				// plus short composite assigns (b := pkga.Box{}).
+				for recv := range ourReceivers {
+					recv = strings.TrimPrefix(recv, "*")
+					if recv == "" {
+						continue
+					}
+					for name := range varsTypedAsImported(content, local, recv) {
+						allowed[name] = true
+					}
+					for name := range varsAssignedImportedComposite(content, local, recv) {
 						allowed[name] = true
 					}
 				}
@@ -1972,6 +1987,77 @@ func varsTypedAsImported(content []byte, importLocal, typeName string) map[strin
 			}
 			off = pos + len(needle)
 		}
+	}
+	return names
+}
+
+// varsAssignedImportedComposite returns identifiers from short assignments of
+// imported composite literals or address-of composites, e.g.:
+//
+//	b := pkga.Box{}
+//	b := &pkga.Box{}
+//	b = pkga.Box{N: 1}
+func varsAssignedImportedComposite(content []byte, importLocal, typeName string) map[string]bool {
+	names := map[string]bool{}
+	if importLocal == "" || typeName == "" {
+		return names
+	}
+	text := string(content)
+	inString := buildStringLiteralMask(text)
+	needle := importLocal + "." + typeName
+	off := 0
+	for {
+		idx := strings.Index(text[off:], needle)
+		if idx < 0 {
+			break
+		}
+		pos := off + idx
+		if inString[pos] {
+			off = pos + len(needle)
+			continue
+		}
+		// After type name: optional space then '{' (composite literal).
+		k := pos + len(needle)
+		for k < len(text) && (text[k] == ' ' || text[k] == '\t') {
+			k++
+		}
+		if k >= len(text) || text[k] != '{' {
+			off = pos + len(needle)
+			continue
+		}
+		// Before type name: optional '&' then ':=' or '=' then identifier.
+		j := pos - 1
+		for j >= 0 && (text[j] == ' ' || text[j] == '\t' || text[j] == '\n') {
+			j--
+		}
+		if j >= 0 && text[j] == '&' {
+			j--
+			for j >= 0 && (text[j] == ' ' || text[j] == '\t' || text[j] == '\n') {
+				j--
+			}
+		}
+		if j < 0 || text[j] != '=' {
+			off = pos + len(needle)
+			continue
+		}
+		j-- // before '='
+		if j >= 0 && text[j] == ':' {
+			j--
+		}
+		for j >= 0 && (text[j] == ' ' || text[j] == '\t' || text[j] == '\n') {
+			j--
+		}
+		end := j + 1
+		for j >= 0 && ingest.IsIdentChar(text[j]) {
+			j--
+		}
+		name := text[j+1 : end]
+		switch name {
+		case "", "var", "const", "type", "func", "return", "range", "map", "chan", "struct", "interface":
+		default:
+			names[name] = true
+		}
+		off = pos + len(needle)
 	}
 	return names
 }
