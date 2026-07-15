@@ -442,17 +442,13 @@ func jsIdentUsed(text, ident string) bool {
 		}
 		pos := off + idx
 		end := pos + len(ident)
-		before := pos == 0 || !isJSWordChar(text[pos-1])
-		after := end >= len(text) || !isJSWordChar(text[end])
+		before := pos == 0 || !ingest.IsIdentCharJava(text[pos-1])
+		after := end >= len(text) || !ingest.IsIdentCharJava(text[end])
 		if before && after {
 			return true
 		}
 		off = end
 	}
-}
-
-func isJSWordChar(b byte) bool {
-	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '$'
 }
 
 // jsImportInsertEdits produces an edit to insert import statements into a file.
@@ -650,26 +646,9 @@ func findJSDecl(root *grammar.Node, nameStart uint32) (decl *grammar.Node, expor
 	return nil, nil
 }
 
-// spanOccupied reports whether [start,end) overlaps any already-covered rename span.
-func spanOccupied(occ map[[2]uint32]bool, start, end uint32) bool {
-	if occ == nil {
-		return false
-	}
-	if occ[[2]uint32{start, end}] {
-		return true
-	}
-	for k := range occ {
-		if start < k[1] && end > k[0] {
-			return true
-		}
-	}
-	return false
-}
-
 // ExtraRenameEdits rewrites member-expression call sites when renaming a method
 // (Class.method → Class.newName). Relation-based rename only covers entity/
 // relation spans; instance receivers (this/params/locals) are not entities.
-// Mirrors Go/Python ExtraRenameEdits for ECMA member expressions.
 func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, sourceRefs []string, oldLeaf, newLeaf string) []ingest.Edit {
 	if oldLeaf == "" || oldLeaf == newLeaf || len(sourceRefs) == 0 || rootDir == "" || result == nil {
 		return nil
@@ -706,28 +685,7 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		}
 	}
 
-	occupied := map[string]map[[2]uint32]bool{}
-	mark := func(file string, start, end uint32) {
-		file = strings.TrimPrefix(file, "./")
-		if occupied[file] == nil {
-			occupied[file] = map[[2]uint32]bool{}
-		}
-		occupied[file][[2]uint32{start, end}] = true
-	}
-	for _, ent := range result.Entities {
-		if !sourceSet[ent.Reference] {
-			continue
-		}
-		ref := ingest.ParseReference(ent.Reference)
-		mark(ref.Path, ent.StartByte, ent.EndByte)
-	}
-	for _, rel := range result.Relations {
-		if !sourceSet[rel.Target] {
-			continue
-		}
-		ref := ingest.ParseReference(rel.Reference)
-		mark(ref.Path, rel.StartByte, rel.EndByte)
-	}
+	occupied := ingest.MarkEntityRelationSpans(result, sourceSet)
 
 	var edits []ingest.Edit
 	for _, f := range result.Files {
@@ -741,7 +699,7 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		}
 		occ := occupied[rel]
 		for _, e := range jsMethodAttrEdits(rel, content, oldLeaf, newLeaf, ourReceivers, foreignReceivers) {
-			if spanOccupied(occ, e.StartByte, e.EndByte) {
+			if ingest.SpanOccupied(occ, e.StartByte, e.EndByte) {
 				continue
 			}
 			edits = append(edits, e)

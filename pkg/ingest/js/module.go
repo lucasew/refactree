@@ -453,21 +453,6 @@ func extractJSClass(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 			if value := ingest.ChildByField(member, "value"); value != nil {
 				walkJSUsages(fe, value, source, className)
 			}
-			continue
-		case "method_definition":
-			// handled below
-		default:
-			continue
-		}
-		methodNameNode := ingest.ChildByField(member, "name")
-		if methodNameNode == nil {
-			continue
-		}
-		// Skip computed property names (e.g. [Symbol.asyncDispose]) — they are
-		// runtime-determined and cannot be statically refactored.
-		if methodNameNode.Type() == "computed_property_name" {
-			continue
-		}
 		case "method_definition":
 			methodNameNode := ingest.ChildByField(member, "name")
 			if methodNameNode == nil {
@@ -488,17 +473,14 @@ func extractJSClass(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 				Exported:  true,
 			})
 
-		if params := ingest.ChildByField(member, "parameters"); params != nil {
-			walkJSUsages(fe, params, source, methodName)
-		}
-		if methodBody := ingest.ChildByField(member, "body"); methodBody != nil {
-			walkJSUsages(fe, methodBody, source, methodName)
+			if params := ingest.ChildByField(member, "parameters"); params != nil {
+				walkJSUsages(fe, params, source, methodName)
+			}
 			if methodBody := ingest.ChildByField(member, "body"); methodBody != nil {
 				walkJSUsages(fe, methodBody, source, methodName)
 			}
 		case "class_static_block":
 			// `static { helper() }` — body is a statement_block of free references.
-			// field_definition value walks are covered elsewhere (default-param/field-init).
 			if blockBody := ingest.ChildByField(member, "body"); blockBody != nil {
 				walkJSUsages(fe, blockBody, source, className)
 			}
