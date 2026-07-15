@@ -327,6 +327,16 @@ func extractJavaType(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 	if body == nil {
 		return
 	}
+	extractJavaTypeBody(fe, body, source, typeName)
+}
+
+// extractJavaTypeBody walks class/interface/enum/record bodies.
+// Enum methods and fields live under enum_body_declarations after the ';'
+// that terminates the constant list — walk that node the same way as the body.
+func extractJavaTypeBody(fe *ingest.FileExtract, body *grammar.Node, source []byte, typeName string) {
+	if body == nil || body.IsNull() {
+		return
+	}
 	for i := uint32(0); i < body.ChildCount(); i++ {
 		child := body.Child(i)
 		switch child.Type() {
@@ -343,6 +353,8 @@ func extractJavaType(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 			extractJavaConstant(fe, child, source, typeName)
 		case "enum_constant":
 			extractJavaEnumConstant(fe, child, source, typeName)
+		case "enum_body_declarations":
+			extractJavaTypeBody(fe, child, source, typeName)
 		}
 	}
 }
@@ -571,9 +583,34 @@ func walkJavaUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scop
 		}
 		return
 	case "scoped_type_identifier", "scoped_identifier":
+		// Prefer named fields when the grammar exposes them; tree-sitter-java
+		// often emits flat type_identifier children with no "scope"/"name".
 		scopeNode := ingest.ChildByField(n, "scope")
 		nameNode := ingest.ChildByField(n, "name")
-		if scopeNode != nil && nameNode != nil && scopeNode.Type() == "identifier" {
+		if scopeNode == nil || nameNode == nil {
+			var ids []*grammar.Node
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				c := n.Child(i)
+				switch c.Type() {
+				case "identifier", "type_identifier":
+					ids = append(ids, c)
+				}
+			}
+			if len(ids) >= 2 {
+				if scopeNode == nil {
+					scopeNode = ids[len(ids)-2]
+				}
+				if nameNode == nil {
+					nameNode = ids[len(ids)-1]
+				}
+			} else if len(ids) == 1 && nameNode == nil {
+				nameNode = ids[0]
+			}
+		}
+		// Qualifiers are type_identifier in type positions and identifier in
+		// expression positions (e.g. Outer.Inner vs pkg.Member).
+		if scopeNode != nil && nameNode != nil &&
+			(scopeNode.Type() == "identifier" || scopeNode.Type() == "type_identifier") {
 			fe.Usages = append(fe.Usages, ingest.UsageDef{
 				Scope:         scope,
 				Name:          ingest.NodeText(nameNode, source),
@@ -585,6 +622,7 @@ func walkJavaUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scop
 			})
 			return
 		}
+		// Nested scope (Outer.Mid.Inner): walk the scope chain, then the leaf name.
 		if scopeNode != nil {
 			walkJavaUsages(fe, scopeNode, source, scope)
 		}

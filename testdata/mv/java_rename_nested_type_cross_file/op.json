@@ -1,0 +1,4 @@
+{
+  "source": "path:./demo/Outer.java::Outer.Inner",
+  "destination": "path:./demo/Outer.java::Outer.Core"
+}
