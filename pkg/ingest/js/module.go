@@ -700,6 +700,12 @@ func emitJSIdentifierUsage(fe *ingest.FileExtract, n *grammar.Node, source []byt
 				QualStartByte: obj.StartByte(),
 				QualEndByte:   obj.EndByte(),
 			})
+		default:
+			// Complex receivers: `new Box(1).n`, `factory().x`, `(cond ? A : B).m`.
+			// Walk the object so constructor/callee identifiers inside are usages
+			// (plain `new Box(1)` is handled by walkJSUsages new_expression; chaining
+			// wraps it in member_expression and used to drop the constructor ref).
+			walkJSUsages(fe, obj, source, scope)
 		}
 	}
 }
