@@ -255,7 +255,13 @@ func extractJavaImport(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 		TargetEndByte:   localNode.EndByte(),
 	}
 	if staticImport {
+		// import static Type.member — SourcePath is the type; MemberName must
+		// match entity names (Type.member), not the bare member leaf, so rename
+		// and relation targets resolve to path:…::Box.helper rather than ::helper.
 		imp.SourcePath = pkgOrType
+		if typeName, _ := splitJavaImport(pkgOrType); typeName != "" {
+			imp.MemberName = typeName + "." + member
+		}
 	}
 	fe.Imports = append(fe.Imports, imp)
 }
@@ -317,14 +323,27 @@ func extractJavaType(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 		Exported:  exported,
 	})
 
-	for _, field := range []string{"superclass", "interfaces", "type_parameters"} {
+	// permits: sealed class Shape permits Circle, Square — type_list of subtypes.
+	for _, field := range []string{"superclass", "interfaces", "type_parameters", "permits"} {
 		if part := ingest.ChildByField(n, field); part != nil {
 			walkJavaUsages(fe, part, source, typeName)
 		}
 	}
+	// Class/interface/enum/annotation modifiers include @Annotations.
+	walkJavaModifiers(fe, n, source, typeName)
 
 	body := ingest.ChildByField(n, "body")
 	if body == nil {
+		return
+	}
+	extractJavaTypeBody(fe, body, source, typeName)
+}
+
+// extractJavaTypeBody walks class/interface/enum/record bodies.
+// Enum methods and fields live under enum_body_declarations after the ';'
+// that terminates the constant list — walk that node the same way as the body.
+func extractJavaTypeBody(fe *ingest.FileExtract, body *grammar.Node, source []byte, typeName string) {
+	if body == nil || body.IsNull() {
 		return
 	}
 	for i := uint32(0); i < body.ChildCount(); i++ {
@@ -343,6 +362,8 @@ func extractJavaType(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 			extractJavaConstant(fe, child, source, typeName)
 		case "enum_constant":
 			extractJavaEnumConstant(fe, child, source, typeName)
+		case "enum_body_declarations":
+			extractJavaTypeBody(fe, child, source, typeName)
 		}
 	}
 }
@@ -360,11 +381,12 @@ func extractJavaNestedType(fe *ingest.FileExtract, n *grammar.Node, source []byt
 		EndByte:   nameNode.EndByte(),
 		Exported:  javaNodeIsPublic(n),
 	})
-	for _, field := range []string{"superclass", "interfaces", "type_parameters"} {
+	for _, field := range []string{"superclass", "interfaces", "type_parameters", "permits"} {
 		if part := ingest.ChildByField(n, field); part != nil {
 			walkJavaUsages(fe, part, source, full)
 		}
 	}
+	walkJavaModifiers(fe, n, source, full)
 	if body := ingest.ChildByField(n, "body"); body != nil {
 		for i := uint32(0); i < body.ChildCount(); i++ {
 			child := body.Child(i)
@@ -393,6 +415,7 @@ func extractJavaMethod(fe *ingest.FileExtract, n *grammar.Node, source []byte, t
 		EndByte:   nameNode.EndByte(),
 		Exported:  javaNodeIsPublic(n),
 	})
+	walkJavaModifiers(fe, n, source, full)
 	for _, field := range []string{"type_parameters", "parameters", "type", "dimensions"} {
 		if part := ingest.ChildByField(n, field); part != nil {
 			walkJavaUsages(fe, part, source, full)
@@ -412,6 +435,18 @@ func extractJavaMethod(fe *ingest.FileExtract, n *grammar.Node, source []byte, t
 
 func extractJavaConstructor(fe *ingest.FileExtract, n *grammar.Node, source []byte, typeName string) {
 	scope := typeName
+	// Constructor name must match the declaring type. Emit as a usage of the type
+	// so renames rewrite `public Box(...)` when the class is renamed.
+	// typeName may be nested (Outer.Inner); resolve indexes by full entity name.
+	if nameNode := ingest.ChildByField(n, "name"); nameNode != nil {
+		fe.Usages = append(fe.Usages, ingest.UsageDef{
+			Scope:     scope,
+			Name:      typeName,
+			StartByte: nameNode.StartByte(),
+			EndByte:   nameNode.EndByte(),
+		})
+	}
+	walkJavaModifiers(fe, n, source, scope)
 	if params := ingest.ChildByField(n, "parameters"); params != nil {
 		walkJavaUsages(fe, params, source, scope)
 	}
@@ -422,6 +457,7 @@ func extractJavaConstructor(fe *ingest.FileExtract, n *grammar.Node, source []by
 
 func extractJavaField(fe *ingest.FileExtract, n *grammar.Node, source []byte, typeName string) {
 	exported := javaNodeIsPublic(n)
+	walkJavaModifiers(fe, n, source, typeName)
 	if typ := ingest.ChildByField(n, "type"); typ != nil {
 		walkJavaUsages(fe, typ, source, typeName)
 	}
@@ -517,12 +553,49 @@ func javaNodeIsPublic(n *grammar.Node) bool {
 	return false
 }
 
+// walkJavaModifiers walks annotation / marker_annotation nodes under a
+// declaration's modifiers child so @Tag sites rename with the annotation type.
+func walkJavaModifiers(fe *ingest.FileExtract, decl *grammar.Node, source []byte, scope string) {
+	if decl == nil {
+		return
+	}
+	for i := uint32(0); i < decl.ChildCount(); i++ {
+		child := decl.Child(i)
+		if child.Type() == "modifiers" {
+			walkJavaUsages(fe, child, source, scope)
+		}
+	}
+}
+
 func walkJavaUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
 	if n == nil || n.IsNull() {
 		return
 	}
 
 	switch n.Type() {
+	case "annotation", "marker_annotation":
+		// @Tag / @Tag(...) — name is an identifier (or scoped_identifier).
+		if name := ingest.ChildByField(n, "name"); name != nil {
+			walkJavaUsages(fe, name, source, scope)
+		} else {
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch.Type() == "identifier" || ch.Type() == "scoped_identifier" || ch.Type() == "scoped_type_identifier" {
+					walkJavaUsages(fe, ch, source, scope)
+				}
+			}
+		}
+		if args := ingest.ChildByField(n, "arguments"); args != nil {
+			walkJavaUsages(fe, args, source, scope)
+		}
+		// annotation_argument_list is not always a named field.
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "annotation_argument_list" {
+				walkJavaUsages(fe, ch, source, scope)
+			}
+		}
+		return
 	case "method_invocation":
 		obj := ingest.ChildByField(n, "object")
 		name := ingest.ChildByField(n, "name")
@@ -609,9 +682,34 @@ func walkJavaUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scop
 		}
 		return
 	case "scoped_type_identifier", "scoped_identifier":
+		// Prefer named fields when the grammar exposes them; tree-sitter-java
+		// often emits flat type_identifier children with no "scope"/"name".
 		scopeNode := ingest.ChildByField(n, "scope")
 		nameNode := ingest.ChildByField(n, "name")
-		if scopeNode != nil && nameNode != nil && scopeNode.Type() == "identifier" {
+		if scopeNode == nil || nameNode == nil {
+			var ids []*grammar.Node
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				c := n.Child(i)
+				switch c.Type() {
+				case "identifier", "type_identifier":
+					ids = append(ids, c)
+				}
+			}
+			if len(ids) >= 2 {
+				if scopeNode == nil {
+					scopeNode = ids[len(ids)-2]
+				}
+				if nameNode == nil {
+					nameNode = ids[len(ids)-1]
+				}
+			} else if len(ids) == 1 && nameNode == nil {
+				nameNode = ids[0]
+			}
+		}
+		// Qualifiers are type_identifier in type positions and identifier in
+		// expression positions (e.g. Outer.Inner vs pkg.Member).
+		if scopeNode != nil && nameNode != nil &&
+			(scopeNode.Type() == "identifier" || scopeNode.Type() == "type_identifier") {
 			fe.Usages = append(fe.Usages, ingest.UsageDef{
 				Scope:         scope,
 				Name:          ingest.NodeText(nameNode, source),
@@ -623,6 +721,7 @@ func walkJavaUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scop
 			})
 			return
 		}
+		// Nested scope (Outer.Mid.Inner): walk the scope chain, then the leaf name.
 		if scopeNode != nil {
 			walkJavaUsages(fe, scopeNode, source, scope)
 		}
@@ -645,8 +744,9 @@ func walkJavaUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scop
 		return
 	case "string_literal", "character_literal", "decimal_integer_literal", "hex_integer_literal",
 		"octal_integer_literal", "binary_integer_literal", "decimal_floating_point_literal",
-		"true", "false", "null_literal", "line_comment", "block_comment", "modifiers":
+		"true", "false", "null_literal", "line_comment", "block_comment":
 		return
+		// modifiers: fall through and walk children (annotations live here).
 	}
 
 	for i := uint32(0); i < n.ChildCount(); i++ {

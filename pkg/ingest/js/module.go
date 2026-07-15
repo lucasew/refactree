@@ -279,9 +279,15 @@ func extractJSExport(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 		case "lexical_declaration", "variable_declaration":
 			extractJSVarDecl(fe, inner, source, "")
 		case "identifier":
-			// export default someName
+			// export default someName — record as primary export and as a usage so
+			// renaming someName rewrites this reference (not only the definition).
 			if isDefault {
 				fe.DefaultExport = ingest.NodeText(inner, source)
+				fe.Usages = append(fe.Usages, ingest.UsageDef{
+					Name:      fe.DefaultExport,
+					StartByte: inner.StartByte(),
+					EndByte:   inner.EndByte(),
+				})
 			}
 		default:
 			// export default defineConfig({...}) — usages inside the expression.
@@ -309,6 +315,13 @@ func extractJSLocalExportClause(fe *ingest.FileExtract, clause *grammar.Node, so
 		if aliasNode := ingest.ChildByField(spec, "alias"); aliasNode != nil {
 			exportName = ingest.NodeText(aliasNode, source)
 		}
+		// Local binding reference in `export { name }` / `export { name as alias }` —
+		// rename must rewrite this span when the binding is renamed.
+		fe.Usages = append(fe.Usages, ingest.UsageDef{
+			Name:      sourceName,
+			StartByte: nameNode.StartByte(),
+			EndByte:   nameNode.EndByte(),
+		})
 		// ESM default export via alias — only this branch sets the neutral DefaultExport field.
 		if exportName == "default" {
 			fe.DefaultExport = sourceName
@@ -348,10 +361,14 @@ func extractJSReexport(fe *ingest.FileExtract, n *grammar.Node, source []byte, s
 		if aliasNode := ingest.ChildByField(spec, "alias"); aliasNode != nil {
 			exportName = ingest.NodeText(aliasNode, source)
 		}
+		// Span of the imported/source name token — the site rename must rewrite
+		// (export { helper } from / export { helper as h } from).
 		fe.Reexports = append(fe.Reexports, ingest.ReexportDef{
-			ExportName: exportName,
-			SourceName: sourceName,
-			SourcePath: sourcePath,
+			ExportName:      exportName,
+			SourceName:      sourceName,
+			SourcePath:      sourcePath,
+			SourceStartByte: nameNode.StartByte(),
+			SourceEndByte:   nameNode.EndByte(),
 		})
 	}
 }
@@ -392,6 +409,10 @@ func extractJSFunc(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 		Exported:  true,
 	})
 
+	// Default parameter values (n = helper()) are value references, not bindings.
+	if params := ingest.ChildByField(n, "parameters"); params != nil {
+		walkJSUsages(fe, params, source, name)
+	}
 	if body := ingest.ChildByField(n, "body"); body != nil {
 		walkJSUsages(fe, body, source, name)
 	}
@@ -411,6 +432,14 @@ func extractJSClass(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 		Exported:  true,
 	})
 
+	// `class Sub extends Box` — heritage is not under body.
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		if child.Type() == "class_heritage" {
+			walkJSUsages(fe, child, source, className)
+		}
+	}
+
 	body := ingest.ChildByField(n, "body")
 	if body == nil {
 		return
@@ -418,7 +447,16 @@ func extractJSClass(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 
 	for i := uint32(0); i < body.ChildCount(); i++ {
 		member := body.Child(i)
-		if member.Type() != "method_definition" {
+		switch member.Type() {
+		case "field_definition":
+			// Class field initializers: `b = new Box(1)` — walk value usages only.
+			if value := ingest.ChildByField(member, "value"); value != nil {
+				walkJSUsages(fe, value, source, className)
+			}
+			continue
+		case "method_definition":
+			// handled below
+		default:
 			continue
 		}
 		methodNameNode := ingest.ChildByField(member, "name")
@@ -430,18 +468,40 @@ func extractJSClass(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 		if methodNameNode.Type() == "computed_property_name" {
 			continue
 		}
+		case "method_definition":
+			methodNameNode := ingest.ChildByField(member, "name")
+			if methodNameNode == nil {
+				continue
+			}
+			// Skip computed property names (e.g. [Symbol.asyncDispose]) — they are
+			// runtime-determined and cannot be statically refactored.
+			if methodNameNode.Type() == "computed_property_name" {
+				continue
+			}
 
-		methodShort := ingest.NodeText(methodNameNode, source)
-		methodName := className + "." + methodShort
-		fe.Entities = append(fe.Entities, ingest.EntityDef{
-			Name:      methodName,
-			StartByte: methodNameNode.StartByte(),
-			EndByte:   methodNameNode.EndByte(),
-			Exported:  true,
-		})
+			methodShort := ingest.NodeText(methodNameNode, source)
+			methodName := className + "." + methodShort
+			fe.Entities = append(fe.Entities, ingest.EntityDef{
+				Name:      methodName,
+				StartByte: methodNameNode.StartByte(),
+				EndByte:   methodNameNode.EndByte(),
+				Exported:  true,
+			})
 
+		if params := ingest.ChildByField(member, "parameters"); params != nil {
+			walkJSUsages(fe, params, source, methodName)
+		}
 		if methodBody := ingest.ChildByField(member, "body"); methodBody != nil {
 			walkJSUsages(fe, methodBody, source, methodName)
+			if methodBody := ingest.ChildByField(member, "body"); methodBody != nil {
+				walkJSUsages(fe, methodBody, source, methodName)
+			}
+		case "class_static_block":
+			// `static { helper() }` — body is a statement_block of free references.
+			// field_definition value walks are covered elsewhere (default-param/field-init).
+			if blockBody := ingest.ChildByField(member, "body"); blockBody != nil {
+				walkJSUsages(fe, blockBody, source, className)
+			}
 		}
 	}
 }
@@ -535,6 +595,9 @@ func extractJSNamespaceImport(fe *ingest.FileExtract, n *grammar.Node, source []
 }
 
 func walkJSUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
+	if n == nil || n.IsNull() {
+		return
+	}
 	switch n.Type() {
 	case "call_expression":
 		funcNode := ingest.ChildByField(n, "function")
@@ -545,6 +608,36 @@ func walkJSUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope 
 			walkJSUsages(fe, args, source, scope)
 		}
 		return
+	case "new_expression":
+		// `new Box(1)` — constructor field is the type/value being constructed.
+		if ctor := ingest.ChildByField(n, "constructor"); ctor != nil {
+			emitJSIdentifierUsage(fe, ctor, source, scope)
+		}
+		if args := ingest.ChildByField(n, "arguments"); args != nil {
+			walkJSUsages(fe, args, source, scope)
+		}
+		return
+	case "class_heritage":
+		// `extends Box` / `extends pkg.Box` — expression after extends.
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			child := n.Child(i)
+			if child.Type() == "extends" {
+				continue
+			}
+			emitJSIdentifierUsage(fe, child, source, scope)
+		}
+		return
+	case "binary_expression":
+		// `x instanceof Box` — right operand is a type/value reference.
+		if op := ingest.ChildByField(n, "operator"); op != nil && ingest.NodeText(op, source) == "instanceof" {
+			if right := ingest.ChildByField(n, "right"); right != nil {
+				emitJSIdentifierUsage(fe, right, source, scope)
+			}
+			if left := ingest.ChildByField(n, "left"); left != nil {
+				walkJSUsages(fe, left, source, scope)
+			}
+			return
+		}
 	case "jsx_self_closing_element", "jsx_opening_element":
 		// JSX elements are component invocations: <Component /> or <Component>.
 		// Emit a usage for the component name so renames and moves track them.
@@ -559,14 +652,104 @@ func walkJSUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope 
 			}
 		}
 		return
+	case "identifier", "shorthand_property_identifier":
+		// Bare value references: assignment RHS, call args, array elements,
+		// object values, object shorthand ({ helper }), ternary/binary operands.
+		// Matches Go/Python walk*Usages for residual rename correctness.
+		// Object-pattern shorthands use shorthand_property_identifier_pattern
+		// (skipped via object_pattern below), so this is literal-only.
+		fe.Usages = append(fe.Usages, ingest.UsageDef{
+			Scope:     scope,
+			Name:      ingest.NodeText(n, source),
+			StartByte: n.StartByte(),
+			EndByte:   n.EndByte(),
+		})
+		return
+	case "member_expression":
+		// obj.prop value/call-function already handled via emit; record leaf + qualifier.
+		emitJSIdentifierUsage(fe, n, source, scope)
+		return
+	case "object_pattern", "array_pattern", "formal_parameters":
+		// Binding sites for pattern ids — walk default-value expressions only.
+		walkJSBindingPatternDefaults(fe, n, source, scope)
+		return
+	case "assignment_pattern", "object_assignment_pattern":
+		// `n = helper()` / `{ n = helper() }` defaults: right-hand side is a value ref.
+		if right := ingest.ChildByField(n, "right"); right != nil {
+			walkJSUsages(fe, right, source, scope)
+		}
+		if left := ingest.ChildByField(n, "left"); left != nil {
+			walkJSBindingPatternDefaults(fe, left, source, scope)
+		}
+		return
+	case "function_declaration", "generator_function_declaration",
+		"class_declaration", "abstract_class_declaration",
+		"method_definition", "variable_declarator":
+		// Nested declarations: walk bodies/values only so the declared name is
+		// not recorded as a usage of a same-named outer entity.
+		if value := ingest.ChildByField(n, "value"); value != nil {
+			walkJSUsages(fe, value, source, scope)
+		}
+		if body := ingest.ChildByField(n, "body"); body != nil {
+			walkJSUsages(fe, body, source, scope)
+		}
+		// method_definition / function may have params with default values.
+		if params := ingest.ChildByField(n, "parameters"); params != nil {
+			walkJSUsages(fe, params, source, scope)
+		}
+		return
+	case "property_identifier", "private_property_identifier",
+		"shorthand_property_identifier_pattern",
+		"string", "template_string", "number", "true", "false", "null", "undefined",
+		"comment", "this", "super":
+		return
 	}
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		walkJSUsages(fe, n.Child(i), source, scope)
 	}
 }
 
+// walkJSBindingPatternDefaults walks default-value expressions inside binding
+// patterns (formal parameters, object/array destructuring) without treating
+// the bound identifiers themselves as value references.
+func walkJSBindingPatternDefaults(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
+	if n == nil || n.IsNull() {
+		return
+	}
+	switch n.Type() {
+	case "assignment_pattern", "object_assignment_pattern":
+		// `n = helper()` / `{ n = helper() }` — right-hand side is a value ref.
+		if right := ingest.ChildByField(n, "right"); right != nil {
+			walkJSUsages(fe, right, source, scope)
+		}
+		if left := ingest.ChildByField(n, "left"); left != nil {
+			walkJSBindingPatternDefaults(fe, left, source, scope)
+		}
+		return
+	case "required_parameter", "optional_parameter":
+		// TS: (n: T = expr) — default is value field; pattern may nest further.
+		if value := ingest.ChildByField(n, "value"); value != nil {
+			walkJSUsages(fe, value, source, scope)
+		}
+		if pattern := ingest.ChildByField(n, "pattern"); pattern != nil {
+			walkJSBindingPatternDefaults(fe, pattern, source, scope)
+		}
+		return
+	case "object_pattern", "array_pattern", "formal_parameters",
+		"pair_pattern", "rest_pattern":
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walkJSBindingPatternDefaults(fe, n.Child(i), source, scope)
+		}
+		return
+	}
+}
+
 // emitJSIdentifierUsage records a usage for a function/component reference node.
 // Handles both plain identifiers and member expressions (pkg.Component).
+// Nested chains like Box.getValue.call emit leaf usages only (Box.getValue with
+// Qualifier "Box"), never a qualifier span covering a nested member expression —
+// resolveQualifiedUsage would otherwise treat the whole "Box.getValue" span as a
+// relation target and rename would replace it with the leaf alone.
 func emitJSIdentifierUsage(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
 	switch n.Type() {
 	case "identifier":
@@ -576,10 +759,18 @@ func emitJSIdentifierUsage(fe *ingest.FileExtract, n *grammar.Node, source []byt
 			StartByte: n.StartByte(),
 			EndByte:   n.EndByte(),
 		})
-	case "member_expression":
+	case "member_expression", "member_expression_optional", "optional_chain":
 		obj := ingest.ChildByField(n, "object")
 		prop := ingest.ChildByField(n, "property")
-		if obj != nil && prop != nil {
+		if obj == nil || prop == nil {
+			return
+		}
+		// Recurse so Box.getValue.call also records Box.getValue (leaf getValue).
+		switch obj.Type() {
+		case "member_expression", "member_expression_optional", "optional_chain":
+			emitJSIdentifierUsage(fe, obj, source, scope)
+			return
+		case "identifier", "this", "super":
 			fe.Usages = append(fe.Usages, ingest.UsageDef{
 				Scope:         scope,
 				Name:          ingest.NodeText(prop, source),
@@ -589,6 +780,12 @@ func emitJSIdentifierUsage(fe *ingest.FileExtract, n *grammar.Node, source []byt
 				QualStartByte: obj.StartByte(),
 				QualEndByte:   obj.EndByte(),
 			})
+		default:
+			// Complex receivers: `new Box(1).n`, `factory().x`, `(cond ? A : B).m`.
+			// Walk the object so constructor/callee identifiers inside are usages
+			// (plain `new Box(1)` is handled by walkJSUsages new_expression; chaining
+			// wraps it in member_expression and used to drop the constructor ref).
+			walkJSUsages(fe, obj, source, scope)
 		}
 	}
 }

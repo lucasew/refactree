@@ -1,0 +1,4 @@
+{
+  "source": "path:./mod.py::Child.helper",
+  "destination": "path:./mod.py::Child.assist"
+}

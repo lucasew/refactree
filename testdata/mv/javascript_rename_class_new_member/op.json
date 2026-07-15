@@ -1,0 +1,4 @@
+{
+  "source": "path:./box.js::Box",
+  "destination": "path:./box.js::Crate"
+}

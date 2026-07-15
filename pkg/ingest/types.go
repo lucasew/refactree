@@ -62,12 +62,16 @@ type FileExtract struct {
 
 // ReexportDef is a language-neutral "this module forwards X from Y" fact.
 // Language drivers fill it from their syntax (JS export … from, Python from … import re-export, etc.).
-// Resolved into Result.Aliases (zero-span) for CanonicalizeInResult; not language-specific at the walk.
+// Resolved into Result.Aliases for CanonicalizeInResult. When SourceStartByte/SourceEndByte
+// are set, the alias span is the source-name token so renames rewrite export { name } from
+// (and export { name as alias } from) without relying on zero-span synthetic sites.
 type ReexportDef struct {
-	ExportName string // name this module exposes; empty for star/wildcard forward
-	SourceName string // name in the source module; empty for star or when same as ExportName
-	SourcePath string // module specifier ("./foo", "pkg", …)
-	Star       bool   // true for wildcard forward (export * / from … import *)
+	ExportName      string // name this module exposes; empty for star/wildcard forward
+	SourceName      string // name in the source module; empty for star or when same as ExportName
+	SourcePath      string // module specifier ("./foo", "pkg", …)
+	Star            bool   // true for wildcard forward (export * / from … import *)
+	SourceStartByte uint32 // byte span of SourceName token when known (rename site)
+	SourceEndByte   uint32
 }
 
 // EntityDef is a symbol definition found during extraction.

@@ -1157,16 +1157,21 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 	src := ingest.ParseReference(sourceRefs[0])
 	_, isMethod := receiverTypeName(src.Symbol)
 	if !isMethod {
-		return nil
+		// Type (or other non-method) rename: rewrite embedded-field selectors
+		// (struct { Base }; b.Base) when the package embeds oldLeaf.
+		return embeddedTypeFieldSelectorEdits(rootDir, result, sourceRefs, oldLeaf, newLeaf)
 	}
 	scopePrefix := methodRenameScopePrefix(strings.TrimPrefix(src.Path, "./"))
 	sourceSet := map[string]bool{}
 	pkgDirs := map[string]bool{}
 	ourPkgDirs := map[string]bool{}
+	// Include the source package even when it is the module root (dir "").
+	// Skipping "" left ExtraRename unable to run findInterfaceMethodEdits for
+	// package main / root packages, so interface-typed selectors were rewritten
+	// without renaming the interface method (broken go build).
 	srcPkgDir := dirOf(strings.TrimPrefix(src.Path, "./"))
-	if srcPkgDir != "" {
-		ourPkgDirs[srcPkgDir] = true
-	}
+	ourPkgDirs[srcPkgDir] = true
+	pkgDirs[srcPkgDir] = true
 	if scopePrefix != "" {
 		ourPkgDirs[scopePrefix] = true
 	}
@@ -1177,10 +1182,10 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		sourceSet[s] = true
 		ref := ingest.ParseReference(s)
 		rel := strings.TrimPrefix(ref.Path, "./")
-		if d := dirOf(rel); d != "" {
-			pkgDirs[d] = true
-			ourPkgDirs[d] = true
-		}
+		// Always record package dir, including "" for files at module root.
+		d := dirOf(rel)
+		pkgDirs[d] = true
+		ourPkgDirs[d] = true
 		if recv, ok := receiverTypeName(ref.Symbol); ok {
 			ourReceivers[recv] = true
 		}
@@ -1316,6 +1321,136 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		}
 	}
 	return edits
+}
+
+// embeddedTypeFieldSelectorEdits rewrites `.OldType` selectors when renaming a
+// type that is embedded in a struct in the same package (promoted field name
+// equals the type name in Go).
+func embeddedTypeFieldSelectorEdits(rootDir string, result *ingest.Result, sourceRefs []string, oldLeaf, newLeaf string) []ingest.Edit {
+	src := ingest.ParseReference(sourceRefs[0])
+	// Only plain type/func-like leaves (no dots); skip package moves.
+	if src.Symbol == "" || strings.Contains(src.Symbol, ".") {
+		return nil
+	}
+	srcPkgDir := dirOf(strings.TrimPrefix(src.Path, "./"))
+	ourPkgDirs := map[string]bool{srcPkgDir: true}
+
+	// Confirm the package embeds oldLeaf somewhere; otherwise skip (avoids
+	// rewriting arbitrary .OldLeaf method/field selectors for non-embed renames).
+	embeds := false
+	for _, f := range result.Files {
+		if f.Language != "go" {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Path, "./")
+		if dirOf(rel) != srcPkgDir {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		if fileEmbedsType(content, oldLeaf) {
+			embeds = true
+			break
+		}
+	}
+	if !embeds {
+		return nil
+	}
+
+	sourceSet := map[string]bool{}
+	for _, s := range sourceRefs {
+		sourceSet[s] = true
+	}
+	occupied := map[string]map[[2]uint32]bool{}
+	mark := func(file string, start, end uint32) {
+		file = strings.TrimPrefix(file, "./")
+		if occupied[file] == nil {
+			occupied[file] = map[[2]uint32]bool{}
+		}
+		occupied[file][[2]uint32{start, end}] = true
+	}
+	for _, ent := range result.Entities {
+		if sourceSet[ent.Reference] {
+			ref := ingest.ParseReference(ent.Reference)
+			mark(ref.Path, ent.StartByte, ent.EndByte)
+		}
+	}
+	for _, reln := range result.Relations {
+		if sourceSet[reln.Target] {
+			ref := ingest.ParseReference(reln.Reference)
+			mark(ref.Path, reln.StartByte, reln.EndByte)
+		}
+	}
+
+	var edits []ingest.Edit
+	for _, f := range result.Files {
+		if f.Language != "go" {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Path, "./")
+		if !ourPkgDirs[dirOf(rel)] {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		occ := occupied[rel]
+		for _, e := range findSelectorLeafEdits(rel, content, oldLeaf, newLeaf, nil) {
+			if occ[[2]uint32{e.StartByte, e.EndByte}] {
+				continue
+			}
+			edits = append(edits, e)
+		}
+	}
+	return edits
+}
+
+// fileEmbedsType reports whether content has a struct field_declaration that is
+// an embedded type named leaf (type_identifier only, no field name).
+func fileEmbedsType(content []byte, leaf string) bool {
+	if leaf == "" {
+		return false
+	}
+	pf, err := ingest.ParseSource(content, ".go", "")
+	if err != nil {
+		return false
+	}
+	defer pf.Close()
+	var found bool
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || found {
+			return
+		}
+		if n.Type() == "field_declaration" {
+			// Embedded: has type_identifier child and no field_identifier name.
+			var hasFieldName bool
+			var embedsLeaf bool
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				switch ch.Type() {
+				case "field_identifier":
+					hasFieldName = true
+				case "type_identifier":
+					if ingest.NodeText(ch, content) == leaf {
+						embedsLeaf = true
+					}
+				}
+			}
+			if embedsLeaf && !hasFieldName {
+				found = true
+				return
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(pf.Root)
+	return found
 }
 
 // methodReceiversWithLeaf returns receiver type names (star-stripped) of methods

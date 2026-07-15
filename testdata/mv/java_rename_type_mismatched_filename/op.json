@@ -1,0 +1,4 @@
+{
+  "source": "path:./Types.java::Helper",
+  "destination": "path:./Types.java::Renamed"
+}

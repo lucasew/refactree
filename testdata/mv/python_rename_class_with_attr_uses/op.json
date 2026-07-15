@@ -1,0 +1,4 @@
+{
+  "source": "path:./box.py::Box",
+  "destination": "path:./box.py::Crate"
+}

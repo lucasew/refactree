@@ -1,0 +1,4 @@
+{
+  "source": "path:./box.py::Box.VALUE",
+  "destination": "path:./box.py::Box.AMOUNT"
+}
