@@ -1,0 +1,4 @@
+{
+  "source": "path:./box.js::Box.helper",
+  "destination": "path:./box.js::Box.assist"
+}
