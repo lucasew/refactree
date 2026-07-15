@@ -623,8 +623,9 @@ func jsImportCallPath(n *grammar.Node, source []byte) (string, bool) {
 	return "", false
 }
 
-// bindJSDynamicImportThen records a namespace-style import for the first
-// parameter of `import("…").then(m => …)` / `.then(function (m) { … })`.
+// bindJSDynamicImportThen records imports for `import("…").then(…)` callbacks:
+//   - namespace: `.then(m => m.helper())` — identifier param
+//   - named:    `.then(({ helper }) => helper())` — object_pattern param
 func bindJSDynamicImportThen(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 	if fe == nil || n == nil || n.Type() != "call_expression" {
 		return
@@ -660,24 +661,34 @@ func bindJSDynamicImportThen(fe *ingest.FileExtract, n *grammar.Node, source []b
 	if cb == nil {
 		return
 	}
-	// First formal parameter is the module namespace binding.
+	// First formal parameter: namespace ident or destructured named imports.
 	params := ingest.ChildByField(cb, "parameters")
 	var param *grammar.Node
 	if params != nil {
 		for i := uint32(0); i < params.ChildCount(); i++ {
 			p := params.Child(i)
-			if p.Type() == "identifier" {
+			switch p.Type() {
+			case "identifier", "object_pattern":
 				param = p
+			}
+			if param != nil {
 				break
 			}
 		}
 	} else {
 		// Single-param arrow without parens: `m => m.helper()` — parameter field.
-		if p := ingest.ChildByField(cb, "parameter"); p != nil && p.Type() == "identifier" {
-			param = p
+		if p := ingest.ChildByField(cb, "parameter"); p != nil {
+			switch p.Type() {
+			case "identifier", "object_pattern":
+				param = p
+			}
 		}
 	}
 	if param == nil {
+		return
+	}
+	if param.Type() == "object_pattern" {
+		bindJSObjectPatternNamedImports(fe, param, source, dynPath)
 		return
 	}
 	local := ingest.NodeText(param, source)
@@ -690,6 +701,119 @@ func bindJSDynamicImportThen(fe *ingest.FileExtract, n *grammar.Node, source []b
 		StartByte:  param.StartByte(),
 		EndByte:    param.EndByte(),
 	})
+}
+
+// bindJSObjectPatternNamedImports records named imports for each shorthand /
+// pair in an object pattern bound from a dynamic import module namespace.
+// e.g. `{ helper, stay: s }` from `import("./box.js")` → member imports.
+func bindJSObjectPatternNamedImports(fe *ingest.FileExtract, pattern *grammar.Node, source []byte, dynPath string) {
+	if fe == nil || pattern == nil || pattern.Type() != "object_pattern" || dynPath == "" {
+		return
+	}
+	for i := uint32(0); i < pattern.ChildCount(); i++ {
+		ch := pattern.Child(i)
+		switch ch.Type() {
+		case "shorthand_property_identifier_pattern":
+			name := ingest.NodeText(ch, source)
+			if name == "" {
+				continue
+			}
+			fe.Imports = append(fe.Imports, ingest.ImportDef{
+				LocalName:       name,
+				SourcePath:      dynPath,
+				MemberName:      name,
+				StartByte:       ch.StartByte(),
+				EndByte:         ch.EndByte(),
+				TargetStartByte: ch.StartByte(),
+				TargetEndByte:   ch.EndByte(),
+			})
+		case "pair_pattern":
+			// `{ helper: h }` — key is export name, value is local binding.
+			key := ingest.ChildByField(ch, "key")
+			val := ingest.ChildByField(ch, "value")
+			if key == nil || val == nil {
+				continue
+			}
+			memberName := ingest.NodeText(key, source)
+			var localNode *grammar.Node
+			switch val.Type() {
+			case "identifier", "shorthand_property_identifier_pattern":
+				localNode = val
+			case "assignment_pattern":
+				if left := ingest.ChildByField(val, "left"); left != nil {
+					localNode = left
+				}
+			}
+			if memberName == "" || localNode == nil {
+				continue
+			}
+			local := ingest.NodeText(localNode, source)
+			fe.Imports = append(fe.Imports, ingest.ImportDef{
+				LocalName:       local,
+				SourcePath:      dynPath,
+				MemberName:      memberName,
+				StartByte:       localNode.StartByte(),
+				EndByte:         localNode.EndByte(),
+				TargetStartByte: key.StartByte(),
+				TargetEndByte:   key.EndByte(),
+				HasAliasBinding: local != memberName,
+			})
+		case "object_assignment_pattern":
+			// `{ helper = fallback }` treated as shorthand with default.
+			if left := ingest.ChildByField(ch, "left"); left != nil {
+				if left.Type() == "shorthand_property_identifier_pattern" || left.Type() == "identifier" {
+					name := ingest.NodeText(left, source)
+					if name == "" {
+						continue
+					}
+					fe.Imports = append(fe.Imports, ingest.ImportDef{
+						LocalName:       name,
+						SourcePath:      dynPath,
+						MemberName:      name,
+						StartByte:       left.StartByte(),
+						EndByte:         left.EndByte(),
+						TargetStartByte: left.StartByte(),
+						TargetEndByte:   left.EndByte(),
+					})
+				}
+			}
+		}
+	}
+}
+
+// bindJSDynamicImportDeclarator records named imports for
+// `const { helper } = await import("./x")` / `const { helper } = import("./x")`.
+func bindJSDynamicImportDeclarator(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
+	if fe == nil || n == nil || n.Type() != "variable_declarator" {
+		return
+	}
+	name := ingest.ChildByField(n, "name")
+	value := ingest.ChildByField(n, "value")
+	if name == nil || value == nil || name.Type() != "object_pattern" {
+		return
+	}
+	// Unwrap await: await import("…")
+	call := value
+	if value.Type() == "await_expression" {
+		// await_expression argument / first non-keyword child
+		if arg := ingest.ChildByField(value, "argument"); arg != nil {
+			call = arg
+		} else {
+			for i := uint32(0); i < value.ChildCount(); i++ {
+				ch := value.Child(i)
+				if ch.Type() == "await" {
+					continue
+				}
+				call = ch
+				break
+			}
+		}
+	}
+	dynPath, ok := jsImportCallPath(call, source)
+	if !ok || dynPath == "" {
+		return
+	}
+	bindJSObjectPatternNamedImports(fe, name, source, dynPath)
 }
 
 func walkJSUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
@@ -783,9 +907,21 @@ func walkJSUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope 
 			walkJSBindingPatternDefaults(fe, left, source, scope)
 		}
 		return
+	case "variable_declarator":
+		// const { helper } = await import("./x") — bind named imports before
+		// walking the RHS so bare uses of helper resolve to the export.
+		bindJSDynamicImportDeclarator(fe, n, source)
+		if value := ingest.ChildByField(n, "value"); value != nil {
+			walkJSUsages(fe, value, source, scope)
+		}
+		// Defaults inside object patterns: { n = helper() }
+		if name := ingest.ChildByField(n, "name"); name != nil {
+			walkJSBindingPatternDefaults(fe, name, source, scope)
+		}
+		return
 	case "function_declaration", "generator_function_declaration",
 		"class_declaration", "abstract_class_declaration",
-		"method_definition", "variable_declarator":
+		"method_definition":
 		// Nested declarations: walk bodies/values only so the declared name is
 		// not recorded as a usage of a same-named outer entity.
 		if value := ingest.ChildByField(n, "value"); value != nil {

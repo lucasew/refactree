@@ -172,25 +172,73 @@ func extractPythonTypeAlias(fe *ingest.FileExtract, n *grammar.Node, source []by
 		return
 	}
 	// tree-sitter-python: left = name type node, right = RHS type expression.
+	// Plain: type BoxAlias = list[int]  → left type → identifier
+	// Param: type Vec[T: Helper] = list[T] → left type → generic_type → identifier + type_parameter
 	left := ingest.ChildByField(n, "left")
 	if left == nil {
 		return
 	}
-	nameNode := left
-	if left.Type() == "type" {
-		for i := uint32(0); i < left.ChildCount(); i++ {
-			if left.Child(i).Type() == "identifier" {
-				nameNode = left.Child(i)
-				break
-			}
-		}
-	}
-	if nameNode.Type() != "identifier" {
+	nameNode := pythonTypeAliasNameNode(left)
+	if nameNode == nil || nameNode.Type() != "identifier" {
 		return
 	}
 	appendPythonEntity(fe, nameNode, source)
+	name := ingest.NodeText(nameNode, source)
+	// Bounds/defaults live under type_parameter nodes on the left (no field name).
+	walkPythonTypeParameterNodes(fe, left, source, name)
 	if right := ingest.ChildByField(n, "right"); right != nil {
-		walkPythonUsages(fe, right, source, ingest.NodeText(nameNode, source))
+		walkPythonUsages(fe, right, source, name)
+	}
+}
+
+// pythonTypeAliasNameNode returns the alias identifier under a type alias left field.
+func pythonTypeAliasNameNode(left *grammar.Node) *grammar.Node {
+	if left == nil || left.IsNull() {
+		return nil
+	}
+	if left.Type() == "identifier" {
+		return left
+	}
+	// Prefer direct identifier, then generic_type's head identifier.
+	var generic *grammar.Node
+	for i := uint32(0); i < left.ChildCount(); i++ {
+		ch := left.Child(i)
+		switch ch.Type() {
+		case "identifier":
+			return ch
+		case "generic_type":
+			generic = ch
+		}
+	}
+	if generic != nil {
+		for i := uint32(0); i < generic.ChildCount(); i++ {
+			if generic.Child(i).Type() == "identifier" {
+				return generic.Child(i)
+			}
+		}
+	}
+	// Nested type wrappers.
+	for i := uint32(0); i < left.ChildCount(); i++ {
+		if n := pythonTypeAliasNameNode(left.Child(i)); n != nil {
+			return n
+		}
+	}
+	return nil
+}
+
+// walkPythonTypeParameterNodes walks type_parameter subtrees under n so PEP 695
+// bounds/defaults (Helper in Vec[T: Helper]) become usages without treating the
+// alias/class name identifier as a self-usage.
+func walkPythonTypeParameterNodes(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
+	if n == nil || n.IsNull() {
+		return
+	}
+	if n.Type() == "type_parameter" {
+		walkPythonUsages(fe, n, source, scope)
+		return
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		walkPythonTypeParameterNodes(fe, n.Child(i), source, scope)
 	}
 }
 
@@ -358,6 +406,10 @@ func extractPythonFunc(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 	if dec := ingest.ChildByField(n, "superclasses"); dec != nil {
 		walkPythonUsages(fe, dec, source, name)
 	}
+	// PEP 695: def use[T: Helper](...) — type parameter bounds/defaults.
+	if tps := ingest.ChildByField(n, "type_parameters"); tps != nil {
+		walkPythonUsages(fe, tps, source, name)
+	}
 	for _, field := range []string{"parameters", "return_type"} {
 		if part := ingest.ChildByField(n, field); part != nil {
 			walkPythonUsages(fe, part, source, name)
@@ -388,6 +440,10 @@ func extractPythonClass(fe *ingest.FileExtract, n *grammar.Node, source []byte, 
 
 	if bases := ingest.ChildByField(n, "superclasses"); bases != nil {
 		walkPythonUsages(fe, bases, source, className)
+	}
+	// PEP 695: class Box[T: Helper] / class Box[T = Helper] — bounds and defaults.
+	if tps := ingest.ChildByField(n, "type_parameters"); tps != nil {
+		walkPythonUsages(fe, tps, source, className)
 	}
 
 	if body := ingest.ChildByField(n, "body"); body != nil {
@@ -431,6 +487,10 @@ func extractPythonMethod(fe *ingest.FileExtract, n *grammar.Node, source []byte,
 		Exported:  len(methodShort) == 0 || methodShort[0] != '_',
 	})
 
+	// PEP 695: def use[T: Helper](self, x: T) — method type parameter bounds.
+	if tps := ingest.ChildByField(n, "type_parameters"); tps != nil {
+		walkPythonUsages(fe, tps, source, methodName)
+	}
 	for _, field := range []string{"parameters", "return_type"} {
 		if part := ingest.ChildByField(n, field); part != nil {
 			walkPythonUsages(fe, part, source, methodName)
