@@ -1,0 +1,4 @@
+{
+  "source": "path:./main.js::api.helper",
+  "destination": "path:./main.js::api.assist"
+}

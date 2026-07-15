@@ -332,11 +332,49 @@ func extractJavaType(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 	// Class/interface/enum/annotation modifiers include @Annotations.
 	walkJavaModifiers(fe, n, source, typeName)
 
+	// Record components live on the header (formal_parameters), not in the body.
+	if n.Type() == "record_declaration" {
+		extractJavaRecordComponents(fe, n, source, typeName)
+	}
+
 	body := ingest.ChildByField(n, "body")
 	if body == nil {
 		return
 	}
 	extractJavaTypeBody(fe, body, source, typeName)
+}
+
+// extractJavaRecordComponents records each record header component as Type.name
+// (matches the public accessor / implicit field).
+func extractJavaRecordComponents(fe *ingest.FileExtract, n *grammar.Node, source []byte, typeName string) {
+	params := ingest.ChildByField(n, "parameters")
+	if params == nil {
+		return
+	}
+	for i := uint32(0); i < params.ChildCount(); i++ {
+		child := params.Child(i)
+		if child.Type() != "formal_parameter" && child.Type() != "spread_parameter" {
+			continue
+		}
+		if typ := ingest.ChildByField(child, "type"); typ != nil {
+			walkJavaUsages(fe, typ, source, typeName)
+		}
+		nameNode := ingest.ChildByField(child, "name")
+		if nameNode == nil {
+			nameNode = ingest.ChildByType(child, "identifier")
+		}
+		if nameNode == nil {
+			continue
+		}
+		short := ingest.NodeText(nameNode, source)
+		fe.Entities = append(fe.Entities, ingest.EntityDef{
+			Name:      typeName + "." + short,
+			StartByte: nameNode.StartByte(),
+			EndByte:   nameNode.EndByte(),
+			// Record components always produce public accessors.
+			Exported: true,
+		})
+	}
 }
 
 // extractJavaTypeBody walks class/interface/enum/record bodies.
@@ -349,7 +387,8 @@ func extractJavaTypeBody(fe *ingest.FileExtract, body *grammar.Node, source []by
 	for i := uint32(0); i < body.ChildCount(); i++ {
 		child := body.Child(i)
 		switch child.Type() {
-		case "method_declaration":
+		case "method_declaration", "annotation_type_element_declaration":
+			// Interface/class methods and @interface element members share a name field.
 			extractJavaMethod(fe, child, source, typeName)
 		case "constructor_declaration", "compact_constructor_declaration":
 			// Regular ctors and record compact ctors (`public Point { … }`) both
@@ -389,11 +428,14 @@ func extractJavaNestedType(fe *ingest.FileExtract, n *grammar.Node, source []byt
 		}
 	}
 	walkJavaModifiers(fe, n, source, full)
+	if n.Type() == "record_declaration" {
+		extractJavaRecordComponents(fe, n, source, full)
+	}
 	if body := ingest.ChildByField(n, "body"); body != nil {
 		for i := uint32(0); i < body.ChildCount(); i++ {
 			child := body.Child(i)
 			switch child.Type() {
-			case "method_declaration":
+			case "method_declaration", "annotation_type_element_declaration":
 				extractJavaMethod(fe, child, source, full)
 			case "constructor_declaration", "compact_constructor_declaration":
 				extractJavaConstructor(fe, child, source, full)
@@ -418,7 +460,8 @@ func extractJavaMethod(fe *ingest.FileExtract, n *grammar.Node, source []byte, t
 		Exported:  javaNodeIsPublic(n),
 	})
 	walkJavaModifiers(fe, n, source, full)
-	for _, field := range []string{"type_parameters", "parameters", "type", "dimensions"} {
+	// "value" covers annotation element defaults: String helper() default "h";
+	for _, field := range []string{"type_parameters", "parameters", "type", "dimensions", "value"} {
 		if part := ingest.ChildByField(n, field); part != nil {
 			walkJavaUsages(fe, part, source, full)
 		}
@@ -612,6 +655,54 @@ func walkJavaModifiers(fe *ingest.FileExtract, decl *grammar.Node, source []byte
 	}
 }
 
+// walkJavaAnnotationArgs records @Ann(helper = …) element keys as qualified
+// usages of the annotation type so member rename rewrites call-site keys.
+func walkJavaAnnotationArgs(fe *ingest.FileExtract, ann *grammar.Node, source []byte, scope, annName string) {
+	if ann == nil {
+		return
+	}
+	var args []*grammar.Node
+	if a := ingest.ChildByField(ann, "arguments"); a != nil {
+		args = append(args, a)
+	}
+	for i := uint32(0); i < ann.ChildCount(); i++ {
+		ch := ann.Child(i)
+		if ch.Type() == "annotation_argument_list" {
+			args = append(args, ch)
+		}
+	}
+	for _, argList := range args {
+		for i := uint32(0); i < argList.ChildCount(); i++ {
+			pair := argList.Child(i)
+			if pair.Type() != "element_value_pair" {
+				// Single-element shorthand @Ann("x") — value only.
+				if pair.IsNamed() {
+					walkJavaUsages(fe, pair, source, scope)
+				}
+				continue
+			}
+			key := ingest.ChildByField(pair, "key")
+			val := ingest.ChildByField(pair, "value")
+			if key != nil && annName != "" {
+				fe.Usages = append(fe.Usages, ingest.UsageDef{
+					Scope:         scope,
+					Name:          ingest.NodeText(key, source),
+					StartByte:     key.StartByte(),
+					EndByte:       key.EndByte(),
+					Qualifier:     annName,
+					QualStartByte: 0,
+					QualEndByte:   0,
+				})
+			} else if key != nil {
+				walkJavaUsages(fe, key, source, scope)
+			}
+			if val != nil {
+				walkJavaUsages(fe, val, source, scope)
+			}
+		}
+	}
+}
+
 func walkJavaUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
 	if n == nil || n.IsNull() {
 		return
@@ -620,26 +711,23 @@ func walkJavaUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scop
 	switch n.Type() {
 	case "annotation", "marker_annotation":
 		// @Tag / @Tag(...) — name is an identifier (or scoped_identifier).
+		annName := ""
 		if name := ingest.ChildByField(n, "name"); name != nil {
+			annName = javaTypeLeafName(name, source)
 			walkJavaUsages(fe, name, source, scope)
 		} else {
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				ch := n.Child(i)
 				if ch.Type() == "identifier" || ch.Type() == "scoped_identifier" || ch.Type() == "scoped_type_identifier" {
+					if annName == "" {
+						annName = javaTypeLeafName(ch, source)
+					}
 					walkJavaUsages(fe, ch, source, scope)
 				}
 			}
 		}
-		if args := ingest.ChildByField(n, "arguments"); args != nil {
-			walkJavaUsages(fe, args, source, scope)
-		}
-		// annotation_argument_list is not always a named field.
-		for i := uint32(0); i < n.ChildCount(); i++ {
-			ch := n.Child(i)
-			if ch.Type() == "annotation_argument_list" {
-				walkJavaUsages(fe, ch, source, scope)
-			}
-		}
+		// @Ann(helper = "x") — element keys are members of the annotation type.
+		walkJavaAnnotationArgs(fe, n, source, scope, annName)
 		return
 	case "method_invocation":
 		obj := ingest.ChildByField(n, "object")

@@ -380,16 +380,32 @@ func extractJSVarDecl(fe *ingest.FileExtract, n *grammar.Node, source []byte, sc
 			continue
 		}
 		nameNode := ingest.ChildByField(child, "name")
+		binding := ""
 		if nameNode != nil && nameNode.Type() == "identifier" {
-			name := ingest.NodeText(nameNode, source)
+			binding = ingest.NodeText(nameNode, source)
 			fe.Entities = append(fe.Entities, ingest.EntityDef{
-				Name:      name,
+				Name:      binding,
 				StartByte: nameNode.StartByte(),
 				EndByte:   nameNode.EndByte(),
 				Exported:  true,
 			})
 		}
 		if value := ingest.ChildByField(child, "value"); value != nil {
+			// const Box = class { m() {} } / const api = { m() {} } — methods are
+			// path entities under the binding name (class expressions have no
+			// declaration path of their own).
+			switch value.Type() {
+			case "class", "class_expression", "abstract_class_declaration":
+				if binding != "" {
+					extractJSClassMembers(fe, value, source, binding)
+					continue
+				}
+			case "object":
+				if binding != "" {
+					extractJSObjectMembers(fe, value, source, binding, scope)
+					continue
+				}
+			}
 			walkJSUsages(fe, value, source, scope)
 		}
 	}
@@ -431,12 +447,20 @@ func extractJSClass(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 		EndByte:   nameNode.EndByte(),
 		Exported:  true,
 	})
+	extractJSClassMembers(fe, n, source, className)
+}
 
+// extractJSClassMembers records methods of a class_declaration or class expression
+// under ownerName (declaration name or the const/let binding that holds the class).
+func extractJSClassMembers(fe *ingest.FileExtract, n *grammar.Node, source []byte, ownerName string) {
+	if ownerName == "" {
+		return
+	}
 	// `class Sub extends Box` — heritage is not under body.
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
 		if child.Type() == "class_heritage" {
-			walkJSUsages(fe, child, source, className)
+			walkJSUsages(fe, child, source, ownerName)
 		}
 	}
 
@@ -451,7 +475,7 @@ func extractJSClass(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 		case "field_definition":
 			// Class field initializers: `b = new Box(1)` — walk value usages only.
 			if value := ingest.ChildByField(member, "value"); value != nil {
-				walkJSUsages(fe, value, source, className)
+				walkJSUsages(fe, value, source, ownerName)
 			}
 		case "method_definition":
 			methodNameNode := ingest.ChildByField(member, "name")
@@ -461,11 +485,17 @@ func extractJSClass(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 			// Skip computed property names (e.g. [Symbol.asyncDispose]) — they are
 			// runtime-determined and cannot be statically refactored.
 			if methodNameNode.Type() == "computed_property_name" {
+				if params := ingest.ChildByField(member, "parameters"); params != nil {
+					walkJSUsages(fe, params, source, ownerName)
+				}
+				if methodBody := ingest.ChildByField(member, "body"); methodBody != nil {
+					walkJSUsages(fe, methodBody, source, ownerName)
+				}
 				continue
 			}
 
 			methodShort := ingest.NodeText(methodNameNode, source)
-			methodName := className + "." + methodShort
+			methodName := ownerName + "." + methodShort
 			fe.Entities = append(fe.Entities, ingest.EntityDef{
 				Name:      methodName,
 				StartByte: methodNameNode.StartByte(),
@@ -482,7 +512,83 @@ func extractJSClass(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 		case "class_static_block":
 			// `static { helper() }` — body is a statement_block of free references.
 			if blockBody := ingest.ChildByField(member, "body"); blockBody != nil {
-				walkJSUsages(fe, blockBody, source, className)
+				walkJSUsages(fe, blockBody, source, ownerName)
+			}
+		}
+	}
+}
+
+// extractJSObjectMembers records non-computed object methods / function-valued
+// properties as owner.method entities (const api = { helper() {}, stay: fn }).
+// Shorthand / value properties still produce usages of free identifiers under
+// enclosingScope (not ownerName — they are not members of the object binding).
+func extractJSObjectMembers(fe *ingest.FileExtract, n *grammar.Node, source []byte, ownerName, enclosingScope string) {
+	if n == nil || ownerName == "" {
+		return
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		switch child.Type() {
+		case "method_definition":
+			methodNameNode := ingest.ChildByField(child, "name")
+			if methodNameNode == nil || methodNameNode.Type() == "computed_property_name" {
+				if params := ingest.ChildByField(child, "parameters"); params != nil {
+					walkJSUsages(fe, params, source, enclosingScope)
+				}
+				if methodBody := ingest.ChildByField(child, "body"); methodBody != nil {
+					walkJSUsages(fe, methodBody, source, enclosingScope)
+				}
+				continue
+			}
+			methodShort := ingest.NodeText(methodNameNode, source)
+			methodName := ownerName + "." + methodShort
+			fe.Entities = append(fe.Entities, ingest.EntityDef{
+				Name:      methodName,
+				StartByte: methodNameNode.StartByte(),
+				EndByte:   methodNameNode.EndByte(),
+				Exported:  true,
+			})
+			if params := ingest.ChildByField(child, "parameters"); params != nil {
+				walkJSUsages(fe, params, source, methodName)
+			}
+			if methodBody := ingest.ChildByField(child, "body"); methodBody != nil {
+				walkJSUsages(fe, methodBody, source, methodName)
+			}
+		case "pair":
+			key := ingest.ChildByField(child, "key")
+			val := ingest.ChildByField(child, "value")
+			if key == nil || val == nil || key.Type() == "computed_property_name" {
+				if val != nil {
+					walkJSUsages(fe, val, source, enclosingScope)
+				}
+				continue
+			}
+			switch val.Type() {
+			case "function_expression", "function", "arrow_function", "generator_function":
+				methodShort := ingest.NodeText(key, source)
+				methodName := ownerName + "." + methodShort
+				fe.Entities = append(fe.Entities, ingest.EntityDef{
+					Name:      methodName,
+					StartByte: key.StartByte(),
+					EndByte:   key.EndByte(),
+					Exported:  true,
+				})
+				if params := ingest.ChildByField(val, "parameters"); params != nil {
+					walkJSUsages(fe, params, source, methodName)
+				}
+				if methodBody := ingest.ChildByField(val, "body"); methodBody != nil {
+					walkJSUsages(fe, methodBody, source, methodName)
+				}
+			default:
+				// `{ k: helper }` — free value reference under enclosing scope.
+				walkJSUsages(fe, val, source, enclosingScope)
+			}
+		case "spread_element", "shorthand_property_identifier":
+			// `{ ...other }` / `{ helper }` shorthand — free identifier usages.
+			walkJSUsages(fe, child, source, enclosingScope)
+		default:
+			if child.IsNamed() {
+				walkJSUsages(fe, child, source, enclosingScope)
 			}
 		}
 	}
