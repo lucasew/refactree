@@ -1,0 +1,4 @@
+{
+  "source": "path:./Types.java::A.value",
+  "destination": "path:./Types.java::A.amount"
+}
