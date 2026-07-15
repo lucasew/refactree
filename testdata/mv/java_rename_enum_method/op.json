@@ -1,0 +1,4 @@
+{
+  "source": "path:./Color.java::Color.code",
+  "destination": "path:./Color.java::Color.rank"
+}

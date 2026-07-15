@@ -1,0 +1,4 @@
+{
+  "source": "path:./Outer.java::Outer.Nested.helper",
+  "destination": "path:./Outer.java::Outer.Nested.assist"
+}
