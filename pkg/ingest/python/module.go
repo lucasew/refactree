@@ -201,10 +201,14 @@ func extractPythonDecorated(fe *ingest.FileExtract, n *grammar.Node, source []by
 		return
 	}
 	// Decorator expressions may reference other symbols (@deco, @mark.route).
+	// Property mutators `@helper.setter` / `.getter` / `.deleter` reference the
+	// property method name on the object side — rewrite with Class.helper.
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		ch := n.Child(i)
 		if ch.Type() == "decorator" {
-			walkPythonUsages(fe, ch, source, classScope)
+			if !emitPythonPropertyDecoratorUsages(fe, ch, source, classScope) {
+				walkPythonUsages(fe, ch, source, classScope)
+			}
 		}
 	}
 	def := ingest.ChildByField(n, "definition")
@@ -221,6 +225,54 @@ func extractPythonDecorated(fe *ingest.FileExtract, n *grammar.Node, source []by
 	case "class_definition":
 		extractPythonClass(fe, def, source, classScope)
 	}
+}
+
+// emitPythonPropertyDecoratorUsages rewrites `@helper.setter` object names when
+// renaming Box.helper. Returns true when the decorator was a property accessor
+// form (so the generic usage walk should be skipped for that decorator).
+func emitPythonPropertyDecoratorUsages(fe *ingest.FileExtract, dec *grammar.Node, source []byte, classScope string) bool {
+	if fe == nil || dec == nil || classScope == "" {
+		return false
+	}
+	// decorator → attribute (helper.setter) or call (@helper.setter() rare)
+	var attr *grammar.Node
+	for i := uint32(0); i < dec.ChildCount(); i++ {
+		ch := dec.Child(i)
+		if ch.Type() == "attribute" {
+			attr = ch
+			break
+		}
+		if ch.Type() == "call" {
+			if fn := ingest.ChildByField(ch, "function"); fn != nil && fn.Type() == "attribute" {
+				attr = fn
+				break
+			}
+		}
+	}
+	if attr == nil {
+		return false
+	}
+	obj := ingest.ChildByField(attr, "object")
+	prop := ingest.ChildByField(attr, "attribute")
+	if obj == nil || prop == nil || obj.Type() != "identifier" {
+		return false
+	}
+	acc := ingest.NodeText(prop, source)
+	if acc != "setter" && acc != "getter" && acc != "deleter" {
+		return false
+	}
+	short := ingest.NodeText(obj, source)
+	if short == "" {
+		return false
+	}
+	// Full entity name so resolveEntityName binds to Class.helper (not bare helper).
+	fe.Usages = append(fe.Usages, ingest.UsageDef{
+		Scope:     classScope,
+		Name:      classScope + "." + short,
+		StartByte: obj.StartByte(),
+		EndByte:   obj.EndByte(),
+	})
+	return true
 }
 
 func extractPythonAssign(fe *ingest.FileExtract, assign *grammar.Node, source []byte, scope string) {
@@ -595,6 +647,42 @@ func walkPythonUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, sc
 			})
 			return
 		}
+	case "call":
+		// Box(helper=1) / NamedTuple / TypedDict / partial(Box, helper=1): keyword
+		// names are Class.field usages. Bare walk would treat keywords as free names.
+		fn := ingest.ChildByField(n, "function")
+		args := ingest.ChildByField(n, "arguments")
+		typeName := pythonCallConstructorName(fn, args, source)
+		if fn != nil {
+			walkPythonUsages(fe, fn, source, scope)
+		}
+		if args != nil {
+			for i := uint32(0); i < args.ChildCount(); i++ {
+				ch := args.Child(i)
+				switch ch.Type() {
+				case "keyword_argument":
+					nameN := ingest.ChildByField(ch, "name")
+					valN := ingest.ChildByField(ch, "value")
+					if nameN != nil && typeName != "" {
+						fe.Usages = append(fe.Usages, ingest.UsageDef{
+							Scope:     scope,
+							Name:      ingest.NodeText(nameN, source),
+							Qualifier: typeName,
+							StartByte: nameN.StartByte(),
+							EndByte:   nameN.EndByte(),
+						})
+					}
+					if valN != nil {
+						walkPythonUsages(fe, valN, source, scope)
+					}
+				case "(", ")", ",", "comment":
+					// punctuation
+				default:
+					walkPythonUsages(fe, ch, source, scope)
+				}
+			}
+		}
+		return
 	case "identifier":
 		fe.Usages = append(fe.Usages, ingest.UsageDef{
 			Scope:     scope,
@@ -629,6 +717,61 @@ func walkPythonUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, sc
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		walkPythonUsages(fe, n.Child(i), source, scope)
 	}
+}
+
+// pythonCallConstructorName returns the type/class name whose fields are bound
+// by keyword arguments on a call: Box(...), pkg.Box(...), partial(Box, ...).
+// replace(obj, field=...) is handled in ExtraRename (typed receiver), not here.
+func pythonCallConstructorName(fn, args *grammar.Node, source []byte) string {
+	if fn == nil {
+		return ""
+	}
+	name := pythonSimpleCalleeName(fn, source)
+	if name == "" {
+		return ""
+	}
+	if name == "partial" {
+		return pythonFirstPositionalIdent(args, source)
+	}
+	if name == "replace" {
+		return ""
+	}
+	return name
+}
+
+func pythonSimpleCalleeName(fn *grammar.Node, source []byte) string {
+	if fn == nil {
+		return ""
+	}
+	switch fn.Type() {
+	case "identifier":
+		return ingest.NodeText(fn, source)
+	case "attribute":
+		if attr := ingest.ChildByField(fn, "attribute"); attr != nil {
+			return ingest.NodeText(attr, source)
+		}
+	}
+	return ""
+}
+
+// pythonFirstPositionalIdent returns the first non-keyword argument when it is
+// a bare identifier (partial(Box, helper=1) → "Box").
+func pythonFirstPositionalIdent(args *grammar.Node, source []byte) string {
+	if args == nil {
+		return ""
+	}
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		switch ch.Type() {
+		case "(", ")", ",", "comment", "keyword_argument":
+			continue
+		case "identifier":
+			return ingest.NodeText(ch, source)
+		default:
+			return ""
+		}
+	}
+	return ""
 }
 
 func pythonVisibilityName(name string) string {

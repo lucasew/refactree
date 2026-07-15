@@ -1393,11 +1393,81 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 				}
 			}
 		}
+		// dataclasses.replace(b, field=…) / replace(b, field=…): keyword names are
+		// field sites when the first positional target is one of our receivers.
+		if n.Type() == "call" {
+			if kwEdits := pythonReplaceKeywordEdits(fileRel, n, content, oldLeaf, newLeaf, ourReceivers, foreignReceivers, typedLocals); len(kwEdits) > 0 {
+				edits = append(edits, kwEdits...)
+			}
+		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), classHere)
 		}
 	}
 	walk(pf.Root, "")
+	return edits
+}
+
+// pythonReplaceKeywordEdits rewrites field keywords on replace(obj, oldLeaf=…).
+// Only when obj is a typed local / class name of ourReceivers (fail closed).
+func pythonReplaceKeywordEdits(fileRel string, call *grammar.Node, content []byte, oldLeaf, newLeaf string, ourReceivers, foreignReceivers, typedLocals map[string]bool) []ingest.Edit {
+	if call == nil || call.Type() != "call" {
+		return nil
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil {
+		return nil
+	}
+	// replace(...) or dataclasses.replace(...) / dc.replace(...)
+	leaf := pythonSimpleCalleeName(fn, content)
+	if leaf != "replace" {
+		return nil
+	}
+	args := ingest.ChildByField(call, "arguments")
+	if args == nil {
+		return nil
+	}
+	// First positional argument is the dataclass instance.
+	var target *grammar.Node
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		switch ch.Type() {
+		case "(", ")", ",", "comment", "keyword_argument":
+			continue
+		default:
+			target = ch
+		}
+		if target != nil {
+			break
+		}
+	}
+	if target == nil || target.Type() != "identifier" {
+		return nil
+	}
+	name := ingest.NodeText(target, content)
+	if !typedLocals[name] && !ourReceivers[name] {
+		return nil
+	}
+	if foreignReceivers[name] {
+		return nil
+	}
+	var edits []ingest.Edit
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch.Type() != "keyword_argument" {
+			continue
+		}
+		nameN := ingest.ChildByField(ch, "name")
+		if nameN == nil || ingest.NodeText(nameN, content) != oldLeaf {
+			continue
+		}
+		edits = append(edits, ingest.Edit{
+			File:      fileRel,
+			StartByte: nameN.StartByte(),
+			EndByte:   nameN.EndByte(),
+			NewText:   newLeaf,
+		})
+	}
 	return edits
 }
 
