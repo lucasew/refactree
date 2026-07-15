@@ -1,0 +1,4 @@
+{
+  "source": "path:./demo/Color.java::Color",
+  "destination": "path:./demo/Color.java::Hue"
+}

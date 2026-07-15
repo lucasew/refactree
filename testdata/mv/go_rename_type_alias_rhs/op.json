@@ -1,0 +1,4 @@
+{
+  "source": "path:./t.go::Box",
+  "destination": "path:./t.go::Crate"
+}

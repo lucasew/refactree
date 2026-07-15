@@ -1,0 +1,4 @@
+{
+  "source": "path:./demo/Color.java::Color.RED",
+  "destination": "path:./demo/Color.java::Color.CRIMSON"
+}

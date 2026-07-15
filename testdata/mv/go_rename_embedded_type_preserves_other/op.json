@@ -1,0 +1,4 @@
+{
+  "source": "path:./t.go::Base",
+  "destination": "path:./t.go::Core"
+}

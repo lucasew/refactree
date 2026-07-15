@@ -1,0 +1,4 @@
+{
+  "source": "path:./Tag.java::Tag",
+  "destination": "path:./Tag.java::Label"
+}

@@ -547,6 +547,11 @@ func spanOccupied(occ map[[2]uint32]bool, start, end uint32) bool {
 // (Class.method → Class.newName). Relation-based rename covers same-scope bare
 // and this-implicit calls, but not instance receivers (m.method) because those
 // are not entities. Mirrors Go/Python ExtraRenameEdits for Java.
+// ExtraRenameEdits rewrites field_access name spans when renaming a field
+// (Class.field → Class.newName). Relation-based rename covers same-scope this
+// accesses recorded as usages, but not instance receivers (m.field) because
+// those are not entities. Field-access only — method invocations are a separate
+// ExtraRename concern.
 func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, sourceRefs []string, oldLeaf, newLeaf string) []ingest.Edit {
 	if oldLeaf == "" || oldLeaf == newLeaf || len(sourceRefs) == 0 || rootDir == "" || result == nil {
 		return nil
@@ -561,7 +566,7 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 	for _, s := range sourceRefs {
 		sourceSet[s] = true
 		ref := ingest.ParseReference(s)
-		if recv, ok := javaMethodReceiver(ref.Symbol); ok {
+		if recv, ok := javaMemberReceiver(ref.Symbol); ok {
 			ourReceivers[recv] = true
 		}
 	}
@@ -578,7 +583,7 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		if ingest.SymbolLeaf(ref.Symbol) != oldLeaf {
 			continue
 		}
-		if recv, ok := javaMethodReceiver(ref.Symbol); ok && !ourReceivers[recv] {
+		if recv, ok := javaMemberReceiver(ref.Symbol); ok && !ourReceivers[recv] {
 			foreignReceivers[recv] = true
 		}
 	}
@@ -617,7 +622,7 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 			continue
 		}
 		occ := occupied[rel]
-		for _, e := range javaMethodAttrEdits(rel, content, oldLeaf, newLeaf, ourReceivers, foreignReceivers) {
+		for _, e := range javaFieldAccessEdits(rel, content, oldLeaf, newLeaf, ourReceivers, foreignReceivers) {
 			if spanOccupied(occ, e.StartByte, e.EndByte) {
 				continue
 			}
@@ -627,8 +632,8 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 	return edits
 }
 
-// javaMethodReceiver returns the class name for "Class.method" symbols.
-func javaMethodReceiver(symbol string) (string, bool) {
+// javaMemberReceiver returns the type qualifier for "Type.member" symbols.
+func javaMemberReceiver(symbol string) (string, bool) {
 	if symbol == "" || !strings.Contains(symbol, ".") {
 		return "", false
 	}
@@ -636,23 +641,18 @@ func javaMethodReceiver(symbol string) (string, bool) {
 	if len(parts) < 2 {
 		return "", false
 	}
-	// Nested: Outer.Inner.method → receiver Outer.Inner
 	recv := strings.Join(parts[:len(parts)-1], ".")
-	// For simple Class.method, use the leaf class segment as well for typed locals
-	// which use simple type names. ourReceivers stores full prefix; typed locals
-	// match against simple Class.
 	return recv, recv != ""
 }
 
-// javaMethodAttrEdits finds m.oldLeaf method_invocation name nodes to rewrite.
-func javaMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, ourReceivers, foreignReceivers map[string]bool) []ingest.Edit {
+// javaFieldAccessEdits finds m.oldLeaf field_access field nodes to rewrite.
+func javaFieldAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf string, ourReceivers, foreignReceivers map[string]bool) []ingest.Edit {
 	pf, err := ingest.ParseSource(content, fileRel, "java")
 	if err != nil {
 		return nil
 	}
 	defer pf.Close()
 
-	// Expand simple type names (Main) from nested receivers (pkg.Main → Main).
 	ourSimple := map[string]bool{}
 	for r := range ourReceivers {
 		ourSimple[r] = true
@@ -682,20 +682,6 @@ func javaMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string
 				classHere = ingest.NodeText(nameN, content)
 			}
 		}
-		if n.Type() == "method_invocation" {
-			obj := ingest.ChildByField(n, "object")
-			name := ingest.ChildByField(n, "name")
-			if name != nil && ingest.NodeText(name, content) == oldLeaf {
-				if javaShouldRenameInvocation(obj, content, classHere, ourSimple, foreignSimple, typedLocals) {
-					edits = append(edits, ingest.Edit{
-						File:      fileRel,
-						StartByte: name.StartByte(),
-						EndByte:   name.EndByte(),
-						NewText:   newLeaf,
-					})
-				}
-			}
-		}
 		if n.Type() == "field_access" {
 			obj := ingest.ChildByField(n, "object")
 			field := ingest.ChildByField(n, "field")
@@ -703,7 +689,7 @@ func javaMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string
 				field = ingest.ChildByType(n, "identifier")
 			}
 			if field != nil && ingest.NodeText(field, content) == oldLeaf {
-				if javaShouldRenameInvocation(obj, content, classHere, ourSimple, foreignSimple, typedLocals) {
+				if javaShouldRenameFieldAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals) {
 					edits = append(edits, ingest.Edit{
 						File:      fileRel,
 						StartByte: field.StartByte(),
@@ -721,18 +707,14 @@ func javaMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string
 	return edits
 }
 
-// javaShouldRenameInvocation decides whether obj.oldLeaf targets our receiver.
-// obj may be nil for bare calls (handled by relations); ExtraRename still can
-// rewrite them when unique-leaf, but occupied spans skip already-covered ones.
-func javaShouldRenameInvocation(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool) bool {
+// javaShouldRenameFieldAccess decides whether obj.oldLeaf targets our receiver type.
+func javaShouldRenameFieldAccess(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool) bool {
 	if obj == nil {
-		// Bare call: only when unique leaf (fail-open uniqueness) and enclosing is ours
 		if enclosingClass != "" && ourReceivers[enclosingClass] {
 			return true
 		}
 		return len(foreignReceivers) == 0
 	}
-	// this.x / super.x
 	if obj.Type() == "this" || obj.Type() == "super" {
 		if enclosingClass == "" {
 			return len(foreignReceivers) == 0
@@ -749,7 +731,6 @@ func javaShouldRenameInvocation(obj *grammar.Node, content []byte, enclosingClas
 		return false
 	}
 	name := ingest.NodeText(obj, content)
-	// Class-qualified: Main.method (static) or type name
 	if ourReceivers[name] {
 		return true
 	}
@@ -763,7 +744,6 @@ func javaShouldRenameInvocation(obj *grammar.Node, content []byte, enclosingClas
 }
 
 // javaTypedLocals maps locals/params declared with our receiver types.
-// Covers: Main m, Main m = ..., final Main m = new Main().
 func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]bool {
 	out := map[string]bool{}
 	if root == nil || len(ourReceivers) == 0 {
@@ -793,10 +773,8 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 			}
 			tn := javaTypeName(typeN, content)
 			if !ourReceivers[tn] {
-				// still walk children for nested
 				break
 			}
-			// declarators
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				c := n.Child(i)
 				if c.Type() == "variable_declarator" {
@@ -810,7 +788,6 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 				}
 			}
 		case "enhanced_for_statement":
-			// for (Main m : list)
 			typeN := ingest.ChildByField(n, "type")
 			nameN := ingest.ChildByField(n, "name")
 			if typeN != nil && nameN != nil {
@@ -843,7 +820,6 @@ func javaTypeName(typeN *grammar.Node, content []byte) string {
 			return ingest.NodeText(name, content)
 		}
 	case "scoped_type_identifier":
-		// a.b.Main → Main
 		if name := ingest.ChildByField(typeN, "name"); name != nil {
 			return ingest.NodeText(name, content)
 		}
@@ -852,7 +828,6 @@ func javaTypeName(typeN *grammar.Node, content []byte) string {
 			return javaTypeName(elem, content)
 		}
 	}
-	// integral_type etc. — not our receivers
 	if id := ingest.ChildByType(typeN, "type_identifier"); id != nil {
 		return ingest.NodeText(id, content)
 	}
