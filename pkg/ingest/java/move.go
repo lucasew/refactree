@@ -526,3 +526,335 @@ func rewriteJavaNameToken(fileRelPath string, content []byte, oldName, newName s
 func isJavaIdentChar(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '$'
 }
+
+// spanOccupied reports whether [start,end) overlaps any already-covered rename span.
+func spanOccupied(occ map[[2]uint32]bool, start, end uint32) bool {
+	if occ == nil {
+		return false
+	}
+	if occ[[2]uint32{start, end}] {
+		return true
+	}
+	for k := range occ {
+		if start < k[1] && end > k[0] {
+			return true
+		}
+	}
+	return false
+}
+
+// ExtraRenameEdits rewrites method_invocation name spans when renaming a method
+// (Class.method → Class.newName). Relation-based rename covers same-scope bare
+// and this-implicit calls, but not instance receivers (m.method) because those
+// are not entities. Mirrors Go/Python ExtraRenameEdits for Java.
+func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, sourceRefs []string, oldLeaf, newLeaf string) []ingest.Edit {
+	if oldLeaf == "" || oldLeaf == newLeaf || len(sourceRefs) == 0 || rootDir == "" || result == nil {
+		return nil
+	}
+	src := ingest.ParseReference(sourceRefs[0])
+	if !strings.Contains(src.Symbol, ".") {
+		return nil
+	}
+
+	ourReceivers := map[string]bool{}
+	sourceSet := map[string]bool{}
+	for _, s := range sourceRefs {
+		sourceSet[s] = true
+		ref := ingest.ParseReference(s)
+		if recv, ok := javaMethodReceiver(ref.Symbol); ok {
+			ourReceivers[recv] = true
+		}
+	}
+	if len(ourReceivers) == 0 {
+		return nil
+	}
+
+	foreignReceivers := map[string]bool{}
+	for _, ent := range result.Entities {
+		if sourceSet[ent.Reference] {
+			continue
+		}
+		ref := ingest.ParseReference(ent.Reference)
+		if ingest.SymbolLeaf(ref.Symbol) != oldLeaf {
+			continue
+		}
+		if recv, ok := javaMethodReceiver(ref.Symbol); ok && !ourReceivers[recv] {
+			foreignReceivers[recv] = true
+		}
+	}
+
+	occupied := map[string]map[[2]uint32]bool{}
+	mark := func(file string, start, end uint32) {
+		file = strings.TrimPrefix(file, "./")
+		if occupied[file] == nil {
+			occupied[file] = map[[2]uint32]bool{}
+		}
+		occupied[file][[2]uint32{start, end}] = true
+	}
+	for _, ent := range result.Entities {
+		if !sourceSet[ent.Reference] {
+			continue
+		}
+		ref := ingest.ParseReference(ent.Reference)
+		mark(ref.Path, ent.StartByte, ent.EndByte)
+	}
+	for _, rel := range result.Relations {
+		if !sourceSet[rel.Target] {
+			continue
+		}
+		ref := ingest.ParseReference(rel.Reference)
+		mark(ref.Path, rel.StartByte, rel.EndByte)
+	}
+
+	var edits []ingest.Edit
+	for _, f := range result.Files {
+		if f.Language != "java" {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Path, "./")
+		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		occ := occupied[rel]
+		for _, e := range javaMethodAttrEdits(rel, content, oldLeaf, newLeaf, ourReceivers, foreignReceivers) {
+			if spanOccupied(occ, e.StartByte, e.EndByte) {
+				continue
+			}
+			edits = append(edits, e)
+		}
+	}
+	return edits
+}
+
+// javaMethodReceiver returns the class name for "Class.method" symbols.
+func javaMethodReceiver(symbol string) (string, bool) {
+	if symbol == "" || !strings.Contains(symbol, ".") {
+		return "", false
+	}
+	parts := strings.Split(symbol, ".")
+	if len(parts) < 2 {
+		return "", false
+	}
+	// Nested: Outer.Inner.method → receiver Outer.Inner
+	recv := strings.Join(parts[:len(parts)-1], ".")
+	// For simple Class.method, use the leaf class segment as well for typed locals
+	// which use simple type names. ourReceivers stores full prefix; typed locals
+	// match against simple Class.
+	return recv, recv != ""
+}
+
+// javaMethodAttrEdits finds m.oldLeaf method_invocation name nodes to rewrite.
+func javaMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, ourReceivers, foreignReceivers map[string]bool) []ingest.Edit {
+	pf, err := ingest.ParseSource(content, fileRel, "java")
+	if err != nil {
+		return nil
+	}
+	defer pf.Close()
+
+	// Expand simple type names (Main) from nested receivers (pkg.Main → Main).
+	ourSimple := map[string]bool{}
+	for r := range ourReceivers {
+		ourSimple[r] = true
+		if i := strings.LastIndex(r, "."); i >= 0 {
+			ourSimple[r[i+1:]] = true
+		}
+	}
+	foreignSimple := map[string]bool{}
+	for r := range foreignReceivers {
+		foreignSimple[r] = true
+		if i := strings.LastIndex(r, "."); i >= 0 {
+			foreignSimple[r[i+1:]] = true
+		}
+	}
+
+	typedLocals := javaTypedLocals(pf.Root, content, ourSimple)
+
+	var edits []ingest.Edit
+	var walk func(n *grammar.Node, enclosingClass string)
+	walk = func(n *grammar.Node, enclosingClass string) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		classHere := enclosingClass
+		if n.Type() == "class_declaration" || n.Type() == "interface_declaration" || n.Type() == "enum_declaration" {
+			if nameN := ingest.ChildByField(n, "name"); nameN != nil {
+				classHere = ingest.NodeText(nameN, content)
+			}
+		}
+		if n.Type() == "method_invocation" {
+			obj := ingest.ChildByField(n, "object")
+			name := ingest.ChildByField(n, "name")
+			if name != nil && ingest.NodeText(name, content) == oldLeaf {
+				if javaShouldRenameInvocation(obj, content, classHere, ourSimple, foreignSimple, typedLocals) {
+					edits = append(edits, ingest.Edit{
+						File:      fileRel,
+						StartByte: name.StartByte(),
+						EndByte:   name.EndByte(),
+						NewText:   newLeaf,
+					})
+				}
+			}
+		}
+		if n.Type() == "field_access" {
+			obj := ingest.ChildByField(n, "object")
+			field := ingest.ChildByField(n, "field")
+			if field == nil {
+				field = ingest.ChildByType(n, "identifier")
+			}
+			if field != nil && ingest.NodeText(field, content) == oldLeaf {
+				if javaShouldRenameInvocation(obj, content, classHere, ourSimple, foreignSimple, typedLocals) {
+					edits = append(edits, ingest.Edit{
+						File:      fileRel,
+						StartByte: field.StartByte(),
+						EndByte:   field.EndByte(),
+						NewText:   newLeaf,
+					})
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i), classHere)
+		}
+	}
+	walk(pf.Root, "")
+	return edits
+}
+
+// javaShouldRenameInvocation decides whether obj.oldLeaf targets our receiver.
+// obj may be nil for bare calls (handled by relations); ExtraRename still can
+// rewrite them when unique-leaf, but occupied spans skip already-covered ones.
+func javaShouldRenameInvocation(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool) bool {
+	if obj == nil {
+		// Bare call: only when unique leaf (fail-open uniqueness) and enclosing is ours
+		if enclosingClass != "" && ourReceivers[enclosingClass] {
+			return true
+		}
+		return len(foreignReceivers) == 0
+	}
+	// this.x / super.x
+	if obj.Type() == "this" || obj.Type() == "super" {
+		if enclosingClass == "" {
+			return len(foreignReceivers) == 0
+		}
+		if ourReceivers[enclosingClass] {
+			return true
+		}
+		if foreignReceivers[enclosingClass] {
+			return false
+		}
+		return len(foreignReceivers) == 0
+	}
+	if obj.Type() != "identifier" {
+		return false
+	}
+	name := ingest.NodeText(obj, content)
+	// Class-qualified: Main.method (static) or type name
+	if ourReceivers[name] {
+		return true
+	}
+	if foreignReceivers[name] {
+		return false
+	}
+	if typedLocals[name] {
+		return true
+	}
+	return len(foreignReceivers) == 0
+}
+
+// javaTypedLocals maps locals/params declared with our receiver types.
+// Covers: Main m, Main m = ..., final Main m = new Main().
+func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]bool {
+	out := map[string]bool{}
+	if root == nil || len(ourReceivers) == 0 {
+		return out
+	}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		switch n.Type() {
+		case "formal_parameter", "spread_parameter":
+			typeN := ingest.ChildByField(n, "type")
+			nameN := ingest.ChildByField(n, "name")
+			if nameN == nil {
+				nameN = ingest.ChildByType(n, "identifier")
+			}
+			if typeN != nil && nameN != nil {
+				if tn := javaTypeName(typeN, content); ourReceivers[tn] {
+					out[ingest.NodeText(nameN, content)] = true
+				}
+			}
+		case "local_variable_declaration", "field_declaration":
+			typeN := ingest.ChildByField(n, "type")
+			if typeN == nil {
+				break
+			}
+			tn := javaTypeName(typeN, content)
+			if !ourReceivers[tn] {
+				// still walk children for nested
+				break
+			}
+			// declarators
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				c := n.Child(i)
+				if c.Type() == "variable_declarator" {
+					nameN := ingest.ChildByField(c, "name")
+					if nameN == nil {
+						nameN = ingest.ChildByType(c, "identifier")
+					}
+					if nameN != nil {
+						out[ingest.NodeText(nameN, content)] = true
+					}
+				}
+			}
+		case "enhanced_for_statement":
+			// for (Main m : list)
+			typeN := ingest.ChildByField(n, "type")
+			nameN := ingest.ChildByField(n, "name")
+			if typeN != nil && nameN != nil {
+				if tn := javaTypeName(typeN, content); ourReceivers[tn] {
+					out[ingest.NodeText(nameN, content)] = true
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	return out
+}
+
+// javaTypeName extracts a simple type identifier from a type node.
+func javaTypeName(typeN *grammar.Node, content []byte) string {
+	if typeN == nil {
+		return ""
+	}
+	switch typeN.Type() {
+	case "type_identifier", "identifier":
+		return ingest.NodeText(typeN, content)
+	case "generic_type":
+		if name := ingest.ChildByField(typeN, "type"); name != nil {
+			return javaTypeName(name, content)
+		}
+		if name := ingest.ChildByType(typeN, "type_identifier"); name != nil {
+			return ingest.NodeText(name, content)
+		}
+	case "scoped_type_identifier":
+		// a.b.Main → Main
+		if name := ingest.ChildByField(typeN, "name"); name != nil {
+			return ingest.NodeText(name, content)
+		}
+	case "array_type":
+		if elem := ingest.ChildByField(typeN, "element"); elem != nil {
+			return javaTypeName(elem, content)
+		}
+	}
+	// integral_type etc. — not our receivers
+	if id := ingest.ChildByType(typeN, "type_identifier"); id != nil {
+		return ingest.NodeText(id, content)
+	}
+	return ""
+}
