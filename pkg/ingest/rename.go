@@ -149,6 +149,9 @@ func planSymbolRename(dir string, result *Result, sourceRefs []string, destSymbo
 	}
 
 	// 3. Rename in import bindings that target any expanded entity.
+	// Zero-span aliases (DefaultExport, re-exports) exist only for
+	// CanonicalizeInResult — they are not textual sites and must not be rewritten
+	// (rewriting [0:0] would insert the new name at the start of the file).
 	// Zero-span aliases (DefaultExport, star/legacy re-exports) exist only for
 	// CanonicalizeInResult — rewriting [0:0] would insert the new name at the
 	// start of the file.
