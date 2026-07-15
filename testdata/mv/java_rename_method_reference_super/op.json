@@ -1,0 +1,4 @@
+{
+  "source": "path:./Base.java::Base.helper",
+  "destination": "path:./Base.java::Base.assist"
+}

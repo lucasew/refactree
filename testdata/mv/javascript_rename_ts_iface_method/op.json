@@ -1,0 +1,4 @@
+{
+  "source": "path:./box.ts::Worker.helper",
+  "destination": "path:./box.ts::Worker.assist"
+}

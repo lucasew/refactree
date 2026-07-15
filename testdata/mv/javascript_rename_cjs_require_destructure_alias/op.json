@@ -1,0 +1,4 @@
+{
+  "source": "path:./mod.js::helper",
+  "destination": "path:./mod.js::assist"
+}
