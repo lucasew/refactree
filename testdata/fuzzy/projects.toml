@@ -95,8 +95,14 @@ run = [
 ]
 
 [projects.astro.mise.tasks.test]
-description = "Run unit tests for the astro package"
-run = "pnpm --filter astro run test:unit -- --verbose"
+description = "Build packages/astro dist, then run unit tests (test:unit imports dist/*)"
+# build:ci writes packages/astro/dist; unit tests import it. Setup only installs
+# deps, so a post-mv check without build fails with ERR_MODULE_NOT_FOUND.
+# Build on check (not only setup) so dist reflects the mutated tree after mv.
+run = [
+  "pnpm --filter astro run build:ci",
+  "pnpm --filter astro run test:unit -- --verbose",
+]
 
 [projects.pesquisarr]
 url = "https://github.com/lucasew/pesquisarr.git"
