@@ -91,7 +91,11 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 	}
 
 	// (1) Interface / override method declaration renames on related types.
-	if len(alsoTypes) > 0 {
+	// alsoTypes covers named implementors/supertypes. ourTypes alone is enough
+	// when the only other Type.method entities are anonymous class overrides
+	// (new Type() { m() {} }) which share the constructed type's simple name
+	// but live on a different path — no implements edge is recorded for them.
+	if len(alsoTypes) > 0 || len(ourTypes) > 0 {
 		for _, ent := range result.Entities {
 			if sourceSet[ent.Reference] {
 				continue
