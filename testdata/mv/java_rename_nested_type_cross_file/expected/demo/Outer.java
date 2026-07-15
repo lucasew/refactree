@@ -4,7 +4,7 @@ public class Outer {
   public static class Core {
     public int n;
 
-    public Inner(int n) {
+    public Core(int n) {
       this.n = n;
     }
 
