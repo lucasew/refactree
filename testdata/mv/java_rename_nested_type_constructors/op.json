@@ -1,0 +1,4 @@
+{
+  "source": "path:./Outer.java::Outer.Box",
+  "destination": "path:./Outer.java::Outer.Crate"
+}

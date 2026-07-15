@@ -434,6 +434,17 @@ func extractJavaMethod(fe *ingest.FileExtract, n *grammar.Node, source []byte, t
 
 func extractJavaConstructor(fe *ingest.FileExtract, n *grammar.Node, source []byte, typeName string) {
 	scope := typeName
+	// Constructor name must match the declaring type. Emit as a usage of the type
+	// so renames rewrite `public Box(...)` when the class is renamed.
+	// typeName may be nested (Outer.Inner); resolve indexes by full entity name.
+	if nameNode := ingest.ChildByField(n, "name"); nameNode != nil {
+		fe.Usages = append(fe.Usages, ingest.UsageDef{
+			Scope:     scope,
+			Name:      typeName,
+			StartByte: nameNode.StartByte(),
+			EndByte:   nameNode.EndByte(),
+		})
+	}
 	walkJavaModifiers(fe, n, source, scope)
 	if params := ingest.ChildByField(n, "parameters"); params != nil {
 		walkJavaUsages(fe, params, source, scope)
