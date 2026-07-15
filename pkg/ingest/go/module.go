@@ -237,7 +237,49 @@ func extractGoTypeSpec(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 		if child.Type() == "type_identifier" && child.StartByte() == nameNode.StartByte() {
 			continue
 		}
+		if child.Type() == "struct_type" {
+			extractGoStructFields(fe, child, source, name)
+		}
 		walkGoUsages(fe, child, source, name)
+	}
+}
+
+// extractGoStructFields records named struct fields as Type.Field entities so
+// renames rewrite definitions and selector/literal sites (via ExtraRename).
+// Embedded types (no field_identifier) are not field entities — they are type
+// references already handled as usages.
+func extractGoStructFields(fe *ingest.FileExtract, structType *grammar.Node, source []byte, typeName string) {
+	if structType == nil || typeName == "" {
+		return
+	}
+	list := ingest.ChildByType(structType, "field_declaration_list")
+	if list == nil {
+		return
+	}
+	for i := uint32(0); i < list.ChildCount(); i++ {
+		fd := list.Child(i)
+		if fd.Type() != "field_declaration" {
+			continue
+		}
+		// Named fields only (field_identifier). Multiple names on one line are rare
+		// in modern Go but field_identifier children cover them.
+		for j := uint32(0); j < fd.ChildCount(); j++ {
+			c := fd.Child(j)
+			if c.Type() != "field_identifier" {
+				continue
+			}
+			fieldName := ingest.NodeText(c, source)
+			if fieldName == "" {
+				continue
+			}
+			full := typeName + "." + fieldName
+			fe.Entities = append(fe.Entities, ingest.EntityDef{
+				Name:      full,
+				StartByte: c.StartByte(),
+				EndByte:   c.EndByte(),
+				Exported:  languageDriver{}.AllowListSymbol(fieldName, ingest.SymbolListOptions{}),
+			})
+		}
 	}
 }
 
@@ -293,10 +335,18 @@ func extractGoTypeAlias(fe *ingest.FileExtract, n *grammar.Node, source []byte) 
 		Exported:  languageDriver{}.AllowListSymbol(name, ingest.SymbolListOptions{}),
 	})
 	// Usages: everything after the alias name (RHS type, possibly pointer/qualified).
+	// Alias-to-interface: `type Worker = interface { Helper() }` — method_elem names
+	// are path entities Worker.Helper (same as type_spec interfaces).
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
 		if child == nameNode || (child.Type() == "type_identifier" && child.StartByte() == nameNode.StartByte()) {
 			continue
+		}
+		if child.Type() == "interface_type" {
+			extractGoInterfaceMethods(fe, child, source, name)
+		}
+		if child.Type() == "struct_type" {
+			extractGoStructFields(fe, child, source, name)
 		}
 		walkGoUsages(fe, child, source, name)
 	}

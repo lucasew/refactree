@@ -762,6 +762,7 @@ func goTypeIsInterface(rootDir string, result *ingest.Result, pkgDir, typeName s
 }
 
 // typeIsInterfaceInFile reports whether typeName is declared as interface in content.
+// Covers both `type T interface {…}` (type_spec) and `type T = interface {…}` (type_alias).
 func typeIsInterfaceInFile(content []byte, typeName string) bool {
 	if typeName == "" {
 		return false
@@ -777,12 +778,35 @@ func typeIsInterfaceInFile(content []byte, typeName string) bool {
 		if n == nil || found {
 			return
 		}
-		if n.Type() == "type_spec" {
+		switch n.Type() {
+		case "type_spec":
 			id := ingest.ChildByType(n, "type_identifier")
 			if id != nil && ingest.NodeText(id, content) == typeName {
 				if t := ingest.ChildByField(n, "type"); t != nil && t.Type() == "interface_type" {
 					found = true
 					return
+				}
+			}
+		case "type_alias":
+			// First type_identifier is the alias name; RHS may be interface_type.
+			var nameNode *grammar.Node
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch.Type() == "type_identifier" {
+					nameNode = ch
+					break
+				}
+			}
+			if nameNode != nil && ingest.NodeText(nameNode, content) == typeName {
+				for i := uint32(0); i < n.ChildCount(); i++ {
+					ch := n.Child(i)
+					if ch == nameNode {
+						continue
+					}
+					if ch.Type() == "interface_type" {
+						found = true
+						return
+					}
 				}
 			}
 		}
@@ -1339,6 +1363,29 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		relatedFiles[strings.TrimPrefix(ref.Path, "./")] = true
 	}
 
+	// Receivers among our rename targets that do not also declare a method with
+	// this leaf — composite literal keys only apply to pure field renames.
+	fieldReceivers := map[string]bool{}
+	for recv := range ourReceivers {
+		fieldReceivers[recv] = true
+	}
+	for _, f := range result.Files {
+		if f.Language != "go" {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Path, "./")
+		if !ourPkgDirs[dirOf(rel)] {
+			continue
+		}
+		c, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		for _, r := range methodReceiversWithLeaf(c, oldLeaf) {
+			delete(fieldReceivers, r)
+		}
+	}
+
 	var edits []ingest.Edit
 	for _, f := range result.Files {
 		if f.Language != "go" {
@@ -1401,6 +1448,21 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 				}
 			}
 			edits = append(edits, e)
+			if occ != nil {
+				occ[[2]uint32{e.StartByte, e.EndByte}] = true
+			}
+		}
+		// Struct field renames: Type{OldLeaf: …} composite literal keys.
+		if (inOurPkg || relatedFiles[rel]) && len(fieldReceivers) > 0 {
+			for _, e := range findCompositeFieldKeyEdits(rel, content, oldLeaf, newLeaf, fieldReceivers) {
+				if occ[[2]uint32{e.StartByte, e.EndByte}] {
+					continue
+				}
+				edits = append(edits, e)
+				if occ != nil {
+					occ[[2]uint32{e.StartByte, e.EndByte}] = true
+				}
+			}
 		}
 		// Box{}.Helper / &Box{}.Helper — composite-literal receivers (text scan
 		// only allows identifier receivers). Same-package only.
@@ -1422,6 +1484,115 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		}
 	}
 	return edits
+}
+
+// findCompositeFieldKeyEdits rewrites OldLeaf keys in composite literals whose
+// type is one of ourReceivers (e.g. Box{Helper: 1} when renaming Box.Helper).
+func findCompositeFieldKeyEdits(file string, content []byte, oldLeaf, newLeaf string, ourReceivers map[string]bool) []ingest.Edit {
+	if oldLeaf == "" || len(ourReceivers) == 0 {
+		return nil
+	}
+	pf, err := ingest.ParseSource(content, file, "go")
+	if err != nil {
+		return nil
+	}
+	defer pf.Close()
+
+	var edits []ingest.Edit
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		if n.Type() == "composite_literal" {
+			typ := compositeLiteralTypeName(n, content)
+			if typ != "" && ourReceivers[typ] {
+				var body *grammar.Node
+				for i := uint32(0); i < n.ChildCount(); i++ {
+					c := n.Child(i)
+					if c.Type() == "literal_value" {
+						body = c
+						break
+					}
+				}
+				if body != nil {
+					collectCompositeKeyEdits(body, content, file, oldLeaf, newLeaf, &edits)
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(pf.Root)
+	return edits
+}
+
+func compositeLiteralTypeName(n *grammar.Node, content []byte) string {
+	if n == nil {
+		return ""
+	}
+	if typN := ingest.ChildByField(n, "type"); typN != nil {
+		return strings.TrimPrefix(typeNameFromTypeNode(typN, content), "*")
+	}
+	// tree-sitter-go often exposes the type as a bare type_identifier child.
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		c := n.Child(i)
+		switch c.Type() {
+		case "type_identifier", "qualified_type", "generic_type", "pointer_type":
+			return strings.TrimPrefix(typeNameFromTypeNode(c, content), "*")
+		}
+	}
+	return ""
+}
+
+func collectCompositeKeyEdits(n *grammar.Node, content []byte, file, oldLeaf, newLeaf string, edits *[]ingest.Edit) {
+	if n == nil || n.IsNull() {
+		return
+	}
+	if n.Type() == "keyed_element" {
+		// key: value — key is field_identifier, identifier, or literal_element wrapping one.
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c.Type() == ":" {
+				break
+			}
+			keyNode := compositeKeyIdent(c)
+			if keyNode == nil {
+				continue
+			}
+			if ingest.NodeText(keyNode, content) == oldLeaf {
+				*edits = append(*edits, ingest.Edit{
+					File:      file,
+					StartByte: keyNode.StartByte(),
+					EndByte:   keyNode.EndByte(),
+					NewText:   newLeaf,
+				})
+			}
+			break
+		}
+		return
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		collectCompositeKeyEdits(n.Child(i), content, file, oldLeaf, newLeaf, edits)
+	}
+}
+
+func compositeKeyIdent(n *grammar.Node) *grammar.Node {
+	if n == nil {
+		return nil
+	}
+	switch n.Type() {
+	case "field_identifier", "identifier":
+		return n
+	case "literal_element":
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			if id := compositeKeyIdent(n.Child(i)); id != nil {
+				return id
+			}
+		}
+	}
+	return nil
 }
 
 // embeddedTypeFieldSelectorEdits rewrites `.OldType` selectors when renaming a
@@ -1945,12 +2116,31 @@ func interfaceTypeNamesWithMethod(content []byte, methodLeaf string) []string {
 			return
 		}
 		nextName, nextIface := ifaceName, inIface
-		if n.Type() == "type_spec" {
+		switch n.Type() {
+		case "type_spec":
 			if id := ingest.ChildByType(n, "type_identifier"); id != nil {
 				nextName = ingest.NodeText(id, content)
 			}
 			if t := ingest.ChildByField(n, "type"); t != nil && t.Type() == "interface_type" {
 				nextIface = true
+			}
+		case "type_alias":
+			var nameNode *grammar.Node
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch.Type() == "type_identifier" {
+					nameNode = ch
+					break
+				}
+			}
+			if nameNode != nil {
+				nextName = ingest.NodeText(nameNode, content)
+			}
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				if n.Child(i).Type() == "interface_type" {
+					nextIface = true
+					break
+				}
 			}
 		}
 		if inIface && (n.Type() == "method_elem" || n.Type() == "field_declaration") {
@@ -2238,6 +2428,7 @@ func buildStringLiteralMask(text string) []bool {
 
 // findInterfaceMethodEdits renames method oldLeaf→newLeaf on every interface
 // declaration in the file (all in-scope interfaces that declare the method).
+// Includes both `type T interface` and `type T = interface` forms.
 func findInterfaceMethodEdits(file string, content []byte, oldLeaf, newLeaf string) []ingest.Edit {
 	pf, err := ingest.ParseSource(content, file, "")
 	if err != nil {
@@ -2256,6 +2447,13 @@ func findInterfaceMethodEdits(file string, content []byte, oldLeaf, newLeaf stri
 		case "type_spec":
 			if t := ingest.ChildByField(n, "type"); t != nil && t.Type() == "interface_type" {
 				nextIface = true
+			}
+		case "type_alias":
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				if n.Child(i).Type() == "interface_type" {
+					nextIface = true
+					break
+				}
 			}
 		case "method_elem", "field_declaration":
 			if inIface {

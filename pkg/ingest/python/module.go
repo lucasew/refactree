@@ -201,10 +201,14 @@ func extractPythonDecorated(fe *ingest.FileExtract, n *grammar.Node, source []by
 		return
 	}
 	// Decorator expressions may reference other symbols (@deco, @mark.route).
+	// Property mutators `@helper.setter` / `.getter` / `.deleter` reference the
+	// property method name on the object side — rewrite with Class.helper.
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		ch := n.Child(i)
 		if ch.Type() == "decorator" {
-			walkPythonUsages(fe, ch, source, classScope)
+			if !emitPythonPropertyDecoratorUsages(fe, ch, source, classScope) {
+				walkPythonUsages(fe, ch, source, classScope)
+			}
 		}
 	}
 	def := ingest.ChildByField(n, "definition")
@@ -221,6 +225,54 @@ func extractPythonDecorated(fe *ingest.FileExtract, n *grammar.Node, source []by
 	case "class_definition":
 		extractPythonClass(fe, def, source, classScope)
 	}
+}
+
+// emitPythonPropertyDecoratorUsages rewrites `@helper.setter` object names when
+// renaming Box.helper. Returns true when the decorator was a property accessor
+// form (so the generic usage walk should be skipped for that decorator).
+func emitPythonPropertyDecoratorUsages(fe *ingest.FileExtract, dec *grammar.Node, source []byte, classScope string) bool {
+	if fe == nil || dec == nil || classScope == "" {
+		return false
+	}
+	// decorator → attribute (helper.setter) or call (@helper.setter() rare)
+	var attr *grammar.Node
+	for i := uint32(0); i < dec.ChildCount(); i++ {
+		ch := dec.Child(i)
+		if ch.Type() == "attribute" {
+			attr = ch
+			break
+		}
+		if ch.Type() == "call" {
+			if fn := ingest.ChildByField(ch, "function"); fn != nil && fn.Type() == "attribute" {
+				attr = fn
+				break
+			}
+		}
+	}
+	if attr == nil {
+		return false
+	}
+	obj := ingest.ChildByField(attr, "object")
+	prop := ingest.ChildByField(attr, "attribute")
+	if obj == nil || prop == nil || obj.Type() != "identifier" {
+		return false
+	}
+	acc := ingest.NodeText(prop, source)
+	if acc != "setter" && acc != "getter" && acc != "deleter" {
+		return false
+	}
+	short := ingest.NodeText(obj, source)
+	if short == "" {
+		return false
+	}
+	// Full entity name so resolveEntityName binds to Class.helper (not bare helper).
+	fe.Usages = append(fe.Usages, ingest.UsageDef{
+		Scope:     classScope,
+		Name:      classScope + "." + short,
+		StartByte: obj.StartByte(),
+		EndByte:   obj.EndByte(),
+	})
+	return true
 }
 
 func extractPythonAssign(fe *ingest.FileExtract, assign *grammar.Node, source []byte, scope string) {
@@ -480,10 +532,23 @@ func extractPythonImportFrom(fe *ingest.FileExtract, n *grammar.Node, source []b
 	moduleName := pythonModuleSpec(modNode, source)
 
 	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		// Star import: `from box import *` — wildcard_import has no "name" field.
+		// Record as MemberName "*" so resolve can bind bare call sites to the
+		// target module's top-level entities.
+		if child.Type() == "wildcard_import" {
+			fe.Imports = append(fe.Imports, ingest.ImportDef{
+				LocalName:  "*",
+				SourcePath: moduleName,
+				MemberName: "*",
+				StartByte:  child.StartByte(),
+				EndByte:    child.EndByte(),
+			})
+			continue
+		}
 		if n.FieldNameForChild(i) != "name" {
 			continue
 		}
-		child := n.Child(i)
 
 		switch child.Type() {
 		case "aliased_import":

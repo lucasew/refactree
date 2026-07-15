@@ -380,19 +380,54 @@ func extractJSVarDecl(fe *ingest.FileExtract, n *grammar.Node, source []byte, sc
 			continue
 		}
 		nameNode := ingest.ChildByField(child, "name")
+		value := ingest.ChildByField(child, "value")
+		var localName string
 		if nameNode != nil && nameNode.Type() == "identifier" {
-			name := ingest.NodeText(nameNode, source)
+			localName = ingest.NodeText(nameNode, source)
 			fe.Entities = append(fe.Entities, ingest.EntityDef{
-				Name:      name,
+				Name:      localName,
 				StartByte: nameNode.StartByte(),
 				EndByte:   nameNode.EndByte(),
 				Exported:  true,
 			})
+			// Dynamic import namespace: `const m = await import("./box.js")` or
+			// `const m = import("./box.js")` — treat like `import * as m from …`
+			// so m.helper property accesses resolve to the module export.
+			if value != nil {
+				if dynPath, ok := jsDynamicImportPath(value, source); ok {
+					fe.Imports = append(fe.Imports, ingest.ImportDef{
+						LocalName:  localName,
+						SourcePath: dynPath,
+						StartByte:  nameNode.StartByte(),
+						EndByte:    nameNode.EndByte(),
+					})
+				}
+			}
 		}
-		if value := ingest.ChildByField(child, "value"); value != nil {
+		if value != nil {
 			walkJSUsages(fe, value, source, scope)
 		}
 	}
+}
+
+// jsDynamicImportPath returns the string specifier for `import("…")` or
+// `await import("…")`. Empty when the RHS is not a dynamic import expression.
+func jsDynamicImportPath(n *grammar.Node, source []byte) (string, bool) {
+	if n == nil {
+		return "", false
+	}
+	// Unwrap await_expression.
+	if n.Type() == "await_expression" {
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c.Type() == "await" {
+				continue
+			}
+			return jsDynamicImportPath(c, source)
+		}
+		return "", false
+	}
+	return jsImportCallPath(n, source)
 }
 
 func extractJSFunc(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
@@ -789,6 +824,20 @@ func walkJSUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope 
 		// Nested declarations: walk bodies/values only so the declared name is
 		// not recorded as a usage of a same-named outer entity.
 		if value := ingest.ChildByField(n, "value"); value != nil {
+			// Nested dynamic import: `async function f() { const m = await import("./x") }`
+			// Top-level extractJSVarDecl does not see these; bind as namespace imports.
+			if n.Type() == "variable_declarator" {
+				if nameNode := ingest.ChildByField(n, "name"); nameNode != nil && nameNode.Type() == "identifier" {
+					if dynPath, ok := jsDynamicImportPath(value, source); ok {
+						fe.Imports = append(fe.Imports, ingest.ImportDef{
+							LocalName:  ingest.NodeText(nameNode, source),
+							SourcePath: dynPath,
+							StartByte:  nameNode.StartByte(),
+							EndByte:    nameNode.EndByte(),
+						})
+					}
+				}
+			}
 			walkJSUsages(fe, value, source, scope)
 		}
 		if body := ingest.ChildByField(n, "body"); body != nil {
