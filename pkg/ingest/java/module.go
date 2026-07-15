@@ -322,6 +322,8 @@ func extractJavaType(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 			walkJavaUsages(fe, part, source, typeName)
 		}
 	}
+	// Class/interface/enum/annotation modifiers include @Annotations.
+	walkJavaModifiers(fe, n, source, typeName)
 
 	body := ingest.ChildByField(n, "body")
 	if body == nil {
@@ -365,6 +367,7 @@ func extractJavaNestedType(fe *ingest.FileExtract, n *grammar.Node, source []byt
 			walkJavaUsages(fe, part, source, full)
 		}
 	}
+	walkJavaModifiers(fe, n, source, full)
 	if body := ingest.ChildByField(n, "body"); body != nil {
 		for i := uint32(0); i < body.ChildCount(); i++ {
 			child := body.Child(i)
@@ -393,6 +396,7 @@ func extractJavaMethod(fe *ingest.FileExtract, n *grammar.Node, source []byte, t
 		EndByte:   nameNode.EndByte(),
 		Exported:  javaNodeIsPublic(n),
 	})
+	walkJavaModifiers(fe, n, source, full)
 	for _, field := range []string{"type_parameters", "parameters", "type", "dimensions"} {
 		if part := ingest.ChildByField(n, field); part != nil {
 			walkJavaUsages(fe, part, source, full)
@@ -412,6 +416,7 @@ func extractJavaMethod(fe *ingest.FileExtract, n *grammar.Node, source []byte, t
 
 func extractJavaConstructor(fe *ingest.FileExtract, n *grammar.Node, source []byte, typeName string) {
 	scope := typeName
+	walkJavaModifiers(fe, n, source, scope)
 	if params := ingest.ChildByField(n, "parameters"); params != nil {
 		walkJavaUsages(fe, params, source, scope)
 	}
@@ -422,6 +427,7 @@ func extractJavaConstructor(fe *ingest.FileExtract, n *grammar.Node, source []by
 
 func extractJavaField(fe *ingest.FileExtract, n *grammar.Node, source []byte, typeName string) {
 	exported := javaNodeIsPublic(n)
+	walkJavaModifiers(fe, n, source, typeName)
 	if typ := ingest.ChildByField(n, "type"); typ != nil {
 		walkJavaUsages(fe, typ, source, typeName)
 	}
@@ -517,12 +523,49 @@ func javaNodeIsPublic(n *grammar.Node) bool {
 	return false
 }
 
+// walkJavaModifiers walks annotation / marker_annotation nodes under a
+// declaration's modifiers child so @Tag sites rename with the annotation type.
+func walkJavaModifiers(fe *ingest.FileExtract, decl *grammar.Node, source []byte, scope string) {
+	if decl == nil {
+		return
+	}
+	for i := uint32(0); i < decl.ChildCount(); i++ {
+		child := decl.Child(i)
+		if child.Type() == "modifiers" {
+			walkJavaUsages(fe, child, source, scope)
+		}
+	}
+}
+
 func walkJavaUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
 	if n == nil || n.IsNull() {
 		return
 	}
 
 	switch n.Type() {
+	case "annotation", "marker_annotation":
+		// @Tag / @Tag(...) — name is an identifier (or scoped_identifier).
+		if name := ingest.ChildByField(n, "name"); name != nil {
+			walkJavaUsages(fe, name, source, scope)
+		} else {
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch.Type() == "identifier" || ch.Type() == "scoped_identifier" || ch.Type() == "scoped_type_identifier" {
+					walkJavaUsages(fe, ch, source, scope)
+				}
+			}
+		}
+		if args := ingest.ChildByField(n, "arguments"); args != nil {
+			walkJavaUsages(fe, args, source, scope)
+		}
+		// annotation_argument_list is not always a named field.
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "annotation_argument_list" {
+				walkJavaUsages(fe, ch, source, scope)
+			}
+		}
+		return
 	case "method_invocation":
 		obj := ingest.ChildByField(n, "object")
 		name := ingest.ChildByField(n, "name")
@@ -607,8 +650,9 @@ func walkJavaUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scop
 		return
 	case "string_literal", "character_literal", "decimal_integer_literal", "hex_integer_literal",
 		"octal_integer_literal", "binary_integer_literal", "decimal_floating_point_literal",
-		"true", "false", "null_literal", "line_comment", "block_comment", "modifiers":
+		"true", "false", "null_literal", "line_comment", "block_comment":
 		return
+		// modifiers: fall through and walk children (annotations live here).
 	}
 
 	for i := uint32(0); i < n.ChildCount(); i++ {
