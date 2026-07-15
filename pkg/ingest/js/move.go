@@ -19,6 +19,267 @@ type moveDriver struct{}
 
 func (moveDriver) Language() string { return "javascript" }
 
+// ExpandRenameSources ties TypeScript interface methods to implementors:
+//
+//  1. Renaming Iface.method expands Class.method for classes that implement Iface.
+//  2. Renaming Class.method expands Iface.method for interfaces Class implements.
+//
+// Type-alias object types are structural — no expand (call sites use ExtraRename).
+func (moveDriver) ExpandRenameSources(rootDir string, result *ingest.Result, sourceRef string) []string {
+	src := ingest.ParseReference(sourceRef)
+	if src.Symbol == "" || !strings.Contains(src.Symbol, ".") {
+		return nil
+	}
+	leaf := ingest.SymbolLeaf(src.Symbol)
+	recv, ok := jsMethodReceiver(src.Symbol)
+	if !ok || leaf == "" || recv == "" || result == nil {
+		return nil
+	}
+
+	// Types whose Type.leaf entities should join the rename source set.
+	related := map[string]bool{}
+	if jsTypeIsInterface(rootDir, result, recv) {
+		for c := range jsClassesImplementing(rootDir, result, recv) {
+			related[c] = true
+		}
+	} else {
+		for iface := range jsInterfacesImplementedBy(rootDir, result, recv) {
+			related[iface] = true
+		}
+	}
+	if len(related) == 0 {
+		return nil
+	}
+
+	var extra []string
+	for _, ent := range result.Entities {
+		if ent.Reference == sourceRef {
+			continue
+		}
+		ref := ingest.ParseReference(ent.Reference)
+		if ref.Provider != "path" || ref.Symbol == "" {
+			continue
+		}
+		if ingest.SymbolLeaf(ref.Symbol) != leaf {
+			continue
+		}
+		entRecv, isMethod := jsMethodReceiver(ref.Symbol)
+		if !isMethod || !related[entRecv] {
+			continue
+		}
+		extra = append(extra, ent.Reference)
+	}
+	return extra
+}
+
+// jsInterfacesImplementedBy returns interface names that className lists in its
+// implements clause across javascript files in result.
+func jsInterfacesImplementedBy(rootDir string, result *ingest.Result, className string) map[string]bool {
+	out := map[string]bool{}
+	if className == "" || result == nil {
+		return out
+	}
+	for _, f := range result.Files {
+		if f.Language != "javascript" {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Path, "./")
+		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		pf, err := ingest.ParseSource(content, rel, "javascript")
+		if err != nil {
+			continue
+		}
+		var walk func(n *grammar.Node)
+		walk = func(n *grammar.Node) {
+			if n == nil {
+				return
+			}
+			if n.Type() == "class_declaration" || n.Type() == "abstract_class_declaration" || n.Type() == "class" {
+				nameN := ingest.ChildByField(n, "name")
+				if nameN != nil && ingest.NodeText(nameN, content) == className {
+					for iface := range jsClassImplementsNames(n, content) {
+						out[iface] = true
+					}
+				}
+			}
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				walk(n.Child(i))
+			}
+		}
+		walk(pf.Root)
+		pf.Close()
+	}
+	return out
+}
+
+// jsTypeIsInterface reports whether typeName is declared as an interface in
+// any javascript file of result.
+func jsTypeIsInterface(rootDir string, result *ingest.Result, typeName string) bool {
+	if typeName == "" || result == nil {
+		return false
+	}
+	for _, f := range result.Files {
+		if f.Language != "javascript" {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Path, "./")
+		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		if jsTypeIsInterfaceInFile(content, rel, typeName) {
+			return true
+		}
+	}
+	return false
+}
+
+func jsTypeIsInterfaceInFile(content []byte, fileRel, typeName string) bool {
+	if typeName == "" {
+		return false
+	}
+	pf, err := ingest.ParseSource(content, fileRel, "javascript")
+	if err != nil {
+		return false
+	}
+	defer pf.Close()
+	var found bool
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || found {
+			return
+		}
+		if n.Type() == "interface_declaration" {
+			if nameN := ingest.ChildByField(n, "name"); nameN != nil && ingest.NodeText(nameN, content) == typeName {
+				found = true
+				return
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(pf.Root)
+	return found
+}
+
+// jsClassesImplementing returns simple class names that declare
+// `implements … Iface …` for ifaceName across javascript files in result.
+func jsClassesImplementing(rootDir string, result *ingest.Result, ifaceName string) map[string]bool {
+	out := map[string]bool{}
+	if ifaceName == "" || result == nil {
+		return out
+	}
+	for _, f := range result.Files {
+		if f.Language != "javascript" {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Path, "./")
+		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		pf, err := ingest.ParseSource(content, rel, "javascript")
+		if err != nil {
+			continue
+		}
+		var walk func(n *grammar.Node)
+		walk = func(n *grammar.Node) {
+			if n == nil {
+				return
+			}
+			if n.Type() == "class_declaration" || n.Type() == "abstract_class_declaration" || n.Type() == "class" {
+				if jsClassImplements(n, content, ifaceName) {
+					if nameN := ingest.ChildByField(n, "name"); nameN != nil {
+						if cn := ingest.NodeText(nameN, content); cn != "" {
+							out[cn] = true
+						}
+					}
+				}
+			}
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				walk(n.Child(i))
+			}
+		}
+		walk(pf.Root)
+		pf.Close()
+	}
+	return out
+}
+
+// jsClassImplements reports whether class node lists ifaceName in its
+// implements clause (class_heritage / implements_clause).
+func jsClassImplements(class *grammar.Node, content []byte, ifaceName string) bool {
+	if ifaceName == "" {
+		return false
+	}
+	return jsClassImplementsNames(class, content)[ifaceName]
+}
+
+// jsClassImplementsNames returns interface type names listed on the class
+// implements clause.
+func jsClassImplementsNames(class *grammar.Node, content []byte) map[string]bool {
+	out := map[string]bool{}
+	if class == nil {
+		return out
+	}
+	var collect func(n *grammar.Node)
+	collect = func(n *grammar.Node) {
+		if n == nil {
+			return
+		}
+		switch n.Type() {
+		case "type_identifier", "identifier":
+			if name := ingest.NodeText(n, content); name != "" {
+				out[name] = true
+			}
+			return
+		case "generic_type":
+			if name := ingest.ChildByField(n, "name"); name != nil {
+				if t := ingest.NodeText(name, content); t != "" {
+					out[t] = true
+				}
+			}
+			return
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			collect(n.Child(i))
+		}
+	}
+	// Prefer class_heritage / implements_clause children so we do not match
+	// the class name itself or body type annotations.
+	for i := uint32(0); i < class.ChildCount(); i++ {
+		ch := class.Child(i)
+		switch ch.Type() {
+		case "class_heritage":
+			// Only the implements_clause branch — not extends.
+			for j := uint32(0); j < ch.ChildCount(); j++ {
+				inner := ch.Child(j)
+				if inner.Type() == "implements_clause" {
+					collect(inner)
+				}
+			}
+		case "implements_clause":
+			collect(ch)
+		default:
+			// Bare `implements` keyword sibling form.
+			if ch.Type() == "implements" {
+				for j := i + 1; j < class.ChildCount(); j++ {
+					sib := class.Child(j)
+					if sib.Type() == "{" || sib.Type() == "class_body" || sib.Type() == "extends" || sib.Type() == "class_heritage" {
+						break
+					}
+					collect(sib)
+				}
+			}
+		}
+	}
+	return out
+}
+
 func (moveDriver) ExtractDecl(filePath string, entity ingest.Entity) (ingest.DeclExtract, error) {
 	pf, err := ingest.ParseSourceFile(filePath, "")
 	if err != nil {
@@ -759,9 +1020,17 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 		classHere := enclosingClass
 		blockHere := block
 		switch n.Type() {
-		case "class_declaration", "class", "abstract_class_declaration":
+		case "class_declaration", "class", "abstract_class_declaration",
+			"interface_declaration":
 			if nameN := ingest.ChildByField(n, "name"); nameN != nil {
 				classHere = ingest.NodeText(nameN, content)
+			}
+		case "type_alias_declaration":
+			// type Worker = { helper(): number } — members live under object_type value.
+			if nameN := ingest.ChildByField(n, "name"); nameN != nil {
+				if value := ingest.ChildByField(n, "value"); value != nil && value.Type() == "object_type" {
+					classHere = ingest.NodeText(nameN, content)
+				}
 			}
 		case "statement_block":
 			blockHere = n
@@ -773,6 +1042,19 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 			if obj != nil && prop != nil && ingest.NodeText(prop, content) == oldLeaf {
 				if jsShouldRenameMember(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals) {
 					addEdit(prop.StartByte(), prop.EndByte(), newLeaf)
+				}
+			}
+		case "method_signature", "property_signature":
+			// TypeScript interface / object-type members: `helper(): number` /
+			// `helper: number`. Relation-based rename covers entities in sourceSet;
+			// ExtraRename rewrites remaining signatures when the leaf is unique
+			// (no foreign same-leaf methods) or the enclosing type is ours —
+			// mirrors Go findInterfaceMethodEdits for class→interface renames.
+			nameN := ingest.ChildByField(n, "name")
+			if nameN != nil && nameN.Type() != "computed_property_name" &&
+				ingest.NodeText(nameN, content) == oldLeaf {
+				if uniqueLeaf || ourReceivers[classHere] {
+					addEdit(nameN.StartByte(), nameN.EndByte(), newLeaf)
 				}
 			}
 		case "variable_declarator":

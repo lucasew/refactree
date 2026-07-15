@@ -1,0 +1,4 @@
+{
+  "source": "path:./box.ts::Color.Helper",
+  "destination": "path:./box.ts::Color.Assist"
+}

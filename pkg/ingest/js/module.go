@@ -220,18 +220,101 @@ func extractECMATopLevel(fe *ingest.FileExtract, n *grammar.Node, source []byte)
 	}
 }
 
-// extractTSNamedType records TypeScript interface / type alias / enum names.
+// extractTSNamedType records TypeScript interface / type alias / enum names and
+// their members (interface method/property signatures, object-type members on
+// type aliases, and enum constants) so renames can target Type.member.
 func extractTSNamedType(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 	nameNode := ingest.ChildByField(n, "name")
 	if nameNode == nil {
 		return
 	}
+	typeName := ingest.NodeText(nameNode, source)
+	if typeName == "" {
+		return
+	}
 	fe.Entities = append(fe.Entities, ingest.EntityDef{
-		Name:      ingest.NodeText(nameNode, source),
+		Name:      typeName,
 		StartByte: nameNode.StartByte(),
 		EndByte:   nameNode.EndByte(),
 		Exported:  true,
 	})
+	switch n.Type() {
+	case "interface_declaration":
+		if body := ingest.ChildByField(n, "body"); body != nil {
+			extractTSObjectTypeMembers(fe, body, source, typeName)
+		}
+	case "type_alias_declaration":
+		// type Worker = { helper(): number; stay: number }
+		if value := ingest.ChildByField(n, "value"); value != nil && value.Type() == "object_type" {
+			extractTSObjectTypeMembers(fe, value, source, typeName)
+		}
+	case "enum_declaration":
+		if body := ingest.ChildByField(n, "body"); body != nil {
+			extractTSEnumMembers(fe, body, source, typeName)
+		}
+	}
+}
+
+// extractTSObjectTypeMembers records method_signature / property_signature
+// members under an interface_body or object_type as Type.member entities.
+func extractTSObjectTypeMembers(fe *ingest.FileExtract, body *grammar.Node, source []byte, typeName string) {
+	if body == nil || typeName == "" {
+		return
+	}
+	for i := uint32(0); i < body.ChildCount(); i++ {
+		member := body.Child(i)
+		switch member.Type() {
+		case "method_signature", "property_signature", "construct_signature", "call_signature":
+			nameNode := ingest.ChildByField(member, "name")
+			if nameNode == nil || nameNode.Type() == "computed_property_name" {
+				continue
+			}
+			short := ingest.NodeText(nameNode, source)
+			if short == "" {
+				continue
+			}
+			fe.Entities = append(fe.Entities, ingest.EntityDef{
+				Name:      typeName + "." + short,
+				StartByte: nameNode.StartByte(),
+				EndByte:   nameNode.EndByte(),
+				Exported:  true,
+			})
+		}
+	}
+}
+
+// extractTSEnumMembers records enum constants as Enum.Member entities.
+// Members may be bare property_identifier children or enum_assignment nodes.
+func extractTSEnumMembers(fe *ingest.FileExtract, body *grammar.Node, source []byte, enumName string) {
+	if body == nil || enumName == "" {
+		return
+	}
+	for i := uint32(0); i < body.ChildCount(); i++ {
+		child := body.Child(i)
+		var nameNode *grammar.Node
+		switch child.Type() {
+		case "enum_assignment":
+			nameNode = ingest.ChildByField(child, "name")
+		case "property_identifier":
+			// Bare member: `enum Color { Helper, Stay }`
+			nameNode = child
+		default:
+			continue
+		}
+		if nameNode == nil {
+			continue
+		}
+		short := ingest.NodeText(nameNode, source)
+		if short == "" {
+			continue
+		}
+		fe.Entities = append(fe.Entities, ingest.EntityDef{
+			Name:      enumName + "." + short,
+			StartByte: nameNode.StartByte(),
+			EndByte:   nameNode.EndByte(),
+			Exported:  true,
+		})
+	}
 }
 func extractJSExport(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 	// export … from "…" / export * from "…" — barrel hop; source field is on the export_statement.
