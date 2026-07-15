@@ -628,6 +628,10 @@ func walkJSUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope 
 
 // emitJSIdentifierUsage records a usage for a function/component reference node.
 // Handles both plain identifiers and member expressions (pkg.Component).
+// Nested chains like Box.getValue.call emit leaf usages only (Box.getValue with
+// Qualifier "Box"), never a qualifier span covering a nested member expression —
+// resolveQualifiedUsage would otherwise treat the whole "Box.getValue" span as a
+// relation target and rename would replace it with the leaf alone.
 func emitJSIdentifierUsage(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
 	switch n.Type() {
 	case "identifier":
@@ -637,10 +641,18 @@ func emitJSIdentifierUsage(fe *ingest.FileExtract, n *grammar.Node, source []byt
 			StartByte: n.StartByte(),
 			EndByte:   n.EndByte(),
 		})
-	case "member_expression":
+	case "member_expression", "member_expression_optional", "optional_chain":
 		obj := ingest.ChildByField(n, "object")
 		prop := ingest.ChildByField(n, "property")
-		if obj != nil && prop != nil {
+		if obj == nil || prop == nil {
+			return
+		}
+		// Recurse so Box.getValue.call also records Box.getValue (leaf getValue).
+		switch obj.Type() {
+		case "member_expression", "member_expression_optional", "optional_chain":
+			emitJSIdentifierUsage(fe, obj, source, scope)
+			return
+		case "identifier", "this", "super":
 			fe.Usages = append(fe.Usages, ingest.UsageDef{
 				Scope:         scope,
 				Name:          ingest.NodeText(prop, source),

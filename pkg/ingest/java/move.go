@@ -543,6 +543,10 @@ func spanOccupied(occ map[[2]uint32]bool, start, end uint32) bool {
 	return false
 }
 
+// ExtraRenameEdits rewrites method_invocation name spans when renaming a method
+// (Class.method → Class.newName). Relation-based rename covers same-scope bare
+// and this-implicit calls, but not instance receivers (m.method) because those
+// are not entities. Mirrors Go/Python ExtraRenameEdits for Java.
 // ExtraRenameEdits rewrites field_access name spans when renaming a field
 // (Class.field → Class.newName). Relation-based rename covers same-scope this
 // accesses recorded as usages, but not instance receivers (m.field) because
