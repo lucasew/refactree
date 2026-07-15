@@ -811,7 +811,24 @@ func receiverTypeName(symbol string) (string, bool) {
 	if recv == "" {
 		return "", false
 	}
+	// Entity symbols for generic methods use Box[T] / Map[K,V]; AST type
+	// analysis and local bindings use the bare name Box / Map. Normalize so
+	// ExtraRename does not treat the same receiver as foreign.
+	recv = stripGoTypeParams(recv)
+	if recv == "" {
+		return "", false
+	}
 	return recv, true
+}
+
+// stripGoTypeParams removes a trailing [type-args] suffix: "Box[T]" → "Box",
+// "Map[K,V]" → "Map". Nested brackets are balanced; no-bracket names pass through.
+func stripGoTypeParams(name string) string {
+	i := strings.IndexByte(name, '[')
+	if i < 0 {
+		return name
+	}
+	return name[:i]
 }
 
 // methodRenameScopePrefix returns the parent package directory of the file's
@@ -1371,8 +1388,14 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 			}
 			if callTargetType != nil {
 				if typ, ok := callTargetType(e.StartByte); ok {
-					typ = strings.TrimPrefix(typ, "*")
+					typ = stripGoTypeParams(strings.TrimPrefix(typ, "*"))
 					if foreignReceivers[typ] && !ourReceivers[typ] {
+						continue
+					}
+				} else if recv := selectorReceiverIdent(content, e.StartByte); recv != "" {
+					// Method expression Type.Method: receiver is a type name, not a
+					// local binding — still skip foreign concrete types.
+					if foreignReceivers[recv] && !ourReceivers[recv] {
 						continue
 					}
 				}
