@@ -449,7 +449,24 @@ func extractJSClass(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 		member := body.Child(i)
 		switch member.Type() {
 		case "field_definition":
-			// Class field initializers: `b = new Box(1)` — walk value usages only.
+			// Class fields (instance/static/private/arrow): `helper = 1`, `static stay = 2`,
+			// `#priv = 3`, `helper = () => 1` → entities Class.helper so rename rewrites
+			// definitions and ExtraRename covers this.helper / Box.helper call sites.
+			if prop := ingest.ChildByField(member, "property"); prop != nil {
+				if prop.Type() != "computed_property_name" {
+					short := ingest.NodeText(prop, source)
+					if short != "" {
+						fieldName := className + "." + short
+						fe.Entities = append(fe.Entities, ingest.EntityDef{
+							Name:      fieldName,
+							StartByte: prop.StartByte(),
+							EndByte:   prop.EndByte(),
+							Exported:  true,
+						})
+					}
+				}
+			}
+			// Class field initializers: `b = new Box(1)` — walk value usages.
 			if value := ingest.ChildByField(member, "value"); value != nil {
 				walkJSUsages(fe, value, source, className)
 			}
@@ -576,12 +593,114 @@ func extractJSNamespaceImport(fe *ingest.FileExtract, n *grammar.Node, source []
 	})
 }
 
+// jsImportCallPath returns the string specifier for a bare `import("…")` call.
+// Does not unwrap await (used when import() is the object of `.then`).
+func jsImportCallPath(n *grammar.Node, source []byte) (string, bool) {
+	if n == nil || n.Type() != "call_expression" {
+		return "", false
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil {
+		return "", false
+	}
+	fnText := ingest.NodeText(fn, source)
+	if fnText != "import" && fn.Type() != "import" {
+		return "", false
+	}
+	args := ingest.ChildByField(n, "arguments")
+	if args == nil {
+		return "", false
+	}
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		arg := args.Child(i)
+		if arg.Type() != "string" {
+			continue
+		}
+		if frag := ingest.ChildByType(arg, "string_fragment"); frag != nil {
+			return ingest.NodeText(frag, source), true
+		}
+	}
+	return "", false
+}
+
+// bindJSDynamicImportThen records a namespace-style import for the first
+// parameter of `import("…").then(m => …)` / `.then(function (m) { … })`.
+func bindJSDynamicImportThen(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
+	if fe == nil || n == nil || n.Type() != "call_expression" {
+		return
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil || fn.Type() != "member_expression" {
+		return
+	}
+	prop := ingest.ChildByField(fn, "property")
+	if prop == nil || ingest.NodeText(prop, source) != "then" {
+		return
+	}
+	obj := ingest.ChildByField(fn, "object")
+	dynPath, ok := jsImportCallPath(obj, source)
+	if !ok || dynPath == "" {
+		return
+	}
+	args := ingest.ChildByField(n, "arguments")
+	if args == nil {
+		return
+	}
+	var cb *grammar.Node
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		arg := args.Child(i)
+		switch arg.Type() {
+		case "arrow_function", "function_expression", "generator_function":
+			cb = arg
+		}
+		if cb != nil {
+			break
+		}
+	}
+	if cb == nil {
+		return
+	}
+	// First formal parameter is the module namespace binding.
+	params := ingest.ChildByField(cb, "parameters")
+	var param *grammar.Node
+	if params != nil {
+		for i := uint32(0); i < params.ChildCount(); i++ {
+			p := params.Child(i)
+			if p.Type() == "identifier" {
+				param = p
+				break
+			}
+		}
+	} else {
+		// Single-param arrow without parens: `m => m.helper()` — parameter field.
+		if p := ingest.ChildByField(cb, "parameter"); p != nil && p.Type() == "identifier" {
+			param = p
+		}
+	}
+	if param == nil {
+		return
+	}
+	local := ingest.NodeText(param, source)
+	if local == "" {
+		return
+	}
+	fe.Imports = append(fe.Imports, ingest.ImportDef{
+		LocalName:  local,
+		SourcePath: dynPath,
+		StartByte:  param.StartByte(),
+		EndByte:    param.EndByte(),
+	})
+}
+
 func walkJSUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
 	if n == nil || n.IsNull() {
 		return
 	}
 	switch n.Type() {
 	case "call_expression":
+		// import("./x").then(m => m.helper()) — bind callback param as namespace import
+		// so property accesses resolve like `import * as m from "./x"`.
+		bindJSDynamicImportThen(fe, n, source)
 		funcNode := ingest.ChildByField(n, "function")
 		if funcNode != nil {
 			emitJSIdentifierUsage(fe, funcNode, source, scope)

@@ -219,6 +219,12 @@ func extractGoTypeSpec(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 		Exported:  languageDriver{}.AllowListSymbol(name, ingest.SymbolListOptions{}),
 	})
 
+	// Interface methods as first-class path entities (Worker.Helper) so renames can
+	// target the interface method directly; ExpandRenameSources pulls implementors.
+	if iface := ingest.ChildByField(n, "type"); iface != nil && iface.Type() == "interface_type" {
+		extractGoInterfaceMethods(fe, iface, source, name)
+	}
+
 	// Walk the type body so embedded fields, pointer/element types, and other
 	// type_identifier sites become usages (struct { Base }, *Box, []T, …).
 	// Skip the declared name itself to avoid a self-usage on the definition.
@@ -232,6 +238,36 @@ func extractGoTypeSpec(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 			continue
 		}
 		walkGoUsages(fe, child, source, name)
+	}
+}
+
+// extractGoInterfaceMethods records method_elem names as Type.Method entities.
+func extractGoInterfaceMethods(fe *ingest.FileExtract, iface *grammar.Node, source []byte, typeName string) {
+	if iface == nil || typeName == "" {
+		return
+	}
+	for i := uint32(0); i < iface.ChildCount(); i++ {
+		child := iface.Child(i)
+		if child.Type() != "method_elem" && child.Type() != "field_declaration" {
+			continue
+		}
+		nameNode := ingest.ChildByField(child, "name")
+		if nameNode == nil {
+			continue
+		}
+		// Skip embedded interfaces (type_identifier only, no method name field pattern).
+		// method_elem always has name field; field_declaration for embedding has type without name.
+		short := ingest.NodeText(nameNode, source)
+		if short == "" {
+			continue
+		}
+		methodName := typeName + "." + short
+		fe.Entities = append(fe.Entities, ingest.EntityDef{
+			Name:      methodName,
+			StartByte: nameNode.StartByte(),
+			EndByte:   nameNode.EndByte(),
+			Exported:  languageDriver{}.AllowListSymbol(short, ingest.SymbolListOptions{}),
+		})
 	}
 }
 

@@ -70,7 +70,7 @@ func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 	if srcLang := languageForRefPath(result, src.Path); srcLang != "" {
 		if driver, ok := moveDriverForLanguage(srcLang); ok {
 			if expander, ok := driver.(RenameExpander); ok {
-				if extra := expander.ExpandRenameSources(result, sourceRef); len(extra) > 0 {
+				if extra := expander.ExpandRenameSources(dir, result, sourceRef); len(extra) > 0 {
 					sourceRefs = uniqueStrings(append(sourceRefs, extra...))
 				}
 			}
