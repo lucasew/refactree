@@ -149,6 +149,8 @@ func extractPython(root *grammar.Node, source []byte, path string) *ingest.FileE
 			extractPythonImportFrom(fe, child, source)
 		case "import_statement":
 			extractPythonImport(fe, child, source)
+		case "type_alias_statement":
+			extractPythonTypeAlias(fe, child, source)
 		case "assignment", "augmented_assignment":
 			extractPythonAssign(fe, child, source, "")
 		case "expression_statement":
@@ -165,6 +167,31 @@ func extractPython(root *grammar.Node, source []byte, path string) *ingest.FileE
 	return fe
 }
 
+// extractPythonTypeAlias handles PEP 695 `type Name = ...` statements.
+func extractPythonTypeAlias(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
+	if n == nil {
+		return
+	}
+	// tree-sitter-python: left = name type node, right = RHS type expression.
+	left := ingest.ChildByField(n, "left")
+	if left == nil {
+		return
+	}
+	nameNode := left
+	if left.Type() == "type" {
+		for i := uint32(0); i < left.ChildCount(); i++ {
+			if left.Child(i).Type() == "identifier" {
+				nameNode = left.Child(i)
+				break
+			}
+		}
+	}
+	if nameNode.Type() != "identifier" {
+		return
+	}
+	appendPythonEntity(fe, nameNode, source)
+	if right := ingest.ChildByField(n, "right"); right != nil {
+		walkPythonUsages(fe, right, source, ingest.NodeText(nameNode, source))
 // extractPythonDecorated unwraps @decorator def/class (tree-sitter decorated_definition).
 // Without this, @dataclass classes and @deco functions are invisible to rename.
 func extractPythonDecorated(fe *ingest.FileExtract, n *grammar.Node, source []byte, classScope string) {
