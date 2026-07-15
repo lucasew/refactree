@@ -774,19 +774,20 @@ func findImportModulesForFile(consumerFile string, result *ingest.Result, oldPat
 			modules[targetMod] = true
 
 			// Also add the relative import form (e.g. ".helpers" for same-dir).
-			if consumerDir != "" {
-				targetDir := ""
-				if targetRef.Provider == "path" {
-					tp := strings.TrimPrefix(targetRef.Path, "./")
-					if i := strings.LastIndex(tp, "/"); i >= 0 {
-						targetDir = tp[:i]
-					}
+			// When the ingest root is the package directory (CLI scopes symbol
+			// ops to the source file's parent), both consumerDir and targetDir
+			// are "" — still same-directory for a single-dot relative import.
+			targetDir := ""
+			if targetRef.Provider == "path" {
+				tp := strings.TrimPrefix(targetRef.Path, "./")
+				if i := strings.LastIndex(tp, "/"); i >= 0 {
+					targetDir = tp[:i]
 				}
-				if targetDir == consumerDir {
-					stem := pythonFileStem(strings.TrimPrefix(targetRef.Path, "./"))
-					if stem != "" {
-						modules["."+stem] = true
-					}
+			}
+			if targetDir == consumerDir {
+				stem := pythonFileStem(strings.TrimPrefix(targetRef.Path, "./"))
+				if stem != "" {
+					modules["."+stem] = true
 				}
 			}
 		}

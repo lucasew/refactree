@@ -1,0 +1,4 @@
+{
+  "source": "path:./mod.py::helper",
+  "destination": "path:./other.py::helper"
+}
