@@ -361,10 +361,14 @@ func extractJSReexport(fe *ingest.FileExtract, n *grammar.Node, source []byte, s
 		if aliasNode := ingest.ChildByField(spec, "alias"); aliasNode != nil {
 			exportName = ingest.NodeText(aliasNode, source)
 		}
+		// Span of the imported/source name token — the site rename must rewrite
+		// (export { helper } from / export { helper as h } from).
 		fe.Reexports = append(fe.Reexports, ingest.ReexportDef{
-			ExportName: exportName,
-			SourceName: sourceName,
-			SourcePath: sourcePath,
+			ExportName:      exportName,
+			SourceName:      sourceName,
+			SourcePath:      sourcePath,
+			SourceStartByte: nameNode.StartByte(),
+			SourceEndByte:   nameNode.EndByte(),
 		})
 	}
 }
