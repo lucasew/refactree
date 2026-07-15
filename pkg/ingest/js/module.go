@@ -680,9 +680,19 @@ func walkJSUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope 
 			walkJSUsages(fe, params, source, scope)
 		}
 		return
+	case "template_string":
+		// Static template text is not a reference. Substitutions (`${helper()}`)
+		// contain live expressions that must rename with the callee.
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "template_substitution" {
+				walkJSUsages(fe, ch, source, scope)
+			}
+		}
+		return
 	case "property_identifier", "private_property_identifier",
 		"shorthand_property_identifier_pattern",
-		"string", "template_string", "number", "true", "false", "null", "undefined",
+		"string", "number", "true", "false", "null", "undefined",
 		"comment", "this", "super":
 		return
 	}
@@ -1180,7 +1190,16 @@ func ExtractECMAExpressionUsages(expr []byte, grammarName string) ([]ingest.Usag
 				EndByte:   n.EndByte(),
 			})
 			return
-		case "string", "template_string", "number", "true", "false", "null", "undefined",
+		case "template_string":
+			// Walk `${…}` substitutions; leave static template chunks alone.
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch.Type() == "template_substitution" {
+					walk(ch, false)
+				}
+			}
+			return
+		case "string", "number", "true", "false", "null", "undefined",
 			"comment", "regex":
 			return
 		}

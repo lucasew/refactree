@@ -1415,9 +1415,11 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 		}
 		return true
 	}
-	// Only simple identifiers: self.x, cls.x, box.x, Box.x
+	// Nested attribute chains (self.inner.helper / b.inner.helper): no static
+	// type on intermediate fields. Only rewrite when the method leaf is unique
+	// across entities (same fail-open as untyped simple receivers below).
 	if obj.Type() != "identifier" {
-		return false
+		return len(foreignReceivers) == 0
 	}
 	name := ingest.NodeText(obj, content)
 	switch name {

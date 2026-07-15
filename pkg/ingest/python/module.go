@@ -622,7 +622,18 @@ func walkPythonUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, sc
 			walkPythonUsages(fe, ch, source, scope)
 		}
 		return
-	case "string", "integer", "float", "true", "false", "none", "comment":
+	case "string":
+		// Plain / bytes strings: no live identifiers. F-strings embed
+		// interpolation nodes whose expressions are real references
+		// (f"{helper()}" must rename with helper).
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "interpolation" {
+				walkPythonUsages(fe, ch, source, scope)
+			}
+		}
+		return
+	case "integer", "float", "true", "false", "none", "comment":
 		return
 	}
 
