@@ -20,10 +20,10 @@ type moveDriver struct{}
 
 func (moveDriver) Language() string { return "java" }
 
-// ExtraRenameEdits rewrites interface-method implementation names when renaming
-// Type.method. Relation-based rename only covers the declared entity; @Override
-// methods on implementors (Task.work when Worker.work moves) are separate
-// entities and would otherwise stay stale.
+// ExtraRenameEdits covers two cases relation-based rename misses for Type.member:
+//  1. Interface/override method names on implementors and related types
+//     (Task.work when Worker.work renames).
+//  2. Instance method_invocation / field_access name spans (m.member) via AST walk.
 func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, sourceRefs []string, oldLeaf, newLeaf string) []ingest.Edit {
 	if oldLeaf == "" || oldLeaf == newLeaf || len(sourceRefs) == 0 || rootDir == "" || result == nil {
 		return nil
@@ -35,6 +35,7 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 
 	sourceSet := map[string]bool{}
 	ourTypes := map[string]bool{} // types whose Type.oldLeaf is in sourceRefs
+	ourReceivers := map[string]bool{}
 	for _, s := range sourceRefs {
 		sourceSet[s] = true
 		ref := ingest.ParseReference(s)
@@ -44,87 +45,104 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 				ourTypes[t[i+1:]] = true
 			}
 		}
+		if recv, ok := javaMemberReceiver(ref.Symbol); ok {
+			ourReceivers[recv] = true
+		}
 	}
-	if len(ourTypes) == 0 {
+	if len(ourTypes) == 0 && len(ourReceivers) == 0 {
 		return nil
 	}
 
-	// implementsEdges: class/iface simple name -> set of interface/superclass names
-	// from the implements/extends clauses (parsed from source).
-	implementsEdges := javaImplementsEdges(rootDir, result)
-
-	// Types that should also rename oldLeaf methods: implementors of our types,
-	// and interfaces/supertypes our types implement (rename interface when
-	// renaming an override, and vice versa).
-	alsoTypes := map[string]bool{}
-	for t := range ourTypes {
-		for iface := range implementsEdges[t] {
-			alsoTypes[iface] = true
-		}
-		// Reverse: types that implement t.
-		for impl, ifaces := range implementsEdges {
-			if ifaces[t] {
-				alsoTypes[impl] = true
-			}
-		}
-	}
-	if len(alsoTypes) == 0 {
-		return nil
-	}
-
-	// Spans already covered by entity/relation rename.
-	occupied := map[string]map[[2]uint32]bool{}
-	mark := func(file string, start, end uint32) {
+	occupied := ingest.MarkEntityRelationSpans(result, sourceSet)
+	markOccupied := func(file string, start, end uint32) {
 		file = strings.TrimPrefix(file, "./")
 		if occupied[file] == nil {
 			occupied[file] = map[[2]uint32]bool{}
 		}
 		occupied[file][[2]uint32{start, end}] = true
 	}
-	for _, ent := range result.Entities {
-		if !sourceSet[ent.Reference] {
-			continue
-		}
-		ref := ingest.ParseReference(ent.Reference)
-		mark(ref.Path, ent.StartByte, ent.EndByte)
-	}
-	for _, rel := range result.Relations {
-		if !sourceSet[rel.Target] {
-			continue
-		}
-		ref := ingest.ParseReference(rel.Reference)
-		mark(ref.Path, rel.StartByte, rel.EndByte)
-	}
 
 	var edits []ingest.Edit
-	for _, ent := range result.Entities {
-		if sourceSet[ent.Reference] {
-			continue
+
+	// (1) Interface / override method declaration renames on related types.
+	if len(ourTypes) > 0 {
+		implementsEdges := javaImplementsEdges(rootDir, result)
+		// alsoTypes: implementors of our types and interfaces/supertypes our types implement.
+		alsoTypes := map[string]bool{}
+		for t := range ourTypes {
+			for iface := range implementsEdges[t] {
+				alsoTypes[iface] = true
+			}
+			for impl, ifaces := range implementsEdges {
+				if ifaces[t] {
+					alsoTypes[impl] = true
+				}
+			}
 		}
-		ref := ingest.ParseReference(ent.Reference)
-		t, m, ok := javaSplitTypeMethod(ref.Symbol)
-		if !ok || m != oldLeaf {
-			continue
+		for _, ent := range result.Entities {
+			if sourceSet[ent.Reference] {
+				continue
+			}
+			ref := ingest.ParseReference(ent.Reference)
+			t, m, ok := javaSplitTypeMethod(ref.Symbol)
+			if !ok || m != oldLeaf {
+				continue
+			}
+			tLeaf := t
+			if i := strings.LastIndex(t, "."); i >= 0 {
+				tLeaf = t[i+1:]
+			}
+			if !alsoTypes[t] && !alsoTypes[tLeaf] {
+				continue
+			}
+			file := strings.TrimPrefix(ref.Path, "./")
+			if ingest.SpanOccupied(occupied[file], ent.StartByte, ent.EndByte) {
+				continue
+			}
+			edits = append(edits, ingest.Edit{
+				File:      file,
+				StartByte: ent.StartByte,
+				EndByte:   ent.EndByte,
+				NewText:   newLeaf,
+			})
+			markOccupied(file, ent.StartByte, ent.EndByte)
 		}
-		tLeaf := t
-		if i := strings.LastIndex(t, "."); i >= 0 {
-			tLeaf = t[i+1:]
-		}
-		if !alsoTypes[t] && !alsoTypes[tLeaf] {
-			continue
-		}
-		file := strings.TrimPrefix(ref.Path, "./")
-		if occ := occupied[file]; occ[[2]uint32{ent.StartByte, ent.EndByte}] {
-			continue
-		}
-		edits = append(edits, ingest.Edit{
-			File:      file,
-			StartByte: ent.StartByte,
-			EndByte:   ent.EndByte,
-			NewText:   newLeaf,
-		})
-		mark(file, ent.StartByte, ent.EndByte)
 	}
+
+	// (2) Instance member access: m.oldLeaf method_invocation / field_access.
+	if len(ourReceivers) > 0 {
+		foreignReceivers := map[string]bool{}
+		for _, ent := range result.Entities {
+			if sourceSet[ent.Reference] {
+				continue
+			}
+			ref := ingest.ParseReference(ent.Reference)
+			if ingest.SymbolLeaf(ref.Symbol) != oldLeaf {
+				continue
+			}
+			if recv, ok := javaMemberReceiver(ref.Symbol); ok && !ourReceivers[recv] {
+				foreignReceivers[recv] = true
+			}
+		}
+		for _, f := range result.Files {
+			if f.Language != "java" {
+				continue
+			}
+			rel := strings.TrimPrefix(f.Path, "./")
+			content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+			if err != nil {
+				continue
+			}
+			occ := occupied[rel]
+			for _, e := range javaMemberAccessEdits(rel, content, oldLeaf, newLeaf, ourReceivers, foreignReceivers) {
+				if ingest.SpanOccupied(occ, e.StartByte, e.EndByte) {
+					continue
+				}
+				edits = append(edits, e)
+			}
+		}
+	}
+
 	return edits
 }
 
@@ -415,11 +433,11 @@ func javaIdentUsed(text, ident string) bool {
 		}
 		pos := off + idx
 		end := pos + len(ident)
-		if pos > 0 && isJavaIdentChar(text[pos-1]) {
+		if pos > 0 && ingest.IsIdentCharJava(text[pos-1]) {
 			off = end
 			continue
 		}
-		if end < len(text) && isJavaIdentChar(text[end]) {
+		if end < len(text) && ingest.IsIdentCharJava(text[end]) {
 			off = end
 			continue
 		}
@@ -705,11 +723,11 @@ func rewriteJavaNameToken(fileRelPath string, content []byte, oldName, newName s
 		}
 		start := off + idx
 		end := start + len(oldName)
-		if start > 0 && isJavaIdentChar(text[start-1]) {
+		if start > 0 && ingest.IsIdentCharJava(text[start-1]) {
 			off = end
 			continue
 		}
-		if end < len(text) && isJavaIdentChar(text[end]) {
+		if end < len(text) && ingest.IsIdentCharJava(text[end]) {
 			off = end
 			continue
 		}
@@ -720,111 +738,6 @@ func rewriteJavaNameToken(fileRelPath string, content []byte, oldName, newName s
 			NewText:   newName,
 		})
 		off = end
-	}
-	return edits
-}
-
-func isJavaIdentChar(b byte) bool {
-	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '$'
-}
-
-// spanOccupied reports whether [start,end) overlaps any already-covered rename span.
-func spanOccupied(occ map[[2]uint32]bool, start, end uint32) bool {
-	if occ == nil {
-		return false
-	}
-	if occ[[2]uint32{start, end}] {
-		return true
-	}
-	for k := range occ {
-		if start < k[1] && end > k[0] {
-			return true
-		}
-	}
-	return false
-}
-
-// ExtraRenameEdits rewrites method_invocation and field_access name spans when
-// renaming a Class.member (Class.method / Class.field → new leaf). Relation-based
-// rename covers same-scope bare and this-implicit sites recorded as usages, but
-// not instance receivers (m.member) because those are not entities. Mirrors
-// Go/Python ExtraRenameEdits for Java.
-func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, sourceRefs []string, oldLeaf, newLeaf string) []ingest.Edit {
-	if oldLeaf == "" || oldLeaf == newLeaf || len(sourceRefs) == 0 || rootDir == "" || result == nil {
-		return nil
-	}
-	src := ingest.ParseReference(sourceRefs[0])
-	if !strings.Contains(src.Symbol, ".") {
-		return nil
-	}
-
-	ourReceivers := map[string]bool{}
-	sourceSet := map[string]bool{}
-	for _, s := range sourceRefs {
-		sourceSet[s] = true
-		ref := ingest.ParseReference(s)
-		if recv, ok := javaMemberReceiver(ref.Symbol); ok {
-			ourReceivers[recv] = true
-		}
-	}
-	if len(ourReceivers) == 0 {
-		return nil
-	}
-
-	foreignReceivers := map[string]bool{}
-	for _, ent := range result.Entities {
-		if sourceSet[ent.Reference] {
-			continue
-		}
-		ref := ingest.ParseReference(ent.Reference)
-		if ingest.SymbolLeaf(ref.Symbol) != oldLeaf {
-			continue
-		}
-		if recv, ok := javaMemberReceiver(ref.Symbol); ok && !ourReceivers[recv] {
-			foreignReceivers[recv] = true
-		}
-	}
-
-	occupied := map[string]map[[2]uint32]bool{}
-	mark := func(file string, start, end uint32) {
-		file = strings.TrimPrefix(file, "./")
-		if occupied[file] == nil {
-			occupied[file] = map[[2]uint32]bool{}
-		}
-		occupied[file][[2]uint32{start, end}] = true
-	}
-	for _, ent := range result.Entities {
-		if !sourceSet[ent.Reference] {
-			continue
-		}
-		ref := ingest.ParseReference(ent.Reference)
-		mark(ref.Path, ent.StartByte, ent.EndByte)
-	}
-	for _, rel := range result.Relations {
-		if !sourceSet[rel.Target] {
-			continue
-		}
-		ref := ingest.ParseReference(rel.Reference)
-		mark(ref.Path, rel.StartByte, rel.EndByte)
-	}
-
-	var edits []ingest.Edit
-	for _, f := range result.Files {
-		if f.Language != "java" {
-			continue
-		}
-		rel := strings.TrimPrefix(f.Path, "./")
-		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
-		if err != nil {
-			continue
-		}
-		occ := occupied[rel]
-		for _, e := range javaMemberAccessEdits(rel, content, oldLeaf, newLeaf, ourReceivers, foreignReceivers) {
-			if spanOccupied(occ, e.StartByte, e.EndByte) {
-				continue
-			}
-			edits = append(edits, e)
-		}
 	}
 	return edits
 }

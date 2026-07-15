@@ -330,7 +330,7 @@ func goIdentUsed(text, ident string) bool {
 		if isIdentStart(text[i]) {
 			start := i
 			i++
-			for i < len(text) && isIdentChar(text[i]) {
+			for i < len(text) && ingest.IsIdentChar(text[i]) {
 				i++
 			}
 			if text[start:i] == ident {
@@ -526,7 +526,7 @@ func findQualifierDotOccurrences(file string, content []byte, oldQual, newQual s
 		}
 		pos := off + idx
 		endPos := pos + len(oldQual)
-		if pos > 0 && isIdentChar(text[pos-1]) {
+		if pos > 0 && ingest.IsIdentChar(text[pos-1]) {
 			off = pos + len(needle)
 			continue
 		}
@@ -539,10 +539,6 @@ func findQualifierDotOccurrences(file string, content []byte, oldQual, newQual s
 		off = pos + len(needle)
 	}
 	return edits
-}
-
-func isIdentChar(b byte) bool {
-	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
 }
 
 // dedentOnce removes one leading tab from each line of s.
@@ -1571,10 +1567,10 @@ func selectorReceiverIdent(content []byte, leafStart uint32) string {
 	}
 	recvEnd := dot
 	recvStart := dot - 1
-	if recvStart < 0 || !isIdentChar(text[recvStart]) {
+	if recvStart < 0 || !ingest.IsIdentChar(text[recvStart]) {
 		return ""
 	}
-	for recvStart > 0 && isIdentChar(text[recvStart-1]) {
+	for recvStart > 0 && ingest.IsIdentChar(text[recvStart-1]) {
 		recvStart--
 	}
 	return text[recvStart:recvEnd]
@@ -1893,7 +1889,7 @@ func varsTypedAsImported(content []byte, importLocal, typeName string) map[strin
 				j--
 			}
 			end := j + 1
-			for j >= 0 && isIdentChar(text[j]) {
+			for j >= 0 && ingest.IsIdentChar(text[j]) {
 				j--
 			}
 			name := text[j+1 : end]
@@ -1945,7 +1941,7 @@ func findSelectorLeafEdits(file string, content []byte, oldLeaf, newLeaf string,
 		dot := off + idx
 		start := dot + 1
 		end := start + len(oldLeaf)
-		if end < len(text) && isIdentChar(text[end]) {
+		if end < len(text) && ingest.IsIdentChar(text[end]) {
 			off = end
 			continue
 		}
@@ -1955,11 +1951,11 @@ func findSelectorLeafEdits(file string, content []byte, oldLeaf, newLeaf string,
 		}
 		// Receiver must be an identifier (pkg.Leaf / recv.Leaf), not Type{}.Leaf.
 		recvStart := dot - 1
-		if recvStart < 0 || !isIdentChar(text[recvStart]) {
+		if recvStart < 0 || !ingest.IsIdentChar(text[recvStart]) {
 			off = end
 			continue
 		}
-		for recvStart > 0 && isIdentChar(text[recvStart-1]) {
+		for recvStart > 0 && ingest.IsIdentChar(text[recvStart-1]) {
 			recvStart--
 		}
 		receiver := text[recvStart:dot]

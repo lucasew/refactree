@@ -485,7 +485,7 @@ func rewritePythonModuleFile(fileRelPath string, content []byte, oldPath, newPat
 			continue
 		}
 		// Also skip if preceded by non-boundary (e.g. "fromx import" is fine; word start).
-		if abs > 0 && isPythonIdentChar(text[abs-1]) {
+		if abs > 0 && ingest.IsIdentChar(text[abs-1]) {
 			off = abs + 7
 			continue
 		}
@@ -640,10 +640,6 @@ func pythonDirOf(p string) string {
 		return p[:i]
 	}
 	return ""
-}
-
-func isPythonIdentChar(c byte) bool {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
 }
 
 // rewritePythonSymbolImport rewrites a Python import statement from the old
@@ -870,7 +866,7 @@ func isPythonIdent(s string) bool {
 			}
 			continue
 		}
-		if !isPythonIdentChar(c) {
+		if !ingest.IsIdentChar(c) {
 			return false
 		}
 	}
@@ -1321,29 +1317,7 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		}
 	}
 
-	// Spans already covered by entity/relation renames.
-	occupied := map[string]map[[2]uint32]bool{}
-	mark := func(file string, start, end uint32) {
-		file = strings.TrimPrefix(file, "./")
-		if occupied[file] == nil {
-			occupied[file] = map[[2]uint32]bool{}
-		}
-		occupied[file][[2]uint32{start, end}] = true
-	}
-	for _, ent := range result.Entities {
-		if !sourceSet[ent.Reference] {
-			continue
-		}
-		ref := ingest.ParseReference(ent.Reference)
-		mark(ref.Path, ent.StartByte, ent.EndByte)
-	}
-	for _, rel := range result.Relations {
-		if !sourceSet[rel.Target] {
-			continue
-		}
-		ref := ingest.ParseReference(rel.Reference)
-		mark(ref.Path, rel.StartByte, rel.EndByte)
-	}
+	occupied := ingest.MarkEntityRelationSpans(result, sourceSet)
 
 	var edits []ingest.Edit
 	for _, f := range result.Files {
@@ -1357,7 +1331,7 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		}
 		occ := occupied[rel]
 		for _, e := range pythonMethodAttrEdits(rel, content, oldLeaf, newLeaf, ourReceivers, foreignReceivers) {
-			if occ[[2]uint32{e.StartByte, e.EndByte}] {
+			if ingest.SpanOccupied(occ, e.StartByte, e.EndByte) {
 				continue
 			}
 			edits = append(edits, e)
