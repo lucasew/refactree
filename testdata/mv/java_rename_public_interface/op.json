@@ -1,0 +1,4 @@
+{
+  "source": "path:./ExclusionStrategy.java::ExclusionStrategy",
+  "destination": "path:./ExclusionStrategy.java::Fuzz1"
+}

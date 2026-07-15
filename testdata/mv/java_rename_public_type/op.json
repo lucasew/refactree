@@ -1,0 +1,4 @@
+{
+  "source": "path:./Helper.java::Helper",
+  "destination": "path:./Helper.java::Renamed"
+}
