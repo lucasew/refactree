@@ -92,7 +92,11 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 			if i := strings.LastIndex(t, "."); i >= 0 {
 				tLeaf = t[i+1:]
 			}
-			if !alsoTypes[t] && !alsoTypes[tLeaf] {
+			// alsoTypes: named implementors/supertypes (Task.work when Worker.work renames).
+			// ourTypes: same-type method entities on other paths — anonymous class bodies
+			// emit Type.method under the file that contains `new Type() { … }`, which is a
+			// different path reference than the type's own declaration file.
+			if !alsoTypes[t] && !alsoTypes[tLeaf] && !ourTypes[t] && !ourTypes[tLeaf] {
 				continue
 			}
 			file := strings.TrimPrefix(ref.Path, "./")

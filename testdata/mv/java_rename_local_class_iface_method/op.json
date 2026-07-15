@@ -1,0 +1,4 @@
+{
+  "source": "path:./Worker.java::Worker.helper",
+  "destination": "path:./Worker.java::Worker.assist"
+}
