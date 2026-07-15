@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -295,11 +296,27 @@ func entityInFile(allEntities map[string][]entityLoc, name, file string) (string
 
 // resolveEntityName finds a symbol reference for a bare name in package/file scope.
 func resolveEntityName(fe *FileExtract, name string, allEntities map[string][]entityLoc) string {
-	if fe != nil && (fe.Language == "go" || fe.Language == "java") && fe.Package != "" {
+	if fe != nil && (fe.Language == "go" || fe.Language == "java") {
+		feDir := path.Dir(fe.Path)
+		if feDir == "." {
+			feDir = ""
+		}
 		for _, loc := range allEntities[name] {
-			if loc.File != fe.Path && loc.Package == fe.Package && loc.Language == fe.Language {
-				return SymbolRef("./"+loc.File, loc.Entity.Name)
+			if loc.File == fe.Path || loc.Package != fe.Package || loc.Language != fe.Language {
+				continue
 			}
+			// Same named package across files. Java's default package ("") is
+			// directory-scoped: only peers in the same directory are visible.
+			if fe.Package == "" {
+				locDir := path.Dir(loc.File)
+				if locDir == "." {
+					locDir = ""
+				}
+				if locDir != feDir {
+					continue
+				}
+			}
+			return SymbolRef("./"+loc.File, loc.Entity.Name)
 		}
 	}
 	for _, loc := range allEntities[name] {

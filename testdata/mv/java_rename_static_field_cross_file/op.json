@@ -1,0 +1,4 @@
+{
+  "source": "path:./Box.java::Box.VALUE",
+  "destination": "path:./Box.java::Box.AMOUNT"
+}

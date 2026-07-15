@@ -255,7 +255,13 @@ func extractJavaImport(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 		TargetEndByte:   localNode.EndByte(),
 	}
 	if staticImport {
+		// import static Type.member — SourcePath is the type; MemberName must
+		// match entity names (Type.member), not the bare member leaf, so rename
+		// and relation targets resolve to path:…::Box.helper rather than ::helper.
 		imp.SourcePath = pkgOrType
+		if typeName, _ := splitJavaImport(pkgOrType); typeName != "" {
+			imp.MemberName = typeName + "." + member
+		}
 	}
 	fe.Imports = append(fe.Imports, imp)
 }
