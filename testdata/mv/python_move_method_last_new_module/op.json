@@ -1,0 +1,4 @@
+{
+  "source": "path:./models.py::C.foo",
+  "destination": "path:./ops.py::C.foo"
+}
