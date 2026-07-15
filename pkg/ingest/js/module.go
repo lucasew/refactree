@@ -380,6 +380,17 @@ func extractJSVarDecl(fe *ingest.FileExtract, n *grammar.Node, source []byte, sc
 			continue
 		}
 		nameNode := ingest.ChildByField(child, "name")
+		value := ingest.ChildByField(child, "value")
+		// CJS: const m = require('./x') / const { a, b: c } = require('./x')
+		// Bind like ESM import so m.a and destructured names resolve to the module.
+		if reqPath, ok := jsRequireCallPath(value, source); ok {
+			bindJSRequireImports(fe, nameNode, source, reqPath)
+			if nameNode != nil {
+				// Defaults inside patterns (rare): { a = helper() } = require(...)
+				walkJSBindingPatternDefaults(fe, nameNode, source, scope)
+			}
+			continue
+		}
 		if nameNode != nil && nameNode.Type() == "identifier" {
 			name := ingest.NodeText(nameNode, source)
 			fe.Entities = append(fe.Entities, ingest.EntityDef{
@@ -389,7 +400,7 @@ func extractJSVarDecl(fe *ingest.FileExtract, n *grammar.Node, source []byte, sc
 				Exported:  true,
 			})
 		}
-		if value := ingest.ChildByField(child, "value"); value != nil {
+		if value != nil {
 			walkJSUsages(fe, value, source, scope)
 		}
 	}
@@ -596,6 +607,16 @@ func extractJSNamespaceImport(fe *ingest.FileExtract, n *grammar.Node, source []
 // jsImportCallPath returns the string specifier for a bare `import("…")` call.
 // Does not unwrap await (used when import() is the object of `.then`).
 func jsImportCallPath(n *grammar.Node, source []byte) (string, bool) {
+	return jsCallStringArg(n, source, "import")
+}
+
+// jsRequireCallPath returns the string specifier for `require("…")`.
+func jsRequireCallPath(n *grammar.Node, source []byte) (string, bool) {
+	return jsCallStringArg(n, source, "require")
+}
+
+// jsCallStringArg returns the first string argument of call_expression callee `name`.
+func jsCallStringArg(n *grammar.Node, source []byte, name string) (string, bool) {
 	if n == nil || n.Type() != "call_expression" {
 		return "", false
 	}
@@ -604,7 +625,7 @@ func jsImportCallPath(n *grammar.Node, source []byte) (string, bool) {
 		return "", false
 	}
 	fnText := ingest.NodeText(fn, source)
-	if fnText != "import" && fn.Type() != "import" {
+	if fnText != name && fn.Type() != name {
 		return "", false
 	}
 	args := ingest.ChildByField(n, "arguments")
@@ -621,6 +642,142 @@ func jsImportCallPath(n *grammar.Node, source []byte) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// bindJSRequireImports records CJS require bindings as ImportDefs (namespace or named).
+func bindJSRequireImports(fe *ingest.FileExtract, nameNode *grammar.Node, source []byte, sourcePath string) {
+	if fe == nil || nameNode == nil || sourcePath == "" {
+		return
+	}
+	switch nameNode.Type() {
+	case "identifier":
+		// const m = require('./mod')
+		fe.Imports = append(fe.Imports, ingest.ImportDef{
+			LocalName:  ingest.NodeText(nameNode, source),
+			SourcePath: sourcePath,
+			StartByte:  nameNode.StartByte(),
+			EndByte:    nameNode.EndByte(),
+		})
+	case "object_pattern":
+		// const { helper, stay: s } = require('./mod')
+		for i := uint32(0); i < nameNode.ChildCount(); i++ {
+			ch := nameNode.Child(i)
+			switch ch.Type() {
+			case "shorthand_property_identifier_pattern":
+				member := ingest.NodeText(ch, source)
+				fe.Imports = append(fe.Imports, ingest.ImportDef{
+					LocalName:       member,
+					SourcePath:      sourcePath,
+					MemberName:      member,
+					StartByte:       ch.StartByte(),
+					EndByte:         ch.EndByte(),
+					TargetStartByte: ch.StartByte(),
+					TargetEndByte:   ch.EndByte(),
+				})
+			case "pair_pattern":
+				key := ingest.ChildByField(ch, "key")
+				val := ingest.ChildByField(ch, "value")
+				if key == nil || val == nil {
+					continue
+				}
+				member := ingest.NodeText(key, source)
+				// value may be identifier or assignment_pattern (default).
+				localNode := val
+				if val.Type() == "assignment_pattern" {
+					if left := ingest.ChildByField(val, "left"); left != nil {
+						localNode = left
+					}
+				}
+				if localNode.Type() != "identifier" {
+					continue
+				}
+				local := ingest.NodeText(localNode, source)
+				fe.Imports = append(fe.Imports, ingest.ImportDef{
+					LocalName:       local,
+					SourcePath:      sourcePath,
+					MemberName:      member,
+					StartByte:       localNode.StartByte(),
+					EndByte:         localNode.EndByte(),
+					TargetStartByte: key.StartByte(),
+					TargetEndByte:   key.EndByte(),
+					HasAliasBinding: local != member,
+				})
+			}
+		}
+	}
+}
+
+// jsIsCJSExportsTarget reports whether n is `exports` or `module.exports`.
+func jsIsCJSExportsTarget(n *grammar.Node, source []byte) bool {
+	if n == nil {
+		return false
+	}
+	switch n.Type() {
+	case "identifier":
+		return ingest.NodeText(n, source) == "exports"
+	case "member_expression":
+		obj := ingest.ChildByField(n, "object")
+		prop := ingest.ChildByField(n, "property")
+		if obj == nil || prop == nil {
+			return false
+		}
+		return obj.Type() == "identifier" &&
+			ingest.NodeText(obj, source) == "module" &&
+			ingest.NodeText(prop, source) == "exports"
+	}
+	return false
+}
+
+// emitJSCJSExportSurfaceUsages records property keys on CJS export assignments so
+// renaming a symbol rewrites exports.helper / module.exports = { helper: … } keys.
+func emitJSCJSExportSurfaceUsages(fe *ingest.FileExtract, left, right *grammar.Node, source []byte, scope string) {
+	if left == nil {
+		return
+	}
+	// exports.helper = … / module.exports.helper = …
+	if left.Type() == "member_expression" {
+		obj := ingest.ChildByField(left, "object")
+		prop := ingest.ChildByField(left, "property")
+		if prop != nil && jsIsCJSExportsTarget(obj, source) {
+			// Bare usage so resolve links the key to a same-file entity of that name.
+			fe.Usages = append(fe.Usages, ingest.UsageDef{
+				Scope:     scope,
+				Name:      ingest.NodeText(prop, source),
+				StartByte: prop.StartByte(),
+				EndByte:   prop.EndByte(),
+			})
+		}
+	}
+	// module.exports = { helper, stay: … } / exports = { … }
+	if right != nil && right.Type() == "object" && jsIsCJSExportsTarget(left, source) {
+		for i := uint32(0); i < right.ChildCount(); i++ {
+			ch := right.Child(i)
+			switch ch.Type() {
+			case "shorthand_property_identifier":
+				// Already emitted as bare usage when walking the object; skip double.
+			case "pair":
+				if key := ingest.ChildByField(ch, "key"); key != nil &&
+					(key.Type() == "property_identifier" || key.Type() == "identifier") {
+					fe.Usages = append(fe.Usages, ingest.UsageDef{
+						Scope:     scope,
+						Name:      ingest.NodeText(key, source),
+						StartByte: key.StartByte(),
+						EndByte:   key.EndByte(),
+					})
+				}
+			case "method_definition":
+				if name := ingest.ChildByField(ch, "name"); name != nil &&
+					(name.Type() == "property_identifier" || name.Type() == "identifier") {
+					fe.Usages = append(fe.Usages, ingest.UsageDef{
+						Scope:     scope,
+						Name:      ingest.NodeText(name, source),
+						StartByte: name.StartByte(),
+						EndByte:   name.EndByte(),
+					})
+				}
+			}
+		}
+	}
 }
 
 // bindJSDynamicImportThen records a namespace-style import for the first
@@ -697,6 +854,31 @@ func walkJSUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope 
 		return
 	}
 	switch n.Type() {
+	case "assignment_expression":
+		// CJS export surface: exports.helper = … / module.exports = { helper: … }
+		// so rename rewrites the public property key with the local symbol.
+		left := ingest.ChildByField(n, "left")
+		right := ingest.ChildByField(n, "right")
+		emitJSCJSExportSurfaceUsages(fe, left, right, source, scope)
+		if left != nil {
+			// Avoid double-recording exports.helper as qualified usage of helper;
+			// the bare key usage from emitJSCJSExportSurfaceUsages is the rename site.
+			if left.Type() == "member_expression" {
+				obj := ingest.ChildByField(left, "object")
+				if !jsIsCJSExportsTarget(obj, source) {
+					walkJSUsages(fe, left, source, scope)
+				} else {
+					// Still walk nested qualifier identifiers if needed (module.exports).
+					// Property key already emitted; object side is exports/module.exports.
+				}
+			} else {
+				walkJSUsages(fe, left, source, scope)
+			}
+		}
+		if right != nil {
+			walkJSUsages(fe, right, source, scope)
+		}
+		return
 	case "call_expression":
 		// import("./x").then(m => m.helper()) — bind callback param as namespace import
 		// so property accesses resolve like `import * as m from "./x"`.
@@ -783,9 +965,26 @@ func walkJSUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope 
 			walkJSBindingPatternDefaults(fe, left, source, scope)
 		}
 		return
+	case "variable_declarator":
+		// Nested CJS: function f() { const m = require('./x'); return m.helper() }
+		nameNode := ingest.ChildByField(n, "name")
+		value := ingest.ChildByField(n, "value")
+		if reqPath, ok := jsRequireCallPath(value, source); ok {
+			bindJSRequireImports(fe, nameNode, source, reqPath)
+			if nameNode != nil {
+				walkJSBindingPatternDefaults(fe, nameNode, source, scope)
+			}
+			return
+		}
+		// Nested declarations: walk bodies/values only so the declared name is
+		// not recorded as a usage of a same-named outer entity.
+		if value != nil {
+			walkJSUsages(fe, value, source, scope)
+		}
+		return
 	case "function_declaration", "generator_function_declaration",
 		"class_declaration", "abstract_class_declaration",
-		"method_definition", "variable_declarator":
+		"method_definition":
 		// Nested declarations: walk bodies/values only so the declared name is
 		// not recorded as a usage of a same-named outer entity.
 		if value := ingest.ChildByField(n, "value"); value != nil {
