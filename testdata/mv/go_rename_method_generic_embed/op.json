@@ -1,0 +1,4 @@
+{
+  "source": "path:./box.go::Inner[T].Helper",
+  "destination": "path:./box.go::Inner[T].Assist"
+}

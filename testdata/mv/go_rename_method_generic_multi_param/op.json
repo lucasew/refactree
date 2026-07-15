@@ -1,0 +1,4 @@
+{
+  "source": "path:./box.go::Map[K,V].Helper",
+  "destination": "path:./box.go::Map[K,V].Assist"
+}
