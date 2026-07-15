@@ -584,9 +584,21 @@ func walkPythonUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, sc
 		attr := ingest.ChildByField(n, "attribute")
 		// Only simple obj.attr (obj is identifier) — matches import/local entity resolution.
 		if obj != nil && attr != nil && obj.Type() == "identifier" {
+			attrName := ingest.NodeText(attr, source)
+			// @prop.setter / @prop.getter / @prop.deleter — the object is a use of
+			// the property method name (not a member "setter" on prop).
+			if attrName == "setter" || attrName == "getter" || attrName == "deleter" {
+				fe.Usages = append(fe.Usages, ingest.UsageDef{
+					Scope:     scope,
+					Name:      ingest.NodeText(obj, source),
+					StartByte: obj.StartByte(),
+					EndByte:   obj.EndByte(),
+				})
+				return
+			}
 			fe.Usages = append(fe.Usages, ingest.UsageDef{
 				Scope:         scope,
-				Name:          ingest.NodeText(attr, source),
+				Name:          attrName,
 				StartByte:     attr.StartByte(),
 				EndByte:       attr.EndByte(),
 				Qualifier:     ingest.NodeText(obj, source),

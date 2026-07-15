@@ -756,8 +756,8 @@ func javaMemberReceiver(symbol string) (string, bool) {
 	return recv, recv != ""
 }
 
-// javaMemberAccessEdits finds m.oldLeaf method_invocation name nodes and
-// field_access field nodes to rewrite.
+// javaMemberAccessEdits finds m.oldLeaf method_invocation name nodes,
+// field_access field nodes, and method_reference name nodes to rewrite.
 func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf string, ourReceivers, foreignReceivers map[string]bool) []ingest.Edit {
 	pf, err := ingest.ParseSource(content, fileRel, "java")
 	if err != nil {
@@ -822,6 +822,31 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 						EndByte:   field.EndByte(),
 						NewText:   newLeaf,
 					})
+				}
+			}
+		case "method_reference":
+			// Type::method / this::method / local::method — tree-sitter has no
+			// stable object/name fields; children are receiver, "::", method name.
+			// Relations cover Type:: and this::; typed locals (b::helper) need ExtraRename.
+			var parts []*grammar.Node
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch == nil || ch.Type() == "::" {
+					continue
+				}
+				parts = append(parts, ch)
+			}
+			if len(parts) >= 2 {
+				obj, name := parts[0], parts[len(parts)-1]
+				if name.Type() == "identifier" && ingest.NodeText(name, content) == oldLeaf {
+					if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals) {
+						edits = append(edits, ingest.Edit{
+							File:      fileRel,
+							StartByte: name.StartByte(),
+							EndByte:   name.EndByte(),
+							NewText:   newLeaf,
+						})
+					}
 				}
 			}
 		}

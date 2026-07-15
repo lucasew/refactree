@@ -710,8 +710,14 @@ func (moveDriver) ExpandRenameSources(result *ingest.Result, sourceRef string) [
 					continue
 				}
 			} else if ref.Symbol == leaf {
-				// Facade function only in the parent package dir (e.g. wallpaper.SetStatic).
-				if entPkgDir != scopePrefix {
+				// Facade function only in the *true* parent package dir
+				// (e.g. pkg/driver/wallpaper.SetStatic when renaming
+				// *Driver.SetStatic under wallpaper/feh).
+				// When scopePrefix is empty or equals the method's package
+				// (root / single-segment dirs), do not expand bare leaves —
+				// that wrongly pulled same-package *types* named like the
+				// method leaf into the rename set (type Helper vs Box.Helper).
+				if scopePrefix == "" || scopePrefix == srcPkgDir || entPkgDir != scopePrefix {
 					continue
 				}
 			} else {

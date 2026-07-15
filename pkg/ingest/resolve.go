@@ -389,6 +389,14 @@ func resolveDirectUsage(res *Result, fe *FileExtract, u UsageDef, imports map[st
 	if target == "" {
 		target = resolveJavaNestedMember(fe, u.Scope, u.Name, allEntities)
 	}
+	// 5. Class-scoped bare names when Scope.Name is an entity (e.g. Python
+	// @helper.setter inside class Box → Box.helper). Method-body scopes are
+	// Class.method; Class.method.leaf is not an entity so this stays fail-closed.
+	if target == "" && u.Scope != "" && fe != nil {
+		if t, ok := entityInFile(allEntities, u.Scope+"."+u.Name, fe.Path); ok {
+			target = t
+		}
+	}
 
 	if target != "" {
 		res.Relations = append(res.Relations, Relation{
