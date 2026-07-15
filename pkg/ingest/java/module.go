@@ -389,18 +389,11 @@ func extractJavaNestedType(fe *ingest.FileExtract, n *grammar.Node, source []byt
 		}
 	}
 	walkJavaModifiers(fe, n, source, full)
+	// Nested enums/classes need the same body walk as top-level types so
+	// enum constants (Outer.Color.RED), nested methods, and further nested
+	// types are entities — not only methods/fields.
 	if body := ingest.ChildByField(n, "body"); body != nil {
-		for i := uint32(0); i < body.ChildCount(); i++ {
-			child := body.Child(i)
-			switch child.Type() {
-			case "method_declaration":
-				extractJavaMethod(fe, child, source, full)
-			case "constructor_declaration", "compact_constructor_declaration":
-				extractJavaConstructor(fe, child, source, full)
-			case "field_declaration":
-				extractJavaField(fe, child, source, full)
-			}
-		}
+		extractJavaTypeBody(fe, body, source, full)
 	}
 }
 

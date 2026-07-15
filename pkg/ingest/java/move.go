@@ -811,8 +811,8 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 	typedLocals := javaTypedLocals(pf.Root, content, ourSimple)
 
 	var edits []ingest.Edit
-	var walk func(n *grammar.Node, enclosingClass string)
-	walk = func(n *grammar.Node, enclosingClass string) {
+	var walk func(n *grammar.Node, enclosingClass string, switchMatchesOur bool)
+	walk = func(n *grammar.Node, enclosingClass string, switchMatchesOur bool) {
 		if n == nil || n.IsNull() {
 			return
 		}
@@ -821,6 +821,10 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			if nameN := ingest.ChildByField(n, "name"); nameN != nil {
 				classHere = ingest.NodeText(nameN, content)
 			}
+		}
+		swHere := switchMatchesOur
+		if n.Type() == "switch_expression" || n.Type() == "switch_statement" {
+			swHere = javaSwitchExprMatchesOur(n, content, ourSimple, typedLocals)
 		}
 		switch n.Type() {
 		case "method_invocation":
@@ -852,13 +856,78 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 					})
 				}
 			}
+		case "switch_label":
+			// case HELPER -> … / case HELPER: — bare enum constant labels.
+			// Relations cover Color.HELPER field_access but not switch labels.
+			if len(foreignSimple) == 0 || swHere {
+				for i := uint32(0); i < n.ChildCount(); i++ {
+					ch := n.Child(i)
+					if (ch.Type() == "identifier" || ch.Type() == "type_identifier") &&
+						ingest.NodeText(ch, content) == oldLeaf {
+						edits = append(edits, ingest.Edit{
+							File:      fileRel,
+							StartByte: ch.StartByte(),
+							EndByte:   ch.EndByte(),
+							NewText:   newLeaf,
+						})
+					}
+				}
+			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
-			walk(n.Child(i), classHere)
+			walk(n.Child(i), classHere, swHere)
 		}
 	}
-	walk(pf.Root, "")
+	walk(pf.Root, "", false)
 	return edits
+}
+
+// javaSwitchExprMatchesOur reports whether the switch selector refers to our type
+// (typed local or receiver name). Used to gate bare case LABEL renames when the
+// constant leaf is not unique across types.
+func javaSwitchExprMatchesOur(sw *grammar.Node, content []byte, ourReceivers, typedLocals map[string]bool) bool {
+	if sw == nil {
+		return false
+	}
+	cond := ingest.ChildByField(sw, "condition")
+	if cond == nil {
+		cond = ingest.ChildByField(sw, "value")
+	}
+	if cond == nil {
+		for i := uint32(0); i < sw.ChildCount(); i++ {
+			ch := sw.Child(i)
+			if ch.Type() == "parenthesized_expression" || ch.Type() == "identifier" {
+				cond = ch
+				break
+			}
+		}
+	}
+	if cond == nil {
+		return false
+	}
+	if cond.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(cond, "expression")
+		if inner == nil {
+			for i := uint32(0); i < cond.ChildCount(); i++ {
+				ch := cond.Child(i)
+				if ch.Type() != "(" && ch.Type() != ")" {
+					inner = ch
+					break
+				}
+			}
+		}
+		cond = inner
+	}
+	if cond == nil {
+		return false
+	}
+	if cond.Type() == "identifier" {
+		name := ingest.NodeText(cond, content)
+		if ourReceivers[name] || typedLocals[name] {
+			return true
+		}
+	}
+	return false
 }
 
 // javaShouldRenameMemberAccess decides whether obj.oldLeaf targets our receiver type.

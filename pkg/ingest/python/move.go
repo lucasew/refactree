@@ -1290,19 +1290,42 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 	}
 
 	ourReceivers := map[string]bool{}
+	ourTypes := map[string]bool{}
 	sourceSet := map[string]bool{}
 	for _, s := range sourceRefs {
 		sourceSet[s] = true
 		ref := ingest.ParseReference(s)
 		if recv, ok := pythonMethodReceiver(ref.Symbol); ok {
 			ourReceivers[recv] = true
+			ourTypes[recv] = true
 		}
 	}
 	if len(ourReceivers) == 0 {
 		return nil
 	}
 
+	// Inheritance edges (bases) for Protocol/ABC expansion: when renaming an
+	// abstract/stub method on Worker, also rename same-leaf methods on subclasses
+	// that list Worker as a base (class Box(Worker)). Unlike Java, Python keeps
+	// concrete Base/Child override pairs as distinct symbols — do NOT expand
+	// parents when renaming a child, and only expand implementors for stub sources.
+	baseEdges := pythonBaseEdges(rootDir, result)
+	alsoTypes := map[string]bool{}
+	if pythonSourcesAreMethodStubs(rootDir, result, sourceSet) {
+		for t := range ourTypes {
+			for impl, parents := range baseEdges {
+				if parents[t] {
+					alsoTypes[impl] = true
+				}
+			}
+		}
+		for t := range alsoTypes {
+			ourReceivers[t] = true
+		}
+	}
+
 	// Other classes that define the same method leaf — do not rewrite their calls.
+	// Hierarchy-expanded types are ours, not foreign.
 	foreignReceivers := map[string]bool{}
 	for _, ent := range result.Entities {
 		if sourceSet[ent.Reference] {
@@ -1318,8 +1341,44 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 	}
 
 	occupied := ingest.MarkEntityRelationSpans(result, sourceSet)
+	markOccupied := func(file string, start, end uint32) {
+		file = strings.TrimPrefix(file, "./")
+		if occupied[file] == nil {
+			occupied[file] = map[[2]uint32]bool{}
+		}
+		occupied[file][[2]uint32{start, end}] = true
+	}
 
 	var edits []ingest.Edit
+
+	// Rename override / related-type method declarations (Protocol/ABC ↔ implementor).
+	if len(alsoTypes) > 0 {
+		for _, ent := range result.Entities {
+			if sourceSet[ent.Reference] {
+				continue
+			}
+			ref := ingest.ParseReference(ent.Reference)
+			recv, ok := pythonMethodReceiver(ref.Symbol)
+			if !ok || ingest.SymbolLeaf(ref.Symbol) != oldLeaf {
+				continue
+			}
+			if !alsoTypes[recv] && !ourTypes[recv] {
+				continue
+			}
+			file := strings.TrimPrefix(ref.Path, "./")
+			if ingest.SpanOccupied(occupied[file], ent.StartByte, ent.EndByte) {
+				continue
+			}
+			edits = append(edits, ingest.Edit{
+				File:      file,
+				StartByte: ent.StartByte,
+				EndByte:   ent.EndByte,
+				NewText:   newLeaf,
+			})
+			markOccupied(file, ent.StartByte, ent.EndByte)
+		}
+	}
+
 	for _, f := range result.Files {
 		if f.Language != "python" {
 			continue
@@ -1340,6 +1399,220 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 	return edits
 }
 
+// pythonSourcesAreMethodStubs reports whether every source entity looks like a
+// Protocol/ABC abstract method (body is `...` / pass, or @abstractmethod).
+// Concrete methods with real bodies must not expand to subclass overrides.
+func pythonSourcesAreMethodStubs(rootDir string, result *ingest.Result, sourceSet map[string]bool) bool {
+	if result == nil || len(sourceSet) == 0 {
+		return false
+	}
+	saw := false
+	for _, ent := range result.Entities {
+		if !sourceSet[ent.Reference] {
+			continue
+		}
+		ref := ingest.ParseReference(ent.Reference)
+		if !strings.Contains(ref.Symbol, ".") {
+			continue
+		}
+		saw = true
+		file := strings.TrimPrefix(ref.Path, "./")
+		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(file)))
+		if err != nil {
+			return false
+		}
+		if !pythonMethodEntityIsStub(content, ent.StartByte, ent.EndByte) {
+			return false
+		}
+	}
+	return saw
+}
+
+// pythonMethodEntityIsStub checks the function_definition around [start,end) name span.
+func pythonMethodEntityIsStub(content []byte, start, end uint32) bool {
+	pf, err := ingest.ParseSource(content, ".py", "")
+	if err != nil {
+		return false
+	}
+	defer pf.Close()
+	var fn *grammar.Node
+	var find func(*grammar.Node)
+	find = func(n *grammar.Node) {
+		if n == nil || n.IsNull() || fn != nil {
+			return
+		}
+		if n.Type() == "function_definition" || n.Type() == "async_function_definition" {
+			nameN := ingest.ChildByField(n, "name")
+			if nameN != nil && nameN.StartByte() == start && nameN.EndByte() == end {
+				fn = n
+				return
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			find(n.Child(i))
+		}
+	}
+	find(pf.Root)
+	if fn == nil {
+		return false
+	}
+	// @abstractmethod counts as abstract even with a real body.
+	var walkDeco func(*grammar.Node) bool
+	walkDeco = func(n *grammar.Node) bool {
+		if n == nil || n.IsNull() {
+			return false
+		}
+		if n.Type() == "decorated_definition" {
+			// decorated_definition children: decorator+ … + function_definition
+			hasFn := false
+			hasAbs := false
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch == fn || (ch.Type() == "function_definition" || ch.Type() == "async_function_definition") {
+					nameN := ingest.ChildByField(ch, "name")
+					if nameN != nil && nameN.StartByte() == start {
+						hasFn = true
+					}
+				}
+				if ch.Type() == "decorator" && strings.Contains(ingest.NodeText(ch, content), "abstractmethod") {
+					hasAbs = true
+				}
+			}
+			if hasFn && hasAbs {
+				return true
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			if walkDeco(n.Child(i)) {
+				return true
+			}
+		}
+		return false
+	}
+	if walkDeco(pf.Root) {
+		return true
+	}
+	body := ingest.ChildByField(fn, "body")
+	if body == nil {
+		return false
+	}
+	// Protocol-style: body is only `...` / `pass` (optional leading docstring).
+	// tree-sitter-python often puts bare ellipsis as a direct block child.
+	hasStub := false
+	for i := uint32(0); i < body.ChildCount(); i++ {
+		ch := body.Child(i)
+		switch ch.Type() {
+		case "ellipsis":
+			hasStub = true
+		case "pass_statement":
+			hasStub = true
+		case "comment":
+			continue
+		case "expression_statement":
+			inner := strings.TrimSpace(ingest.NodeText(ch, content))
+			if inner == "..." {
+				hasStub = true
+				continue
+			}
+			if ch.ChildCount() > 0 {
+				c0 := ch.Child(0)
+				if c0.Type() == "string" {
+					continue // docstring
+				}
+				if c0.Type() == "ellipsis" {
+					hasStub = true
+					continue
+				}
+			}
+			return false
+		default:
+			txt := strings.TrimSpace(ingest.NodeText(ch, content))
+			if txt == "" || txt == "..." {
+				if txt == "..." {
+					hasStub = true
+				}
+				continue
+			}
+			return false
+		}
+	}
+	return hasStub
+}
+
+// pythonBaseEdges returns map[classSimpleName]set[baseSimpleName] from class
+// superclasses lists (class Box(Worker, ABC): …).
+func pythonBaseEdges(rootDir string, result *ingest.Result) map[string]map[string]bool {
+	out := map[string]map[string]bool{}
+	if result == nil {
+		return out
+	}
+	for _, f := range result.Files {
+		if f.Language != "python" {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Path, "./")
+		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		pf, err := ingest.ParseSource(content, rel, "python")
+		if err != nil {
+			continue
+		}
+		var walk func(n *grammar.Node)
+		walk = func(n *grammar.Node) {
+			if n == nil || n.IsNull() {
+				return
+			}
+			if n.Type() == "class_definition" {
+				nameN := ingest.ChildByField(n, "name")
+				bases := ingest.ChildByField(n, "superclasses")
+				if nameN != nil && bases != nil {
+					className := ingest.NodeText(nameN, content)
+					if out[className] == nil {
+						out[className] = map[string]bool{}
+					}
+					for i := uint32(0); i < bases.ChildCount(); i++ {
+						ch := bases.Child(i)
+						// argument_list children: identifier, attribute, keyword_argument (metaclass=)
+						switch ch.Type() {
+						case "identifier":
+							out[className][ingest.NodeText(ch, content)] = true
+						case "attribute":
+							// typing.Protocol / abc.ABC — use attribute leaf
+							if attr := ingest.ChildByField(ch, "attribute"); attr != nil {
+								out[className][ingest.NodeText(attr, content)] = true
+							}
+						case "keyword_argument":
+							// metaclass=Helper — not a base for method inheritance
+							continue
+						default:
+							// subscript: Protocol[T] etc.
+							if ch.Type() == "subscript" {
+								if val := ingest.ChildByField(ch, "value"); val != nil {
+									if val.Type() == "identifier" {
+										out[className][ingest.NodeText(val, content)] = true
+									} else if val.Type() == "attribute" {
+										if attr := ingest.ChildByField(val, "attribute"); attr != nil {
+											out[className][ingest.NodeText(attr, content)] = true
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				walk(n.Child(i))
+			}
+		}
+		walk(pf.Root)
+		pf.Close()
+	}
+	return out
+}
+
 // pythonMethodReceiver returns the class name for "Class.method" symbols.
 func pythonMethodReceiver(symbol string) (string, bool) {
 	if symbol == "" || !strings.Contains(symbol, ".") {
@@ -1356,7 +1629,8 @@ func pythonMethodReceiver(symbol string) (string, bool) {
 	return recv, recv != ""
 }
 
-// pythonMethodAttrEdits finds obj.oldLeaf attribute nodes to rewrite.
+// pythonMethodAttrEdits finds obj.oldLeaf attribute nodes to rewrite, plus
+// TypedDict-style string key loads: b["oldLeaf"] / b.get("oldLeaf").
 func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, ourReceivers, foreignReceivers map[string]bool) []ingest.Edit {
 	pf, err := ingest.ParseSource(content, ".py", "")
 	if err != nil {
@@ -1379,7 +1653,8 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 				classHere = ingest.NodeText(nameN, content)
 			}
 		}
-		if n.Type() == "attribute" {
+		switch n.Type() {
+		case "attribute":
 			obj := ingest.ChildByField(n, "object")
 			attr := ingest.ChildByField(n, "attribute")
 			if obj != nil && attr != nil && ingest.NodeText(attr, content) == oldLeaf {
@@ -1392,6 +1667,47 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 					})
 				}
 			}
+		case "subscript":
+			// b["helper"] / b['helper'] — TypedDict key loads.
+			obj := ingest.ChildByField(n, "value")
+			if obj == nil {
+				obj = ingest.ChildByField(n, "object")
+			}
+			sub := ingest.ChildByField(n, "subscript")
+			if obj != nil && sub != nil && sub.Type() == "string" {
+				if contentN, text := pythonStringContent(sub, content); contentN != nil && text == oldLeaf {
+					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals) {
+						edits = append(edits, ingest.Edit{
+							File:      fileRel,
+							StartByte: contentN.StartByte(),
+							EndByte:   contentN.EndByte(),
+							NewText:   newLeaf,
+						})
+					}
+				}
+			}
+		case "call":
+			// b.get("helper", default) — TypedDict .get key.
+			fn := ingest.ChildByField(n, "function")
+			args := ingest.ChildByField(n, "arguments")
+			if fn != nil && fn.Type() == "attribute" && args != nil {
+				obj := ingest.ChildByField(fn, "object")
+				attr := ingest.ChildByField(fn, "attribute")
+				if obj != nil && attr != nil && ingest.NodeText(attr, content) == "get" {
+					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals) {
+						if key := pythonFirstStringArg(args); key != nil {
+							if contentN, text := pythonStringContent(key, content); contentN != nil && text == oldLeaf {
+								edits = append(edits, ingest.Edit{
+									File:      fileRel,
+									StartByte: contentN.StartByte(),
+									EndByte:   contentN.EndByte(),
+									NewText:   newLeaf,
+								})
+							}
+						}
+					}
+				}
+			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), classHere)
@@ -1399,6 +1715,20 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 	}
 	walk(pf.Root, "")
 	return edits
+}
+
+// pythonFirstStringArg returns the first string argument node in an argument_list.
+func pythonFirstStringArg(args *grammar.Node) *grammar.Node {
+	if args == nil {
+		return nil
+	}
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch.Type() == "string" {
+			return ch
+		}
+	}
+	return nil
 }
 
 // pythonShouldRenameAttr decides whether obj.oldLeaf is a call on one of our receivers.

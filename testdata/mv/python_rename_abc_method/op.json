@@ -1,0 +1,4 @@
+{
+  "source": "path:./main.py::Worker.helper",
+  "destination": "path:./main.py::Worker.assist"
+}
