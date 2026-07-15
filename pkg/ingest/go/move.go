@@ -2126,7 +2126,9 @@ func buildStringLiteralMask(text string) []bool {
 }
 
 // findInterfaceMethodEdits renames method oldLeaf→newLeaf on every interface
-// declaration in the file (all in-scope interfaces that declare the method).
+// type in the file: named declarations (type Worker interface { M() }) and
+// inline/anonymous interfaces (func Call[T interface{ M() }](...),
+// var t interface{ M() }, parameters, returns).
 func findInterfaceMethodEdits(file string, content []byte, oldLeaf, newLeaf string) []ingest.Edit {
 	pf, err := ingest.ParseSource(content, file, "")
 	if err != nil {
@@ -2142,6 +2144,10 @@ func findInterfaceMethodEdits(file string, content []byte, oldLeaf, newLeaf stri
 		}
 		nextIface := inIface
 		switch n.Type() {
+		case "interface_type":
+			// Bare interface types (params, returns, type params, vars) as well as
+			// the body under type_spec. Enter method_elem children with inIface.
+			nextIface = true
 		case "type_spec":
 			if t := ingest.ChildByField(n, "type"); t != nil && t.Type() == "interface_type" {
 				nextIface = true

@@ -337,6 +337,23 @@ func resolveJavaNestedMember(fe *FileExtract, scope, leaf string, allEntities ma
 	return ""
 }
 
+// resolvePythonNestedMember maps bare names in a class body to Class.member
+// (e.g. helper = property(_helper) or alias = helper). Method bodies use
+// scope "Class.method", so Class.method.leaf will not match Class.leaf —
+// correct, since bare names in methods are not implicit class lookups.
+func resolvePythonNestedMember(fe *FileExtract, scope, leaf string, allEntities map[string][]entityLoc) string {
+	if fe == nil || fe.Language != "python" || scope == "" || leaf == "" {
+		return ""
+	}
+	qualified := scope + "." + leaf
+	for _, loc := range allEntities[qualified] {
+		if loc.File == fe.Path {
+			return SymbolRef("./"+loc.File, loc.Entity.Name)
+		}
+	}
+	return ""
+}
+
 // resolveEntityName finds a symbol reference for a bare name in package/file scope.
 func resolveEntityName(fe *FileExtract, name string, allEntities map[string][]entityLoc) string {
 	if fe != nil && (fe.Language == "go" || fe.Language == "java") {
@@ -385,9 +402,13 @@ func resolveDirectUsage(res *Result, fe *FileExtract, u UsageDef, imports map[st
 	if target == "" {
 		target = resolveEntityName(fe, u.Name, allEntities)
 	}
-	// 4. Nested members referenced unqualified inside a type scope (Java fields / enum constants).
+	// 4. Nested members referenced unqualified inside a type scope
+	// (Java fields / enum constants; Python class-body bare method/attr refs).
 	if target == "" {
 		target = resolveJavaNestedMember(fe, u.Scope, u.Name, allEntities)
+	}
+	if target == "" {
+		target = resolvePythonNestedMember(fe, u.Scope, u.Name, allEntities)
 	}
 
 	if target != "" {

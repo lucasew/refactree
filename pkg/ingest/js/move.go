@@ -649,13 +649,16 @@ func findJSDecl(root *grammar.Node, nameStart uint32) (decl *grammar.Node, expor
 // ExtraRenameEdits rewrites member-expression call sites when renaming a method
 // (Class.method → Class.newName). Relation-based rename only covers entity/
 // relation spans; instance receivers (this/params/locals) are not entities.
+// For bare function/value renames it also rewrites property accesses on locals
+// whose object literal used the value as a shorthand key ({ helper } → { assist }
+// then o.helper() must become o.assist()).
 func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, sourceRefs []string, oldLeaf, newLeaf string) []ingest.Edit {
 	if oldLeaf == "" || oldLeaf == newLeaf || len(sourceRefs) == 0 || rootDir == "" || result == nil {
 		return nil
 	}
 	src := ingest.ParseReference(sourceRefs[0])
 	if !strings.Contains(src.Symbol, ".") {
-		return nil // only methods / nested symbols
+		return jsShorthandPropertyAccessEdits(rootDir, result, sourceRefs, oldLeaf, newLeaf)
 	}
 
 	ourReceivers := map[string]bool{}
@@ -705,6 +708,281 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 			edits = append(edits, e)
 		}
 	}
+	return edits
+}
+
+// jsShorthandPropertyAccessEdits covers function/value renames where object
+// shorthand ({ helper }) rewrites the property key with the value. Locals
+// bound to such objects still have o.helper / { helper: h } = o under the old
+// key after the shorthand rewrite — rename those access sites too.
+func jsShorthandPropertyAccessEdits(rootDir string, result *ingest.Result, sourceRefs []string, oldLeaf, newLeaf string) []ingest.Edit {
+	sourceSet := map[string]bool{}
+	for _, s := range sourceRefs {
+		sourceSet[s] = true
+	}
+	// Only when relation rename actually touches a shorthand use of this symbol.
+	hasShorthandUse := false
+	for _, reln := range result.Relations {
+		if !sourceSet[reln.Target] {
+			continue
+		}
+		ref := ingest.ParseReference(reln.Reference)
+		fileRel := strings.TrimPrefix(ref.Path, "./")
+		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(fileRel)))
+		if err != nil || int(reln.EndByte) > len(content) {
+			continue
+		}
+		// Heuristic: the usage span text is oldLeaf and sits inside `{ … }`.
+		if string(content[reln.StartByte:reln.EndByte]) != oldLeaf {
+			continue
+		}
+		if jsSpanIsObjectShorthand(content, reln.StartByte, reln.EndByte) {
+			hasShorthandUse = true
+			break
+		}
+	}
+	if !hasShorthandUse {
+		return nil
+	}
+
+	occupied := ingest.MarkEntityRelationSpans(result, sourceSet)
+	var edits []ingest.Edit
+	for _, f := range result.Files {
+		if f.Language != "javascript" {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Path, "./")
+		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		occ := occupied[rel]
+		for _, e := range jsShorthandLocalPropertyEdits(rel, content, oldLeaf, newLeaf) {
+			if ingest.SpanOccupied(occ, e.StartByte, e.EndByte) {
+				continue
+			}
+			edits = append(edits, e)
+		}
+	}
+	return edits
+}
+
+// jsSpanIsObjectShorthand reports whether [start:end) is a shorthand property
+// name inside an object literal (not a longhand key or a pattern binding).
+func jsSpanIsObjectShorthand(content []byte, start, end uint32) bool {
+	pf, err := ingest.ParseSource(content, "file.js", "javascript")
+	if err != nil {
+		return false
+	}
+	defer pf.Close()
+	var found bool
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() || found {
+			return
+		}
+		if n.Type() == "shorthand_property_identifier" &&
+			n.StartByte() == start && n.EndByte() == end {
+			found = true
+			return
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(pf.Root)
+	return found
+}
+
+// jsShorthandLocalPropertyEdits finds locals assigned an object literal that
+// contains shorthand oldLeaf, then rewrites .oldLeaf member accesses and
+// object-pattern keys on those locals (and nested property paths).
+func jsShorthandLocalPropertyEdits(fileRel string, content []byte, oldLeaf, newLeaf string) []ingest.Edit {
+	pf, err := ingest.ParseSource(content, fileRel, "javascript")
+	if err != nil {
+		return nil
+	}
+	defer pf.Close()
+
+	// binding → true when the bound object literal includes shorthand oldLeaf
+	// either at the top level or nested under property paths we track.
+	// For nested `{ nested: { helper } }` we record binding "o" with path
+	// prefix "nested" so o.nested.helper rewrites.
+	type pathKey struct {
+		binding string
+		// dotted path under binding to the object that has the shorthand key,
+		// empty when the shorthand is a direct property of the binding.
+		prefix string
+	}
+	shorthandLocals := map[pathKey]bool{}
+
+	// Collect (binding, prefix) for every shorthand occurrence under an object
+	// assigned to a local. prefix is the path of pair keys from the binding root
+	// to the object that owns the shorthand.
+	var collectShorthandPaths func(obj *grammar.Node, binding, prefix string)
+	collectShorthandPaths = func(obj *grammar.Node, binding, prefix string) {
+		if obj == nil || obj.Type() != "object" || binding == "" {
+			return
+		}
+		for i := uint32(0); i < obj.ChildCount(); i++ {
+			ch := obj.Child(i)
+			switch ch.Type() {
+			case "shorthand_property_identifier":
+				if ingest.NodeText(ch, content) == oldLeaf {
+					shorthandLocals[pathKey{binding, prefix}] = true
+				}
+			case "pair":
+				key := ingest.ChildByField(ch, "key")
+				val := ingest.ChildByField(ch, "value")
+				if key == nil || val == nil {
+					continue
+				}
+				keyName := ingest.NodeText(key, content)
+				// Only simple identifier keys form a stable path.
+				if key.Type() != "property_identifier" && key.Type() != "identifier" {
+					continue
+				}
+				next := keyName
+				if prefix != "" {
+					next = prefix + "." + keyName
+				}
+				collectShorthandPaths(val, binding, next)
+			}
+		}
+	}
+
+	var walkDecl func(n *grammar.Node)
+	walkDecl = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		if n.Type() == "variable_declarator" {
+			nameN := ingest.ChildByField(n, "name")
+			valN := ingest.ChildByField(n, "value")
+			if nameN != nil && nameN.Type() == "identifier" && valN != nil && valN.Type() == "object" {
+				collectShorthandPaths(valN, ingest.NodeText(nameN, content), "")
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walkDecl(n.Child(i))
+		}
+	}
+	walkDecl(pf.Root)
+	if len(shorthandLocals) == 0 {
+		return nil
+	}
+
+	var edits []ingest.Edit
+	seen := map[[2]uint32]bool{}
+	add := func(start, end uint32) {
+		key := [2]uint32{start, end}
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		edits = append(edits, ingest.Edit{
+			File:      fileRel,
+			StartByte: start,
+			EndByte:   end,
+			NewText:   newLeaf,
+		})
+	}
+
+	// member chain path: o.nested.helper → binding o, prefix nested, prop helper
+	memberPath := func(n *grammar.Node) (binding, prefix, prop string, propNode *grammar.Node, ok bool) {
+		if n == nil {
+			return "", "", "", nil, false
+		}
+		propN := ingest.ChildByField(n, "property")
+		obj := ingest.ChildByField(n, "object")
+		if propN == nil || obj == nil || ingest.NodeText(propN, content) != oldLeaf {
+			return "", "", "", nil, false
+		}
+		// Walk object chain leftward collecting property names until identifier.
+		var parts []string
+		cur := obj
+		for cur != nil {
+			switch cur.Type() {
+			case "identifier":
+				binding = ingest.NodeText(cur, content)
+				// parts are outermost-first? we walked inward so reverse
+				for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
+					parts[i], parts[j] = parts[j], parts[i]
+				}
+				prefix = strings.Join(parts, ".")
+				return binding, prefix, oldLeaf, propN, true
+			case "member_expression", "member_expression_optional", "optional_chain":
+				p := ingest.ChildByField(cur, "property")
+				if p == nil {
+					return "", "", "", nil, false
+				}
+				parts = append(parts, ingest.NodeText(p, content))
+				cur = ingest.ChildByField(cur, "object")
+			default:
+				return "", "", "", nil, false
+			}
+		}
+		return "", "", "", nil, false
+	}
+
+	var walkUses func(n *grammar.Node)
+	walkUses = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		switch n.Type() {
+		case "member_expression", "member_expression_optional", "optional_chain":
+			if binding, prefix, _, propN, ok := memberPath(n); ok {
+				if shorthandLocals[pathKey{binding, prefix}] {
+					add(propN.StartByte(), propN.EndByte())
+				}
+			}
+		case "variable_declarator":
+			// const { helper: h } = o  /  const { helper } = o.nested
+			nameN := ingest.ChildByField(n, "name")
+			valN := ingest.ChildByField(n, "value")
+			if nameN != nil && nameN.Type() == "object_pattern" && valN != nil {
+				binding, prefix := "", ""
+				switch valN.Type() {
+				case "identifier":
+					binding = ingest.NodeText(valN, content)
+				case "member_expression", "member_expression_optional", "optional_chain":
+					// o.nested → binding o, prefix nested
+					var parts []string
+					cur := valN
+					for cur != nil {
+						if cur.Type() == "identifier" {
+							binding = ingest.NodeText(cur, content)
+							for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
+								parts[i], parts[j] = parts[j], parts[i]
+							}
+							prefix = strings.Join(parts, ".")
+							break
+						}
+						if cur.Type() == "member_expression" || cur.Type() == "member_expression_optional" || cur.Type() == "optional_chain" {
+							p := ingest.ChildByField(cur, "property")
+							if p == nil {
+								break
+							}
+							parts = append(parts, ingest.NodeText(p, content))
+							cur = ingest.ChildByField(cur, "object")
+							continue
+						}
+						break
+					}
+				}
+				if binding != "" && shorthandLocals[pathKey{binding, prefix}] {
+					jsCollectObjectPatternMethodEdits(nameN, content, oldLeaf, newLeaf, func(start, end uint32, text string) {
+						add(start, end)
+					})
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walkUses(n.Child(i))
+		}
+	}
+	walkUses(pf.Root)
 	return edits
 }
 
