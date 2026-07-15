@@ -191,6 +191,7 @@ didChange / didSave
 | Overlap | Cancel + restart via `context.Context` |
 | Full Dir Materialize | When workspace symbols / project-wide refs / rename need a closed graph |
 | Fast path | Hop/Seed-style dirty file extract; not full-project on every keystroke |
+| node_modules / vendors | Bare imports resolve via **`node` provider** (then usually materialize as `path:./node_modules/…`). Dir walk still skips vendor trees. **Navigation** (definition / hover / refs) may **on-demand** Hop/Seed + one-hop ExpandImports around the target (incl. package reexports). **Refactor** (rename/mv) stays on the closed project graph until explicitly designed otherwise — no deep vendor crawl just because something was navigated |
 
 ### Mutations (rename)
 

@@ -176,17 +176,32 @@ func (s *Server) Definition(_ context.Context, params *protocol.DefinitionParams
 	off := byteOffset(text, params.Position)
 	hit, ok := ingest.HitAtByte(snap.Result, s.session.relPath(path), off)
 	if !ok || hit.Reference == "" {
-		return nil, nil
+		// Still try identifier + on-demand seed of current file for vendor buffers.
+		hitRef := s.hitFromIdentifier(path, text, off)
+		if hitRef == "" {
+			return nil, nil
+		}
+		hit = ingest.Hit{Reference: hitRef}
 	}
-	ref := ingest.CanonicalizeInResult(snap.Result, ingest.ParseReference(hit.Reference))
-	loc, err := definitionLocation(snap.Root, snap.Result, ref)
+	result, ref := ingest.NavigateReference(snap.Root, s.session.overlay, snap.Result, ingest.ParseReference(hit.Reference))
+	loc, err := s.definitionLocation(snap.Root, result, ref)
 	if err != nil || loc == nil {
 		return nil, nil
 	}
 	return loc, nil
 }
 
-func definitionLocation(root string, result *ingest.Result, ref ingest.Reference) (*protocol.Location, error) {
+// hitFromIdentifier builds a provisional path:./file::Name from the token under the cursor.
+func (s *Server) hitFromIdentifier(path, text string, off int) string {
+	tok, _, _ := ingest.IdentifierAt(text, off)
+	if tok == "" {
+		return ""
+	}
+	rel := s.session.relPath(path)
+	return ingest.SymbolRef("./"+strings.TrimPrefix(rel, "./"), tok)
+}
+
+func (s *Server) definitionLocation(root string, result *ingest.Result, ref ingest.Reference) (*protocol.Location, error) {
 	canon := ref.String()
 	var ent *ingest.Entity
 	for i := range result.Entities {
@@ -196,6 +211,17 @@ func definitionLocation(root string, result *ingest.Result, ref ingest.Reference
 		}
 	}
 	if ent == nil && ref.Symbol != "" {
+		for i := range result.Entities {
+			er := ingest.ParseReference(result.Entities[i].Reference)
+			if er.Symbol == ref.Symbol && (ref.Path == "" || samePath(ref, er)) {
+				ent = &result.Entities[i]
+				ref = er
+				break
+			}
+		}
+	}
+	if ent == nil && ref.Symbol != "" {
+		// last resort: unique symbol name in navigated result
 		for i := range result.Entities {
 			er := ingest.ParseReference(result.Entities[i].Reference)
 			if er.Symbol == ref.Symbol {
@@ -213,13 +239,18 @@ func definitionLocation(root string, result *ingest.Result, ref ingest.Reference
 	if !filepath.IsAbs(abs) {
 		abs = filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(er.Path, "./")))
 	}
-	defText, err := os.ReadFile(abs)
+	defText, err := s.readPath(abs)
 	if err != nil {
-		// try overlay via session not available; disk only
 		return nil, err
 	}
-	r := rangeFromBytes(string(defText), int(ent.StartByte), int(ent.EndByte), nil)
+	r := rangeFromBytes(defText, int(ent.StartByte), int(ent.EndByte), nil)
 	return &protocol.Location{URI: pathToURI(abs), Range: r}, nil
+}
+
+func samePath(a, b ingest.Reference) bool {
+	pa := strings.TrimPrefix(filepath.ToSlash(a.Path), "./")
+	pb := strings.TrimPrefix(filepath.ToSlash(b.Path), "./")
+	return pa == pb
 }
 
 func (s *Server) References(_ context.Context, params *protocol.ReferenceParams) ([]protocol.Location, error) {
@@ -235,22 +266,27 @@ func (s *Server) References(_ context.Context, params *protocol.ReferenceParams)
 	off := byteOffset(text, params.Position)
 	hit, ok := ingest.HitAtByte(snap.Result, s.session.relPath(path), off)
 	if !ok || hit.Reference == "" {
-		return nil, nil
+		if r := s.hitFromIdentifier(path, text, off); r != "" {
+			hit = ingest.Hit{Reference: r}
+		} else {
+			return nil, nil
+		}
 	}
-	ref := ingest.CanonicalizeInResult(snap.Result, ingest.ParseReference(hit.Reference))
+	// Navigation: on-demand expand target neighborhood (node_modules ok).
+	// Project-wide usages still come from the snapshot; we merge nav for declaration.
+	result, ref := ingest.NavigateReference(snap.Root, s.session.overlay, snap.Result, ingest.ParseReference(hit.Reference))
 	target := ref.String()
 	var locs []protocol.Location
-	// definition site
 	if params.Context.IncludeDeclaration {
-		if loc, err := definitionLocation(snap.Root, snap.Result, ref); err == nil && loc != nil {
+		if loc, err := s.definitionLocation(snap.Root, result, ref); err == nil && loc != nil {
 			locs = append(locs, *loc)
 		}
 	}
-	for _, reln := range snap.Result.Relations {
-		if reln.Target != target && reln.Reference != target {
-			// also match canonicalize of target
-			t := ingest.CanonicalizeInResult(snap.Result, ingest.ParseReference(reln.Target))
-			if t.String() != target {
+	for _, reln := range result.Relations {
+		t := reln.Target
+		if t != target {
+			ct := ingest.CanonicalizeInResult(result, ingest.ParseReference(reln.Target))
+			if ct.String() != target {
 				continue
 			}
 		}
@@ -293,9 +329,13 @@ func (s *Server) Hover(_ context.Context, params *protocol.HoverParams) (*protoc
 	off := byteOffset(text, params.Position)
 	hit, ok := ingest.HitAtByte(snap.Result, s.session.relPath(path), off)
 	if !ok || hit.Reference == "" {
-		return nil, nil
+		if r := s.hitFromIdentifier(path, text, off); r != "" {
+			hit = ingest.Hit{Reference: r}
+		} else {
+			return nil, nil
+		}
 	}
-	ref := ingest.CanonicalizeInResult(snap.Result, ingest.ParseReference(hit.Reference))
+	_, ref := ingest.NavigateReference(snap.Root, s.session.overlay, snap.Result, ingest.ParseReference(hit.Reference))
 	doc, err := ingest.DocFor(snap.Root, ref.String())
 	if err != nil || doc == nil {
 		return nil, nil
@@ -459,6 +499,8 @@ func (s *Server) Rename(_ context.Context, params *protocol.RenameParams) (*prot
 	if !ok || hit.Reference == "" {
 		return nil, fmt.Errorf("no symbol at position")
 	}
+	// Refactor: closed project graph only (no on-demand vendor expansion).
+	// Rename planner uses ProjectResult semantics via ingest.Rename.
 	srcRef := ingest.CanonicalizeInResult(snap.Result, ingest.ParseReference(hit.Reference))
 	if srcRef.Symbol == "" {
 		return nil, fmt.Errorf("cannot rename non-symbol")

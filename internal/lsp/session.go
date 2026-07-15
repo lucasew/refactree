@@ -155,8 +155,10 @@ func (s *Session) rebuild(ctx context.Context, gen uint64, client protocol.Clien
 		return
 	}
 
-	// Prefer Seed from open docs when small; full Dir when we need workspace graph.
-	// Dogfood: always full Dir for correct refs/completion; cancelable.
+	// Project Dir (skips node_modules walk) + hop every open buffer so files under
+	// skipped trees (e.g. node_modules opened via gd) still enter the snapshot.
+	// Deeper package hops for navigation are on-demand (NavigateReference), not here.
+	// Rename/refactor keeps using ProjectResult-style closed graph only.
 	result, err := ingest.ProjectResultFS(root, s.overlay)
 	if err != nil {
 		slog.Debug("lsp rebuild: project", "err", err)
@@ -170,6 +172,18 @@ func (s *Session) rebuild(ctx context.Context, gen uint64, client protocol.Clien
 	}
 	if err := ctx.Err(); err != nil {
 		return
+	}
+
+	s.mu.RLock()
+	openPaths := make([]string, 0, len(s.openDocs))
+	for p := range s.openDocs {
+		openPaths = append(openPaths, p)
+	}
+	s.mu.RUnlock()
+	if len(openPaths) > 0 {
+		if openRes, err := ingest.HopResultFS(root, openPaths, s.overlay, true); err == nil {
+			result = ingest.MergeResults(result, openRes)
+		}
 	}
 
 	s.mu.Lock()
