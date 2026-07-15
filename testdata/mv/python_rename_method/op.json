@@ -1,0 +1,4 @@
+{
+  "source": "path:./app.py::Box.get_value",
+  "destination": "path:./app.py::Box.fetch_value"
+}
