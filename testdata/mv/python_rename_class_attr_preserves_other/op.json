@@ -1,0 +1,4 @@
+{
+  "source": "path:./mod.py::Box.VALUE",
+  "destination": "path:./mod.py::Box.AMOUNT"
+}

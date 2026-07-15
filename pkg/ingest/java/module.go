@@ -323,7 +323,8 @@ func extractJavaType(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 		Exported:  exported,
 	})
 
-	for _, field := range []string{"superclass", "interfaces", "type_parameters"} {
+	// permits: sealed class Shape permits Circle, Square — type_list of subtypes.
+	for _, field := range []string{"superclass", "interfaces", "type_parameters", "permits"} {
 		if part := ingest.ChildByField(n, field); part != nil {
 			walkJavaUsages(fe, part, source, typeName)
 		}
@@ -380,7 +381,7 @@ func extractJavaNestedType(fe *ingest.FileExtract, n *grammar.Node, source []byt
 		EndByte:   nameNode.EndByte(),
 		Exported:  javaNodeIsPublic(n),
 	})
-	for _, field := range []string{"superclass", "interfaces", "type_parameters"} {
+	for _, field := range []string{"superclass", "interfaces", "type_parameters", "permits"} {
 		if part := ingest.ChildByField(n, field); part != nil {
 			walkJavaUsages(fe, part, source, full)
 		}
