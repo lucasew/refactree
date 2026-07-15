@@ -772,19 +772,41 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 	defer pf.Close()
 
 	typedLocals := jsTypedLocals(pf.Root, content, ourReceivers)
+	// Unique method leaf: ExtraRename already rewrites every simple obj.oldLeaf.
+	// Apply the same aggressiveness to object-pattern property keys.
+	uniqueLeaf := len(foreignReceivers) == 0
 
 	var edits []ingest.Edit
-	var walk func(n *grammar.Node, enclosingClass string)
-	walk = func(n *grammar.Node, enclosingClass string) {
+	// Spans already scheduled (dedupe pattern keys when both declarator + pattern walk hit).
+	seen := map[[2]uint32]bool{}
+	addEdit := func(start, end uint32, text string) {
+		key := [2]uint32{start, end}
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		edits = append(edits, ingest.Edit{
+			File:      fileRel,
+			StartByte: start,
+			EndByte:   end,
+			NewText:   text,
+		})
+	}
+
+	var walk func(n *grammar.Node, enclosingClass string, block *grammar.Node)
+	walk = func(n *grammar.Node, enclosingClass string, block *grammar.Node) {
 		if n == nil || n.IsNull() {
 			return
 		}
 		classHere := enclosingClass
+		blockHere := block
 		switch n.Type() {
 		case "class_declaration", "class", "abstract_class_declaration":
 			if nameN := ingest.ChildByField(n, "name"); nameN != nil {
 				classHere = ingest.NodeText(nameN, content)
 			}
+		case "statement_block":
+			blockHere = n
 		}
 		switch n.Type() {
 		case "member_expression", "member_expression_optional", "optional_chain":
@@ -792,21 +814,164 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 			prop := ingest.ChildByField(n, "property")
 			if obj != nil && prop != nil && ingest.NodeText(prop, content) == oldLeaf {
 				if jsShouldRenameMember(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals) {
-					edits = append(edits, ingest.Edit{
-						File:      fileRel,
-						StartByte: prop.StartByte(),
-						EndByte:   prop.EndByte(),
-						NewText:   newLeaf,
+					addEdit(prop.StartByte(), prop.EndByte(), newLeaf)
+				}
+			}
+		case "variable_declarator":
+			// const { helper } = b  /  const { helper: h } = b
+			nameN := ingest.ChildByField(n, "name")
+			valN := ingest.ChildByField(n, "value")
+			if nameN != nil && nameN.Type() == "object_pattern" && valN != nil {
+				if uniqueLeaf || jsShouldRenameMember(valN, content, classHere, ourReceivers, foreignReceivers, typedLocals) {
+					jsCollectObjectPatternMethodEdits(nameN, content, oldLeaf, newLeaf, addEdit)
+					// Shorthand `{ helper }` also renames the local binding — rewrite
+					// bare oldLeaf identifiers later in the same statement_block.
+					if blockHere != nil {
+						jsCollectShorthandBindingUses(blockHere, nameN, content, oldLeaf, newLeaf, addEdit)
+					}
+				}
+			}
+		case "function_declaration", "generator_function_declaration",
+			"function_expression", "arrow_function", "method_definition":
+			// Parameter destructure: function use({ helper }) { … }
+			// formal_parameters is a sibling of body, so handle both here.
+			// Only when the method leaf is unique (no RHS type on the pattern).
+			if uniqueLeaf {
+				params := ingest.ChildByField(n, "parameters")
+				body := ingest.ChildByField(n, "body")
+				if params != nil {
+					jsForEachObjectPattern(params, func(pattern *grammar.Node) {
+						jsCollectObjectPatternMethodEdits(pattern, content, oldLeaf, newLeaf, addEdit)
+						if body != nil && body.Type() == "statement_block" {
+							jsCollectShorthandBindingUses(body, pattern, content, oldLeaf, newLeaf, addEdit)
+						}
 					})
 				}
 			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
-			walk(n.Child(i), classHere)
+			walk(n.Child(i), classHere, blockHere)
 		}
 	}
-	walk(pf.Root, "")
+	walk(pf.Root, "", nil)
 	return edits
+}
+
+// jsForEachObjectPattern invokes fn for every object_pattern under n.
+func jsForEachObjectPattern(n *grammar.Node, fn func(*grammar.Node)) {
+	if n == nil {
+		return
+	}
+	if n.Type() == "object_pattern" {
+		fn(n)
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		jsForEachObjectPattern(n.Child(i), fn)
+	}
+}
+
+// jsCollectObjectPatternMethodEdits rewrites property keys named oldLeaf in an object_pattern.
+func jsCollectObjectPatternMethodEdits(pattern *grammar.Node, content []byte, oldLeaf, newLeaf string, add func(start, end uint32, text string)) {
+	if pattern == nil || pattern.Type() != "object_pattern" {
+		return
+	}
+	for i := uint32(0); i < pattern.ChildCount(); i++ {
+		ch := pattern.Child(i)
+		switch ch.Type() {
+		case "shorthand_property_identifier_pattern":
+			if ingest.NodeText(ch, content) == oldLeaf {
+				add(ch.StartByte(), ch.EndByte(), newLeaf)
+			}
+		case "pair_pattern":
+			if key := ingest.ChildByField(ch, "key"); key != nil && ingest.NodeText(key, content) == oldLeaf {
+				add(key.StartByte(), key.EndByte(), newLeaf)
+			}
+		case "object_pattern":
+			jsCollectObjectPatternMethodEdits(ch, content, oldLeaf, newLeaf, add)
+		case "assignment_pattern":
+			// `{ helper = def }` — left is the binding/property name.
+			if left := ingest.ChildByField(ch, "left"); left != nil {
+				switch left.Type() {
+				case "shorthand_property_identifier_pattern", "identifier":
+					if ingest.NodeText(left, content) == oldLeaf {
+						add(left.StartByte(), left.EndByte(), newLeaf)
+					}
+				case "object_pattern":
+					jsCollectObjectPatternMethodEdits(left, content, oldLeaf, newLeaf, add)
+				}
+			}
+		}
+	}
+}
+
+// jsCollectShorthandBindingUses rewrites bare identifier uses of a shorthand
+// destructure binding after the pattern inside block (same statement_block).
+func jsCollectShorthandBindingUses(block, pattern *grammar.Node, content []byte, oldLeaf, newLeaf string, add func(start, end uint32, text string)) {
+	if block == nil || pattern == nil {
+		return
+	}
+	// Only when the pattern actually introduced a shorthand binding named oldLeaf.
+	hasShorthand := false
+	var after uint32
+	var scanPattern func(*grammar.Node)
+	scanPattern = func(p *grammar.Node) {
+		if p == nil {
+			return
+		}
+		if p.Type() == "shorthand_property_identifier_pattern" && ingest.NodeText(p, content) == oldLeaf {
+			hasShorthand = true
+			if p.EndByte() > after {
+				after = p.EndByte()
+			}
+		}
+		// assignment_pattern left shorthand also binds locally under the old name
+		// before we rewrite it — treat like shorthand.
+		if p.Type() == "assignment_pattern" {
+			if left := ingest.ChildByField(p, "left"); left != nil {
+				if (left.Type() == "shorthand_property_identifier_pattern" || left.Type() == "identifier") &&
+					ingest.NodeText(left, content) == oldLeaf {
+					hasShorthand = true
+					if left.EndByte() > after {
+						after = left.EndByte()
+					}
+				}
+			}
+		}
+		for i := uint32(0); i < p.ChildCount(); i++ {
+			scanPattern(p.Child(i))
+		}
+	}
+	scanPattern(pattern)
+	if !hasShorthand {
+		return
+	}
+
+	var walk func(*grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		// Do not walk into nested function bodies (new scopes).
+		switch n.Type() {
+		case "function_declaration", "generator_function_declaration",
+			"function_expression", "arrow_function", "method_definition",
+			"class_declaration", "class", "abstract_class_declaration":
+			return
+		case "identifier":
+			if n.StartByte() >= after && ingest.NodeText(n, content) == oldLeaf {
+				add(n.StartByte(), n.EndByte(), newLeaf)
+			}
+			return
+		case "property_identifier", "shorthand_property_identifier",
+			"shorthand_property_identifier_pattern", "private_property_identifier":
+			// Property names / patterns handled elsewhere.
+			return
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(block)
 }
 
 // jsShouldRenameMember decides whether obj.oldLeaf is a call on one of our receivers.

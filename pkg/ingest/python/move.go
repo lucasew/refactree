@@ -1432,6 +1432,15 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	if obj == nil {
 		return false
 	}
+	// super().method() targets a parent implementation, not the enclosing class's
+	// own override. When renaming Base.m, rewrite super().m in Child even if Child
+	// also defines m; when renaming Child.m, leave super().m alone.
+	if pythonIsSuperCall(obj, content) {
+		if enclosingClass != "" && ourReceivers[enclosingClass] {
+			return false
+		}
+		return true
+	}
 	// Only simple identifiers: self.x, cls.x, box.x, Box.x
 	if obj.Type() != "identifier" {
 		return false
@@ -1467,6 +1476,15 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	// No foreign same-leaf methods: rewrite all simple attribute loads of the leaf
 	// (unique method name in the project graph).
 	return len(foreignReceivers) == 0
+}
+
+// pythonIsSuperCall reports whether n is a call to super (super() / super(C, self)).
+func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
+	if n == nil || n.Type() != "call" {
+		return false
+	}
+	fn := ingest.ChildByField(n, "function")
+	return fn != nil && fn.Type() == "identifier" && ingest.NodeText(fn, content) == "super"
 }
 
 // pythonTypedLocals maps local names that are annotated or assigned as ourReceivers.

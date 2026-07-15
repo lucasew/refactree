@@ -1,0 +1,4 @@
+{
+  "source": "path:./mod.py::Outer.Nested",
+  "destination": "path:./mod.py::Outer.Inner"
+}
