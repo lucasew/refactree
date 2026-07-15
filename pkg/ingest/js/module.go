@@ -428,6 +428,14 @@ func extractJSClass(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 		Exported:  true,
 	})
 
+	// `class Sub extends Box` — heritage is not under body.
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		if child.Type() == "class_heritage" {
+			walkJSUsages(fe, child, source, className)
+		}
+	}
+
 	body := ingest.ChildByField(n, "body")
 	if body == nil {
 		return
@@ -565,6 +573,36 @@ func walkJSUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope 
 			walkJSUsages(fe, args, source, scope)
 		}
 		return
+	case "new_expression":
+		// `new Box(1)` — constructor field is the type/value being constructed.
+		if ctor := ingest.ChildByField(n, "constructor"); ctor != nil {
+			emitJSIdentifierUsage(fe, ctor, source, scope)
+		}
+		if args := ingest.ChildByField(n, "arguments"); args != nil {
+			walkJSUsages(fe, args, source, scope)
+		}
+		return
+	case "class_heritage":
+		// `extends Box` / `extends pkg.Box` — expression after extends.
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			child := n.Child(i)
+			if child.Type() == "extends" {
+				continue
+			}
+			emitJSIdentifierUsage(fe, child, source, scope)
+		}
+		return
+	case "binary_expression":
+		// `x instanceof Box` — right operand is a type/value reference.
+		if op := ingest.ChildByField(n, "operator"); op != nil && ingest.NodeText(op, source) == "instanceof" {
+			if right := ingest.ChildByField(n, "right"); right != nil {
+				emitJSIdentifierUsage(fe, right, source, scope)
+			}
+			if left := ingest.ChildByField(n, "left"); left != nil {
+				walkJSUsages(fe, left, source, scope)
+			}
+			return
+		}
 	case "jsx_self_closing_element", "jsx_opening_element":
 		// JSX elements are component invocations: <Component /> or <Component>.
 		// Emit a usage for the component name so renames and moves track them.

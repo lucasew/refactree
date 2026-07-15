@@ -1,0 +1,4 @@
+{
+  "source": "path:./demo/Box.java::Box",
+  "destination": "path:./demo/Box.java::Crate"
+}
