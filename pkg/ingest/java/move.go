@@ -543,15 +543,11 @@ func spanOccupied(occ map[[2]uint32]bool, start, end uint32) bool {
 	return false
 }
 
-// ExtraRenameEdits rewrites method_invocation name spans when renaming a method
-// (Class.method → Class.newName). Relation-based rename covers same-scope bare
-// and this-implicit calls, but not instance receivers (m.method) because those
-// are not entities. Mirrors Go/Python ExtraRenameEdits for Java.
-// ExtraRenameEdits rewrites field_access name spans when renaming a field
-// (Class.field → Class.newName). Relation-based rename covers same-scope this
-// accesses recorded as usages, but not instance receivers (m.field) because
-// those are not entities. Field-access only — method invocations are a separate
-// ExtraRename concern.
+// ExtraRenameEdits rewrites method_invocation and field_access name spans when
+// renaming a Class.member (Class.method / Class.field → new leaf). Relation-based
+// rename covers same-scope bare and this-implicit sites recorded as usages, but
+// not instance receivers (m.member) because those are not entities. Mirrors
+// Go/Python ExtraRenameEdits for Java.
 func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, sourceRefs []string, oldLeaf, newLeaf string) []ingest.Edit {
 	if oldLeaf == "" || oldLeaf == newLeaf || len(sourceRefs) == 0 || rootDir == "" || result == nil {
 		return nil
@@ -622,7 +618,7 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 			continue
 		}
 		occ := occupied[rel]
-		for _, e := range javaFieldAccessEdits(rel, content, oldLeaf, newLeaf, ourReceivers, foreignReceivers) {
+		for _, e := range javaMemberAccessEdits(rel, content, oldLeaf, newLeaf, ourReceivers, foreignReceivers) {
 			if spanOccupied(occ, e.StartByte, e.EndByte) {
 				continue
 			}
@@ -641,12 +637,14 @@ func javaMemberReceiver(symbol string) (string, bool) {
 	if len(parts) < 2 {
 		return "", false
 	}
+	// Nested: Outer.Inner.method → receiver Outer.Inner
 	recv := strings.Join(parts[:len(parts)-1], ".")
 	return recv, recv != ""
 }
 
-// javaFieldAccessEdits finds m.oldLeaf field_access field nodes to rewrite.
-func javaFieldAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf string, ourReceivers, foreignReceivers map[string]bool) []ingest.Edit {
+// javaMemberAccessEdits finds m.oldLeaf method_invocation name nodes and
+// field_access field nodes to rewrite.
+func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf string, ourReceivers, foreignReceivers map[string]bool) []ingest.Edit {
 	pf, err := ingest.ParseSource(content, fileRel, "java")
 	if err != nil {
 		return nil
@@ -677,19 +675,33 @@ func javaFieldAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf strin
 			return
 		}
 		classHere := enclosingClass
-		if n.Type() == "class_declaration" || n.Type() == "interface_declaration" || n.Type() == "enum_declaration" {
+		if n.Type() == "class_declaration" || n.Type() == "interface_declaration" || n.Type() == "enum_declaration" || n.Type() == "record_declaration" {
 			if nameN := ingest.ChildByField(n, "name"); nameN != nil {
 				classHere = ingest.NodeText(nameN, content)
 			}
 		}
-		if n.Type() == "field_access" {
+		switch n.Type() {
+		case "method_invocation":
+			obj := ingest.ChildByField(n, "object")
+			name := ingest.ChildByField(n, "name")
+			if name != nil && ingest.NodeText(name, content) == oldLeaf {
+				if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals) {
+					edits = append(edits, ingest.Edit{
+						File:      fileRel,
+						StartByte: name.StartByte(),
+						EndByte:   name.EndByte(),
+						NewText:   newLeaf,
+					})
+				}
+			}
+		case "field_access":
 			obj := ingest.ChildByField(n, "object")
 			field := ingest.ChildByField(n, "field")
 			if field == nil {
 				field = ingest.ChildByType(n, "identifier")
 			}
 			if field != nil && ingest.NodeText(field, content) == oldLeaf {
-				if javaShouldRenameFieldAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals) {
+				if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals) {
 					edits = append(edits, ingest.Edit{
 						File:      fileRel,
 						StartByte: field.StartByte(),
@@ -707,8 +719,10 @@ func javaFieldAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf strin
 	return edits
 }
 
-// javaShouldRenameFieldAccess decides whether obj.oldLeaf targets our receiver type.
-func javaShouldRenameFieldAccess(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool) bool {
+// javaShouldRenameMemberAccess decides whether obj.oldLeaf targets our receiver type.
+// obj may be nil for bare calls (relations usually cover those; ExtraRename still
+// can rewrite unique-leaf sites, occupied spans skip already-covered ones).
+func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool) bool {
 	if obj == nil {
 		if enclosingClass != "" && ourReceivers[enclosingClass] {
 			return true
@@ -727,6 +741,26 @@ func javaShouldRenameFieldAccess(obj *grammar.Node, content []byte, enclosingCla
 		}
 		return len(foreignReceivers) == 0
 	}
+	// Nested type / enum-constant receivers: Outer.Nested.m(), Color.RED.m()
+	if obj.Type() == "field_access" {
+		text := ingest.NodeText(obj, content)
+		if ourReceivers[text] {
+			return true
+		}
+		if foreignReceivers[text] {
+			return false
+		}
+		// Color.RED.method → root type Color
+		if root := javaFieldAccessRoot(obj, content); root != "" {
+			if ourReceivers[root] {
+				return true
+			}
+			if foreignReceivers[root] {
+				return false
+			}
+		}
+		return len(foreignReceivers) == 0
+	}
 	if obj.Type() != "identifier" {
 		return false
 	}
@@ -741,6 +775,25 @@ func javaShouldRenameFieldAccess(obj *grammar.Node, content []byte, enclosingCla
 		return true
 	}
 	return len(foreignReceivers) == 0
+}
+
+// javaFieldAccessRoot returns the leftmost identifier of a field_access chain
+// (Color.RED → Color, Outer.Nested → Outer).
+func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
+	for obj != nil && !obj.IsNull() {
+		if obj.Type() == "identifier" || obj.Type() == "type_identifier" {
+			return ingest.NodeText(obj, content)
+		}
+		if obj.Type() != "field_access" {
+			return ""
+		}
+		next := ingest.ChildByField(obj, "object")
+		if next == nil {
+			return ""
+		}
+		obj = next
+	}
+	return ""
 }
 
 // javaTypedLocals maps locals/params declared with our receiver types.
