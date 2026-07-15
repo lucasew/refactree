@@ -173,10 +173,53 @@ func planSymbolRename(dir string, result *Result, sourceRefs []string, destSymbo
 				extra := expander.ExtraRenameEdits(dir, result, sourceRefs, oldLeaf, newText)
 				edits = append(edits, extra...)
 			}
+			edits = dedupeEdits(edits)
+			if mover, ok := driver.(RenameFileMover); ok {
+				if moves := mover.RenameFileMoves(result, sourceRefs, oldLeaf, newText); len(moves) > 0 {
+					edits = applyRenameFileMoves(dir, edits, moves)
+				}
+			}
+			return edits, nil
 		}
 	}
 
 	return dedupeEdits(edits), nil
+}
+
+// applyRenameFileMoves folds per-span renames on files that must relocate into
+// package-move style full-file edits (create new path, truncate old path).
+func applyRenameFileMoves(rootDir string, edits []Edit, moves map[string]string) []Edit {
+	if len(moves) == 0 {
+		return edits
+	}
+	// Group span edits by file for files being relocated.
+	byFile := map[string][]Edit{}
+	var kept []Edit
+	for _, e := range edits {
+		file := strings.TrimPrefix(e.File, "./")
+		if _, ok := moves[file]; ok {
+			byFile[file] = append(byFile[file], e)
+			continue
+		}
+		kept = append(kept, e)
+	}
+	for oldRel, newRel := range moves {
+		if oldRel == "" || newRel == "" || oldRel == newRel {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(rootDir, oldRel))
+		if err != nil {
+			// Fall back to leaving span edits on the old path.
+			kept = append(kept, byFile[oldRel]...)
+			continue
+		}
+		newContent := applyEditsToString(string(content), byFile[oldRel])
+		kept = append(kept,
+			Edit{File: oldRel, StartByte: 0, EndByte: uint32(len(content)), NewText: ""},
+			Edit{File: newRel, StartByte: 0, EndByte: 0, NewText: newContent},
+		)
+	}
+	return dedupeEdits(kept)
 }
 
 func dedupeEdits(edits []Edit) []Edit {

@@ -74,6 +74,14 @@ type RenameSpanExpander interface {
 	ExtraRenameEdits(rootDir string, result *Result, sourceRefs []string, oldLeaf, newLeaf string) []Edit
 }
 
+// RenameFileMover is an optional MoveDriver capability that relocates source
+// files when a symbol rename requires a different path (for example a Java
+// public top-level type whose filename must match the type name).
+// Values are slash paths relative to the ingest root without a leading "./".
+type RenameFileMover interface {
+	RenameFileMoves(result *Result, sourceRefs []string, oldLeaf, newLeaf string) map[string]string
+}
+
 // PackageMovePlanner is an optional MoveDriver capability for languages that
 // need multi-root package relocation and non-source support-file rewrites
 // (for example Java src/main/java + src/test/java and proguard/pom paths).
