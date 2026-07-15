@@ -409,6 +409,10 @@ func extractJSFunc(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 		Exported:  true,
 	})
 
+	// Default parameter values (n = helper()) are value references, not bindings.
+	if params := ingest.ChildByField(n, "parameters"); params != nil {
+		walkJSUsages(fe, params, source, name)
+	}
 	if body := ingest.ChildByField(n, "body"); body != nil {
 		walkJSUsages(fe, body, source, name)
 	}
@@ -444,6 +448,26 @@ func extractJSClass(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 	for i := uint32(0); i < body.ChildCount(); i++ {
 		member := body.Child(i)
 		switch member.Type() {
+		case "field_definition":
+			// Class field initializers: `b = new Box(1)` — walk value usages only.
+			if value := ingest.ChildByField(member, "value"); value != nil {
+				walkJSUsages(fe, value, source, className)
+			}
+			continue
+		case "method_definition":
+			// handled below
+		default:
+			continue
+		}
+		methodNameNode := ingest.ChildByField(member, "name")
+		if methodNameNode == nil {
+			continue
+		}
+		// Skip computed property names (e.g. [Symbol.asyncDispose]) — they are
+		// runtime-determined and cannot be statically refactored.
+		if methodNameNode.Type() == "computed_property_name" {
+			continue
+		}
 		case "method_definition":
 			methodNameNode := ingest.ChildByField(member, "name")
 			if methodNameNode == nil {
@@ -464,6 +488,11 @@ func extractJSClass(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 				Exported:  true,
 			})
 
+		if params := ingest.ChildByField(member, "parameters"); params != nil {
+			walkJSUsages(fe, params, source, methodName)
+		}
+		if methodBody := ingest.ChildByField(member, "body"); methodBody != nil {
+			walkJSUsages(fe, methodBody, source, methodName)
 			if methodBody := ingest.ChildByField(member, "body"); methodBody != nil {
 				walkJSUsages(fe, methodBody, source, methodName)
 			}
@@ -641,7 +670,17 @@ func walkJSUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope 
 		emitJSIdentifierUsage(fe, n, source, scope)
 		return
 	case "object_pattern", "array_pattern", "formal_parameters":
-		// Binding sites, not value references — do not emit usages for pattern ids.
+		// Binding sites for pattern ids — walk default-value expressions only.
+		walkJSBindingPatternDefaults(fe, n, source, scope)
+		return
+	case "assignment_pattern", "object_assignment_pattern":
+		// `n = helper()` / `{ n = helper() }` defaults: right-hand side is a value ref.
+		if right := ingest.ChildByField(n, "right"); right != nil {
+			walkJSUsages(fe, right, source, scope)
+		}
+		if left := ingest.ChildByField(n, "left"); left != nil {
+			walkJSBindingPatternDefaults(fe, left, source, scope)
+		}
 		return
 	case "function_declaration", "generator_function_declaration",
 		"class_declaration", "abstract_class_declaration",
@@ -667,6 +706,41 @@ func walkJSUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope 
 	}
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		walkJSUsages(fe, n.Child(i), source, scope)
+	}
+}
+
+// walkJSBindingPatternDefaults walks default-value expressions inside binding
+// patterns (formal parameters, object/array destructuring) without treating
+// the bound identifiers themselves as value references.
+func walkJSBindingPatternDefaults(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
+	if n == nil || n.IsNull() {
+		return
+	}
+	switch n.Type() {
+	case "assignment_pattern", "object_assignment_pattern":
+		// `n = helper()` / `{ n = helper() }` — right-hand side is a value ref.
+		if right := ingest.ChildByField(n, "right"); right != nil {
+			walkJSUsages(fe, right, source, scope)
+		}
+		if left := ingest.ChildByField(n, "left"); left != nil {
+			walkJSBindingPatternDefaults(fe, left, source, scope)
+		}
+		return
+	case "required_parameter", "optional_parameter":
+		// TS: (n: T = expr) — default is value field; pattern may nest further.
+		if value := ingest.ChildByField(n, "value"); value != nil {
+			walkJSUsages(fe, value, source, scope)
+		}
+		if pattern := ingest.ChildByField(n, "pattern"); pattern != nil {
+			walkJSBindingPatternDefaults(fe, pattern, source, scope)
+		}
+		return
+	case "object_pattern", "array_pattern", "formal_parameters",
+		"pair_pattern", "rest_pattern":
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walkJSBindingPatternDefaults(fe, n.Child(i), source, scope)
+		}
+		return
 	}
 }
 
