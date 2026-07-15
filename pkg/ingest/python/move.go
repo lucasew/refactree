@@ -648,7 +648,15 @@ func isPythonIdentChar(c byte) bool {
 // rewritePythonSymbolImport rewrites a Python import statement from the old
 // module to the new module. It uses the Result's alias data to find the
 // exact import module strings used in this file to refer to the source module,
-// then replaces the module path in the "from <module> import" statement.
+// then updates the "from <module> import <names>" statement.
+//
+// When the import lists multiple names and only some of them are the moved
+// symbol, the statement is split so remaining names keep the old module:
+//
+//	from pkg.mod import helper, stay  →  from pkg.mod import stay
+//	                                    from pkg.utils import helper
+//
+// A sole import of the moved symbol still rewrites only the module path.
 func rewritePythonSymbolImport(fileRelPath string, content []byte, result *ingest.Result, oldRef ingest.Reference, oldPath, newPath string) []ingest.Edit {
 	oldMod := pythonModuleFromPath(oldPath)
 	newMod := pythonModuleFromPath(newPath)
@@ -666,9 +674,9 @@ func rewritePythonSymbolImport(fileRelPath string, content []byte, result *inges
 
 	movedSymbol := oldRef.Symbol
 
-	// Scan for "from <module> import" statements and replace the module path
-	// only when it matches one of the known import module strings AND the
-	// imported symbols include the one being moved.
+	// Scan for "from <module> import" statements and rewrite when the module
+	// matches a known import module string AND the imported names include the
+	// symbol being moved.
 	for off := 0; off < len(text); {
 		idx := strings.Index(text[off:], "from ")
 		if idx < 0 {
@@ -689,9 +697,7 @@ func rewritePythonSymbolImport(fileRelPath string, content []byte, result *inges
 		// Find end of the import statement (end of line or multi-line paren group).
 		importStart := afterFrom + importIdx + 7 // skip " import"
 		importEnd := importStart
-		if importStart < len(text) && text[importStart] == ' ' {
-			importEnd = importStart
-			// Check for parenthesized multi-line imports.
+		if importStart < len(text) {
 			rest := strings.TrimLeft(text[importStart:], " \t")
 			if len(rest) > 0 && rest[0] == '(' {
 				parenClose := strings.Index(text[importStart:], ")")
@@ -710,19 +716,69 @@ func rewritePythonSymbolImport(fileRelPath string, content []byte, result *inges
 		}
 
 		if importModules[modStr] {
-			// Check if the moved symbol appears in the imported names.
 			importedNames := text[importStart:importEnd]
-			if movedSymbol == "" || strings.Contains(importedNames, movedSymbol) {
+			if movedSymbol == "" {
+				// Module-level / unknown symbol: fall back to path rewrite.
 				modStart := afterFrom + strings.Index(text[afterFrom:afterFrom+importIdx], modStr)
 				modEnd := modStart + len(modStr)
-
-				replacement := buildReplacementModule(modStr, oldMod, newMod)
-
 				edits = append(edits, ingest.Edit{
 					File:      fileRelPath,
 					StartByte: uint32(modStart),
 					EndByte:   uint32(modEnd),
-					NewText:   replacement,
+					NewText:   buildReplacementModule(modStr, oldMod, newMod),
+				})
+			} else if items := parsePythonImportItems(importedNames); len(items) > 0 {
+				var moved, stayed []pythonImportItem
+				for _, it := range items {
+					if it.name == movedSymbol {
+						moved = append(moved, it)
+					} else {
+						stayed = append(stayed, it)
+					}
+				}
+				if len(moved) == 0 {
+					// Substring match legacy path (e.g. unusual formatting): module rewrite.
+					if strings.Contains(importedNames, movedSymbol) {
+						modStart := afterFrom + strings.Index(text[afterFrom:afterFrom+importIdx], modStr)
+						modEnd := modStart + len(modStr)
+						edits = append(edits, ingest.Edit{
+							File:      fileRelPath,
+							StartByte: uint32(modStart),
+							EndByte:   uint32(modEnd),
+							NewText:   buildReplacementModule(modStr, oldMod, newMod),
+						})
+					}
+				} else if len(stayed) == 0 {
+					// Only the moved symbol(s): rewrite module path in place.
+					modStart := afterFrom + strings.Index(text[afterFrom:afterFrom+importIdx], modStr)
+					modEnd := modStart + len(modStr)
+					edits = append(edits, ingest.Edit{
+						File:      fileRelPath,
+						StartByte: uint32(modStart),
+						EndByte:   uint32(modEnd),
+						NewText:   buildReplacementModule(modStr, oldMod, newMod),
+					})
+				} else {
+					// Split: keep remaining names on the old module; add a new
+					// import for the moved symbol from the destination module.
+					replacement := buildReplacementModule(modStr, oldMod, newMod)
+					newText := formatPythonFromImport(modStr, stayed) + "\n" + formatPythonFromImport(replacement, moved)
+					edits = append(edits, ingest.Edit{
+						File:      fileRelPath,
+						StartByte: uint32(fromStart),
+						EndByte:   uint32(importEnd),
+						NewText:   newText,
+					})
+				}
+			} else if strings.Contains(importedNames, movedSymbol) {
+				// Unparsed import list (e.g. star): rewrite module only.
+				modStart := afterFrom + strings.Index(text[afterFrom:afterFrom+importIdx], modStr)
+				modEnd := modStart + len(modStr)
+				edits = append(edits, ingest.Edit{
+					File:      fileRelPath,
+					StartByte: uint32(modStart),
+					EndByte:   uint32(modEnd),
+					NewText:   buildReplacementModule(modStr, oldMod, newMod),
 				})
 			}
 		}
@@ -731,6 +787,106 @@ func rewritePythonSymbolImport(fileRelPath string, content []byte, result *inges
 	}
 
 	return edits
+}
+
+// pythonImportItem is one entry in a "from … import a, b as c" name list.
+type pythonImportItem struct {
+	name  string // imported name (before "as")
+	alias string // local alias, empty if none
+}
+
+// parsePythonImportItems splits a Python import name list into items.
+// Handles parenthesized multi-line lists and "name as alias" forms.
+// Returns nil for star imports or unparseable lists.
+func parsePythonImportItems(raw string) []pythonImportItem {
+	s := strings.TrimSpace(raw)
+	if s == "" || s == "*" || strings.HasPrefix(s, "*") {
+		return nil
+	}
+	if strings.HasPrefix(s, "(") {
+		end := strings.LastIndex(s, ")")
+		if end < 0 {
+			return nil
+		}
+		s = s[1:end]
+	}
+	// Drop comments and flatten newlines inside parenthesized groups.
+	var cleaned strings.Builder
+	for _, line := range strings.Split(s, "\n") {
+		if i := strings.Index(line, "#"); i >= 0 {
+			line = line[:i]
+		}
+		line = strings.TrimSpace(line)
+		if line == "" || line == "\\" {
+			continue
+		}
+		if cleaned.Len() > 0 {
+			cleaned.WriteByte(' ')
+		}
+		cleaned.WriteString(line)
+	}
+	s = strings.TrimSpace(cleaned.String())
+	if s == "" {
+		return nil
+	}
+
+	parts := strings.Split(s, ",")
+	var items []pythonImportItem
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		name := part
+		alias := ""
+		if i := strings.Index(part, " as "); i >= 0 {
+			name = strings.TrimSpace(part[:i])
+			alias = strings.TrimSpace(part[i+4:])
+		}
+		if name == "" || name == "*" || !isPythonIdent(name) {
+			return nil
+		}
+		if alias != "" && !isPythonIdent(alias) {
+			return nil
+		}
+		items = append(items, pythonImportItem{name: name, alias: alias})
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	return items
+}
+
+func isPythonIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if i == 0 {
+			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
+				return false
+			}
+			continue
+		}
+		if !isPythonIdentChar(c) {
+			return false
+		}
+	}
+	return true
+}
+
+// formatPythonFromImport builds a single-line "from <mod> import <names>" statement.
+func formatPythonFromImport(mod string, items []pythonImportItem) string {
+	parts := make([]string, 0, len(items))
+	for _, it := range items {
+		if it.alias != "" {
+			parts = append(parts, it.name+" as "+it.alias)
+		} else {
+			parts = append(parts, it.name)
+		}
+	}
+	return "from " + mod + " import " + strings.Join(parts, ", ")
 }
 
 // findImportModulesForFile finds the Python import module strings used in
