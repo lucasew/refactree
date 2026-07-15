@@ -561,6 +561,43 @@ func javaNodeIsPublic(n *grammar.Node) bool {
 	return false
 }
 
+// javaTypeLeafName returns the simple type identifier for a type node
+// (Worker, Outer.Inner → Inner, List<T> → List). Used when attaching
+// anonymous class body methods to the constructed type.
+func javaTypeLeafName(n *grammar.Node, source []byte) string {
+	if n == nil || n.IsNull() {
+		return ""
+	}
+	switch n.Type() {
+	case "type_identifier", "identifier":
+		return ingest.NodeText(n, source)
+	case "generic_type":
+		if typ := ingest.ChildByField(n, "type"); typ != nil {
+			return javaTypeLeafName(typ, source)
+		}
+	case "scoped_type_identifier":
+		if name := ingest.ChildByField(n, "name"); name != nil {
+			return ingest.NodeText(name, source)
+		}
+	}
+	var last string
+	var walk func(*grammar.Node)
+	walk = func(node *grammar.Node) {
+		if node == nil || node.IsNull() {
+			return
+		}
+		switch node.Type() {
+		case "type_identifier", "identifier":
+			last = ingest.NodeText(node, source)
+		}
+		for i := uint32(0); i < node.ChildCount(); i++ {
+			walk(node.Child(i))
+		}
+	}
+	walk(n)
+	return last
+}
+
 // walkJavaModifiers walks annotation / marker_annotation nodes under a
 // declaration's modifiers child so @Tag sites rename with the annotation type.
 func walkJavaModifiers(fe *ingest.FileExtract, decl *grammar.Node, source []byte, scope string) {
@@ -682,12 +719,31 @@ func walkJavaUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scop
 			return
 		}
 	case "object_creation_expression":
+		// new Type(...) or new Type() { ... anonymous body ... }.
+		// Anonymous class bodies override methods of the constructed type
+		// (same idea as enum constant bodies); extract them as Type.method
+		// so rename rewrites the override declarations with the type.
+		// tree-sitter-java exposes class_body as an unnamed child, not field "body".
+		typeName := ""
 		if typ := ingest.ChildByField(n, "type"); typ != nil {
 			walkJavaUsages(fe, typ, source, scope)
+			typeName = javaTypeLeafName(typ, source)
 		}
 		if args := ingest.ChildByField(n, "arguments"); args != nil {
 			walkJavaUsages(fe, args, source, scope)
 		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "class_body" && typeName != "" {
+				extractJavaTypeBody(fe, ch, source, typeName)
+			}
+		}
+		return
+	case "class_declaration", "interface_declaration", "enum_declaration", "record_declaration", "annotation_type_declaration":
+		// Local / nested types discovered while walking method bodies (local
+		// classes). Extract as named types so override methods participate in
+		// interface/superclass ExtraRename the same way as top-level types.
+		extractJavaType(fe, n, source)
 		return
 	case "scoped_type_identifier", "scoped_identifier":
 		// Prefer named fields when the grammar exposes them; tree-sitter-java
