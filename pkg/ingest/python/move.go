@@ -2,6 +2,8 @@ package python
 
 import (
 	"fmt"
+	"os"
+	"path"
 	"strings"
 
 	"github.com/lucasew/refactree/pkg/ingest"
@@ -72,6 +74,278 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 		EndByte:   insertAt,
 		NewText:   insertText,
 	}
+}
+
+// FinishCrossFileMove adds imports when residual same-file uses remain after a
+// move, and when the moved declaration still depends on names left in the
+// source module (mirrors JS FinishCrossFileMove).
+func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src, dst ingest.Reference, decl ingest.DeclExtract) ([]ingest.Edit, error) {
+	srcRel := strings.TrimPrefix(src.Path, "./")
+	dstRel := strings.TrimPrefix(dst.Path, "./")
+	if srcRel == dstRel {
+		return nil, nil
+	}
+	// Nested symbols (Class.method) are not expressible as a simple
+	// "from mod import leaf" for residual uses; leave those for method extract.
+	if strings.Contains(src.Symbol, ".") {
+		return nil, nil
+	}
+	leaf := src.Symbol
+	if leaf == "" {
+		return nil, nil
+	}
+
+	var edits []ingest.Edit
+	srcRef := src.String()
+
+	// 1. Source file still references the moved symbol → import it from dest.
+	if pythonFileUsesTargetOutside(result, srcRel, srcRef, decl.RemoveStart, decl.RemoveEnd) {
+		if srcContent, err := os.ReadFile(path.Join(rootDir, srcRel)); err == nil {
+			stmt := pythonFromImportStmt(srcRel, dstRel, leaf)
+			edits = append(edits, pythonImportInsertEdits(srcRel, srcContent, []string{stmt})...)
+		}
+	}
+
+	// 2. Moved declaration references other same-file entities → import them at dest.
+	localDeps := pythonLocalDepsForDecl(result, src, decl)
+	if len(localDeps) > 0 {
+		var stmts []string
+		for _, dep := range localDeps {
+			stmts = append(stmts, pythonFromImportStmt(dstRel, srcRel, dep))
+		}
+		dstPath := path.Join(rootDir, dstRel)
+		if dstContent, err := os.ReadFile(dstPath); err == nil {
+			edits = append(edits, pythonImportInsertEdits(dstRel, dstContent, stmts)...)
+		} else if os.IsNotExist(err) {
+			// New destination file: plan insert at byte 0. Applied after the
+			// InsertDecl edit (also at 0) so imports end up above the decl.
+			block := strings.Join(stmts, "\n") + "\n\n"
+			edits = append(edits, ingest.Edit{
+				File:      dstRel,
+				StartByte: 0,
+				EndByte:   0,
+				NewText:   block,
+			})
+		}
+	}
+
+	return edits, nil
+}
+
+// pythonFileUsesTargetOutside reports whether fileRel has a relation to targetRef
+// whose span is outside [removeStart, removeEnd].
+func pythonFileUsesTargetOutside(result *ingest.Result, fileRel, targetRef string, removeStart, removeEnd uint32) bool {
+	if result == nil {
+		return false
+	}
+	for _, rel := range result.Relations {
+		if rel.Target != targetRef {
+			continue
+		}
+		ref := ingest.ParseReference(rel.Reference)
+		if strings.TrimPrefix(ref.Path, "./") != fileRel {
+			continue
+		}
+		if rel.StartByte >= removeStart && rel.EndByte <= removeEnd {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// pythonLocalDepsForDecl returns top-level symbol names defined in the same file
+// as src that the moved declaration body references.
+func pythonLocalDepsForDecl(result *ingest.Result, src ingest.Reference, decl ingest.DeclExtract) []string {
+	if result == nil {
+		return nil
+	}
+	srcRef := src.String()
+	srcPath := src.Path
+	localEntities := map[string]bool{}
+	for _, ent := range result.Entities {
+		ref := ingest.ParseReference(ent.Reference)
+		if ref.Path != srcPath || ent.Reference == srcRef {
+			continue
+		}
+		// Only top-level names (no Class.method) for simple imports.
+		if ref.Symbol == "" || strings.Contains(ref.Symbol, ".") {
+			continue
+		}
+		localEntities[ref.Symbol] = true
+	}
+	if len(localEntities) == 0 {
+		return nil
+	}
+	var deps []string
+	seen := map[string]bool{}
+	for _, rel := range result.Relations {
+		ref := ingest.ParseReference(rel.Reference)
+		if ref.Path != srcPath {
+			continue
+		}
+		if rel.StartByte < decl.RemoveStart || rel.EndByte > decl.RemoveEnd {
+			continue
+		}
+		targetRef := ingest.ParseReference(rel.Target)
+		if targetRef.Path != srcPath {
+			continue
+		}
+		sym := targetRef.Symbol
+		if sym == "" || seen[sym] || sym == src.Symbol || strings.Contains(sym, ".") {
+			continue
+		}
+		if localEntities[sym] {
+			seen[sym] = true
+			deps = append(deps, sym)
+		}
+	}
+	return deps
+}
+
+// pythonFromImportStmt builds "from <module> import <symbol>" for a consumer
+// file importing a name defined in toFile.
+func pythonFromImportStmt(fromFile, toFile, symbol string) string {
+	toMod := pythonModuleFromPath(toFile)
+	fromDir := pythonDirOf(fromFile)
+	modSpec := toMod
+	if fromDir != "" {
+		if rel := makePythonRelativeSpec(fromDir, toMod); rel != "" {
+			modSpec = rel
+		}
+	}
+	return fmt.Sprintf("from %s import %s", modSpec, symbol)
+}
+
+// pythonImportInsertEdits inserts missing "from … import …" lines after any
+// existing import block (or at the top of the file).
+func pythonImportInsertEdits(file string, content []byte, stmts []string) []ingest.Edit {
+	if len(stmts) == 0 {
+		return nil
+	}
+	text := string(content)
+	var missing []string
+	for _, s := range stmts {
+		if s == "" || strings.Contains(text, s) {
+			continue
+		}
+		// Also skip if the symbol is already imported from somewhere
+		// ("import X" / "from Y import X" / "from Y import X as Z").
+		missing = append(missing, s)
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+
+	insertPos := pythonImportInsertPos(text)
+	block := strings.Join(missing, "\n") + "\n"
+	// Blank line after import block when inserting before non-import code.
+	if insertPos < len(text) {
+		rest := strings.TrimLeft(text[insertPos:], " \t")
+		if rest != "" && !strings.HasPrefix(rest, "import ") && !strings.HasPrefix(rest, "from ") && !strings.HasPrefix(rest, "\n") {
+			block += "\n"
+		}
+	}
+	return []ingest.Edit{{
+		File:      file,
+		StartByte: uint32(insertPos),
+		EndByte:   uint32(insertPos),
+		NewText:   block,
+	}}
+}
+
+// pythonImportInsertPos returns the byte offset after the last top-level
+// import/from-import line (and after a leading module docstring if present).
+func pythonImportInsertPos(text string) int {
+	offset := 0
+	insertPos := 0
+	// Skip UTF-8 BOM.
+	if strings.HasPrefix(text, "\ufeff") {
+		offset = 3
+		insertPos = 3
+	}
+	// Skip leading module docstring.
+	if rest := text[offset:]; len(rest) > 0 {
+		if q := pythonLeadingDocstringEnd(rest); q > 0 {
+			offset += q
+			insertPos = offset
+		}
+	}
+	for offset < len(text) {
+		// Find end of current line.
+		nl := strings.IndexByte(text[offset:], '\n')
+		var line string
+		var lineEnd int
+		if nl < 0 {
+			line = text[offset:]
+			lineEnd = len(text)
+		} else {
+			line = text[offset : offset+nl]
+			lineEnd = offset + nl + 1
+		}
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") ||
+			strings.HasPrefix(trimmed, "import ") || strings.HasPrefix(trimmed, "from ") {
+			insertPos = lineEnd
+			offset = lineEnd
+			if nl < 0 {
+				break
+			}
+			continue
+		}
+		// Parenthesized multi-line from-import: keep scanning until ")".
+		if strings.HasPrefix(trimmed, "from ") && strings.Contains(line, "(") && !strings.Contains(line, ")") {
+			offset = lineEnd
+			for offset < len(text) {
+				nl2 := strings.IndexByte(text[offset:], '\n')
+				if nl2 < 0 {
+					insertPos = len(text)
+					return insertPos
+				}
+				line2 := text[offset : offset+nl2]
+				offset = offset + nl2 + 1
+				insertPos = offset
+				if strings.Contains(line2, ")") {
+					break
+				}
+			}
+			continue
+		}
+		break
+	}
+	return insertPos
+}
+
+// pythonLeadingDocstringEnd returns the end offset (in s) of a leading
+// module docstring, or 0 if none. Offset is relative to s.
+func pythonLeadingDocstringEnd(s string) int {
+	i := 0
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') {
+		i++
+	}
+	if i >= len(s) {
+		return 0
+	}
+	var quote string
+	if strings.HasPrefix(s[i:], `"""`) {
+		quote = `"""`
+	} else if strings.HasPrefix(s[i:], `'''`) {
+		quote = `'''`
+	} else {
+		return 0
+	}
+	start := i + len(quote)
+	idx := strings.Index(s[start:], quote)
+	if idx < 0 {
+		return 0
+	}
+	end := start + idx + len(quote)
+	if end < len(s) && s[end] == '\n' {
+		end++
+	} else if end+1 < len(s) && s[end] == '\r' && s[end+1] == '\n' {
+		end += 2
+	}
+	return end
 }
 
 func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ingest.Result, oldRef, newRef ingest.Reference) []ingest.Edit {
