@@ -937,6 +937,26 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 	if obj == nil {
 		return false
 	}
+	// Unwrap (expr) so (b).m / (await make()).m / (a ?? b).m / (f ? a : b).m
+	// share logic with bare receivers.
+	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(obj, "expression")
+		if inner == nil && obj.ChildCount() > 0 {
+			// grammar may expose the expression as the first non-"(" child
+			for i := uint32(0); i < obj.ChildCount(); i++ {
+				ch := obj.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		if inner == nil {
+			break
+		}
+		obj = inner
+	}
 	// super.x targets a parent implementation, not the enclosing class's own
 	// override. When renaming Base.m, rewrite super.m in Child even if Child
 	// also defines m; when renaming Child.m, leave super.m alone.
@@ -960,22 +980,31 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 		}
 		return len(foreignReceivers) == 0
 	}
-	// Only simple identifiers: box.x, Box.x
-	if obj.Type() != "identifier" {
-		return false
+	// Simple identifiers: box.x, Box.x
+	if obj.Type() == "identifier" {
+		name := ingest.NodeText(obj, content)
+		if ourReceivers[name] {
+			return true
+		}
+		if foreignReceivers[name] {
+			return false
+		}
+		if typedLocals[name] {
+			return true
+		}
+		// Unique method leaf in the project graph: rewrite all simple member loads.
+		return len(foreignReceivers) == 0
 	}
-	name := ingest.NodeText(obj, content)
-	if ourReceivers[name] {
-		return true
+	// Complex expression receivers — call chains (b.next().m), await, ternary,
+	// nullish/binary, new Type() — only when the method leaf is unique project-wide.
+	// Without static return types we cannot disambiguate foreign same-leaf methods.
+	switch obj.Type() {
+	case "call_expression", "await_expression", "ternary_expression",
+		"binary_expression", "new_expression", "member_expression",
+		"member_expression_optional", "optional_chain":
+		return len(foreignReceivers) == 0
 	}
-	if foreignReceivers[name] {
-		return false
-	}
-	if typedLocals[name] {
-		return true
-	}
-	// Unique method leaf in the project graph: rewrite all simple member loads.
-	return len(foreignReceivers) == 0
+	return false
 }
 
 // jsTypedLocals maps local names constructed as ourReceivers (const b = new Box()).

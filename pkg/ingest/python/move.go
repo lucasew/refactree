@@ -1406,6 +1406,24 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	if obj == nil {
 		return false
 	}
+	// Parenthesized expressions share logic with the inner receiver.
+	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(obj, "expression")
+		if inner == nil && obj.ChildCount() > 0 {
+			for i := uint32(0); i < obj.ChildCount(); i++ {
+				ch := obj.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		if inner == nil {
+			break
+		}
+		obj = inner
+	}
 	// super().method() targets a parent implementation, not the enclosing class's
 	// own override. When renaming Base.m, rewrite super().m in Child even if Child
 	// also defines m; when renaming Child.m, leave super().m alone.
@@ -1415,41 +1433,65 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 		}
 		return true
 	}
-	// Only simple identifiers: self.x, cls.x, box.x, Box.x
-	if obj.Type() != "identifier" {
-		return false
-	}
-	name := ingest.NodeText(obj, content)
-	switch name {
-	case "self", "cls":
-		// Inside our class body: rewrite. If foreign classes share the leaf, only
-		// rewrite when enclosing class is one of ours.
-		if enclosingClass == "" {
+	// Box().method / Box(1).method — temporary constructor receiver.
+	if obj.Type() == "call" {
+		fn := ingest.ChildByField(obj, "function")
+		if fn != nil && fn.Type() == "identifier" {
+			name := ingest.NodeText(fn, content)
+			if ourReceivers[name] {
+				return true
+			}
+			if foreignReceivers[name] {
+				return false
+			}
+			// make().method — unknown return type: only when leaf is unique.
 			return len(foreignReceivers) == 0
 		}
-		if ourReceivers[enclosingClass] {
-			return true
-		}
-		if foreignReceivers[enclosingClass] {
-			return false
-		}
-		// Nested / unknown class: fail closed if collisions exist.
+		// Nested call / attribute callee: fail closed unless leaf is unique.
 		return len(foreignReceivers) == 0
 	}
-	// Class-qualified: Box.method
-	if ourReceivers[name] {
-		return true
+	// Simple identifiers: self.x, cls.x, box.x, Box.x
+	if obj.Type() == "identifier" {
+		name := ingest.NodeText(obj, content)
+		switch name {
+		case "self", "cls":
+			// Inside our class body: rewrite. If foreign classes share the leaf, only
+			// rewrite when enclosing class is one of ours.
+			if enclosingClass == "" {
+				return len(foreignReceivers) == 0
+			}
+			if ourReceivers[enclosingClass] {
+				return true
+			}
+			if foreignReceivers[enclosingClass] {
+				return false
+			}
+			// Nested / unknown class: fail closed if collisions exist.
+			return len(foreignReceivers) == 0
+		}
+		// Class-qualified: Box.method
+		if ourReceivers[name] {
+			return true
+		}
+		if foreignReceivers[name] {
+			return false
+		}
+		// Local with known type matching our receiver.
+		if typedLocals[name] {
+			return true
+		}
+		// No foreign same-leaf methods: rewrite all simple attribute loads of the leaf
+		// (unique method name in the project graph).
+		return len(foreignReceivers) == 0
 	}
-	if foreignReceivers[name] {
-		return false
+	// Complex receivers: xs[0].m, obj.box.m, (a if c else b).m — only when the
+	// method leaf is unique project-wide (no static type on the operand).
+	switch obj.Type() {
+	case "subscript", "attribute", "conditional_expression",
+		"binary_operator", "boolean_operator", "await":
+		return len(foreignReceivers) == 0
 	}
-	// Local with known type matching our receiver.
-	if typedLocals[name] {
-		return true
-	}
-	// No foreign same-leaf methods: rewrite all simple attribute loads of the leaf
-	// (unique method name in the project graph).
-	return len(foreignReceivers) == 0
+	return false
 }
 
 // pythonIsSuperCall reports whether n is a call to super (super() / super(C, self)).
