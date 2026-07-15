@@ -1,0 +1,4 @@
+{
+  "source": "path:./demo/Box.java::Worker.helper",
+  "destination": "path:./demo/Box.java::Worker.assist"
+}

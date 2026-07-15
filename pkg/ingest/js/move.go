@@ -937,8 +937,18 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 	if obj == nil {
 		return false
 	}
-	// this.x / super.x
-	if obj.Type() == "this" || obj.Type() == "super" {
+	// super.x targets a parent implementation, not the enclosing class's own
+	// override. When renaming Base.m, rewrite super.m in Child even if Child
+	// also defines m; when renaming Child.m, leave super.m alone.
+	// Mirrors pythonShouldRenameAttr's super() handling.
+	if obj.Type() == "super" {
+		if enclosingClass != "" && ourReceivers[enclosingClass] {
+			return false
+		}
+		return true
+	}
+	// this.x
+	if obj.Type() == "this" {
 		if enclosingClass == "" {
 			return len(foreignReceivers) == 0
 		}

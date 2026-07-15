@@ -64,11 +64,13 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 
 	var edits []ingest.Edit
 
-	// (1) Interface / override method declaration renames on related types.
+	// Inheritance edges (implements / extends) used for override decl expansion
+	// and for super.member ExtraRename decisions.
+	var implementsEdges map[string]map[string]bool
+	alsoTypes := map[string]bool{}
 	if len(ourTypes) > 0 {
-		implementsEdges := javaImplementsEdges(rootDir, result)
+		implementsEdges = javaImplementsEdges(rootDir, result)
 		// alsoTypes: implementors of our types and interfaces/supertypes our types implement.
-		alsoTypes := map[string]bool{}
 		for t := range ourTypes {
 			for iface := range implementsEdges[t] {
 				alsoTypes[iface] = true
@@ -79,6 +81,17 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 				}
 			}
 		}
+		// Related hierarchy types must count as our receivers so call sites on
+		// expanded override decls (enum implementors, subclasses) rewrite too.
+		// Without this, Worker.helper rename updates Kind's override def but
+		// leaves k.helper() stale when k is typed Kind.
+		for t := range alsoTypes {
+			ourReceivers[t] = true
+		}
+	}
+
+	// (1) Interface / override method declaration renames on related types.
+	if len(alsoTypes) > 0 {
 		for _, ent := range result.Entities {
 			if sourceSet[ent.Reference] {
 				continue
@@ -121,6 +134,15 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 				continue
 			}
 			if recv, ok := javaMemberReceiver(ref.Symbol); ok && !ourReceivers[recv] {
+				// Expanded hierarchy types are ours; don't treat their same-leaf
+				// methods as foreign just because the entity ref isn't in sourceSet.
+				recvLeaf := recv
+				if i := strings.LastIndex(recv, "."); i >= 0 {
+					recvLeaf = recv[i+1:]
+				}
+				if ourReceivers[recvLeaf] {
+					continue
+				}
 				foreignReceivers[recv] = true
 			}
 		}
@@ -134,7 +156,7 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 				continue
 			}
 			occ := occupied[rel]
-			for _, e := range javaMemberAccessEdits(rel, content, oldLeaf, newLeaf, ourReceivers, foreignReceivers) {
+			for _, e := range javaMemberAccessEdits(rel, content, oldLeaf, newLeaf, ourReceivers, foreignReceivers, implementsEdges) {
 				if ingest.SpanOccupied(occ, e.StartByte, e.EndByte) {
 					continue
 				}
@@ -758,7 +780,9 @@ func javaMemberReceiver(symbol string) (string, bool) {
 
 // javaMemberAccessEdits finds m.oldLeaf method_invocation name nodes and
 // field_access field nodes to rewrite.
-func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf string, ourReceivers, foreignReceivers map[string]bool) []ingest.Edit {
+// implementsEdges is map[typeSimpleName]set[parentSimpleName] from extends/implements;
+// used only for super.member decisions (may be nil).
+func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf string, ourReceivers, foreignReceivers map[string]bool, implementsEdges map[string]map[string]bool) []ingest.Edit {
 	pf, err := ingest.ParseSource(content, fileRel, "java")
 	if err != nil {
 		return nil
@@ -799,7 +823,7 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			obj := ingest.ChildByField(n, "object")
 			name := ingest.ChildByField(n, "name")
 			if name != nil && ingest.NodeText(name, content) == oldLeaf {
-				if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals) {
+				if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, implementsEdges) {
 					edits = append(edits, ingest.Edit{
 						File:      fileRel,
 						StartByte: name.StartByte(),
@@ -815,7 +839,7 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 				field = ingest.ChildByType(n, "identifier")
 			}
 			if field != nil && ingest.NodeText(field, content) == oldLeaf {
-				if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals) {
+				if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, implementsEdges) {
 					edits = append(edits, ingest.Edit{
 						File:      fileRel,
 						StartByte: field.StartByte(),
@@ -836,14 +860,38 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 // javaShouldRenameMemberAccess decides whether obj.oldLeaf targets our receiver type.
 // obj may be nil for bare calls (relations usually cover those; ExtraRename still
 // can rewrite unique-leaf sites, occupied spans skip already-covered ones).
-func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool) bool {
+// implementsEdges maps type → parent types (extends/implements); used for super.
+func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, implementsEdges map[string]map[string]bool) bool {
 	if obj == nil {
 		if enclosingClass != "" && ourReceivers[enclosingClass] {
 			return true
 		}
 		return len(foreignReceivers) == 0
 	}
-	if obj.Type() == "this" || obj.Type() == "super" {
+	// super.m targets a parent implementation. Rewrite when a declared parent of
+	// the enclosing type is among ourReceivers (parent/interface method rename,
+	// including hierarchy-expanded sources). Leave alone when only the enclosing
+	// type itself is ours and no parent is — parent method keeps its name.
+	if obj.Type() == "super" {
+		if enclosingClass == "" {
+			return len(foreignReceivers) == 0
+		}
+		if parents := implementsEdges[enclosingClass]; parents != nil {
+			for p := range parents {
+				if ourReceivers[p] {
+					return true
+				}
+			}
+		}
+		if ourReceivers[enclosingClass] {
+			return false
+		}
+		if foreignReceivers[enclosingClass] {
+			return false
+		}
+		return len(foreignReceivers) == 0
+	}
+	if obj.Type() == "this" {
 		if enclosingClass == "" {
 			return len(foreignReceivers) == 0
 		}
