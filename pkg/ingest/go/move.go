@@ -1379,6 +1379,17 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 			}
 			edits = append(edits, e)
 		}
+		// Non-identifier receivers: v.(T).M, xs[0].M, Make().M, (expr).M, (*T).M.
+		// Identifier receivers are handled by findSelectorLeafEdits; composite
+		// Type{}.M may also be covered here via operand type resolution.
+		if inOurPkg || relatedFiles[rel] {
+			for _, e := range findComplexOperandSelectorEdits(rel, content, oldLeaf, newLeaf, ourReceivers, foreignReceivers) {
+				if occ[[2]uint32{e.StartByte, e.EndByte}] {
+					continue
+				}
+				edits = append(edits, e)
+			}
+		}
 		if inOurPkg {
 			for _, e := range findInterfaceMethodEdits(rel, content, oldLeaf, newLeaf) {
 				if occ[[2]uint32{e.StartByte, e.EndByte}] {
@@ -2022,6 +2033,8 @@ func findSelectorLeafEdits(file string, content []byte, oldLeaf, newLeaf string,
 			continue
 		}
 		// Receiver must be an identifier (pkg.Leaf / recv.Leaf), not Type{}.Leaf.
+		// Complex operands (type assert, index, call, composite, paren) are
+		// handled by findComplexOperandSelectorEdits.
 		recvStart := dot - 1
 		if recvStart < 0 || !ingest.IsIdentChar(text[recvStart]) {
 			off = end
@@ -2044,6 +2057,119 @@ func findSelectorLeafEdits(file string, content []byte, oldLeaf, newLeaf string,
 		off = end
 	}
 	return edits
+}
+
+// findComplexOperandSelectorEdits rewrites recv.Method when recv is not a bare
+// identifier: v.(T).M, (v.(T)).M, xs[i].M, Make().M, T{}.M / &T{}.M, (*T).M.
+//
+// When foreign same-leaf methods exist, only rewrite when the operand type is
+// known and not a foreign receiver (same filter as identifier selectors).
+// When the leaf is unique package-wide (no foreignReceivers), rewrite all
+// complex selectors with that leaf.
+func findComplexOperandSelectorEdits(file string, content []byte, oldLeaf, newLeaf string, ourReceivers, foreignReceivers map[string]bool) []ingest.Edit {
+	pf, err := ingest.ParseSource(content, ".go", "")
+	if err != nil {
+		return nil
+	}
+	defer pf.Close()
+
+	uniqueLeaf := len(foreignReceivers) == 0
+	var edits []ingest.Edit
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		if n.Type() == "selector_expression" {
+			operand := ingest.ChildByField(n, "operand")
+			field := ingest.ChildByField(n, "field")
+			if field != nil && ingest.NodeText(field, content) == oldLeaf && operand != nil {
+				if !goOperandIsBareIdent(operand) {
+					ok := false
+					if typ := goComplexOperandType(operand, content); typ != "" {
+						typ = strings.TrimPrefix(typ, "*")
+						if ourReceivers[typ] {
+							ok = true
+						} else if foreignReceivers[typ] {
+							ok = false
+						} else if uniqueLeaf {
+							// Interface or other non-foreign type with unique leaf.
+							ok = true
+						}
+					} else if uniqueLeaf {
+						// Index/call/paren-ident/etc. without static type: only when unique.
+						ok = true
+					}
+					if ok {
+						edits = append(edits, ingest.Edit{
+							File:      file,
+							StartByte: field.StartByte(),
+							EndByte:   field.EndByte(),
+							NewText:   newLeaf,
+						})
+					}
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(pf.Root)
+	return edits
+}
+
+// goOperandIsBareIdent reports whether n is a plain identifier. Parenthesized
+// and other complex operands are handled by findComplexOperandSelectorEdits
+// (findSelectorLeafEdits only matches identifier characters immediately before '.').
+func goOperandIsBareIdent(n *grammar.Node) bool {
+	return n != nil && n.Type() == "identifier"
+}
+
+// goComplexOperandType returns a type name for operands we can resolve without
+// full type inference: type assert/convert, composite lit, &T{}, (*T), paren.
+func goComplexOperandType(n *grammar.Node, content []byte) string {
+	if n == nil {
+		return ""
+	}
+	switch n.Type() {
+	case "parenthesized_expression":
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			return goComplexOperandType(ch, content)
+		}
+	case "type_assertion_expression", "type_conversion_expression":
+		if t := ingest.ChildByField(n, "type"); t != nil {
+			return typeNameFromTypeNode(t, content)
+		}
+	case "composite_literal":
+		if t := ingest.ChildByField(n, "type"); t != nil {
+			return typeNameFromTypeNode(t, content)
+		}
+	case "unary_expression":
+		// &T{} method calls and (*T).M method expressions.
+		// Prefer a nested complex type; otherwise treat *Ident as type name T.
+		var starIdent string
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "identifier" {
+				starIdent = ingest.NodeText(ch, content)
+				continue
+			}
+			if t := goComplexOperandType(ch, content); t != "" {
+				return t
+			}
+		}
+		if starIdent != "" {
+			return strings.TrimPrefix(starIdent, "*")
+		}
+	case "pointer_type", "type_identifier":
+		return typeNameFromTypeNode(n, content)
+	}
+	return ""
 }
 
 func buildStringLiteralMask(text string) []bool {
