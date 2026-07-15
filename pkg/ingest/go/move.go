@@ -1402,6 +1402,16 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 			}
 			edits = append(edits, e)
 		}
+		// Box{}.Helper / &Box{}.Helper — composite-literal receivers (text scan
+		// only allows identifier receivers). Same-package only.
+		if inOurPkg || relatedFiles[rel] {
+			for _, e := range findCompositeLiteralSelectorEdits(rel, content, oldLeaf, newLeaf, ourReceivers, foreignReceivers) {
+				if occ[[2]uint32{e.StartByte, e.EndByte}] {
+					continue
+				}
+				edits = append(edits, e)
+			}
+		}
 		if inOurPkg {
 			for _, e := range findInterfaceMethodEdits(rel, content, oldLeaf, newLeaf) {
 				if occ[[2]uint32{e.StartByte, e.EndByte}] {
@@ -2045,6 +2055,7 @@ func findSelectorLeafEdits(file string, content []byte, oldLeaf, newLeaf string,
 			continue
 		}
 		// Receiver must be an identifier (pkg.Leaf / recv.Leaf), not Type{}.Leaf.
+		// Composite-literal receivers are handled by findCompositeLiteralSelectorEdits.
 		recvStart := dot - 1
 		if recvStart < 0 || !ingest.IsIdentChar(text[recvStart]) {
 			off = end
@@ -2067,6 +2078,83 @@ func findSelectorLeafEdits(file string, content []byte, oldLeaf, newLeaf string,
 		off = end
 	}
 	return edits
+}
+
+// findCompositeLiteralSelectorEdits rewrites Type{}.Method / &Type{}.Method when
+// the composite type is one of ourReceivers (or the method leaf is unique).
+func findCompositeLiteralSelectorEdits(file string, content []byte, oldLeaf, newLeaf string, ourReceivers, foreignReceivers map[string]bool) []ingest.Edit {
+	pf, err := ingest.ParseSource(content, ".go", "")
+	if err != nil {
+		return nil
+	}
+	defer pf.Close()
+
+	var edits []ingest.Edit
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		if n.Type() == "selector_expression" {
+			operand := ingest.ChildByField(n, "operand")
+			field := ingest.ChildByField(n, "field")
+			if field != nil && ingest.NodeText(field, content) == oldLeaf {
+				typ := compositeLiteralTypeName(operand, content)
+				if typ != "" {
+					ok := false
+					if ourReceivers[typ] {
+						ok = true
+					} else if foreignReceivers[typ] {
+						ok = false
+					} else if len(foreignReceivers) == 0 {
+						ok = true
+					}
+					if ok {
+						edits = append(edits, ingest.Edit{
+							File:      file,
+							StartByte: field.StartByte(),
+							EndByte:   field.EndByte(),
+							NewText:   newLeaf,
+						})
+					}
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(pf.Root)
+	return edits
+}
+
+// compositeLiteralTypeName returns T for T{}, &T{}, (*T){}, or nested unary &.
+func compositeLiteralTypeName(n *grammar.Node, content []byte) string {
+	if n == nil {
+		return ""
+	}
+	switch n.Type() {
+	case "composite_literal":
+		if t := ingest.ChildByField(n, "type"); t != nil {
+			return typeNameFromTypeNode(t, content)
+		}
+	case "unary_expression":
+		// &T{}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			if t := compositeLiteralTypeName(n.Child(i), content); t != "" {
+				return t
+			}
+		}
+	case "parenthesized_expression":
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			return compositeLiteralTypeName(ch, content)
+		}
+	}
+	return ""
 }
 
 func buildStringLiteralMask(text string) []bool {

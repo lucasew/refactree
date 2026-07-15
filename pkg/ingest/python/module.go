@@ -254,6 +254,9 @@ func extractPythonAssign(fe *ingest.FileExtract, assign *grammar.Node, source []
 		// are symbol names that should rename with those definitions.
 		if left != nil && left.Type() == "identifier" && ingest.NodeText(left, source) == "__all__" {
 			emitPythonDunderAllUsages(fe, right, source, scope)
+		} else if left != nil && left.Type() == "identifier" && ingest.NodeText(left, source) == "__slots__" && scope != "" {
+			// Class __slots__ = ("helper", "stay") — slot names track class attrs.
+			emitPythonSlotsUsages(fe, right, source, scope)
 		} else {
 			walkPythonUsages(fe, right, source, scope)
 		}
@@ -286,6 +289,34 @@ func emitPythonDunderAllUsages(fe *ingest.FileExtract, n *grammar.Node, source [
 	default:
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			emitPythonDunderAllUsages(fe, n.Child(i), source, scope)
+		}
+	}
+}
+
+// emitPythonSlotsUsages records string entries in class __slots__ as qualified
+// usages of Class.attr (span is string_content so renames rewrite helper not "helper").
+func emitPythonSlotsUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, classScope string) {
+	if n == nil || n.IsNull() || classScope == "" {
+		return
+	}
+	switch n.Type() {
+	case "list", "tuple":
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			emitPythonSlotsUsages(fe, n.Child(i), source, classScope)
+		}
+	case "string":
+		if content, text := pythonStringContent(n, source); content != nil && pythonIsIdentifier(text) {
+			fe.Usages = append(fe.Usages, ingest.UsageDef{
+				Scope:     classScope,
+				Name:      text,
+				Qualifier: classScope,
+				StartByte: content.StartByte(),
+				EndByte:   content.EndByte(),
+			})
+		}
+	default:
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			emitPythonSlotsUsages(fe, n.Child(i), source, classScope)
 		}
 	}
 }
@@ -595,6 +626,55 @@ func walkPythonUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, sc
 			})
 			return
 		}
+	case "class_pattern":
+		// match case Box(helper=h, stay=s): keyword names are Class.attr usages.
+		typeName := pythonClassPatternTypeName(n, source)
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() != "case_pattern" {
+				// Still walk nested patterns / type name identifier as type usage.
+				if ch.Type() == "dotted_name" || ch.Type() == "identifier" {
+					walkPythonUsages(fe, ch, source, scope)
+				}
+				continue
+			}
+			// case_pattern may wrap keyword_pattern.
+			kp := ch
+			if ch.ChildCount() == 1 && ch.Child(0).Type() == "keyword_pattern" {
+				kp = ch.Child(0)
+			}
+			if kp.Type() == "keyword_pattern" {
+				// keyword_pattern: identifier = pattern
+				var key *grammar.Node
+				for j := uint32(0); j < kp.ChildCount(); j++ {
+					c := kp.Child(j)
+					if c.Type() == "identifier" {
+						key = c
+						break
+					}
+				}
+				if key != nil && typeName != "" {
+					fe.Usages = append(fe.Usages, ingest.UsageDef{
+						Scope:     scope,
+						Name:      ingest.NodeText(key, source),
+						Qualifier: typeName,
+						StartByte: key.StartByte(),
+						EndByte:   key.EndByte(),
+					})
+				}
+				// Walk the bound pattern value for nested names.
+				for j := uint32(0); j < kp.ChildCount(); j++ {
+					c := kp.Child(j)
+					if c == key || c.Type() == "=" {
+						continue
+					}
+					walkPythonUsages(fe, c, source, scope)
+				}
+				continue
+			}
+			walkPythonUsages(fe, ch, source, scope)
+		}
+		return
 	case "identifier":
 		fe.Usages = append(fe.Usages, ingest.UsageDef{
 			Scope:     scope,
@@ -629,6 +709,32 @@ func walkPythonUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, sc
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		walkPythonUsages(fe, n.Child(i), source, scope)
 	}
+}
+
+// pythonClassPatternTypeName returns the class name in `case Box(...):` patterns.
+func pythonClassPatternTypeName(n *grammar.Node, source []byte) string {
+	if n == nil {
+		return ""
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		switch ch.Type() {
+		case "dotted_name":
+			// Take the last identifier segment (pkg.Box → Box for local attrs).
+			var last *grammar.Node
+			for j := uint32(0); j < ch.ChildCount(); j++ {
+				if ch.Child(j).Type() == "identifier" {
+					last = ch.Child(j)
+				}
+			}
+			if last != nil {
+				return ingest.NodeText(last, source)
+			}
+		case "identifier":
+			return ingest.NodeText(ch, source)
+		}
+	}
+	return ""
 }
 
 func pythonVisibilityName(name string) string {
