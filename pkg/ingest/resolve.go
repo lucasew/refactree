@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -143,8 +144,13 @@ func resolve(rootDir string, extracts []*FileExtract) *Result {
 				// export { default as Search } → target …::default (or file::SourceName).
 				target = SymbolRef(baseRef.Path, sourceName)
 			}
+			// Prefer the source-name token span so rename rewrites export { name } from
+			// without inserting at [0:0]. Zero-span when the driver did not record it
+			// (canonicalize-only hop).
 			res.Aliases = append(res.Aliases, Alias{
 				Reference: SymbolRef("./"+fe.Path, exportName),
+				StartByte: re.SourceStartByte,
+				EndByte:   re.SourceEndByte,
 				Target:    target,
 			})
 		}
@@ -210,6 +216,11 @@ func resolveQualifiedUsage(res *Result, imports map[string]resolvedImport, scope
 	} else {
 		// Qualifier is a local/package entity (var, type, func), not an import.
 		baseTarget = resolveEntityName(fe, u.Qualifier, allEntities)
+	}
+	// Java enum constants / nested fields used as receivers (RED.ordinal()):
+	// qualifier is not a top-level entity name — resolve Type.leaf via enclosing scope.
+	if baseTarget == "" {
+		baseTarget = resolveJavaNestedMember(fe, u.Scope, u.Qualifier, allEntities)
 	}
 	if baseTarget == "" {
 		return
@@ -293,13 +304,48 @@ func entityInFile(allEntities map[string][]entityLoc, name, file string) (string
 	return "", false
 }
 
+// resolveJavaNestedMember maps a bare leaf (field / enum constant) to Type.leaf
+// using the enclosing Java type from scope (e.g. Color.defaultColor + RED → Color.RED).
+func resolveJavaNestedMember(fe *FileExtract, scope, leaf string, allEntities map[string][]entityLoc) string {
+	if fe == nil || fe.Language != "java" || scope == "" || leaf == "" {
+		return ""
+	}
+	typeName := scope
+	if i := strings.Index(typeName, "."); i >= 0 {
+		typeName = typeName[:i]
+	}
+	qualified := typeName + "." + leaf
+	for _, loc := range allEntities[qualified] {
+		if loc.File == fe.Path {
+			return SymbolRef("./"+loc.File, loc.Entity.Name)
+		}
+	}
+	return ""
+}
+
 // resolveEntityName finds a symbol reference for a bare name in package/file scope.
 func resolveEntityName(fe *FileExtract, name string, allEntities map[string][]entityLoc) string {
-	if fe != nil && (fe.Language == "go" || fe.Language == "java") && fe.Package != "" {
+	if fe != nil && (fe.Language == "go" || fe.Language == "java") {
+		feDir := path.Dir(fe.Path)
+		if feDir == "." {
+			feDir = ""
+		}
 		for _, loc := range allEntities[name] {
-			if loc.File != fe.Path && loc.Package == fe.Package && loc.Language == fe.Language {
-				return SymbolRef("./"+loc.File, loc.Entity.Name)
+			if loc.File == fe.Path || loc.Package != fe.Package || loc.Language != fe.Language {
+				continue
 			}
+			// Same named package across files. Java's default package ("") is
+			// directory-scoped: only peers in the same directory are visible.
+			if fe.Package == "" {
+				locDir := path.Dir(loc.File)
+				if locDir == "." {
+					locDir = ""
+				}
+				if locDir != feDir {
+					continue
+				}
+			}
+			return SymbolRef("./"+loc.File, loc.Entity.Name)
 		}
 	}
 	for _, loc := range allEntities[name] {
@@ -325,19 +371,9 @@ func resolveDirectUsage(res *Result, fe *FileExtract, u UsageDef, imports map[st
 	if target == "" {
 		target = resolveEntityName(fe, u.Name, allEntities)
 	}
-	// 4. Nested members referenced unqualified inside a type scope (Java fields).
-	if target == "" && fe != nil && fe.Language == "java" && u.Scope != "" {
-		typeName := u.Scope
-		if i := strings.Index(typeName, "."); i >= 0 {
-			typeName = typeName[:i]
-		}
-		qualified := typeName + "." + u.Name
-		for _, loc := range allEntities[qualified] {
-			if loc.File == fe.Path {
-				target = SymbolRef("./"+loc.File, loc.Entity.Name)
-				break
-			}
-		}
+	// 4. Nested members referenced unqualified inside a type scope (Java fields / enum constants).
+	if target == "" {
+		target = resolveJavaNestedMember(fe, u.Scope, u.Name, allEntities)
 	}
 
 	if target != "" {

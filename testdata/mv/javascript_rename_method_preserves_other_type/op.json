@@ -1,0 +1,4 @@
+{
+  "source": "path:./main.js::A.run",
+  "destination": "path:./main.js::A.execute"
+}

@@ -1,0 +1,2 @@
+def stay():
+    pass

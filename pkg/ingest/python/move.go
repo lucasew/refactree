@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/lucasew/refactree/pkg/ingest"
@@ -648,7 +649,15 @@ func isPythonIdentChar(c byte) bool {
 // rewritePythonSymbolImport rewrites a Python import statement from the old
 // module to the new module. It uses the Result's alias data to find the
 // exact import module strings used in this file to refer to the source module,
-// then replaces the module path in the "from <module> import" statement.
+// then updates the "from <module> import <names>" statement.
+//
+// When the import lists multiple names and only some of them are the moved
+// symbol, the statement is split so remaining names keep the old module:
+//
+//	from pkg.mod import helper, stay  →  from pkg.mod import stay
+//	                                    from pkg.utils import helper
+//
+// A sole import of the moved symbol still rewrites only the module path.
 func rewritePythonSymbolImport(fileRelPath string, content []byte, result *ingest.Result, oldRef ingest.Reference, oldPath, newPath string) []ingest.Edit {
 	oldMod := pythonModuleFromPath(oldPath)
 	newMod := pythonModuleFromPath(newPath)
@@ -666,9 +675,9 @@ func rewritePythonSymbolImport(fileRelPath string, content []byte, result *inges
 
 	movedSymbol := oldRef.Symbol
 
-	// Scan for "from <module> import" statements and replace the module path
-	// only when it matches one of the known import module strings AND the
-	// imported symbols include the one being moved.
+	// Scan for "from <module> import" statements and rewrite when the module
+	// matches a known import module string AND the imported names include the
+	// symbol being moved.
 	for off := 0; off < len(text); {
 		idx := strings.Index(text[off:], "from ")
 		if idx < 0 {
@@ -689,9 +698,7 @@ func rewritePythonSymbolImport(fileRelPath string, content []byte, result *inges
 		// Find end of the import statement (end of line or multi-line paren group).
 		importStart := afterFrom + importIdx + 7 // skip " import"
 		importEnd := importStart
-		if importStart < len(text) && text[importStart] == ' ' {
-			importEnd = importStart
-			// Check for parenthesized multi-line imports.
+		if importStart < len(text) {
 			rest := strings.TrimLeft(text[importStart:], " \t")
 			if len(rest) > 0 && rest[0] == '(' {
 				parenClose := strings.Index(text[importStart:], ")")
@@ -710,19 +717,69 @@ func rewritePythonSymbolImport(fileRelPath string, content []byte, result *inges
 		}
 
 		if importModules[modStr] {
-			// Check if the moved symbol appears in the imported names.
 			importedNames := text[importStart:importEnd]
-			if movedSymbol == "" || strings.Contains(importedNames, movedSymbol) {
+			if movedSymbol == "" {
+				// Module-level / unknown symbol: fall back to path rewrite.
 				modStart := afterFrom + strings.Index(text[afterFrom:afterFrom+importIdx], modStr)
 				modEnd := modStart + len(modStr)
-
-				replacement := buildReplacementModule(modStr, oldMod, newMod)
-
 				edits = append(edits, ingest.Edit{
 					File:      fileRelPath,
 					StartByte: uint32(modStart),
 					EndByte:   uint32(modEnd),
-					NewText:   replacement,
+					NewText:   buildReplacementModule(modStr, oldMod, newMod),
+				})
+			} else if items := parsePythonImportItems(importedNames); len(items) > 0 {
+				var moved, stayed []pythonImportItem
+				for _, it := range items {
+					if it.name == movedSymbol {
+						moved = append(moved, it)
+					} else {
+						stayed = append(stayed, it)
+					}
+				}
+				if len(moved) == 0 {
+					// Substring match legacy path (e.g. unusual formatting): module rewrite.
+					if strings.Contains(importedNames, movedSymbol) {
+						modStart := afterFrom + strings.Index(text[afterFrom:afterFrom+importIdx], modStr)
+						modEnd := modStart + len(modStr)
+						edits = append(edits, ingest.Edit{
+							File:      fileRelPath,
+							StartByte: uint32(modStart),
+							EndByte:   uint32(modEnd),
+							NewText:   buildReplacementModule(modStr, oldMod, newMod),
+						})
+					}
+				} else if len(stayed) == 0 {
+					// Only the moved symbol(s): rewrite module path in place.
+					modStart := afterFrom + strings.Index(text[afterFrom:afterFrom+importIdx], modStr)
+					modEnd := modStart + len(modStr)
+					edits = append(edits, ingest.Edit{
+						File:      fileRelPath,
+						StartByte: uint32(modStart),
+						EndByte:   uint32(modEnd),
+						NewText:   buildReplacementModule(modStr, oldMod, newMod),
+					})
+				} else {
+					// Split: keep remaining names on the old module; add a new
+					// import for the moved symbol from the destination module.
+					replacement := buildReplacementModule(modStr, oldMod, newMod)
+					newText := formatPythonFromImport(modStr, stayed) + "\n" + formatPythonFromImport(replacement, moved)
+					edits = append(edits, ingest.Edit{
+						File:      fileRelPath,
+						StartByte: uint32(fromStart),
+						EndByte:   uint32(importEnd),
+						NewText:   newText,
+					})
+				}
+			} else if strings.Contains(importedNames, movedSymbol) {
+				// Unparsed import list (e.g. star): rewrite module only.
+				modStart := afterFrom + strings.Index(text[afterFrom:afterFrom+importIdx], modStr)
+				modEnd := modStart + len(modStr)
+				edits = append(edits, ingest.Edit{
+					File:      fileRelPath,
+					StartByte: uint32(modStart),
+					EndByte:   uint32(modEnd),
+					NewText:   buildReplacementModule(modStr, oldMod, newMod),
 				})
 			}
 		}
@@ -731,6 +788,106 @@ func rewritePythonSymbolImport(fileRelPath string, content []byte, result *inges
 	}
 
 	return edits
+}
+
+// pythonImportItem is one entry in a "from … import a, b as c" name list.
+type pythonImportItem struct {
+	name  string // imported name (before "as")
+	alias string // local alias, empty if none
+}
+
+// parsePythonImportItems splits a Python import name list into items.
+// Handles parenthesized multi-line lists and "name as alias" forms.
+// Returns nil for star imports or unparseable lists.
+func parsePythonImportItems(raw string) []pythonImportItem {
+	s := strings.TrimSpace(raw)
+	if s == "" || s == "*" || strings.HasPrefix(s, "*") {
+		return nil
+	}
+	if strings.HasPrefix(s, "(") {
+		end := strings.LastIndex(s, ")")
+		if end < 0 {
+			return nil
+		}
+		s = s[1:end]
+	}
+	// Drop comments and flatten newlines inside parenthesized groups.
+	var cleaned strings.Builder
+	for _, line := range strings.Split(s, "\n") {
+		if i := strings.Index(line, "#"); i >= 0 {
+			line = line[:i]
+		}
+		line = strings.TrimSpace(line)
+		if line == "" || line == "\\" {
+			continue
+		}
+		if cleaned.Len() > 0 {
+			cleaned.WriteByte(' ')
+		}
+		cleaned.WriteString(line)
+	}
+	s = strings.TrimSpace(cleaned.String())
+	if s == "" {
+		return nil
+	}
+
+	parts := strings.Split(s, ",")
+	var items []pythonImportItem
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		name := part
+		alias := ""
+		if i := strings.Index(part, " as "); i >= 0 {
+			name = strings.TrimSpace(part[:i])
+			alias = strings.TrimSpace(part[i+4:])
+		}
+		if name == "" || name == "*" || !isPythonIdent(name) {
+			return nil
+		}
+		if alias != "" && !isPythonIdent(alias) {
+			return nil
+		}
+		items = append(items, pythonImportItem{name: name, alias: alias})
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	return items
+}
+
+func isPythonIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if i == 0 {
+			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
+				return false
+			}
+			continue
+		}
+		if !isPythonIdentChar(c) {
+			return false
+		}
+	}
+	return true
+}
+
+// formatPythonFromImport builds a single-line "from <mod> import <names>" statement.
+func formatPythonFromImport(mod string, items []pythonImportItem) string {
+	parts := make([]string, 0, len(items))
+	for _, it := range items {
+		if it.alias != "" {
+			parts = append(parts, it.name+" as "+it.alias)
+		} else {
+			parts = append(parts, it.name)
+		}
+	}
+	return "from " + mod + " import " + strings.Join(parts, ", ")
 }
 
 // findImportModulesForFile finds the Python import module strings used in
@@ -774,19 +931,20 @@ func findImportModulesForFile(consumerFile string, result *ingest.Result, oldPat
 			modules[targetMod] = true
 
 			// Also add the relative import form (e.g. ".helpers" for same-dir).
-			if consumerDir != "" {
-				targetDir := ""
-				if targetRef.Provider == "path" {
-					tp := strings.TrimPrefix(targetRef.Path, "./")
-					if i := strings.LastIndex(tp, "/"); i >= 0 {
-						targetDir = tp[:i]
-					}
+			// When the ingest root is the package directory (CLI scopes symbol
+			// ops to the source file's parent), both consumerDir and targetDir
+			// are "" — still same-directory for a single-dot relative import.
+			targetDir := ""
+			if targetRef.Provider == "path" {
+				tp := strings.TrimPrefix(targetRef.Path, "./")
+				if i := strings.LastIndex(tp, "/"); i >= 0 {
+					targetDir = tp[:i]
 				}
-				if targetDir == consumerDir {
-					stem := pythonFileStem(strings.TrimPrefix(targetRef.Path, "./"))
-					if stem != "" {
-						modules["."+stem] = true
-					}
+			}
+			if targetDir == consumerDir {
+				stem := pythonFileStem(strings.TrimPrefix(targetRef.Path, "./"))
+				if stem != "" {
+					modules["."+stem] = true
 				}
 			}
 		}
@@ -1120,4 +1278,279 @@ func pythonFindClass(n *grammar.Node, source []byte, className string) *grammar.
 		}
 	}
 	return nil
+}
+
+// ExtraRenameEdits rewrites attribute call sites when renaming a method
+// (Class.method → Class.new_name). Relation-based rename only covers class-
+// qualified calls (Box.get_value) because instance receivers (self/params)
+// are not entities. Mirror Go ExtraRenameEdits for Python attributes.
+func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, sourceRefs []string, oldLeaf, newLeaf string) []ingest.Edit {
+	if oldLeaf == "" || oldLeaf == newLeaf || len(sourceRefs) == 0 || rootDir == "" || result == nil {
+		return nil
+	}
+	src := ingest.ParseReference(sourceRefs[0])
+	if !strings.Contains(src.Symbol, ".") {
+		return nil // only methods / nested symbols
+	}
+
+	ourReceivers := map[string]bool{}
+	sourceSet := map[string]bool{}
+	for _, s := range sourceRefs {
+		sourceSet[s] = true
+		ref := ingest.ParseReference(s)
+		if recv, ok := pythonMethodReceiver(ref.Symbol); ok {
+			ourReceivers[recv] = true
+		}
+	}
+	if len(ourReceivers) == 0 {
+		return nil
+	}
+
+	// Other classes that define the same method leaf — do not rewrite their calls.
+	foreignReceivers := map[string]bool{}
+	for _, ent := range result.Entities {
+		if sourceSet[ent.Reference] {
+			continue
+		}
+		ref := ingest.ParseReference(ent.Reference)
+		if ingest.SymbolLeaf(ref.Symbol) != oldLeaf {
+			continue
+		}
+		if recv, ok := pythonMethodReceiver(ref.Symbol); ok && !ourReceivers[recv] {
+			foreignReceivers[recv] = true
+		}
+	}
+
+	// Spans already covered by entity/relation renames.
+	occupied := map[string]map[[2]uint32]bool{}
+	mark := func(file string, start, end uint32) {
+		file = strings.TrimPrefix(file, "./")
+		if occupied[file] == nil {
+			occupied[file] = map[[2]uint32]bool{}
+		}
+		occupied[file][[2]uint32{start, end}] = true
+	}
+	for _, ent := range result.Entities {
+		if !sourceSet[ent.Reference] {
+			continue
+		}
+		ref := ingest.ParseReference(ent.Reference)
+		mark(ref.Path, ent.StartByte, ent.EndByte)
+	}
+	for _, rel := range result.Relations {
+		if !sourceSet[rel.Target] {
+			continue
+		}
+		ref := ingest.ParseReference(rel.Reference)
+		mark(ref.Path, rel.StartByte, rel.EndByte)
+	}
+
+	var edits []ingest.Edit
+	for _, f := range result.Files {
+		if f.Language != "python" {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Path, "./")
+		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		occ := occupied[rel]
+		for _, e := range pythonMethodAttrEdits(rel, content, oldLeaf, newLeaf, ourReceivers, foreignReceivers) {
+			if occ[[2]uint32{e.StartByte, e.EndByte}] {
+				continue
+			}
+			edits = append(edits, e)
+		}
+	}
+	return edits
+}
+
+// pythonMethodReceiver returns the class name for "Class.method" symbols.
+func pythonMethodReceiver(symbol string) (string, bool) {
+	if symbol == "" || !strings.Contains(symbol, ".") {
+		return "", false
+	}
+	// Nested: Outer.Inner.method → treat last parent as receiver class name segment.
+	// For Class.method, receiver is Class.
+	parts := strings.Split(symbol, ".")
+	if len(parts) < 2 {
+		return "", false
+	}
+	// method leaf is last; receiver for Class.method is Class; for A.B.m is A.B
+	recv := strings.Join(parts[:len(parts)-1], ".")
+	return recv, recv != ""
+}
+
+// pythonMethodAttrEdits finds obj.oldLeaf attribute nodes to rewrite.
+func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, ourReceivers, foreignReceivers map[string]bool) []ingest.Edit {
+	pf, err := ingest.ParseSource(content, ".py", "")
+	if err != nil {
+		return nil
+	}
+	defer pf.Close()
+
+	// Locals whose static type we can attribute to a class (annotations / Class()).
+	typedLocals := pythonTypedLocals(pf.Root, content, ourReceivers)
+
+	var edits []ingest.Edit
+	var walk func(n *grammar.Node, enclosingClass string)
+	walk = func(n *grammar.Node, enclosingClass string) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		classHere := enclosingClass
+		if n.Type() == "class_definition" {
+			if nameN := ingest.ChildByField(n, "name"); nameN != nil {
+				classHere = ingest.NodeText(nameN, content)
+			}
+		}
+		if n.Type() == "attribute" {
+			obj := ingest.ChildByField(n, "object")
+			attr := ingest.ChildByField(n, "attribute")
+			if obj != nil && attr != nil && ingest.NodeText(attr, content) == oldLeaf {
+				if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals) {
+					edits = append(edits, ingest.Edit{
+						File:      fileRel,
+						StartByte: attr.StartByte(),
+						EndByte:   attr.EndByte(),
+						NewText:   newLeaf,
+					})
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i), classHere)
+		}
+	}
+	walk(pf.Root, "")
+	return edits
+}
+
+// pythonShouldRenameAttr decides whether obj.oldLeaf is a call on one of our receivers.
+func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool) bool {
+	if obj == nil {
+		return false
+	}
+	// Only simple identifiers: self.x, cls.x, box.x, Box.x
+	if obj.Type() != "identifier" {
+		return false
+	}
+	name := ingest.NodeText(obj, content)
+	switch name {
+	case "self", "cls":
+		// Inside our class body: rewrite. If foreign classes share the leaf, only
+		// rewrite when enclosing class is one of ours.
+		if enclosingClass == "" {
+			return len(foreignReceivers) == 0
+		}
+		if ourReceivers[enclosingClass] {
+			return true
+		}
+		if foreignReceivers[enclosingClass] {
+			return false
+		}
+		// Nested / unknown class: fail closed if collisions exist.
+		return len(foreignReceivers) == 0
+	}
+	// Class-qualified: Box.method
+	if ourReceivers[name] {
+		return true
+	}
+	if foreignReceivers[name] {
+		return false
+	}
+	// Local with known type matching our receiver.
+	if typedLocals[name] {
+		return true
+	}
+	// No foreign same-leaf methods: rewrite all simple attribute loads of the leaf
+	// (unique method name in the project graph).
+	return len(foreignReceivers) == 0
+}
+
+// pythonTypedLocals maps local names that are annotated or assigned as ourReceivers.
+// Covers: `b: Box`, `b = Box()`, `b: Box = ...`.
+func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]bool {
+	out := map[string]bool{}
+	if root == nil || len(ourReceivers) == 0 {
+		return out
+	}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		switch n.Type() {
+		case "parameters", "lambda_parameters":
+			// function params: (self, b: Box) / (b: "Box")
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				p := n.Child(i)
+				switch p.Type() {
+				case "typed_parameter", "typed_default_parameter":
+					nameN := ingest.ChildByField(p, "name")
+					typeN := ingest.ChildByField(p, "type")
+					if nameN == nil {
+						// grammar may put identifier as first named child
+						nameN = ingest.ChildByType(p, "identifier")
+					}
+					if nameN != nil && typeN != nil {
+						if tn := pythonTypeName(typeN, content); ourReceivers[tn] {
+							out[ingest.NodeText(nameN, content)] = true
+						}
+					}
+				}
+			}
+		case "assignment":
+			left := ingest.ChildByField(n, "left")
+			right := ingest.ChildByField(n, "right")
+			typeN := ingest.ChildByField(n, "type")
+			if left != nil && left.Type() == "identifier" {
+				lname := ingest.NodeText(left, content)
+				if typeN != nil {
+					if tn := pythonTypeName(typeN, content); ourReceivers[tn] {
+						out[lname] = true
+					}
+				}
+				if right != nil && right.Type() == "call" {
+					fn := ingest.ChildByField(right, "function")
+					if fn != nil && fn.Type() == "identifier" {
+						if ourReceivers[ingest.NodeText(fn, content)] {
+							out[lname] = true
+						}
+					}
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	return out
+}
+
+// pythonTypeName extracts a simple class name from a type annotation node.
+func pythonTypeName(typeN *grammar.Node, content []byte) string {
+	if typeN == nil {
+		return ""
+	}
+	// type may be type node wrapping identifier / attribute / string
+	if typeN.Type() == "type" && typeN.ChildCount() > 0 {
+		typeN = typeN.Child(0)
+	}
+	switch typeN.Type() {
+	case "identifier":
+		return ingest.NodeText(typeN, content)
+	case "string":
+		// from __future__ annotations / quoted: "Box"
+		s := ingest.NodeText(typeN, content)
+		return strings.Trim(s, `"'`)
+	case "attribute":
+		// pkg.Box — use leaf
+		if attr := ingest.ChildByField(typeN, "attribute"); attr != nil {
+			return ingest.NodeText(attr, content)
+		}
+	}
+	return ""
 }

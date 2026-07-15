@@ -95,8 +95,15 @@ run = [
 ]
 
 [projects.astro.mise.tasks.test]
-description = "Run unit tests for the astro package"
-run = "pnpm --filter astro run test:unit -- --verbose"
+description = "Build workspace dist packages, then run astro unit tests"
+# unit tests import packages/astro/dist and workspace:* packages that export dist/*
+# (e.g. @astrojs/internal-helpers/remote). Setup only pnpm-installs sources.
+# Build on check (not only setup) so dist reflects the tree after catalog mv.
+run = [
+  "pnpm --filter @astrojs/internal-helpers run build:ci",
+  "pnpm --filter astro run build:ci",
+  "pnpm --filter astro run test:unit -- --verbose",
+]
 
 [projects.pesquisarr]
 url = "https://github.com/lucasew/pesquisarr.git"
