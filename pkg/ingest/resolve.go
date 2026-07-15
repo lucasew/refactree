@@ -143,8 +143,13 @@ func resolve(rootDir string, extracts []*FileExtract) *Result {
 				// export { default as Search } → target …::default (or file::SourceName).
 				target = SymbolRef(baseRef.Path, sourceName)
 			}
+			// Prefer the source-name token span so rename rewrites export { name } from
+			// without inserting at [0:0]. Zero-span when the driver did not record it
+			// (canonicalize-only hop).
 			res.Aliases = append(res.Aliases, Alias{
 				Reference: SymbolRef("./"+fe.Path, exportName),
+				StartByte: re.SourceStartByte,
+				EndByte:   re.SourceEndByte,
 				Target:    target,
 			})
 		}
