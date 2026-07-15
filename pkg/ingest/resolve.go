@@ -62,6 +62,9 @@ func resolve(rootDir string, extracts []*FileExtract) *Result {
 
 	// Build import tables and emit aliases.
 	importTables := map[string]map[string]resolvedImport{}
+	// starModules maps importer file path → resolved module bases from
+	// `from mod import *` so bare identifiers can bind to exported top-level names.
+	starModules := map[string][]string{}
 
 	for _, fe := range extracts {
 		table := map[string]resolvedImport{}
@@ -76,6 +79,12 @@ func resolve(rootDir string, extracts []*FileExtract) *Result {
 			base := imp.SourcePath
 			if hasDriver {
 				base = driver.ResolveImport(imp.SourcePath, ctx)
+			}
+			// Star / wildcard member import: no local name token to rewrite; keep
+			// module base for bare-name resolution in resolveDirectUsage.
+			if imp.MemberName == "*" || imp.LocalName == "*" {
+				starModules[fe.Path] = append(starModules[fe.Path], base)
+				continue
 			}
 			ri := resolvedImport{
 				Target:          base,
@@ -184,6 +193,7 @@ func resolve(rootDir string, extracts []*FileExtract) *Result {
 	// Resolve usages to relations.
 	for _, fe := range extracts {
 		imports := importTables[fe.Path]
+		stars := starModules[fe.Path]
 		for _, u := range fe.Usages {
 			scopeRef := SymbolRef("./"+fe.Path, u.Scope)
 			if u.Scope == "" {
@@ -193,7 +203,7 @@ func resolve(rootDir string, extracts []*FileExtract) *Result {
 			if u.Qualifier != "" {
 				resolveQualifiedUsage(res, imports, scopeRef, u, allEntities, fe)
 			} else {
-				resolveDirectUsage(res, fe, u, imports, allEntities, scopeRef)
+				resolveDirectUsage(res, fe, u, imports, stars, allEntities, scopeRef)
 			}
 		}
 	}
@@ -371,7 +381,7 @@ func resolveEntityName(fe *FileExtract, name string, allEntities map[string][]en
 }
 
 // resolveDirectUsage handles bare identifier access.
-func resolveDirectUsage(res *Result, fe *FileExtract, u UsageDef, imports map[string]resolvedImport, allEntities map[string][]entityLoc, scopeRef string) {
+func resolveDirectUsage(res *Result, fe *FileExtract, u UsageDef, imports map[string]resolvedImport, starBases []string, allEntities map[string][]entityLoc, scopeRef string) {
 	target := ""
 	viaImportAlias := false
 
@@ -388,6 +398,22 @@ func resolveDirectUsage(res *Result, fe *FileExtract, u UsageDef, imports map[st
 	// 4. Nested members referenced unqualified inside a type scope (Java fields / enum constants).
 	if target == "" {
 		target = resolveJavaNestedMember(fe, u.Scope, u.Name, allEntities)
+	}
+	// 5. Star imports (`from mod import *`): bind bare names to top-level entities
+	// in the imported module (skip private `_` names; last star wins on collision).
+	if target == "" && len(starBases) > 0 && u.Name != "" && !strings.HasPrefix(u.Name, "_") {
+		for i := len(starBases) - 1; i >= 0; i-- {
+			baseRef := ParseReference(starBases[i])
+			file := strings.TrimPrefix(baseRef.Path, "./")
+			if file == "" {
+				continue
+			}
+			// Only flat top-level names (not Type.method) are introduced by import *.
+			if t, ok := entityInFile(allEntities, u.Name, file); ok {
+				target = t
+				break
+			}
+		}
 	}
 
 	if target != "" {

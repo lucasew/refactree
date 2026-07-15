@@ -1250,6 +1250,29 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		relatedFiles[strings.TrimPrefix(ref.Path, "./")] = true
 	}
 
+	// Receivers among our rename targets that do not also declare a method with
+	// this leaf — composite literal keys only apply to pure field renames.
+	fieldReceivers := map[string]bool{}
+	for recv := range ourReceivers {
+		fieldReceivers[recv] = true
+	}
+	for _, f := range result.Files {
+		if f.Language != "go" {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Path, "./")
+		if !ourPkgDirs[dirOf(rel)] {
+			continue
+		}
+		c, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		for _, r := range methodReceiversWithLeaf(c, oldLeaf) {
+			delete(fieldReceivers, r)
+		}
+	}
+
 	var edits []ingest.Edit
 	for _, f := range result.Files {
 		if f.Language != "go" {
@@ -1307,6 +1330,18 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 			}
 			edits = append(edits, e)
 		}
+		// Struct field renames: Type{OldLeaf: …} composite literal keys.
+		if (inOurPkg || relatedFiles[rel]) && len(fieldReceivers) > 0 {
+			for _, e := range findCompositeFieldKeyEdits(rel, content, oldLeaf, newLeaf, fieldReceivers) {
+				if occ[[2]uint32{e.StartByte, e.EndByte}] {
+					continue
+				}
+				edits = append(edits, e)
+				if occ != nil {
+					occ[[2]uint32{e.StartByte, e.EndByte}] = true
+				}
+			}
+		}
 		if inOurPkg {
 			for _, e := range findInterfaceMethodEdits(rel, content, oldLeaf, newLeaf) {
 				if occ[[2]uint32{e.StartByte, e.EndByte}] {
@@ -1317,6 +1352,115 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		}
 	}
 	return edits
+}
+
+// findCompositeFieldKeyEdits rewrites OldLeaf keys in composite literals whose
+// type is one of ourReceivers (e.g. Box{Helper: 1} when renaming Box.Helper).
+func findCompositeFieldKeyEdits(file string, content []byte, oldLeaf, newLeaf string, ourReceivers map[string]bool) []ingest.Edit {
+	if oldLeaf == "" || len(ourReceivers) == 0 {
+		return nil
+	}
+	pf, err := ingest.ParseSource(content, file, "go")
+	if err != nil {
+		return nil
+	}
+	defer pf.Close()
+
+	var edits []ingest.Edit
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		if n.Type() == "composite_literal" {
+			typ := compositeLiteralTypeName(n, content)
+			if typ != "" && ourReceivers[typ] {
+				var body *grammar.Node
+				for i := uint32(0); i < n.ChildCount(); i++ {
+					c := n.Child(i)
+					if c.Type() == "literal_value" {
+						body = c
+						break
+					}
+				}
+				if body != nil {
+					collectCompositeKeyEdits(body, content, file, oldLeaf, newLeaf, &edits)
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(pf.Root)
+	return edits
+}
+
+func compositeLiteralTypeName(n *grammar.Node, content []byte) string {
+	if n == nil {
+		return ""
+	}
+	if typN := ingest.ChildByField(n, "type"); typN != nil {
+		return strings.TrimPrefix(typeNameFromTypeNode(typN, content), "*")
+	}
+	// tree-sitter-go often exposes the type as a bare type_identifier child.
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		c := n.Child(i)
+		switch c.Type() {
+		case "type_identifier", "qualified_type", "generic_type", "pointer_type":
+			return strings.TrimPrefix(typeNameFromTypeNode(c, content), "*")
+		}
+	}
+	return ""
+}
+
+func collectCompositeKeyEdits(n *grammar.Node, content []byte, file, oldLeaf, newLeaf string, edits *[]ingest.Edit) {
+	if n == nil || n.IsNull() {
+		return
+	}
+	if n.Type() == "keyed_element" {
+		// key: value — key is field_identifier, identifier, or literal_element wrapping one.
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c.Type() == ":" {
+				break
+			}
+			keyNode := compositeKeyIdent(c)
+			if keyNode == nil {
+				continue
+			}
+			if ingest.NodeText(keyNode, content) == oldLeaf {
+				*edits = append(*edits, ingest.Edit{
+					File:      file,
+					StartByte: keyNode.StartByte(),
+					EndByte:   keyNode.EndByte(),
+					NewText:   newLeaf,
+				})
+			}
+			break
+		}
+		return
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		collectCompositeKeyEdits(n.Child(i), content, file, oldLeaf, newLeaf, edits)
+	}
+}
+
+func compositeKeyIdent(n *grammar.Node) *grammar.Node {
+	if n == nil {
+		return nil
+	}
+	switch n.Type() {
+	case "field_identifier", "identifier":
+		return n
+	case "literal_element":
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			if id := compositeKeyIdent(n.Child(i)); id != nil {
+				return id
+			}
+		}
+	}
+	return nil
 }
 
 // embeddedTypeFieldSelectorEdits rewrites `.OldType` selectors when renaming a

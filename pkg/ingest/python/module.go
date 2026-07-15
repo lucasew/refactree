@@ -449,10 +449,23 @@ func extractPythonImportFrom(fe *ingest.FileExtract, n *grammar.Node, source []b
 	moduleName := pythonModuleSpec(modNode, source)
 
 	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		// Star import: `from box import *` — wildcard_import has no "name" field.
+		// Record as MemberName "*" so resolve can bind bare call sites to the
+		// target module's top-level entities.
+		if child.Type() == "wildcard_import" {
+			fe.Imports = append(fe.Imports, ingest.ImportDef{
+				LocalName:  "*",
+				SourcePath: moduleName,
+				MemberName: "*",
+				StartByte:  child.StartByte(),
+				EndByte:    child.EndByte(),
+			})
+			continue
+		}
 		if n.FieldNameForChild(i) != "name" {
 			continue
 		}
-		child := n.Child(i)
 
 		switch child.Type() {
 		case "aliased_import":
