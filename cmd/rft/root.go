@@ -50,6 +50,7 @@ func newRootCmd() (*cobra.Command, *pprof.Profiler) {
 		newBrowseCmd(),
 		newEditCmd(),
 		newLsCmd(),
+		newLSPCmd(),
 		newMvCmd(),
 		newDocCmd(),
 		newIngestCmd(),

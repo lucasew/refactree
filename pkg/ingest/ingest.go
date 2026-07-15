@@ -7,14 +7,19 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+
+	"github.com/lucasew/refactree/pkg/projectfs"
 )
 
 // appendImportTargetExtracts parses files referenced by imports/reexports when
 // the language driver resolves them to a path under rootAbs (including a single
 // node_modules entry). Does not recurse into dependency trees.
-func appendImportTargetExtracts(rootAbs string, extracts []*FileExtract, seen map[string]bool) []*FileExtract {
+func appendImportTargetExtracts(rootAbs string, extracts []*FileExtract, seen map[string]bool, fsys projectfs.FS) []*FileExtract {
 	if seen == nil {
 		seen = map[string]bool{}
+	}
+	if fsys == nil {
+		fsys = projectfs.OS{}
 	}
 	known := map[string]bool{}
 	for _, fe := range extracts {
@@ -58,7 +63,7 @@ func appendImportTargetExtracts(rootAbs string, extracts []*FileExtract, seen ma
 				continue
 			}
 			seen[abs] = true
-			extra, err := parseFileCached(rootAbs, abs, nil)
+			extra, err := parseFileCached(rootAbs, abs, nil, fsys)
 			if err != nil || extra == nil {
 				continue
 			}
@@ -251,10 +256,14 @@ var extractCache sync.Map // extractCacheKey -> extractCacheEntry
 
 // parseFileCached returns a cached FileExtract when the file's mtime matches a
 // previous parse for the same ingest root; otherwise parses and stores.
-func parseFileCached(rootAbs, absPath string, info os.FileInfo) (*FileExtract, error) {
+// fsys nil means disk.
+func parseFileCached(rootAbs, absPath string, info os.FileInfo, fsys projectfs.FS) (*FileExtract, error) {
+	if fsys == nil {
+		fsys = projectfs.OS{}
+	}
 	if info == nil {
 		var err error
-		info, err = os.Stat(absPath)
+		info, err = fsys.Stat(absPath)
 		if err != nil {
 			return nil, err
 		}
@@ -270,7 +279,7 @@ func parseFileCached(rootAbs, absPath string, info os.FileInfo) (*FileExtract, e
 		}
 	}
 
-	fe, err := parseFile(rootAbs, absPath)
+	fe, err := parseFile(rootAbs, absPath, fsys)
 	if err != nil || fe == nil {
 		return fe, err
 	}
@@ -299,7 +308,10 @@ func ClearExtractCache() {
 // Some pure-Go tree-sitter grammars can SIGSEGV on valid source (observed on
 // Go slice/variadic patterns). SetPanicOnFault turns that into a recoverable
 // error so HTTP serve and ingest walks stay up.
-func parseFile(dir, absPath string) (*FileExtract, error) {
+func parseFile(dir, absPath string, fsys projectfs.FS) (*FileExtract, error) {
+	if fsys == nil {
+		fsys = projectfs.OS{}
+	}
 	driver, ok := languageDriverForFile(absPath)
 	if !ok {
 		return nil, nil
@@ -314,7 +326,7 @@ func parseFile(dir, absPath string) (*FileExtract, error) {
 		return nil, err
 	}
 
-	source, err := os.ReadFile(absPath)
+	source, err := fsys.ReadFile(absPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", relPath, err)
 	}

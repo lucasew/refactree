@@ -23,7 +23,7 @@ func TestParseFile_TreeSitterFaultIsError(t *testing.T) {
 		t.Skip(err)
 	}
 	// Should not SIGSEGV the process.
-	fe, err := parseFile(root, abs)
+	fe, err := parseFile(root, abs, nil)
 	if err == nil && fe != nil {
 		// Grammar may be fixed upstream; success is fine.
 		t.Log("parse succeeded; no fault on this grammar version")
