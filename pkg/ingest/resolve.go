@@ -211,6 +211,11 @@ func resolveQualifiedUsage(res *Result, imports map[string]resolvedImport, scope
 		// Qualifier is a local/package entity (var, type, func), not an import.
 		baseTarget = resolveEntityName(fe, u.Qualifier, allEntities)
 	}
+	// Java enum constants / nested fields used as receivers (RED.ordinal()):
+	// qualifier is not a top-level entity name — resolve Type.leaf via enclosing scope.
+	if baseTarget == "" {
+		baseTarget = resolveJavaNestedMember(fe, u.Scope, u.Qualifier, allEntities)
+	}
 	if baseTarget == "" {
 		return
 	}
@@ -293,6 +298,25 @@ func entityInFile(allEntities map[string][]entityLoc, name, file string) (string
 	return "", false
 }
 
+// resolveJavaNestedMember maps a bare leaf (field / enum constant) to Type.leaf
+// using the enclosing Java type from scope (e.g. Color.defaultColor + RED → Color.RED).
+func resolveJavaNestedMember(fe *FileExtract, scope, leaf string, allEntities map[string][]entityLoc) string {
+	if fe == nil || fe.Language != "java" || scope == "" || leaf == "" {
+		return ""
+	}
+	typeName := scope
+	if i := strings.Index(typeName, "."); i >= 0 {
+		typeName = typeName[:i]
+	}
+	qualified := typeName + "." + leaf
+	for _, loc := range allEntities[qualified] {
+		if loc.File == fe.Path {
+			return SymbolRef("./"+loc.File, loc.Entity.Name)
+		}
+	}
+	return ""
+}
+
 // resolveEntityName finds a symbol reference for a bare name in package/file scope.
 func resolveEntityName(fe *FileExtract, name string, allEntities map[string][]entityLoc) string {
 	if fe != nil && (fe.Language == "go" || fe.Language == "java") && fe.Package != "" {
@@ -325,19 +349,9 @@ func resolveDirectUsage(res *Result, fe *FileExtract, u UsageDef, imports map[st
 	if target == "" {
 		target = resolveEntityName(fe, u.Name, allEntities)
 	}
-	// 4. Nested members referenced unqualified inside a type scope (Java fields).
-	if target == "" && fe != nil && fe.Language == "java" && u.Scope != "" {
-		typeName := u.Scope
-		if i := strings.Index(typeName, "."); i >= 0 {
-			typeName = typeName[:i]
-		}
-		qualified := typeName + "." + u.Name
-		for _, loc := range allEntities[qualified] {
-			if loc.File == fe.Path {
-				target = SymbolRef("./"+loc.File, loc.Entity.Name)
-				break
-			}
-		}
+	// 4. Nested members referenced unqualified inside a type scope (Java fields / enum constants).
+	if target == "" {
+		target = resolveJavaNestedMember(fe, u.Scope, u.Name, allEntities)
 	}
 
 	if target != "" {
