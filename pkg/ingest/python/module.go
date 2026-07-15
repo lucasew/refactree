@@ -141,7 +141,7 @@ func extractPython(root *grammar.Node, source []byte, path string) *ingest.FileE
 		case "function_definition":
 			extractPythonFunc(fe, child, source)
 		case "class_definition":
-			extractPythonClass(fe, child, source)
+			extractPythonClass(fe, child, source, "")
 		case "import_from_statement":
 			extractPythonImportFrom(fe, child, source)
 		case "import_statement":
@@ -294,18 +294,22 @@ func extractPythonFunc(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 	}
 }
 
-func extractPythonClass(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
+func extractPythonClass(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
 	nameNode := ingest.ChildByField(n, "name")
 	if nameNode == nil {
 		return
 	}
-	className := ingest.NodeText(nameNode, source)
+	shortName := ingest.NodeText(nameNode, source)
+	className := shortName
+	if scope != "" {
+		className = scope + "." + shortName
+	}
 
 	fe.Entities = append(fe.Entities, ingest.EntityDef{
 		Name:      className,
 		StartByte: nameNode.StartByte(),
 		EndByte:   nameNode.EndByte(),
-		Exported:  len(className) == 0 || className[0] != '_',
+		Exported:  len(shortName) == 0 || shortName[0] != '_',
 	})
 
 	if bases := ingest.ChildByField(n, "superclasses"); bases != nil {
@@ -315,16 +319,25 @@ func extractPythonClass(fe *ingest.FileExtract, n *grammar.Node, source []byte) 
 	if body := ingest.ChildByField(n, "body"); body != nil {
 		for i := uint32(0); i < body.ChildCount(); i++ {
 			child := body.Child(i)
-			if child.Type() != "function_definition" {
-				// Class-level assignments / attributes.
-				if child.Type() == "assignment" || child.Type() == "augmented_assignment" {
-					extractPythonAssign(fe, child, source, className)
-				} else if child.Type() == "expression_statement" && child.ChildCount() > 0 {
+			switch child.Type() {
+			case "class_definition":
+				// Nested class: Outer.Nested (+ methods Outer.Nested.m).
+				extractPythonClass(fe, child, source, className)
+				continue
+			case "function_definition":
+				// handled below
+			case "assignment", "augmented_assignment":
+				extractPythonAssign(fe, child, source, className)
+				continue
+			case "expression_statement":
+				if child.ChildCount() > 0 {
 					inner := child.Child(0)
 					if inner.Type() == "assignment" || inner.Type() == "augmented_assignment" {
 						extractPythonAssign(fe, inner, source, className)
 					}
 				}
+				continue
+			default:
 				continue
 			}
 
