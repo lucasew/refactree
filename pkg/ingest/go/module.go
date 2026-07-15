@@ -191,12 +191,16 @@ func extractGo(root *grammar.Node, source []byte, path string) *ingest.FileExtra
 }
 
 func extractGoTypeDecl(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
-	// A type_declaration may contain a single type_spec or multiple inside
-	// a parenthesised group: type ( A struct{} ; B int ).
+	// A type_declaration may contain a single type_spec / type_alias or
+	// multiple inside a parenthesised group: type ( A struct{} ; B int ).
+	// tree-sitter-go uses type_alias for `type Name = RHS` (distinct from type_spec).
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
-		if child.Type() == "type_spec" {
+		switch child.Type() {
+		case "type_spec":
 			extractGoTypeSpec(fe, child, source)
+		case "type_alias":
+			extractGoTypeAlias(fe, child, source)
 		}
 	}
 }
@@ -214,6 +218,52 @@ func extractGoTypeSpec(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 		EndByte:   nameNode.EndByte(),
 		Exported:  languageDriver{}.AllowListSymbol(name, ingest.SymbolListOptions{}),
 	})
+
+	// Walk the type body so embedded fields, pointer/element types, and other
+	// type_identifier sites become usages (struct { Base }, *Box, []T, …).
+	// Skip the declared name itself to avoid a self-usage on the definition.
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		if child == nameNode {
+			continue
+		}
+		// type_spec children: name type_identifier, then the RHS type node(s).
+		if child.Type() == "type_identifier" && child.StartByte() == nameNode.StartByte() {
+			continue
+		}
+		walkGoUsages(fe, child, source, name)
+	}
+}
+
+// extractGoTypeAlias handles `type Alias = RHS` (type_alias node).
+func extractGoTypeAlias(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
+	// Children are two type_identifiers: name then RHS (may also be more complex types).
+	var nameNode *grammar.Node
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		if child.Type() == "type_identifier" {
+			nameNode = child
+			break
+		}
+	}
+	if nameNode == nil {
+		return
+	}
+	name := ingest.NodeText(nameNode, source)
+	fe.Entities = append(fe.Entities, ingest.EntityDef{
+		Name:      name,
+		StartByte: nameNode.StartByte(),
+		EndByte:   nameNode.EndByte(),
+		Exported:  languageDriver{}.AllowListSymbol(name, ingest.SymbolListOptions{}),
+	})
+	// Usages: everything after the alias name (RHS type, possibly pointer/qualified).
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		child := n.Child(i)
+		if child == nameNode || (child.Type() == "type_identifier" && child.StartByte() == nameNode.StartByte()) {
+			continue
+		}
+		walkGoUsages(fe, child, source, name)
+	}
 }
 
 func extractGoFunc(fe *ingest.FileExtract, n *grammar.Node, source []byte) {

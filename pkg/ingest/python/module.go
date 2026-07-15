@@ -172,11 +172,84 @@ func extractPythonAssign(fe *ingest.FileExtract, assign *grammar.Node, source []
 	}
 	// Type/value sides may reference imports (logger = logging.getLogger(...)).
 	if right := ingest.ChildByField(assign, "right"); right != nil {
-		walkPythonUsages(fe, right, source, scope)
+		// Module export list: __all__ = ["helper", "stay"] — string contents
+		// are symbol names that should rename with those definitions.
+		if left != nil && left.Type() == "identifier" && ingest.NodeText(left, source) == "__all__" {
+			emitPythonDunderAllUsages(fe, right, source, scope)
+		} else {
+			walkPythonUsages(fe, right, source, scope)
+		}
 	}
 	if typ := ingest.ChildByField(assign, "type"); typ != nil {
 		walkPythonUsages(fe, typ, source, scope)
 	}
+}
+
+// emitPythonDunderAllUsages records string entries in __all__ as bare name usages
+// (span is the string_content so renames rewrite helper not "helper").
+func emitPythonDunderAllUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
+	if n == nil || n.IsNull() {
+		return
+	}
+	switch n.Type() {
+	case "list", "tuple":
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			emitPythonDunderAllUsages(fe, n.Child(i), source, scope)
+		}
+	case "string":
+		if content, text := pythonStringContent(n, source); content != nil && pythonIsIdentifier(text) {
+			fe.Usages = append(fe.Usages, ingest.UsageDef{
+				Scope:     scope,
+				Name:      text,
+				StartByte: content.StartByte(),
+				EndByte:   content.EndByte(),
+			})
+		}
+	default:
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			emitPythonDunderAllUsages(fe, n.Child(i), source, scope)
+		}
+	}
+}
+
+func pythonStringContent(n *grammar.Node, source []byte) (*grammar.Node, string) {
+	if n == nil {
+		return nil, ""
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		if ch.Type() == "string_content" {
+			return ch, ingest.NodeText(ch, source)
+		}
+	}
+	// Fallback: strip surrounding quotes from full string text.
+	text := ingest.NodeText(n, source)
+	if len(text) >= 2 {
+		q := text[0]
+		if (q == '"' || q == '\'') && text[len(text)-1] == q {
+			inner := text[1 : len(text)-1]
+			return n, inner
+		}
+	}
+	return nil, ""
+}
+
+func pythonIsIdentifier(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		if i == 0 {
+			if r != '_' && (r < 'A' || r > 'Z') && (r < 'a' || r > 'z') {
+				return false
+			}
+			continue
+		}
+		if r != '_' && (r < 'A' || r > 'Z') && (r < 'a' || r > 'z') && (r < '0' || r > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 func appendPythonEntity(fe *ingest.FileExtract, nameNode *grammar.Node, source []byte) {
@@ -438,6 +511,25 @@ func walkPythonUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, sc
 			StartByte: n.StartByte(),
 			EndByte:   n.EndByte(),
 		})
+		return
+	case "type":
+		// PEP 484/563 forward refs: annotations may be quoted ("Box" / 'Box').
+		// Emit string_content as a bare name usage; leave non-string types to walk.
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "string" {
+				if content, text := pythonStringContent(ch, source); content != nil && pythonIsIdentifier(text) {
+					fe.Usages = append(fe.Usages, ingest.UsageDef{
+						Scope:     scope,
+						Name:      text,
+						StartByte: content.StartByte(),
+						EndByte:   content.EndByte(),
+					})
+					continue
+				}
+			}
+			walkPythonUsages(fe, ch, source, scope)
+		}
 		return
 	case "string", "integer", "float", "true", "false", "none", "comment":
 		return
