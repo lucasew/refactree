@@ -875,6 +875,24 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 		}
 		return len(foreignReceivers) == 0
 	}
+	// new Point(1, 2).sum() — object is object_creation_expression with type field.
+	if obj.Type() == "object_creation_expression" {
+		typeN := ingest.ChildByField(obj, "type")
+		if typeN == nil {
+			return len(foreignReceivers) == 0
+		}
+		tn := javaTypeName(typeN, content)
+		if tn == "" {
+			return len(foreignReceivers) == 0
+		}
+		if ourReceivers[tn] {
+			return true
+		}
+		if foreignReceivers[tn] {
+			return false
+		}
+		return len(foreignReceivers) == 0
+	}
 	if obj.Type() != "identifier" {
 		return false
 	}
