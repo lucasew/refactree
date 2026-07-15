@@ -851,7 +851,15 @@ func walkJSBindingPatternDefaults(fe *ingest.FileExtract, n *grammar.Node, sourc
 // Qualifier "Box"), never a qualifier span covering a nested member expression —
 // resolveQualifiedUsage would otherwise treat the whole "Box.getValue" span as a
 // relation target and rename would replace it with the leaf alone.
+//
+// Complex nodes (parenthesized_expression, ternary, binary, sequence, …) fall
+// through to walkJSUsages so callees like `(helper)()`, `(c ? a : b)()`,
+// `(f || helper)()`, and constructors like `new (c ? Helper : Stay)()` still
+// record identifier usages.
 func emitJSIdentifierUsage(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
+	if n == nil || n.IsNull() {
+		return
+	}
 	switch n.Type() {
 	case "identifier":
 		fe.Usages = append(fe.Usages, ingest.UsageDef{
@@ -888,6 +896,11 @@ func emitJSIdentifierUsage(fe *ingest.FileExtract, n *grammar.Node, source []byt
 			// wraps it in member_expression and used to drop the constructor ref).
 			walkJSUsages(fe, obj, source, scope)
 		}
+	default:
+		// call_expression / new_expression / class_heritage function|constructor
+		// fields that are not bare identifiers or members (e.g. parenthesized
+		// ternary or logical callees).
+		walkJSUsages(fe, n, source, scope)
 	}
 }
 
