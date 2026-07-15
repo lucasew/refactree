@@ -775,6 +775,14 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 					addEdit(prop.StartByte(), prop.EndByte(), newLeaf)
 				}
 			}
+		case "private_property_identifier":
+			// Brand checks: `#helper in this` — bare private id, not member_expression.
+			// Only rewrite inside a class we own (private names are class-scoped).
+			if strings.HasPrefix(oldLeaf, "#") && ingest.NodeText(n, content) == oldLeaf {
+				if classHere != "" && ourReceivers[classHere] {
+					addEdit(n.StartByte(), n.EndByte(), newLeaf)
+				}
+			}
 		case "variable_declarator":
 			// const { helper } = b  /  const { helper: h } = b
 			nameN := ingest.ChildByField(n, "name")
@@ -937,6 +945,22 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 	if obj == nil {
 		return false
 	}
+	// Unwrap (new Box()) so parenthesized new expressions still match.
+	for obj != nil && obj.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < obj.ChildCount(); i++ {
+			ch := obj.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		obj = inner
+	}
+	if obj == nil {
+		return false
+	}
 	// super.x targets a parent implementation, not the enclosing class's own
 	// override. When renaming Base.m, rewrite super.m in Child even if Child
 	// also defines m; when renaming Child.m, leave super.m alone.
@@ -956,6 +980,20 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 			return true
 		}
 		if foreignReceivers[enclosingClass] {
+			return false
+		}
+		return len(foreignReceivers) == 0
+	}
+	// new Box().m / new Box(1).m — mirror Java object_creation_expression.
+	if obj.Type() == "new_expression" {
+		ctor := jsNewExpressionType(obj, content)
+		if ctor == "" {
+			return len(foreignReceivers) == 0
+		}
+		if ourReceivers[ctor] {
+			return true
+		}
+		if foreignReceivers[ctor] {
 			return false
 		}
 		return len(foreignReceivers) == 0

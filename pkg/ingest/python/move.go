@@ -1415,6 +1415,21 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 		}
 		return true
 	}
+	// Box().method / Box(1).method — temporary constructor receiver (mirror Java new).
+	if obj.Type() == "call" {
+		fn := ingest.ChildByField(obj, "function")
+		if fn != nil && fn.Type() == "identifier" {
+			name := ingest.NodeText(fn, content)
+			if ourReceivers[name] {
+				return true
+			}
+			if foreignReceivers[name] {
+				return false
+			}
+			return len(foreignReceivers) == 0
+		}
+		return false
+	}
 	// Only simple identifiers: self.x, cls.x, box.x, Box.x
 	if obj.Type() != "identifier" {
 		return false
