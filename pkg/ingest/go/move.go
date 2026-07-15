@@ -1163,10 +1163,13 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 	sourceSet := map[string]bool{}
 	pkgDirs := map[string]bool{}
 	ourPkgDirs := map[string]bool{}
+	// Include the source package even when it is the module root (dir "").
+	// Skipping "" left ExtraRename unable to run findInterfaceMethodEdits for
+	// package main / root packages, so interface-typed selectors were rewritten
+	// without renaming the interface method (broken go build).
 	srcPkgDir := dirOf(strings.TrimPrefix(src.Path, "./"))
-	if srcPkgDir != "" {
-		ourPkgDirs[srcPkgDir] = true
-	}
+	ourPkgDirs[srcPkgDir] = true
+	pkgDirs[srcPkgDir] = true
 	if scopePrefix != "" {
 		ourPkgDirs[scopePrefix] = true
 	}
@@ -1177,10 +1180,10 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		sourceSet[s] = true
 		ref := ingest.ParseReference(s)
 		rel := strings.TrimPrefix(ref.Path, "./")
-		if d := dirOf(rel); d != "" {
-			pkgDirs[d] = true
-			ourPkgDirs[d] = true
-		}
+		// Always record package dir, including "" for files at module root.
+		d := dirOf(rel)
+		pkgDirs[d] = true
+		ourPkgDirs[d] = true
 		if recv, ok := receiverTypeName(ref.Symbol); ok {
 			ourReceivers[recv] = true
 		}

@@ -1,0 +1,4 @@
+{
+  "source": "path:./main.go::Sink.Write",
+  "destination": "path:./main.go::Sink.WriteData"
+}
