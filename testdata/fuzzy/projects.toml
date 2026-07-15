@@ -95,11 +95,12 @@ run = [
 ]
 
 [projects.astro.mise.tasks.test]
-description = "Build packages/astro dist, then run unit tests (test:unit imports dist/*)"
-# build:ci writes packages/astro/dist; unit tests import it. Setup only installs
-# deps, so a post-mv check without build fails with ERR_MODULE_NOT_FOUND.
-# Build on check (not only setup) so dist reflects the mutated tree after mv.
+description = "Build workspace dist packages, then run astro unit tests"
+# unit tests import packages/astro/dist and workspace:* packages that export dist/*
+# (e.g. @astrojs/internal-helpers/remote). Setup only pnpm-installs sources.
+# Build on check (not only setup) so dist reflects the tree after catalog mv.
 run = [
+  "pnpm --filter @astrojs/internal-helpers run build:ci",
   "pnpm --filter astro run build:ci",
   "pnpm --filter astro run test:unit -- --verbose",
 ]
