@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/lucasew/refactree/pkg/ingest"
@@ -1277,4 +1278,279 @@ func pythonFindClass(n *grammar.Node, source []byte, className string) *grammar.
 		}
 	}
 	return nil
+}
+
+// ExtraRenameEdits rewrites attribute call sites when renaming a method
+// (Class.method → Class.new_name). Relation-based rename only covers class-
+// qualified calls (Box.get_value) because instance receivers (self/params)
+// are not entities. Mirror Go ExtraRenameEdits for Python attributes.
+func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, sourceRefs []string, oldLeaf, newLeaf string) []ingest.Edit {
+	if oldLeaf == "" || oldLeaf == newLeaf || len(sourceRefs) == 0 || rootDir == "" || result == nil {
+		return nil
+	}
+	src := ingest.ParseReference(sourceRefs[0])
+	if !strings.Contains(src.Symbol, ".") {
+		return nil // only methods / nested symbols
+	}
+
+	ourReceivers := map[string]bool{}
+	sourceSet := map[string]bool{}
+	for _, s := range sourceRefs {
+		sourceSet[s] = true
+		ref := ingest.ParseReference(s)
+		if recv, ok := pythonMethodReceiver(ref.Symbol); ok {
+			ourReceivers[recv] = true
+		}
+	}
+	if len(ourReceivers) == 0 {
+		return nil
+	}
+
+	// Other classes that define the same method leaf — do not rewrite their calls.
+	foreignReceivers := map[string]bool{}
+	for _, ent := range result.Entities {
+		if sourceSet[ent.Reference] {
+			continue
+		}
+		ref := ingest.ParseReference(ent.Reference)
+		if ingest.SymbolLeaf(ref.Symbol) != oldLeaf {
+			continue
+		}
+		if recv, ok := pythonMethodReceiver(ref.Symbol); ok && !ourReceivers[recv] {
+			foreignReceivers[recv] = true
+		}
+	}
+
+	// Spans already covered by entity/relation renames.
+	occupied := map[string]map[[2]uint32]bool{}
+	mark := func(file string, start, end uint32) {
+		file = strings.TrimPrefix(file, "./")
+		if occupied[file] == nil {
+			occupied[file] = map[[2]uint32]bool{}
+		}
+		occupied[file][[2]uint32{start, end}] = true
+	}
+	for _, ent := range result.Entities {
+		if !sourceSet[ent.Reference] {
+			continue
+		}
+		ref := ingest.ParseReference(ent.Reference)
+		mark(ref.Path, ent.StartByte, ent.EndByte)
+	}
+	for _, rel := range result.Relations {
+		if !sourceSet[rel.Target] {
+			continue
+		}
+		ref := ingest.ParseReference(rel.Reference)
+		mark(ref.Path, rel.StartByte, rel.EndByte)
+	}
+
+	var edits []ingest.Edit
+	for _, f := range result.Files {
+		if f.Language != "python" {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Path, "./")
+		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		occ := occupied[rel]
+		for _, e := range pythonMethodAttrEdits(rel, content, oldLeaf, newLeaf, ourReceivers, foreignReceivers) {
+			if occ[[2]uint32{e.StartByte, e.EndByte}] {
+				continue
+			}
+			edits = append(edits, e)
+		}
+	}
+	return edits
+}
+
+// pythonMethodReceiver returns the class name for "Class.method" symbols.
+func pythonMethodReceiver(symbol string) (string, bool) {
+	if symbol == "" || !strings.Contains(symbol, ".") {
+		return "", false
+	}
+	// Nested: Outer.Inner.method → treat last parent as receiver class name segment.
+	// For Class.method, receiver is Class.
+	parts := strings.Split(symbol, ".")
+	if len(parts) < 2 {
+		return "", false
+	}
+	// method leaf is last; receiver for Class.method is Class; for A.B.m is A.B
+	recv := strings.Join(parts[:len(parts)-1], ".")
+	return recv, recv != ""
+}
+
+// pythonMethodAttrEdits finds obj.oldLeaf attribute nodes to rewrite.
+func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, ourReceivers, foreignReceivers map[string]bool) []ingest.Edit {
+	pf, err := ingest.ParseSource(content, ".py", "")
+	if err != nil {
+		return nil
+	}
+	defer pf.Close()
+
+	// Locals whose static type we can attribute to a class (annotations / Class()).
+	typedLocals := pythonTypedLocals(pf.Root, content, ourReceivers)
+
+	var edits []ingest.Edit
+	var walk func(n *grammar.Node, enclosingClass string)
+	walk = func(n *grammar.Node, enclosingClass string) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		classHere := enclosingClass
+		if n.Type() == "class_definition" {
+			if nameN := ingest.ChildByField(n, "name"); nameN != nil {
+				classHere = ingest.NodeText(nameN, content)
+			}
+		}
+		if n.Type() == "attribute" {
+			obj := ingest.ChildByField(n, "object")
+			attr := ingest.ChildByField(n, "attribute")
+			if obj != nil && attr != nil && ingest.NodeText(attr, content) == oldLeaf {
+				if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals) {
+					edits = append(edits, ingest.Edit{
+						File:      fileRel,
+						StartByte: attr.StartByte(),
+						EndByte:   attr.EndByte(),
+						NewText:   newLeaf,
+					})
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i), classHere)
+		}
+	}
+	walk(pf.Root, "")
+	return edits
+}
+
+// pythonShouldRenameAttr decides whether obj.oldLeaf is a call on one of our receivers.
+func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool) bool {
+	if obj == nil {
+		return false
+	}
+	// Only simple identifiers: self.x, cls.x, box.x, Box.x
+	if obj.Type() != "identifier" {
+		return false
+	}
+	name := ingest.NodeText(obj, content)
+	switch name {
+	case "self", "cls":
+		// Inside our class body: rewrite. If foreign classes share the leaf, only
+		// rewrite when enclosing class is one of ours.
+		if enclosingClass == "" {
+			return len(foreignReceivers) == 0
+		}
+		if ourReceivers[enclosingClass] {
+			return true
+		}
+		if foreignReceivers[enclosingClass] {
+			return false
+		}
+		// Nested / unknown class: fail closed if collisions exist.
+		return len(foreignReceivers) == 0
+	}
+	// Class-qualified: Box.method
+	if ourReceivers[name] {
+		return true
+	}
+	if foreignReceivers[name] {
+		return false
+	}
+	// Local with known type matching our receiver.
+	if typedLocals[name] {
+		return true
+	}
+	// No foreign same-leaf methods: rewrite all simple attribute loads of the leaf
+	// (unique method name in the project graph).
+	return len(foreignReceivers) == 0
+}
+
+// pythonTypedLocals maps local names that are annotated or assigned as ourReceivers.
+// Covers: `b: Box`, `b = Box()`, `b: Box = ...`.
+func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]bool {
+	out := map[string]bool{}
+	if root == nil || len(ourReceivers) == 0 {
+		return out
+	}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		switch n.Type() {
+		case "parameters", "lambda_parameters":
+			// function params: (self, b: Box) / (b: "Box")
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				p := n.Child(i)
+				switch p.Type() {
+				case "typed_parameter", "typed_default_parameter":
+					nameN := ingest.ChildByField(p, "name")
+					typeN := ingest.ChildByField(p, "type")
+					if nameN == nil {
+						// grammar may put identifier as first named child
+						nameN = ingest.ChildByType(p, "identifier")
+					}
+					if nameN != nil && typeN != nil {
+						if tn := pythonTypeName(typeN, content); ourReceivers[tn] {
+							out[ingest.NodeText(nameN, content)] = true
+						}
+					}
+				}
+			}
+		case "assignment":
+			left := ingest.ChildByField(n, "left")
+			right := ingest.ChildByField(n, "right")
+			typeN := ingest.ChildByField(n, "type")
+			if left != nil && left.Type() == "identifier" {
+				lname := ingest.NodeText(left, content)
+				if typeN != nil {
+					if tn := pythonTypeName(typeN, content); ourReceivers[tn] {
+						out[lname] = true
+					}
+				}
+				if right != nil && right.Type() == "call" {
+					fn := ingest.ChildByField(right, "function")
+					if fn != nil && fn.Type() == "identifier" {
+						if ourReceivers[ingest.NodeText(fn, content)] {
+							out[lname] = true
+						}
+					}
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	return out
+}
+
+// pythonTypeName extracts a simple class name from a type annotation node.
+func pythonTypeName(typeN *grammar.Node, content []byte) string {
+	if typeN == nil {
+		return ""
+	}
+	// type may be type node wrapping identifier / attribute / string
+	if typeN.Type() == "type" && typeN.ChildCount() > 0 {
+		typeN = typeN.Child(0)
+	}
+	switch typeN.Type() {
+	case "identifier":
+		return ingest.NodeText(typeN, content)
+	case "string":
+		// from __future__ annotations / quoted: "Box"
+		s := ingest.NodeText(typeN, content)
+		return strings.Trim(s, `"'`)
+	case "attribute":
+		// pkg.Box — use leaf
+		if attr := ingest.ChildByField(typeN, "attribute"); attr != nil {
+			return ingest.NodeText(attr, content)
+		}
+	}
+	return ""
 }
