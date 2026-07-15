@@ -351,7 +351,9 @@ func extractJavaTypeBody(fe *ingest.FileExtract, body *grammar.Node, source []by
 		switch child.Type() {
 		case "method_declaration":
 			extractJavaMethod(fe, child, source, typeName)
-		case "constructor_declaration":
+		case "constructor_declaration", "compact_constructor_declaration":
+			// Regular ctors and record compact ctors (`public Point { … }`) both
+			// carry a type-name identifier that must rename with the type.
 			extractJavaConstructor(fe, child, source, typeName)
 		case "field_declaration":
 			extractJavaField(fe, child, source, typeName)
@@ -393,7 +395,7 @@ func extractJavaNestedType(fe *ingest.FileExtract, n *grammar.Node, source []byt
 			switch child.Type() {
 			case "method_declaration":
 				extractJavaMethod(fe, child, source, full)
-			case "constructor_declaration":
+			case "constructor_declaration", "compact_constructor_declaration":
 				extractJavaConstructor(fe, child, source, full)
 			case "field_declaration":
 				extractJavaField(fe, child, source, full)
@@ -532,6 +534,12 @@ func extractJavaEnumConstant(fe *ingest.FileExtract, n *grammar.Node, source []b
 	})
 	if args := ingest.ChildByField(n, "arguments"); args != nil {
 		walkJavaUsages(fe, args, source, typeName)
+	}
+	// Enum constants may carry an anonymous class body with method overrides
+	// (RED { @Override public int code() { … } }). Those methods override the
+	// enum's abstract/default methods and must rename as Type.method entities.
+	if body := ingest.ChildByField(n, "body"); body != nil {
+		extractJavaTypeBody(fe, body, source, typeName)
 	}
 }
 

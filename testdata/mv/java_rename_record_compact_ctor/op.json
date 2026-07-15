@@ -1,0 +1,4 @@
+{
+  "source": "path:./Point.java::Point",
+  "destination": "path:./Point.java::Coord"
+}

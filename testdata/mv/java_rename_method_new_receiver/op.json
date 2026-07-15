@@ -1,0 +1,4 @@
+{
+  "source": "path:./Point.java::Point.sum",
+  "destination": "path:./Point.java::Point.total"
+}
