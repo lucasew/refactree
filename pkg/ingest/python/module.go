@@ -141,6 +141,9 @@ func extractPython(root *grammar.Node, source []byte, path string) *ingest.FileE
 		case "function_definition":
 			extractPythonFunc(fe, child, source)
 		case "class_definition":
+			extractPythonClass(fe, child, source)
+		case "decorated_definition":
+			extractPythonDecorated(fe, child, source, "")
 			extractPythonClass(fe, child, source, "")
 		case "import_from_statement":
 			extractPythonImportFrom(fe, child, source)
@@ -162,12 +165,55 @@ func extractPython(root *grammar.Node, source []byte, path string) *ingest.FileE
 	return fe
 }
 
+// extractPythonDecorated unwraps @decorator def/class (tree-sitter decorated_definition).
+// Without this, @dataclass classes and @deco functions are invisible to rename.
+func extractPythonDecorated(fe *ingest.FileExtract, n *grammar.Node, source []byte, classScope string) {
+	if n == nil {
+		return
+	}
+	// Decorator expressions may reference other symbols (@deco, @mark.route).
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		if ch.Type() == "decorator" {
+			walkPythonUsages(fe, ch, source, classScope)
+		}
+	}
+	def := ingest.ChildByField(n, "definition")
+	if def == nil {
+		return
+	}
+	switch def.Type() {
+	case "function_definition":
+		if classScope != "" {
+			extractPythonMethod(fe, def, source, classScope)
+		} else {
+			extractPythonFunc(fe, def, source)
+		}
+	case "class_definition":
+		extractPythonClass(fe, def, source)
+	}
+}
+
 func extractPythonAssign(fe *ingest.FileExtract, assign *grammar.Node, source []byte, scope string) {
 	if assign == nil {
 		return
 	}
 	left := ingest.ChildByField(assign, "left")
 	if left != nil && left.Type() == "identifier" {
+		// Class body assigns are Class.attr entities (methods already use Class.method).
+		// Module-level assigns stay bare names.
+		if scope != "" {
+			short := ingest.NodeText(left, source)
+			full := scope + "." + short
+			fe.Entities = append(fe.Entities, ingest.EntityDef{
+				Name:      full,
+				StartByte: left.StartByte(),
+				EndByte:   left.EndByte(),
+				Exported:  len(short) == 0 || short[0] != '_',
+			})
+		} else {
+			appendPythonEntity(fe, left, source)
+		}
 		appendPythonEntity(fe, left, source)
 	} else if left != nil {
 		// Attribute / subscript / tuple targets reference symbols
@@ -320,6 +366,12 @@ func extractPythonClass(fe *ingest.FileExtract, n *grammar.Node, source []byte, 
 		for i := uint32(0); i < body.ChildCount(); i++ {
 			child := body.Child(i)
 			switch child.Type() {
+			case "function_definition":
+				extractPythonMethod(fe, child, source, className)
+			case "decorated_definition":
+				extractPythonDecorated(fe, child, source, className)
+			case "assignment", "augmented_assignment":
+				extractPythonAssign(fe, child, source, className)
 			case "class_definition":
 				// Nested class: Outer.Nested (+ methods Outer.Nested.m).
 				extractPythonClass(fe, child, source, className)
@@ -340,30 +392,33 @@ func extractPythonClass(fe *ingest.FileExtract, n *grammar.Node, source []byte, 
 			default:
 				continue
 			}
-
-			methodNameNode := ingest.ChildByField(child, "name")
-			if methodNameNode == nil {
-				continue
-			}
-			methodShort := ingest.NodeText(methodNameNode, source)
-			methodName := className + "." + methodShort
-
-			fe.Entities = append(fe.Entities, ingest.EntityDef{
-				Name:      methodName,
-				StartByte: methodNameNode.StartByte(),
-				EndByte:   methodNameNode.EndByte(),
-				Exported:  len(methodShort) == 0 || methodShort[0] != '_',
-			})
-
-			for _, field := range []string{"parameters", "return_type"} {
-				if part := ingest.ChildByField(child, field); part != nil {
-					walkPythonUsages(fe, part, source, methodName)
-				}
-			}
-			if methodBody := ingest.ChildByField(child, "body"); methodBody != nil {
-				walkPythonUsages(fe, methodBody, source, methodName)
-			}
 		}
+	}
+}
+
+// extractPythonMethod records Class.method and walks params/body usages.
+func extractPythonMethod(fe *ingest.FileExtract, n *grammar.Node, source []byte, className string) {
+	methodNameNode := ingest.ChildByField(n, "name")
+	if methodNameNode == nil {
+		return
+	}
+	methodShort := ingest.NodeText(methodNameNode, source)
+	methodName := className + "." + methodShort
+
+	fe.Entities = append(fe.Entities, ingest.EntityDef{
+		Name:      methodName,
+		StartByte: methodNameNode.StartByte(),
+		EndByte:   methodNameNode.EndByte(),
+		Exported:  len(methodShort) == 0 || methodShort[0] != '_',
+	})
+
+	for _, field := range []string{"parameters", "return_type"} {
+		if part := ingest.ChildByField(n, field); part != nil {
+			walkPythonUsages(fe, part, source, methodName)
+		}
+	}
+	if methodBody := ingest.ChildByField(n, "body"); methodBody != nil {
+		walkPythonUsages(fe, methodBody, source, methodName)
 	}
 }
 

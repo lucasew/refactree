@@ -206,31 +206,45 @@ func resolve(rootDir string, extracts []*FileExtract) *Result {
 func resolveQualifiedUsage(res *Result, imports map[string]resolvedImport, scopeRef string, u UsageDef, allEntities map[string][]entityLoc, fe *FileExtract) {
 	var baseTarget string
 	var importMember string
+	// qualTarget is what the qualifier identifier renames with. For member imports
+	// (from box import Box) that is the member entity, not the module path — so
+	// renaming Box rewrites Box.VALUE qualifiers. Member lookup still uses the
+	// module path in baseTarget (strip) + importMember.
+	var qualTarget string
 
 	if ri, ok := imports[u.Qualifier]; ok {
-		baseTarget = ri.Target
+		fullTarget := ri.Target
 		importMember = ri.MemberName
+		baseTarget = fullTarget
 		if ri.MemberName != "" {
-			baseTarget = strings.TrimSuffix(baseTarget, "::"+ri.MemberName)
+			baseTarget = strings.TrimSuffix(fullTarget, "::"+ri.MemberName)
+			qualTarget = fullTarget
+		} else {
+			qualTarget = fullTarget
 		}
 	} else {
 		// Qualifier is a local/package entity (var, type, func), not an import.
 		baseTarget = resolveEntityName(fe, u.Qualifier, allEntities)
+		qualTarget = baseTarget
 	}
 	// Java enum constants / nested fields used as receivers (RED.ordinal()):
 	// qualifier is not a top-level entity name — resolve Type.leaf via enclosing scope.
 	if baseTarget == "" {
 		baseTarget = resolveJavaNestedMember(fe, u.Scope, u.Qualifier, allEntities)
+		qualTarget = baseTarget
 	}
 	if baseTarget == "" {
 		return
+	}
+	if qualTarget == "" {
+		qualTarget = baseTarget
 	}
 
 	res.Relations = append(res.Relations, Relation{
 		Reference: scopeRef,
 		StartByte: u.QualStartByte,
 		EndByte:   u.QualEndByte,
-		Target:    baseTarget,
+		Target:    qualTarget,
 	})
 
 	memberTarget := resolveQualifiedMemberTarget(baseTarget, importMember, u.Name, allEntities)

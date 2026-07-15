@@ -44,7 +44,7 @@
       "reference": "path:./app/Main.java::Main.main",
       "start_byte": 107,
       "end_byte": 113,
-      "target": "path:./lib/Helper.java"
+      "target": "path:./lib/Helper.java::Helper"
     },
     {
       "reference": "path:./app/Main.java::Main.main",
