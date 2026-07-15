@@ -20,6 +20,207 @@ type moveDriver struct{}
 
 func (moveDriver) Language() string { return "java" }
 
+// ExtraRenameEdits rewrites interface-method implementation names when renaming
+// Type.method. Relation-based rename only covers the declared entity; @Override
+// methods on implementors (Task.work when Worker.work moves) are separate
+// entities and would otherwise stay stale.
+func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, sourceRefs []string, oldLeaf, newLeaf string) []ingest.Edit {
+	if oldLeaf == "" || oldLeaf == newLeaf || len(sourceRefs) == 0 || rootDir == "" || result == nil {
+		return nil
+	}
+	src := ingest.ParseReference(sourceRefs[0])
+	if !strings.Contains(src.Symbol, ".") {
+		return nil
+	}
+
+	sourceSet := map[string]bool{}
+	ourTypes := map[string]bool{} // types whose Type.oldLeaf is in sourceRefs
+	for _, s := range sourceRefs {
+		sourceSet[s] = true
+		ref := ingest.ParseReference(s)
+		if t, m, ok := javaSplitTypeMethod(ref.Symbol); ok && m == oldLeaf {
+			ourTypes[t] = true
+			if i := strings.LastIndex(t, "."); i >= 0 {
+				ourTypes[t[i+1:]] = true
+			}
+		}
+	}
+	if len(ourTypes) == 0 {
+		return nil
+	}
+
+	// implementsEdges: class/iface simple name -> set of interface/superclass names
+	// from the implements/extends clauses (parsed from source).
+	implementsEdges := javaImplementsEdges(rootDir, result)
+
+	// Types that should also rename oldLeaf methods: implementors of our types,
+	// and interfaces/supertypes our types implement (rename interface when
+	// renaming an override, and vice versa).
+	alsoTypes := map[string]bool{}
+	for t := range ourTypes {
+		for iface := range implementsEdges[t] {
+			alsoTypes[iface] = true
+		}
+		// Reverse: types that implement t.
+		for impl, ifaces := range implementsEdges {
+			if ifaces[t] {
+				alsoTypes[impl] = true
+			}
+		}
+	}
+	if len(alsoTypes) == 0 {
+		return nil
+	}
+
+	// Spans already covered by entity/relation rename.
+	occupied := map[string]map[[2]uint32]bool{}
+	mark := func(file string, start, end uint32) {
+		file = strings.TrimPrefix(file, "./")
+		if occupied[file] == nil {
+			occupied[file] = map[[2]uint32]bool{}
+		}
+		occupied[file][[2]uint32{start, end}] = true
+	}
+	for _, ent := range result.Entities {
+		if !sourceSet[ent.Reference] {
+			continue
+		}
+		ref := ingest.ParseReference(ent.Reference)
+		mark(ref.Path, ent.StartByte, ent.EndByte)
+	}
+	for _, rel := range result.Relations {
+		if !sourceSet[rel.Target] {
+			continue
+		}
+		ref := ingest.ParseReference(rel.Reference)
+		mark(ref.Path, rel.StartByte, rel.EndByte)
+	}
+
+	var edits []ingest.Edit
+	for _, ent := range result.Entities {
+		if sourceSet[ent.Reference] {
+			continue
+		}
+		ref := ingest.ParseReference(ent.Reference)
+		t, m, ok := javaSplitTypeMethod(ref.Symbol)
+		if !ok || m != oldLeaf {
+			continue
+		}
+		tLeaf := t
+		if i := strings.LastIndex(t, "."); i >= 0 {
+			tLeaf = t[i+1:]
+		}
+		if !alsoTypes[t] && !alsoTypes[tLeaf] {
+			continue
+		}
+		file := strings.TrimPrefix(ref.Path, "./")
+		if occ := occupied[file]; occ[[2]uint32{ent.StartByte, ent.EndByte}] {
+			continue
+		}
+		edits = append(edits, ingest.Edit{
+			File:      file,
+			StartByte: ent.StartByte,
+			EndByte:   ent.EndByte,
+			NewText:   newLeaf,
+		})
+		mark(file, ent.StartByte, ent.EndByte)
+	}
+	return edits
+}
+
+func javaSplitTypeMethod(symbol string) (typeName, method string, ok bool) {
+	i := strings.LastIndex(symbol, ".")
+	if i <= 0 || i+1 >= len(symbol) {
+		return "", "", false
+	}
+	return symbol[:i], symbol[i+1:], true
+}
+
+// javaImplementsEdges returns map[typeSimpleName]set[ifaceOrSuperSimpleName]
+// from implements / extends clauses across Java files in result.
+func javaImplementsEdges(rootDir string, result *ingest.Result) map[string]map[string]bool {
+	out := map[string]map[string]bool{}
+	if result == nil {
+		return out
+	}
+	for _, f := range result.Files {
+		if f.Language != "java" {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Path, "./")
+		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		pf, err := ingest.ParseSource(content, rel, "java")
+		if err != nil {
+			continue
+		}
+		collectJavaImplementsEdges(pf.Root, content, out)
+		pf.Close()
+	}
+	return out
+}
+
+func collectJavaImplementsEdges(n *grammar.Node, source []byte, out map[string]map[string]bool) {
+	if n == nil || n.IsNull() {
+		return
+	}
+	switch n.Type() {
+	case "class_declaration", "interface_declaration", "enum_declaration", "record_declaration":
+		nameN := ingest.ChildByField(n, "name")
+		if nameN == nil {
+			break
+		}
+		typeName := ingest.NodeText(nameN, source)
+		add := func(clause *grammar.Node) {
+			if clause == nil {
+				return
+			}
+			for _, id := range javaTypeNamesInClause(clause, source) {
+				if out[typeName] == nil {
+					out[typeName] = map[string]bool{}
+				}
+				out[typeName][id] = true
+			}
+		}
+		add(ingest.ChildByField(n, "interfaces"))
+		add(ingest.ChildByField(n, "superclass"))
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		collectJavaImplementsEdges(n.Child(i), source, out)
+	}
+}
+
+func javaTypeNamesInClause(n *grammar.Node, source []byte) []string {
+	if n == nil {
+		return nil
+	}
+	var names []string
+	var walk func(*grammar.Node)
+	walk = func(node *grammar.Node) {
+		if node == nil || node.IsNull() {
+			return
+		}
+		switch node.Type() {
+		case "type_identifier", "identifier":
+			names = append(names, ingest.NodeText(node, source))
+			return
+		case "scoped_type_identifier":
+			// Use leaf type name (Outer.Inner → Inner) for matching simple entities.
+			if name := ingest.ChildByField(node, "name"); name != nil {
+				names = append(names, ingest.NodeText(name, source))
+				return
+			}
+		}
+		for i := uint32(0); i < node.ChildCount(); i++ {
+			walk(node.Child(i))
+		}
+	}
+	walk(n)
+	return names
+}
+
 func (moveDriver) ExtractDecl(filePath string, entity ingest.Entity) (ingest.DeclExtract, error) {
 	pf, err := ingest.ParseSourceFile(filePath, "java")
 	if err != nil {

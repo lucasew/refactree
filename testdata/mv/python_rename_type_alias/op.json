@@ -1,0 +1,4 @@
+{
+  "source": "path:./mod.py::BoxAlias",
+  "destination": "path:./mod.py::IntList"
+}

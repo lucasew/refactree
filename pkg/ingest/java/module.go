@@ -544,6 +544,44 @@ func walkJavaUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, scop
 			}
 			return
 		}
+	case "method_reference":
+		// Type::method / this::method — tree-sitter exposes no stable object/name
+		// fields; children are the receiver expression, "::", and method name.
+		var parts []*grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			child := n.Child(i)
+			if child.Type() == "::" {
+				continue
+			}
+			parts = append(parts, child)
+		}
+		if len(parts) >= 2 {
+			obj, name := parts[0], parts[len(parts)-1]
+			if name.Type() == "identifier" {
+				switch obj.Type() {
+				case "identifier", "type_identifier":
+					fe.Usages = append(fe.Usages, ingest.UsageDef{
+						Scope:         scope,
+						Name:          ingest.NodeText(name, source),
+						StartByte:     name.StartByte(),
+						EndByte:       name.EndByte(),
+						Qualifier:     ingest.NodeText(obj, source),
+						QualStartByte: obj.StartByte(),
+						QualEndByte:   obj.EndByte(),
+					})
+					return
+				case "this", "super":
+					// Resolve as class-scoped bare method (same as this.method()).
+					fe.Usages = append(fe.Usages, ingest.UsageDef{
+						Scope:     scope,
+						Name:      ingest.NodeText(name, source),
+						StartByte: name.StartByte(),
+						EndByte:   name.EndByte(),
+					})
+					return
+				}
+			}
+		}
 	case "field_access":
 		obj := ingest.ChildByField(n, "object")
 		field := ingest.ChildByField(n, "field")
