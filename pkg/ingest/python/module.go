@@ -169,6 +169,10 @@ func extractPythonAssign(fe *ingest.FileExtract, assign *grammar.Node, source []
 	left := ingest.ChildByField(assign, "left")
 	if left != nil && left.Type() == "identifier" {
 		appendPythonEntity(fe, left, source)
+	} else if left != nil {
+		// Attribute / subscript / tuple targets reference symbols
+		// (`Box.tag = ...`, `items[i] = ...`) and must rename with them.
+		walkPythonUsages(fe, left, source, scope)
 	}
 	// Type/value sides may reference imports (logger = logging.getLogger(...)).
 	if right := ingest.ChildByField(assign, "right"); right != nil {
