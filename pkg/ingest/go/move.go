@@ -718,8 +718,20 @@ func (moveDriver) ExpandRenameSources(rootDir string, result *ingest.Result, sou
 					continue
 				}
 			} else if ref.Symbol == leaf {
-				// Facade function only in the parent package dir (e.g. wallpaper.SetStatic).
+				// Facade free function in the interface package (e.g. wallpaper.SetStatic).
+				// Bare path entities also cover types/vars/consts with the same leaf
+				// (type Helper vs Box.Helper) — only free funcs may co-rename.
 				if entPkgDir != scopePrefix {
+					continue
+				}
+				if !goEntityIsFreeFunc(rootDir, ent) {
+					continue
+				}
+				// Concrete methods only absorb facades in a *parent* package
+				// (implementor in feh → facade in wallpaper). Same-package bare
+				// names stay for interface-method renames so we do not rename
+				// unrelated funcs that share the method leaf.
+				if !ifaceExpand && entPkgDir == srcPkgDir {
 					continue
 				}
 			} else {
@@ -735,6 +747,35 @@ func (moveDriver) ExpandRenameSources(rootDir string, result *ingest.Result, sou
 		}
 	}
 	return extra
+}
+
+// goEntityIsFreeFunc reports whether ent is a package-level function (no receiver),
+// as opposed to a type/var/const/method that shares a bare symbol leaf.
+func goEntityIsFreeFunc(rootDir string, ent ingest.Entity) bool {
+	ref := ingest.ParseReference(ent.Reference)
+	if ref.Symbol == "" || strings.Contains(ref.Symbol, ".") {
+		return false
+	}
+	rel := strings.TrimPrefix(ref.Path, "./")
+	content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+	if err != nil {
+		return false
+	}
+	pf, err := ingest.ParseSource(content, rel, "go")
+	if err != nil {
+		return false
+	}
+	defer pf.Close()
+	d := findGoDecl(pf.Root, ent.StartByte)
+	if d == nil || d.Node == nil {
+		return false
+	}
+	// tree-sitter-go uses function_declaration for both funcs and methods;
+	// methods carry a receiver field.
+	if d.Node.Type() != "function_declaration" && d.Node.Type() != "method_declaration" {
+		return false
+	}
+	return ingest.ChildByField(d.Node, "receiver") == nil
 }
 
 // goTypeIsInterface reports whether typeName is declared as an interface in pkgDir.
@@ -1528,24 +1569,6 @@ func findCompositeFieldKeyEdits(file string, content []byte, oldLeaf, newLeaf st
 	return edits
 }
 
-func compositeLiteralTypeName(n *grammar.Node, content []byte) string {
-	if n == nil {
-		return ""
-	}
-	if typN := ingest.ChildByField(n, "type"); typN != nil {
-		return strings.TrimPrefix(typeNameFromTypeNode(typN, content), "*")
-	}
-	// tree-sitter-go often exposes the type as a bare type_identifier child.
-	for i := uint32(0); i < n.ChildCount(); i++ {
-		c := n.Child(i)
-		switch c.Type() {
-		case "type_identifier", "qualified_type", "generic_type", "pointer_type":
-			return strings.TrimPrefix(typeNameFromTypeNode(c, content), "*")
-		}
-	}
-	return ""
-}
-
 func collectCompositeKeyEdits(n *grammar.Node, content []byte, file, oldLeaf, newLeaf string, edits *[]ingest.Edit) {
 	if n == nil || n.IsNull() {
 		return
@@ -2319,6 +2342,8 @@ func findCompositeLiteralSelectorEdits(file string, content []byte, oldLeaf, new
 }
 
 // compositeLiteralTypeName returns T for T{}, &T{}, (*T){}, or nested unary &.
+// Used for both composite field keys (Type{Field: …}) and selector receivers
+// (Type{}.Method / &Type{}.Method).
 func compositeLiteralTypeName(n *grammar.Node, content []byte) string {
 	if n == nil {
 		return ""
@@ -2326,7 +2351,15 @@ func compositeLiteralTypeName(n *grammar.Node, content []byte) string {
 	switch n.Type() {
 	case "composite_literal":
 		if t := ingest.ChildByField(n, "type"); t != nil {
-			return typeNameFromTypeNode(t, content)
+			return strings.TrimPrefix(typeNameFromTypeNode(t, content), "*")
+		}
+		// tree-sitter-go often exposes the type as a bare type_identifier child.
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			switch c.Type() {
+			case "type_identifier", "qualified_type", "generic_type", "pointer_type":
+				return strings.TrimPrefix(typeNameFromTypeNode(c, content), "*")
+			}
 		}
 	case "unary_expression":
 		// &T{}

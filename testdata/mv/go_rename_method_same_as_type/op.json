@@ -1,0 +1,4 @@
+{
+  "source": "path:./t.go::Helper.Helper",
+  "destination": "path:./t.go::Helper.Assist"
+}
