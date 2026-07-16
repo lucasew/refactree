@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/lucasew/refactree/pkg/projectfs"
 )
 
 // ExtractKind selects how paths enter WalkExtracts.
@@ -45,6 +47,9 @@ type ExtractSource struct {
 	// Paths are seed/hop files (absolute or relative to Root).
 	// Used by ExtractSeed and ExtractHop.
 	Paths []string
+
+	// FS is optional project content (nil = disk). LSP overlays pass a projectfs.Overlay.
+	FS projectfs.FS
 }
 
 // MaterializeOptions controls graph construction over a closed extract set.
@@ -52,6 +57,8 @@ type MaterializeOptions struct {
 	// ExpandImports one-hop parses import/reexport targets under Root
 	// (project-complete Dir loads only; off for Seed/Hop).
 	ExpandImports bool
+	// FS is optional project content for ExpandImports reads (nil = disk).
+	FS projectfs.FS
 }
 
 // WalkExtracts pulls FileExtract values for src, invoking yield for each
@@ -64,6 +71,11 @@ func WalkExtracts(src ExtractSource, yield func(*FileExtract) bool) error {
 	rootAbs, err := absRoot(src.Root)
 	if err != nil {
 		return err
+	}
+
+	fsys := src.FS
+	if fsys == nil {
+		fsys = projectfs.OS{}
 	}
 
 	switch src.Kind {
@@ -79,21 +91,21 @@ func WalkExtracts(src ExtractSource, yield func(*FileExtract) bool) error {
 				return err
 			}
 		}
-		return walkExtractsDir(rootAbs, dirAbs, src.Recursive, yield)
+		return walkExtractsDir(rootAbs, dirAbs, src.Recursive, fsys, yield)
 
 	case ExtractSeed:
 		paths, err := normalizeSourcePaths(rootAbs, src.Paths)
 		if err != nil {
 			return err
 		}
-		return walkExtractsSeed(rootAbs, paths, yield)
+		return walkExtractsSeed(rootAbs, paths, fsys, yield)
 
 	case ExtractHop:
 		paths, err := normalizeSourcePaths(rootAbs, src.Paths)
 		if err != nil {
 			return err
 		}
-		return walkExtractsHop(rootAbs, paths, yield)
+		return walkExtractsHop(rootAbs, paths, fsys, yield)
 
 	default:
 		return fmt.Errorf("WalkExtracts: unknown kind %d", src.Kind)
@@ -129,7 +141,11 @@ func Materialize(root string, extracts []*FileExtract, opts MaterializeOptions) 
 			abs := filepath.Join(rootAbs, filepath.FromSlash(strings.TrimPrefix(fe.Path, "./")))
 			seen[abs] = true
 		}
-		extracts = appendImportTargetExtracts(rootAbs, extracts, seen)
+		fsys := opts.FS
+		if fsys == nil {
+			fsys = projectfs.OS{}
+		}
+		extracts = appendImportTargetExtracts(rootAbs, extracts, seen, fsys)
 	}
 	return resolve(rootAbs, extracts)
 }
@@ -143,6 +159,9 @@ func MaterializeSource(src ExtractSource, opts MaterializeOptions) (*Result, err
 	root := src.Root
 	if root == "" {
 		root = "."
+	}
+	if opts.FS == nil {
+		opts.FS = src.FS
 	}
 	return Materialize(root, extracts, opts), nil
 }
@@ -211,7 +230,7 @@ func normalizeSourcePaths(rootAbs string, paths []string) ([]string, error) {
 	return out, nil
 }
 
-func walkExtractsDir(parseRoot, dirAbs string, recursive bool, yield func(*FileExtract) bool) error {
+func walkExtractsDir(parseRoot, dirAbs string, recursive bool, fsys projectfs.FS, yield func(*FileExtract) bool) error {
 	return filepath.WalkDir(dirAbs, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -229,7 +248,7 @@ func walkExtractsDir(parseRoot, dirAbs string, recursive bool, yield func(*FileE
 		if infoErr != nil {
 			return infoErr
 		}
-		fe, parseErr := parseFileCached(parseRoot, path, info)
+		fe, parseErr := parseFileCached(parseRoot, path, info, fsys)
 		if parseErr != nil {
 			return parseErr
 		}
@@ -243,9 +262,9 @@ func walkExtractsDir(parseRoot, dirAbs string, recursive bool, yield func(*FileE
 	})
 }
 
-func walkExtractsHop(rootAbs string, paths []string, yield func(*FileExtract) bool) error {
+func walkExtractsHop(rootAbs string, paths []string, fsys projectfs.FS, yield func(*FileExtract) bool) error {
 	for _, abs := range paths {
-		fe, err := parseFileCached(rootAbs, abs, nil)
+		fe, err := parseFileCached(rootAbs, abs, nil, fsys)
 		if err != nil {
 			return err
 		}
@@ -259,7 +278,7 @@ func walkExtractsHop(rootAbs string, paths []string, yield func(*FileExtract) bo
 	return nil
 }
 
-func walkExtractsSeed(rootAbs string, seeds []string, yield func(*FileExtract) bool) error {
+func walkExtractsSeed(rootAbs string, seeds []string, fsys projectfs.FS, yield func(*FileExtract) bool) error {
 	seen := map[string]bool{}
 	queue := append([]string(nil), seeds...)
 
@@ -275,7 +294,7 @@ func walkExtractsSeed(rootAbs string, seeds []string, yield func(*FileExtract) b
 			continue
 		}
 
-		fe, err := parseFileCached(rootAbs, absPath, nil)
+		fe, err := parseFileCached(rootAbs, absPath, nil, fsys)
 		if err != nil {
 			return err
 		}

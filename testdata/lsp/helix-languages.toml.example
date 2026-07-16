@@ -1,0 +1,23 @@
+# Example Helix languages.toml fragment for rft as complement LSP.
+# Put language-specific servers first so they win on first-wins features
+# (definition, hover, rename). Helix merges diagnostics/completion/symbols.
+
+[language-server.rft]
+command = "rft"
+args = ["lsp"]
+
+[[language]]
+name = "go"
+language-servers = ["gopls", "rft"]
+
+[[language]]
+name = "python"
+language-servers = ["basedpyright", "rft"]
+
+[[language]]
+name = "javascript"
+language-servers = ["typescript-language-server", "rft"]
+
+[[language]]
+name = "nix"
+language-servers = ["nil", "rft"]
