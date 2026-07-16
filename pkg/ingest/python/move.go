@@ -1873,8 +1873,9 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 }
 
 // pythonTypedLocals maps local names that are annotated or assigned as ourReceivers.
-// Covers: `b: Box`, `b = Box()`, `b: Box = ...`, as-bindings
-// (`case A() as a`, `with A() as a`, `except A as e`), walrus (`a := A()`),
+// Covers: `b: Box`, `b = Box()`, `b: Box = ...`, Optional/Union/`|` annotations
+// (`b: Optional[Box]`, `b: Box | None`, `b: Union[Box, None]`), `b = cast(Box, x)`,
+// as-bindings (`case A() as a`, `with A() as a`, `except A as e`), walrus (`a := A()`),
 // for/comprehension targets over known collections
 // (`for a in [A()]`, `for a in items` with `items: list[A]`,
 // `for a in d.values()` / `for k, a in d.items()` with `d: dict[K, A]`),
@@ -1939,8 +1940,22 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				if right != nil && right.Type() == "call" {
 					fn := ingest.ChildByField(right, "function")
 					if fn != nil && fn.Type() == "identifier" {
-						if ourReceivers[ingest.NodeText(fn, content)] {
+						fname := ingest.NodeText(fn, content)
+						if ourReceivers[fname] {
 							out[lname] = true
+						}
+						// a = cast(A, x) / cast("A", x)
+						if fname == "cast" {
+							if tn := pythonCastTypeArg(right, content); ourReceivers[tn] {
+								out[lname] = true
+							}
+						}
+					} else if fn != nil && fn.Type() == "attribute" {
+						// typing.cast(A, x)
+						if attr := ingest.ChildByField(fn, "attribute"); attr != nil && ingest.NodeText(attr, content) == "cast" {
+							if tn := pythonCastTypeArg(right, content); ourReceivers[tn] {
+								out[lname] = true
+							}
 						}
 					}
 				}
@@ -2532,6 +2547,9 @@ func pythonDottedNameLeaf(n *grammar.Node, content []byte) string {
 }
 
 // pythonTypeName extracts a simple class name from a type annotation node.
+// Unwraps Optional[T], Union[T, None]/Union[None, T], and T | None / None | T
+// to T so annotated params/locals participate in ExtraRename. Multi-arm unions
+// with more than one non-None type fail closed ("").
 func pythonTypeName(typeN *grammar.Node, content []byte) string {
 	if typeN == nil {
 		return ""
@@ -2551,6 +2569,171 @@ func pythonTypeName(typeN *grammar.Node, content []byte) string {
 		// pkg.Box — use leaf
 		if attr := ingest.ChildByField(typeN, "attribute"); attr != nil {
 			return ingest.NodeText(attr, content)
+		}
+	case "generic_type":
+		// Optional[T] / Union[T, None] (and typing.Optional / typing.Union via leaf).
+		return pythonOptionalUnionType(typeN, content)
+	case "binary_operator":
+		// T | None / None | T (PEP 604). Multi non-None arms fail closed.
+		return pythonPipeUnionType(typeN, content)
+	}
+	return ""
+}
+
+// pythonOptionalUnionType handles Optional[T] and Union[..., None, ...].
+func pythonOptionalUnionType(typeN *grammar.Node, content []byte) string {
+	if typeN == nil || typeN.Type() != "generic_type" {
+		return ""
+	}
+	var contName string
+	var typeParam *grammar.Node
+	for i := uint32(0); i < typeN.ChildCount(); i++ {
+		ch := typeN.Child(i)
+		switch ch.Type() {
+		case "identifier":
+			if contName == "" {
+				contName = ingest.NodeText(ch, content)
+			}
+		case "attribute":
+			// typing.Optional — use leaf
+			if contName == "" {
+				if attr := ingest.ChildByField(ch, "attribute"); attr != nil {
+					contName = ingest.NodeText(attr, content)
+				}
+			}
+		case "type_parameter":
+			typeParam = ch
+		}
+	}
+	if typeParam == nil {
+		return ""
+	}
+	var args []string
+	for i := uint32(0); i < typeParam.ChildCount(); i++ {
+		ch := typeParam.Child(i)
+		if ch.Type() != "type" {
+			continue
+		}
+		if pythonIsNoneTypeNode(ch, content) {
+			continue
+		}
+		if tn := pythonTypeName(ch, content); tn != "" && tn != "None" {
+			args = append(args, tn)
+		}
+	}
+	switch contName {
+	case "Optional":
+		// Optional[T] — single type arg (None is implicit).
+		if len(args) == 1 {
+			return args[0]
+		}
+		return ""
+	case "Union":
+		// Union[T, None] / Union[None, T] → T; multi non-None fails closed.
+		if len(args) == 1 {
+			return args[0]
+		}
+		return ""
+	default:
+		return ""
+	}
+}
+
+// pythonPipeUnionType handles PEP 604 unions: T | None / None | T / T | U | None.
+// Exactly one non-None arm → that type; otherwise fail closed.
+func pythonPipeUnionType(n *grammar.Node, content []byte) string {
+	arms := pythonPipeUnionArms(n, content)
+	if arms == nil {
+		return ""
+	}
+	var nonNone []string
+	for _, a := range arms {
+		if a == "" || a == "None" {
+			continue
+		}
+		nonNone = append(nonNone, a)
+	}
+	if len(nonNone) == 1 {
+		return nonNone[0]
+	}
+	return ""
+}
+
+// pythonPipeUnionArms flattens a | chain into type-name leaves; None arms are "".
+// Returns nil if any arm is not a resolvable type / None (fail closed).
+func pythonPipeUnionArms(n *grammar.Node, content []byte) []string {
+	if n == nil {
+		return nil
+	}
+	if n.Type() == "type" && n.ChildCount() > 0 {
+		n = n.Child(0)
+	}
+	if n.Type() == "binary_operator" {
+		op := ingest.ChildByField(n, "operator")
+		if op == nil || ingest.NodeText(op, content) != "|" {
+			return nil
+		}
+		left := pythonPipeUnionArms(ingest.ChildByField(n, "left"), content)
+		right := pythonPipeUnionArms(ingest.ChildByField(n, "right"), content)
+		if left == nil || right == nil {
+			return nil
+		}
+		return append(left, right...)
+	}
+	if pythonIsNoneTypeNode(n, content) {
+		return []string{""}
+	}
+	if tn := pythonTypeName(n, content); tn != "" {
+		return []string{tn}
+	}
+	return nil
+}
+
+// pythonIsNoneTypeNode reports None / none in type position.
+func pythonIsNoneTypeNode(n *grammar.Node, content []byte) bool {
+	if n == nil {
+		return false
+	}
+	if n.Type() == "type" && n.ChildCount() > 0 {
+		n = n.Child(0)
+	}
+	switch n.Type() {
+	case "none":
+		return true
+	case "identifier":
+		return ingest.NodeText(n, content) == "None"
+	}
+	return false
+}
+
+// pythonCastTypeArg returns the type leaf of cast(T, x) / typing.cast(T, x)
+// first argument (identifier, attribute leaf, or string).
+func pythonCastTypeArg(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	args := ingest.ChildByField(call, "arguments")
+	if args == nil {
+		return ""
+	}
+	// First non-punctuation child is the type expression.
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		switch ch.Type() {
+		case "(", ")", ",", "comment":
+			continue
+		case "identifier":
+			return ingest.NodeText(ch, content)
+		case "attribute":
+			if attr := ingest.ChildByField(ch, "attribute"); attr != nil {
+				return ingest.NodeText(attr, content)
+			}
+			return ""
+		case "string":
+			return strings.Trim(ingest.NodeText(ch, content), `"'`)
+		default:
+			// Unexpected shape — fail closed.
+			return ""
 		}
 	}
 	return ""
