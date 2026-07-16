@@ -19,6 +19,268 @@ type moveDriver struct{}
 
 func (moveDriver) Language() string { return "javascript" }
 
+
+// ExpandRenameSources ties TypeScript interface methods to implementors:
+//
+//  1. Renaming Iface.method expands Class.method for classes that implement Iface.
+//  2. Renaming Class.method expands Iface.method for interfaces Class implements.
+//
+// Type-alias object types are structural — no expand (call sites use ExtraRename).
+func (moveDriver) ExpandRenameSources(rootDir string, result *ingest.Result, sourceRef string) []string {
+	src := ingest.ParseReference(sourceRef)
+	if src.Symbol == "" || !strings.Contains(src.Symbol, ".") {
+		return nil
+	}
+	leaf := ingest.SymbolLeaf(src.Symbol)
+	recv, ok := jsMethodReceiver(src.Symbol)
+	if !ok || leaf == "" || recv == "" || result == nil {
+		return nil
+	}
+
+	// Types whose Type.leaf entities should join the rename source set.
+	related := map[string]bool{}
+	if jsTypeIsInterface(rootDir, result, recv) {
+		for c := range jsClassesImplementing(rootDir, result, recv) {
+			related[c] = true
+		}
+	} else {
+		for iface := range jsInterfacesImplementedBy(rootDir, result, recv) {
+			related[iface] = true
+		}
+	}
+	if len(related) == 0 {
+		return nil
+	}
+
+	var extra []string
+	for _, ent := range result.Entities {
+		if ent.Reference == sourceRef {
+			continue
+		}
+		ref := ingest.ParseReference(ent.Reference)
+		if ref.Provider != "path" || ref.Symbol == "" {
+			continue
+		}
+		if ingest.SymbolLeaf(ref.Symbol) != leaf {
+			continue
+		}
+		entRecv, isMethod := jsMethodReceiver(ref.Symbol)
+		if !isMethod || !related[entRecv] {
+			continue
+		}
+		extra = append(extra, ent.Reference)
+	}
+	return extra
+}
+
+// jsInterfacesImplementedBy returns interface names that className lists in its
+// implements clause across javascript files in result.
+func jsInterfacesImplementedBy(rootDir string, result *ingest.Result, className string) map[string]bool {
+	out := map[string]bool{}
+	if className == "" || result == nil {
+		return out
+	}
+	for _, f := range result.Files {
+		if f.Language != "javascript" {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Path, "./")
+		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		pf, err := ingest.ParseSource(content, rel, "javascript")
+		if err != nil {
+			continue
+		}
+		var walk func(n *grammar.Node)
+		walk = func(n *grammar.Node) {
+			if n == nil {
+				return
+			}
+			if n.Type() == "class_declaration" || n.Type() == "abstract_class_declaration" || n.Type() == "class" {
+				nameN := ingest.ChildByField(n, "name")
+				if nameN != nil && ingest.NodeText(nameN, content) == className {
+					for iface := range jsClassImplementsNames(n, content) {
+						out[iface] = true
+					}
+				}
+			}
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				walk(n.Child(i))
+			}
+		}
+		walk(pf.Root)
+		pf.Close()
+	}
+	return out
+}
+
+// jsTypeIsInterface reports whether typeName is declared as an interface in
+// any javascript file of result.
+func jsTypeIsInterface(rootDir string, result *ingest.Result, typeName string) bool {
+	if typeName == "" || result == nil {
+		return false
+	}
+	for _, f := range result.Files {
+		if f.Language != "javascript" {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Path, "./")
+		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		if jsTypeIsInterfaceInFile(content, rel, typeName) {
+			return true
+		}
+	}
+	return false
+}
+
+func jsTypeIsInterfaceInFile(content []byte, fileRel, typeName string) bool {
+	if typeName == "" {
+		return false
+	}
+	pf, err := ingest.ParseSource(content, fileRel, "javascript")
+	if err != nil {
+		return false
+	}
+	defer pf.Close()
+	var found bool
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || found {
+			return
+		}
+		if n.Type() == "interface_declaration" {
+			if nameN := ingest.ChildByField(n, "name"); nameN != nil && ingest.NodeText(nameN, content) == typeName {
+				found = true
+				return
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(pf.Root)
+	return found
+}
+
+// jsClassesImplementing returns simple class names that declare
+// `implements … Iface …` for ifaceName across javascript files in result.
+func jsClassesImplementing(rootDir string, result *ingest.Result, ifaceName string) map[string]bool {
+	out := map[string]bool{}
+	if ifaceName == "" || result == nil {
+		return out
+	}
+	for _, f := range result.Files {
+		if f.Language != "javascript" {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Path, "./")
+		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		pf, err := ingest.ParseSource(content, rel, "javascript")
+		if err != nil {
+			continue
+		}
+		var walk func(n *grammar.Node)
+		walk = func(n *grammar.Node) {
+			if n == nil {
+				return
+			}
+			if n.Type() == "class_declaration" || n.Type() == "abstract_class_declaration" || n.Type() == "class" {
+				if jsClassImplements(n, content, ifaceName) {
+					if nameN := ingest.ChildByField(n, "name"); nameN != nil {
+						if cn := ingest.NodeText(nameN, content); cn != "" {
+							out[cn] = true
+						}
+					}
+				}
+			}
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				walk(n.Child(i))
+			}
+		}
+		walk(pf.Root)
+		pf.Close()
+	}
+	return out
+}
+
+// jsClassImplements reports whether class node lists ifaceName in its
+// implements clause (class_heritage / implements_clause).
+func jsClassImplements(class *grammar.Node, content []byte, ifaceName string) bool {
+	if ifaceName == "" {
+		return false
+	}
+	return jsClassImplementsNames(class, content)[ifaceName]
+}
+
+// jsClassImplementsNames returns interface type names listed on the class
+// implements clause.
+func jsClassImplementsNames(class *grammar.Node, content []byte) map[string]bool {
+	out := map[string]bool{}
+	if class == nil {
+		return out
+	}
+	var collect func(n *grammar.Node)
+	collect = func(n *grammar.Node) {
+		if n == nil {
+			return
+		}
+		switch n.Type() {
+		case "type_identifier", "identifier":
+			if name := ingest.NodeText(n, content); name != "" {
+				out[name] = true
+			}
+			return
+		case "generic_type":
+			if name := ingest.ChildByField(n, "name"); name != nil {
+				if t := ingest.NodeText(name, content); t != "" {
+					out[t] = true
+				}
+			}
+			return
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			collect(n.Child(i))
+		}
+	}
+	// Prefer class_heritage / implements_clause children so we do not match
+	// the class name itself or body type annotations.
+	for i := uint32(0); i < class.ChildCount(); i++ {
+		ch := class.Child(i)
+		switch ch.Type() {
+		case "class_heritage":
+			// Only the implements_clause branch — not extends.
+			for j := uint32(0); j < ch.ChildCount(); j++ {
+				inner := ch.Child(j)
+				if inner.Type() == "implements_clause" {
+					collect(inner)
+				}
+			}
+		case "implements_clause":
+			collect(ch)
+		default:
+			// Bare `implements` keyword sibling form.
+			if ch.Type() == "implements" {
+				for j := i + 1; j < class.ChildCount(); j++ {
+					sib := class.Child(j)
+					if sib.Type() == "{" || sib.Type() == "class_body" || sib.Type() == "extends" || sib.Type() == "class_heritage" {
+						break
+					}
+					collect(sib)
+				}
+			}
+		}
+	}
+	return out
+}
+
 func (moveDriver) ExtractDecl(filePath string, entity ingest.Entity) (ingest.DeclExtract, error) {
 	pf, err := ingest.ParseSourceFile(filePath, "")
 	if err != nil {
@@ -655,7 +917,7 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 	}
 	src := ingest.ParseReference(sourceRefs[0])
 	if !strings.Contains(src.Symbol, ".") {
-		return nil // only methods / nested symbols
+		return jsShorthandPropertyAccessEdits(rootDir, result, sourceRefs, oldLeaf, newLeaf)
 	}
 
 	ourReceivers := map[string]bool{}
@@ -707,6 +969,290 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 	}
 	return edits
 }
+
+// jsShorthandPropertyAccessEdits covers function/value renames where object
+// shorthand ({ helper }) rewrites the property key with the value. Locals
+// bound to such objects still have o.helper / { helper: h } = o under the old
+// key after the shorthand rewrite — rename those access sites too.
+func jsShorthandPropertyAccessEdits(rootDir string, result *ingest.Result, sourceRefs []string, oldLeaf, newLeaf string) []ingest.Edit {
+	sourceSet := map[string]bool{}
+	for _, s := range sourceRefs {
+		sourceSet[s] = true
+	}
+	// Only when relation rename actually touches a shorthand use of this symbol.
+	hasShorthandUse := false
+	for _, reln := range result.Relations {
+		if !sourceSet[reln.Target] {
+			continue
+		}
+		ref := ingest.ParseReference(reln.Reference)
+		fileRel := strings.TrimPrefix(ref.Path, "./")
+		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(fileRel)))
+		if err != nil || int(reln.EndByte) > len(content) {
+			continue
+		}
+		// Heuristic: the usage span text is oldLeaf and sits inside `{ … }`.
+		if string(content[reln.StartByte:reln.EndByte]) != oldLeaf {
+			continue
+		}
+		if jsSpanIsObjectShorthand(content, reln.StartByte, reln.EndByte) {
+			hasShorthandUse = true
+			break
+		}
+	}
+	if !hasShorthandUse {
+		return nil
+	}
+
+	occupied := ingest.MarkEntityRelationSpans(result, sourceSet)
+	var edits []ingest.Edit
+	for _, f := range result.Files {
+		if f.Language != "javascript" {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Path, "./")
+		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		occ := occupied[rel]
+		for _, e := range jsShorthandLocalPropertyEdits(rel, content, oldLeaf, newLeaf) {
+			if ingest.SpanOccupied(occ, e.StartByte, e.EndByte) {
+				continue
+			}
+			edits = append(edits, e)
+		}
+	}
+	return edits
+}
+
+// jsSpanIsObjectShorthand reports whether [start:end) is a shorthand property
+// name inside an object literal (not a longhand key or a pattern binding).
+
+// jsSpanIsObjectShorthand reports whether [start:end) is a shorthand property
+// name inside an object literal (not a longhand key or a pattern binding).
+func jsSpanIsObjectShorthand(content []byte, start, end uint32) bool {
+	pf, err := ingest.ParseSource(content, "file.js", "javascript")
+	if err != nil {
+		return false
+	}
+	defer pf.Close()
+	var found bool
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() || found {
+			return
+		}
+		if n.Type() == "shorthand_property_identifier" &&
+			n.StartByte() == start && n.EndByte() == end {
+			found = true
+			return
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(pf.Root)
+	return found
+}
+
+// jsShorthandLocalPropertyEdits finds locals assigned an object literal that
+// contains shorthand oldLeaf, then rewrites .oldLeaf member accesses and
+// object-pattern keys on those locals (and nested property paths).
+
+// jsShorthandLocalPropertyEdits finds locals assigned an object literal that
+// contains shorthand oldLeaf, then rewrites .oldLeaf member accesses and
+// object-pattern keys on those locals (and nested property paths).
+func jsShorthandLocalPropertyEdits(fileRel string, content []byte, oldLeaf, newLeaf string) []ingest.Edit {
+	pf, err := ingest.ParseSource(content, fileRel, "javascript")
+	if err != nil {
+		return nil
+	}
+	defer pf.Close()
+
+	// binding → true when the bound object literal includes shorthand oldLeaf
+	// either at the top level or nested under property paths we track.
+	// For nested `{ nested: { helper } }` we record binding "o" with path
+	// prefix "nested" so o.nested.helper rewrites.
+	type pathKey struct {
+		binding string
+		// dotted path under binding to the object that has the shorthand key,
+		// empty when the shorthand is a direct property of the binding.
+		prefix string
+	}
+	shorthandLocals := map[pathKey]bool{}
+
+	// Collect (binding, prefix) for every shorthand occurrence under an object
+	// assigned to a local. prefix is the path of pair keys from the binding root
+	// to the object that owns the shorthand.
+	var collectShorthandPaths func(obj *grammar.Node, binding, prefix string)
+	collectShorthandPaths = func(obj *grammar.Node, binding, prefix string) {
+		if obj == nil || obj.Type() != "object" || binding == "" {
+			return
+		}
+		for i := uint32(0); i < obj.ChildCount(); i++ {
+			ch := obj.Child(i)
+			switch ch.Type() {
+			case "shorthand_property_identifier":
+				if ingest.NodeText(ch, content) == oldLeaf {
+					shorthandLocals[pathKey{binding, prefix}] = true
+				}
+			case "pair":
+				key := ingest.ChildByField(ch, "key")
+				val := ingest.ChildByField(ch, "value")
+				if key == nil || val == nil {
+					continue
+				}
+				keyName := ingest.NodeText(key, content)
+				// Only simple identifier keys form a stable path.
+				if key.Type() != "property_identifier" && key.Type() != "identifier" {
+					continue
+				}
+				next := keyName
+				if prefix != "" {
+					next = prefix + "." + keyName
+				}
+				collectShorthandPaths(val, binding, next)
+			}
+		}
+	}
+
+	var walkDecl func(n *grammar.Node)
+	walkDecl = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		if n.Type() == "variable_declarator" {
+			nameN := ingest.ChildByField(n, "name")
+			valN := ingest.ChildByField(n, "value")
+			if nameN != nil && nameN.Type() == "identifier" && valN != nil && valN.Type() == "object" {
+				collectShorthandPaths(valN, ingest.NodeText(nameN, content), "")
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walkDecl(n.Child(i))
+		}
+	}
+	walkDecl(pf.Root)
+	if len(shorthandLocals) == 0 {
+		return nil
+	}
+
+	var edits []ingest.Edit
+	seen := map[[2]uint32]bool{}
+	add := func(start, end uint32) {
+		key := [2]uint32{start, end}
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		edits = append(edits, ingest.Edit{
+			File:      fileRel,
+			StartByte: start,
+			EndByte:   end,
+			NewText:   newLeaf,
+		})
+	}
+
+	// member chain path: o.nested.helper → binding o, prefix nested, prop helper
+	memberPath := func(n *grammar.Node) (binding, prefix, prop string, propNode *grammar.Node, ok bool) {
+		if n == nil {
+			return "", "", "", nil, false
+		}
+		propN := ingest.ChildByField(n, "property")
+		obj := ingest.ChildByField(n, "object")
+		if propN == nil || obj == nil || ingest.NodeText(propN, content) != oldLeaf {
+			return "", "", "", nil, false
+		}
+		// Walk object chain leftward collecting property names until identifier.
+		var parts []string
+		cur := obj
+		for cur != nil {
+			switch cur.Type() {
+			case "identifier":
+				binding = ingest.NodeText(cur, content)
+				// parts are outermost-first? we walked inward so reverse
+				for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
+					parts[i], parts[j] = parts[j], parts[i]
+				}
+				prefix = strings.Join(parts, ".")
+				return binding, prefix, oldLeaf, propN, true
+			case "member_expression", "member_expression_optional", "optional_chain":
+				p := ingest.ChildByField(cur, "property")
+				if p == nil {
+					return "", "", "", nil, false
+				}
+				parts = append(parts, ingest.NodeText(p, content))
+				cur = ingest.ChildByField(cur, "object")
+			default:
+				return "", "", "", nil, false
+			}
+		}
+		return "", "", "", nil, false
+	}
+
+	var walkUses func(n *grammar.Node)
+	walkUses = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		switch n.Type() {
+		case "member_expression", "member_expression_optional", "optional_chain":
+			if binding, prefix, _, propN, ok := memberPath(n); ok {
+				if shorthandLocals[pathKey{binding, prefix}] {
+					add(propN.StartByte(), propN.EndByte())
+				}
+			}
+		case "variable_declarator":
+			// const { helper: h } = o  /  const { helper } = o.nested
+			nameN := ingest.ChildByField(n, "name")
+			valN := ingest.ChildByField(n, "value")
+			if nameN != nil && nameN.Type() == "object_pattern" && valN != nil {
+				binding, prefix := "", ""
+				switch valN.Type() {
+				case "identifier":
+					binding = ingest.NodeText(valN, content)
+				case "member_expression", "member_expression_optional", "optional_chain":
+					// o.nested → binding o, prefix nested
+					var parts []string
+					cur := valN
+					for cur != nil {
+						if cur.Type() == "identifier" {
+							binding = ingest.NodeText(cur, content)
+							for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
+								parts[i], parts[j] = parts[j], parts[i]
+							}
+							prefix = strings.Join(parts, ".")
+							break
+						}
+						if cur.Type() == "member_expression" || cur.Type() == "member_expression_optional" || cur.Type() == "optional_chain" {
+							p := ingest.ChildByField(cur, "property")
+							if p == nil {
+								break
+							}
+							parts = append(parts, ingest.NodeText(p, content))
+							cur = ingest.ChildByField(cur, "object")
+							continue
+						}
+						break
+					}
+				}
+				if binding != "" && shorthandLocals[pathKey{binding, prefix}] {
+					jsCollectObjectPatternMethodEdits(nameN, content, oldLeaf, newLeaf, func(start, end uint32, text string) {
+						add(start, end)
+					})
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walkUses(n.Child(i))
+		}
+	}
+	walkUses(pf.Root)
+	return edits
+}
+
+// jsMethodReceiver returns the class/type name for "Class.method" symbols.
 
 // jsMethodReceiver returns the class/type name for "Class.method" symbols.
 func jsMethodReceiver(symbol string) (string, bool) {
@@ -998,22 +1544,32 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 		}
 		return len(foreignReceivers) == 0
 	}
-	// Only simple identifiers: box.x, Box.x
-	if obj.Type() != "identifier" {
-		return false
+	// Simple identifiers: box.x, Box.x
+	if obj.Type() == "identifier" {
+		name := ingest.NodeText(obj, content)
+		if ourReceivers[name] {
+			return true
+		}
+		if foreignReceivers[name] {
+			return false
+		}
+		if typedLocals[name] {
+			return true
+		}
+		// Unique method leaf in the project graph: rewrite all simple member loads.
+		return len(foreignReceivers) == 0
 	}
-	name := ingest.NodeText(obj, content)
-	if ourReceivers[name] {
-		return true
+	// Complex expression receivers — call chains (b.next().m), await, ternary,
+	// nullish/binary, subscript — only when the method leaf is unique project-wide.
+	// Without static return types we cannot disambiguate foreign same-leaf methods.
+	switch obj.Type() {
+	case "call_expression", "await_expression", "ternary_expression",
+		"binary_expression", "member_expression",
+		"member_expression_optional", "optional_chain",
+		"subscript_expression", "assignment_expression":
+		return len(foreignReceivers) == 0
 	}
-	if foreignReceivers[name] {
-		return false
-	}
-	if typedLocals[name] {
-		return true
-	}
-	// Unique method leaf in the project graph: rewrite all simple member loads.
-	return len(foreignReceivers) == 0
+	return false
 }
 
 // jsTypedLocals maps local names constructed as ourReceivers (const b = new Box()).

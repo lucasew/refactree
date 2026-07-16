@@ -91,7 +91,11 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 	}
 
 	// (1) Interface / override method declaration renames on related types.
-	if len(alsoTypes) > 0 {
+	// alsoTypes covers named implementors/supertypes. ourTypes alone is enough
+	// when the only other Type.method entities are anonymous class overrides
+	// (new Type() { m() {} }) which share the constructed type's simple name
+	// but live on a different path — no implements edge is recorded for them.
+	if len(alsoTypes) > 0 || len(ourTypes) > 0 {
 		for _, ent := range result.Entities {
 			if sourceSet[ent.Reference] {
 				continue
@@ -126,7 +130,8 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		}
 	}
 
-	// (2) Instance member access: m.oldLeaf method_invocation / field_access.
+	// (2) Instance member access: m.oldLeaf method_invocation / field_access /
+	// method_reference (and complex receivers).
 	if len(ourReceivers) > 0 {
 		foreignReceivers := map[string]bool{}
 		for _, ent := range result.Entities {
@@ -782,8 +787,8 @@ func javaMemberReceiver(symbol string) (string, bool) {
 	return recv, recv != ""
 }
 
-// javaMemberAccessEdits finds m.oldLeaf method_invocation name nodes and
-// field_access field nodes to rewrite.
+// javaMemberAccessEdits finds m.oldLeaf method_invocation name nodes,
+// field_access field nodes, and method_reference method names to rewrite.
 // implementsEdges is map[typeSimpleName]set[parentSimpleName] from extends/implements;
 // used only for super.member decisions (may be nil).
 func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf string, ourReceivers, foreignReceivers map[string]bool, implementsEdges map[string]map[string]bool) []ingest.Edit {
@@ -811,8 +816,8 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 	typedLocals := javaTypedLocals(pf.Root, content, ourSimple)
 
 	var edits []ingest.Edit
-	var walk func(n *grammar.Node, enclosingClass string)
-	walk = func(n *grammar.Node, enclosingClass string) {
+	var walk func(n *grammar.Node, enclosingClass string, switchMatchesOur bool)
+	walk = func(n *grammar.Node, enclosingClass string, switchMatchesOur bool) {
 		if n == nil || n.IsNull() {
 			return
 		}
@@ -821,6 +826,10 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			if nameN := ingest.ChildByField(n, "name"); nameN != nil {
 				classHere = ingest.NodeText(nameN, content)
 			}
+		}
+		swHere := switchMatchesOur
+		if n.Type() == "switch_expression" || n.Type() == "switch_statement" {
+			swHere = javaSwitchExprMatchesOur(n, content, ourSimple, typedLocals)
 		}
 		switch n.Type() {
 		case "method_invocation":
@@ -852,13 +861,103 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 					})
 				}
 			}
+		case "method_reference":
+			// Children: receiver, "::", method name (optional type_arguments).
+			// Type::method and this::method are often covered by usages; expr::method
+			// and super::method need ExtraRename like instance invocations.
+			var parts []*grammar.Node
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				child := n.Child(i)
+				if child.Type() == "::" {
+					continue
+				}
+				parts = append(parts, child)
+			}
+			if len(parts) >= 2 {
+				obj, name := parts[0], parts[len(parts)-1]
+				if name.Type() == "identifier" && ingest.NodeText(name, content) == oldLeaf {
+					if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, implementsEdges) {
+						edits = append(edits, ingest.Edit{
+							File:      fileRel,
+							StartByte: name.StartByte(),
+							EndByte:   name.EndByte(),
+							NewText:   newLeaf,
+						})
+					}
+				}
+			}
+		case "switch_label":
+			// case HELPER -> … / case HELPER: — bare enum constant labels.
+			// Relations cover Color.HELPER field_access but not switch labels.
+			if len(foreignSimple) == 0 || swHere {
+				for i := uint32(0); i < n.ChildCount(); i++ {
+					ch := n.Child(i)
+					if (ch.Type() == "identifier" || ch.Type() == "type_identifier") &&
+						ingest.NodeText(ch, content) == oldLeaf {
+						edits = append(edits, ingest.Edit{
+							File:      fileRel,
+							StartByte: ch.StartByte(),
+							EndByte:   ch.EndByte(),
+							NewText:   newLeaf,
+						})
+					}
+				}
+			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
-			walk(n.Child(i), classHere)
+			walk(n.Child(i), classHere, swHere)
 		}
 	}
-	walk(pf.Root, "")
+	walk(pf.Root, "", false)
 	return edits
+}
+
+// javaSwitchExprMatchesOur reports whether the switch selector refers to our type
+// (typed local or receiver name). Used to gate bare case LABEL renames when the
+// constant leaf is not unique across types.
+func javaSwitchExprMatchesOur(sw *grammar.Node, content []byte, ourReceivers, typedLocals map[string]bool) bool {
+	if sw == nil {
+		return false
+	}
+	cond := ingest.ChildByField(sw, "condition")
+	if cond == nil {
+		cond = ingest.ChildByField(sw, "value")
+	}
+	if cond == nil {
+		for i := uint32(0); i < sw.ChildCount(); i++ {
+			ch := sw.Child(i)
+			if ch.Type() == "parenthesized_expression" || ch.Type() == "identifier" {
+				cond = ch
+				break
+			}
+		}
+	}
+	if cond == nil {
+		return false
+	}
+	if cond.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(cond, "expression")
+		if inner == nil {
+			for i := uint32(0); i < cond.ChildCount(); i++ {
+				ch := cond.Child(i)
+				if ch.Type() != "(" && ch.Type() != ")" {
+					inner = ch
+					break
+				}
+			}
+		}
+		cond = inner
+	}
+	if cond == nil {
+		return false
+	}
+	if cond.Type() == "identifier" {
+		name := ingest.NodeText(cond, content)
+		if ourReceivers[name] || typedLocals[name] {
+			return true
+		}
+	}
+	return false
 }
 
 // javaShouldRenameMemberAccess decides whether obj.oldLeaf targets our receiver type.
@@ -866,6 +965,19 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 // can rewrite unique-leaf sites, occupied spans skip already-covered ones).
 // implementsEdges maps type → parent types (extends/implements); used for super.
 func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, implementsEdges map[string]map[string]bool) bool {
+	// Unwrap (expr).member — cast, ternary, and call receivers are often parenthesized.
+	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < obj.ChildCount(); i++ {
+			ch := obj.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		obj = inner
+	}
 	if obj == nil {
 		if enclosingClass != "" && ourReceivers[enclosingClass] {
 			return true
@@ -945,8 +1057,44 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 		}
 		return len(foreignReceivers) == 0
 	}
-	if obj.Type() != "identifier" {
-		return false
+	// ((Box) o).helper() / (Box) o::helper — cast_expression type field.
+	if obj.Type() == "cast_expression" {
+		typeN := ingest.ChildByField(obj, "type")
+		if typeN == nil {
+			return len(foreignReceivers) == 0
+		}
+		tn := javaTypeName(typeN, content)
+		if tn == "" {
+			return len(foreignReceivers) == 0
+		}
+		if ourReceivers[tn] {
+			return true
+		}
+		if foreignReceivers[tn] {
+			return false
+		}
+		return len(foreignReceivers) == 0
+	}
+	// xs[0].helper() — array element type from typed local/param Box[] xs.
+	if obj.Type() == "array_access" {
+		arr := ingest.ChildByField(obj, "array")
+		if arr == nil {
+			return len(foreignReceivers) == 0
+		}
+		// Recurse for (xs)[0] / matrix[i][j] via parenthesized unwrap on re-entry.
+		return javaShouldRenameMemberAccess(arr, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, implementsEdges)
+	}
+	// make().helper(), (f ? a : b).helper(), and other complex receivers without
+	// a static type we can recover: only rewrite when the method leaf is unique
+	// among project method entities (no foreign same-leaf receivers).
+	if obj.Type() == "method_invocation" || obj.Type() == "ternary_expression" ||
+		obj.Type() == "binary_expression" || obj.Type() == "assignment_expression" ||
+		obj.Type() == "switch_expression" || obj.Type() == "lambda_expression" {
+		return len(foreignReceivers) == 0
+	}
+	if obj.Type() != "identifier" && obj.Type() != "type_identifier" {
+		// Unknown receiver shape: unique-leaf only.
+		return len(foreignReceivers) == 0
 	}
 	name := ingest.NodeText(obj, content)
 	if ourReceivers[name] {
