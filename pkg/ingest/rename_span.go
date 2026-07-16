@@ -59,3 +59,47 @@ func IsIdentChar(b byte) bool {
 func IsIdentCharJava(b byte) bool {
 	return IsIdentChar(b) || b == '$'
 }
+
+// MaskNonNewlinesInPlace replaces bytes in [start, end) with spaces, keeping
+// newlines so residual whole-word scans still see line structure. Indices are
+// clamped to buf. Used by strip-unused-import paths after a declaration move.
+func MaskNonNewlinesInPlace(buf []byte, start, end int) {
+	if start < 0 {
+		start = 0
+	}
+	if end > len(buf) {
+		end = len(buf)
+	}
+	for i := start; i < end; i++ {
+		if buf[i] != '\n' {
+			buf[i] = ' '
+		}
+	}
+}
+
+// IdentUsed reports whether ident appears as a whole identifier in text.
+// isIdent classifies identifier characters (IsIdentChar or IsIdentCharJava).
+// Empty ident or a nil isIdent always returns false.
+func IdentUsed(text, ident string, isIdent func(byte) bool) bool {
+	if ident == "" || isIdent == nil {
+		return false
+	}
+	off := 0
+	for {
+		idx := strings.Index(text[off:], ident)
+		if idx < 0 {
+			return false
+		}
+		pos := off + idx
+		end := pos + len(ident)
+		if pos > 0 && isIdent(text[pos-1]) {
+			off = end
+			continue
+		}
+		if end < len(text) && isIdent(text[end]) {
+			off = end
+			continue
+		}
+		return true
+	}
+}

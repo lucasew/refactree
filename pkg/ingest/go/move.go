@@ -1206,30 +1206,17 @@ func stripUnusedSourceImports(file string, content []byte, decl ingest.DeclExtra
 	}
 	specs := parseGoImportSpecs(content)
 	masked := append([]byte(nil), content...)
-	mask := func(start, end int) {
-		if start < 0 {
-			start = 0
-		}
-		if end > len(masked) {
-			end = len(masked)
-		}
-		for i := start; i < end; i++ {
-			if masked[i] != '\n' {
-				masked[i] = ' '
-			}
-		}
-	}
-	mask(int(decl.RemoveStart), int(decl.RemoveEnd))
+	ingest.MaskNonNewlinesInPlace(masked, int(decl.RemoveStart), int(decl.RemoveEnd))
 	seenBlocks := map[int]bool{}
 	for _, spec := range specs {
 		if spec.blockStart >= 0 && spec.blockEnd > 0 {
 			if !seenBlocks[spec.blockStart] {
-				mask(spec.blockStart, spec.blockEnd)
+				ingest.MaskNonNewlinesInPlace(masked, spec.blockStart, spec.blockEnd)
 				seenBlocks[spec.blockStart] = true
 			}
 			continue
 		}
-		mask(spec.lineStart, spec.lineEnd)
+		ingest.MaskNonNewlinesInPlace(masked, spec.lineStart, spec.lineEnd)
 	}
 	bodyText := string(masked)
 	var edits []ingest.Edit
