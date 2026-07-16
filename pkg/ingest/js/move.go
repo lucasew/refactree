@@ -1027,9 +1027,6 @@ func jsShorthandPropertyAccessEdits(rootDir string, result *ingest.Result, sourc
 
 // jsSpanIsObjectShorthand reports whether [start:end) is a shorthand property
 // name inside an object literal (not a longhand key or a pattern binding).
-
-// jsSpanIsObjectShorthand reports whether [start:end) is a shorthand property
-// name inside an object literal (not a longhand key or a pattern binding).
 func jsSpanIsObjectShorthand(content []byte, start, end uint32) bool {
 	pf, err := ingest.ParseSource(content, "file.js", "javascript")
 	if err != nil {
@@ -1054,10 +1051,6 @@ func jsSpanIsObjectShorthand(content []byte, start, end uint32) bool {
 	walk(pf.Root)
 	return found
 }
-
-// jsShorthandLocalPropertyEdits finds locals assigned an object literal that
-// contains shorthand oldLeaf, then rewrites .oldLeaf member accesses and
-// object-pattern keys on those locals (and nested property paths).
 
 // jsShorthandLocalPropertyEdits finds locals assigned an object literal that
 // contains shorthand oldLeaf, then rewrites .oldLeaf member accesses and
@@ -1250,8 +1243,6 @@ func jsShorthandLocalPropertyEdits(fileRel string, content []byte, oldLeaf, newL
 	walkUses(pf.Root)
 	return edits
 }
-
-// jsMethodReceiver returns the class/type name for "Class.method" symbols.
 
 // jsMethodReceiver returns the class/type name for "Class.method" symbols.
 func jsMethodReceiver(symbol string) (string, bool) {
@@ -1485,6 +1476,20 @@ func jsCollectShorthandBindingUses(block, pattern *grammar.Node, content []byte,
 	walk(block)
 }
 
+// jsRenameByTypeMaps: our → rename; foreign → skip; typedLocals → rename; else unique-leaf only.
+func jsRenameByTypeMaps(name string, ourReceivers, foreignReceivers, typedLocals map[string]bool) bool {
+	if ourReceivers[name] {
+		return true
+	}
+	if foreignReceivers[name] {
+		return false
+	}
+	if typedLocals != nil && typedLocals[name] {
+		return true
+	}
+	return len(foreignReceivers) == 0
+}
+
 // jsShouldRenameMember decides whether obj.oldLeaf is a call on one of our receivers.
 func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool) bool {
 	if obj == nil {
@@ -1506,61 +1511,20 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 	if obj == nil {
 		return false
 	}
-	// super.x targets a parent implementation, not the enclosing class's own
-	// override. When renaming Base.m, rewrite super.m in Child even if Child
-	// also defines m; when renaming Child.m, leave super.m alone.
-	// Mirrors pythonShouldRenameAttr's super() handling.
+	// super.x: parent impl. Rewrite when renaming Base.m in Child; leave alone when renaming Child.m.
 	if obj.Type() == "super" {
-		if enclosingClass != "" && ourReceivers[enclosingClass] {
-			return false
-		}
-		return true
+		return enclosingClass == "" || !ourReceivers[enclosingClass]
 	}
-	// this.x
 	if obj.Type() == "this" {
-		if enclosingClass == "" {
-			return len(foreignReceivers) == 0
-		}
-		if ourReceivers[enclosingClass] {
-			return true
-		}
-		if foreignReceivers[enclosingClass] {
-			return false
-		}
-		return len(foreignReceivers) == 0
+		return jsRenameByTypeMaps(enclosingClass, ourReceivers, foreignReceivers, nil)
 	}
-	// new Box().m / new Box(1).m — mirror Java object_creation_expression.
 	if obj.Type() == "new_expression" {
-		ctor := jsNewExpressionType(obj, content)
-		if ctor == "" {
-			return len(foreignReceivers) == 0
-		}
-		if ourReceivers[ctor] {
-			return true
-		}
-		if foreignReceivers[ctor] {
-			return false
-		}
-		return len(foreignReceivers) == 0
+		return jsRenameByTypeMaps(jsNewExpressionType(obj, content), ourReceivers, foreignReceivers, nil)
 	}
-	// Simple identifiers: box.x, Box.x
 	if obj.Type() == "identifier" {
-		name := ingest.NodeText(obj, content)
-		if ourReceivers[name] {
-			return true
-		}
-		if foreignReceivers[name] {
-			return false
-		}
-		if typedLocals[name] {
-			return true
-		}
-		// Unique method leaf in the project graph: rewrite all simple member loads.
-		return len(foreignReceivers) == 0
+		return jsRenameByTypeMaps(ingest.NodeText(obj, content), ourReceivers, foreignReceivers, typedLocals)
 	}
-	// Complex expression receivers — call chains (b.next().m), await, ternary,
-	// nullish/binary, subscript — only when the method leaf is unique project-wide.
-	// Without static return types we cannot disambiguate foreign same-leaf methods.
+	// Complex receivers: only when the method leaf is unique project-wide.
 	switch obj.Type() {
 	case "call_expression", "await_expression", "ternary_expression",
 		"binary_expression", "member_expression",

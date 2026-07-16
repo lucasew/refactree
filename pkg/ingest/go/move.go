@@ -1374,30 +1374,15 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 			}
 		}
 	}
-	occupied := map[string]map[[2]uint32]bool{}
-	mark := func(file string, start, end uint32) {
-		file = strings.TrimPrefix(file, "./")
-		if occupied[file] == nil {
-			occupied[file] = map[[2]uint32]bool{}
-		}
-		occupied[file][[2]uint32{start, end}] = true
-	}
-	for _, ent := range result.Entities {
-		if !sourceSet[ent.Reference] {
-			continue
-		}
-		ref := ingest.ParseReference(ent.Reference)
-		mark(ref.Path, ent.StartByte, ent.EndByte)
-	}
+
+	occupied := ingest.MarkEntityRelationSpans(result, sourceSet)
 	relatedFiles := map[string]bool{}
 	for _, rel := range result.Relations {
 		if !sourceSet[rel.Target] {
 			continue
 		}
 		ref := ingest.ParseReference(rel.Reference)
-		fileRel := strings.TrimPrefix(ref.Path, "./")
-		relatedFiles[fileRel] = true
-		mark(ref.Path, rel.StartByte, rel.EndByte)
+		relatedFiles[strings.TrimPrefix(ref.Path, "./")] = true
 	}
 	for _, s := range sourceRefs {
 		ref := ingest.ParseReference(s)
@@ -1435,128 +1420,125 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		rel := strings.TrimPrefix(f.Path, "./")
 		entPkg := dirOf(rel)
 		inOurPkg := ourPkgDirs[entPkg]
+		samePkg := inOurPkg || relatedFiles[rel]
 		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
 		if err != nil {
 			continue
 		}
 		importsRelated := fileImportsAnyPackage(content, pkgDirs)
-		if !inOurPkg && !relatedFiles[rel] && !importsRelated {
+		if !samePkg && !importsRelated {
 			continue
 		}
 		occ := occupied[rel]
 		var selectorEdits []ingest.Edit
-		if inOurPkg || relatedFiles[rel] {
+		if samePkg {
 			// Same package tree: rename ident.Leaf only (not Type{}.Leaf).
 			selectorEdits = findSelectorLeafEdits(rel, content, oldLeaf, newLeaf, nil)
-		} else if importsRelated {
+		} else {
 			// External importers: package qualifiers for our pkgs plus variables
 			// typed as imported interfaces that carry this method (var d a.Driver)
 			// or as our concrete receiver types (b pkga.Box / b := pkga.Box{}).
-			// Never b.Unrelated{}.WriteImage or b.WriteImage on foreign packages.
-			allowed := importLocalsForPackages(content, pkgDirs)
-			ifaceNames := interfaceNamesWithMethod(rootDir, result, ourPkgDirs, oldLeaf)
-			for local := range importLocalsForPackages(content, pkgDirs) {
-				for _, iface := range ifaceNames {
-					for name := range varsTypedAsImported(content, local, iface) {
-						allowed[name] = true
-					}
-				}
-				// Concrete receivers: same importLocal.Type patterns as interfaces,
-				// plus short composite assigns (b := pkga.Box{}).
-				for recv := range ourReceivers {
-					recv = strings.TrimPrefix(recv, "*")
-					if recv == "" {
-						continue
-					}
-					for name := range varsTypedAsImported(content, local, recv) {
-						allowed[name] = true
-					}
-					for name := range varsAssignedImportedComposite(content, local, recv) {
-						allowed[name] = true
-					}
-				}
-			}
+			allowed := importAllowedReceivers(content, pkgDirs, ourPkgDirs, ourReceivers, rootDir, result, oldLeaf)
 			selectorEdits = findSelectorLeafEdits(rel, content, oldLeaf, newLeaf, allowed)
 		}
 		// Filter same-package renames by the *call target* type (selector receiver),
 		// not the enclosing method's receiver — so package-level helpers and
 		// cross-type calls inside foreign methods are handled correctly.
 		var callTargetType func(leafStart uint32) (string, bool)
-		if len(foreignReceivers) > 0 && (inOurPkg || relatedFiles[rel]) {
+		if len(foreignReceivers) > 0 && samePkg {
 			callTargetType = selectorCallTargetTypeFunc(content)
 		}
 		for _, e := range selectorEdits {
-			if occ[[2]uint32{e.StartByte, e.EndByte}] {
+			if ingest.SpanOccupied(occ, e.StartByte, e.EndByte) {
 				continue
 			}
-			if callTargetType != nil {
-				if typ, ok := callTargetType(e.StartByte); ok {
-					typ = stripGoTypeParams(strings.TrimPrefix(typ, "*"))
-					if foreignReceivers[typ] && !ourReceivers[typ] {
-						continue
-					}
-				} else if recv := selectorReceiverIdent(content, e.StartByte); recv != "" {
-					// Method expression Type.Method: receiver is a type name, not a
-					// local binding — still skip foreign concrete types.
-					if foreignReceivers[recv] && !ourReceivers[recv] {
-						continue
-					}
-				}
+			if callTargetType != nil && goSelectorTargetsForeign(content, e.StartByte, callTargetType, ourReceivers, foreignReceivers) {
+				continue
 			}
-			edits = append(edits, e)
-			if occ != nil {
-				occ[[2]uint32{e.StartByte, e.EndByte}] = true
-			}
+			edits = appendUnoccupied(edits, occ, e)
 		}
-		// Struct field renames: Type{OldLeaf: …} composite literal keys.
-		if (inOurPkg || relatedFiles[rel]) && len(fieldReceivers) > 0 {
-			for _, e := range findCompositeFieldKeyEdits(rel, content, oldLeaf, newLeaf, fieldReceivers) {
-				if occ[[2]uint32{e.StartByte, e.EndByte}] {
-					continue
-				}
-				edits = append(edits, e)
-				if occ != nil {
-					occ[[2]uint32{e.StartByte, e.EndByte}] = true
-				}
+		if samePkg {
+			// Struct field renames: Type{OldLeaf: …} composite literal keys.
+			if len(fieldReceivers) > 0 {
+				edits = appendUnoccupiedAll(edits, occ, findCompositeFieldKeyEdits(rel, content, oldLeaf, newLeaf, fieldReceivers))
 			}
-		}
-		// Box{}.Helper / &Box{}.Helper — composite-literal receivers (text scan
-		// only allows identifier receivers). Same-package only.
-		if inOurPkg || relatedFiles[rel] {
-			for _, e := range findCompositeLiteralSelectorEdits(rel, content, oldLeaf, newLeaf, ourReceivers, foreignReceivers) {
-				if occ[[2]uint32{e.StartByte, e.EndByte}] {
-					continue
-				}
-				edits = append(edits, e)
-				if occ != nil {
-					occ[[2]uint32{e.StartByte, e.EndByte}] = true
-				}
-			}
-		}
-		// Non-identifier receivers: v.(T).M, xs[0].M, Make().M, (expr).M, (*T).M.
-		// Identifier receivers are handled by findSelectorLeafEdits; composite
-		// Type{}.M may also be covered here via operand type resolution.
-		if inOurPkg || relatedFiles[rel] {
-			for _, e := range findComplexOperandSelectorEdits(rel, content, oldLeaf, newLeaf, ourReceivers, foreignReceivers) {
-				if occ[[2]uint32{e.StartByte, e.EndByte}] {
-					continue
-				}
-				edits = append(edits, e)
-				if occ != nil {
-					occ[[2]uint32{e.StartByte, e.EndByte}] = true
-				}
-			}
+			// Non-identifier receivers: Type{}.M, v.(T).M, xs[i].M, Make().M, (*T).M.
+			// Identifier receivers are handled by findSelectorLeafEdits.
+			edits = appendUnoccupiedAll(edits, occ, findComplexOperandSelectorEdits(rel, content, oldLeaf, newLeaf, ourReceivers, foreignReceivers))
 		}
 		if inOurPkg {
+			// Interface method decls: do not mark occupied (matches prior behavior).
 			for _, e := range findInterfaceMethodEdits(rel, content, oldLeaf, newLeaf) {
-				if occ[[2]uint32{e.StartByte, e.EndByte}] {
-					continue
+				if !ingest.SpanOccupied(occ, e.StartByte, e.EndByte) {
+					edits = append(edits, e)
 				}
-				edits = append(edits, e)
 			}
 		}
 	}
 	return edits
+}
+
+// appendUnoccupied appends e when its span is free, and marks the span occupied.
+func appendUnoccupied(edits []ingest.Edit, occ map[[2]uint32]bool, e ingest.Edit) []ingest.Edit {
+	if ingest.SpanOccupied(occ, e.StartByte, e.EndByte) {
+		return edits
+	}
+	if occ != nil {
+		occ[[2]uint32{e.StartByte, e.EndByte}] = true
+	}
+	return append(edits, e)
+}
+
+func appendUnoccupiedAll(edits []ingest.Edit, occ map[[2]uint32]bool, candidates []ingest.Edit) []ingest.Edit {
+	for _, e := range candidates {
+		edits = appendUnoccupied(edits, occ, e)
+	}
+	return edits
+}
+
+// goSelectorTargetsForeign reports whether the selector at leafStart targets a
+// foreign concrete receiver (skip rewrite).
+func goSelectorTargetsForeign(content []byte, leafStart uint32, callTargetType func(uint32) (string, bool), ourReceivers, foreignReceivers map[string]bool) bool {
+	if typ, ok := callTargetType(leafStart); ok {
+		typ = stripGoTypeParams(strings.TrimPrefix(typ, "*"))
+		return foreignReceivers[typ] && !ourReceivers[typ]
+	}
+	if recv := selectorReceiverIdent(content, leafStart); recv != "" {
+		return foreignReceivers[recv] && !ourReceivers[recv]
+	}
+	return false
+}
+
+// importAllowedReceivers builds the allowed selector-receiver set for a file
+// that imports our packages: import locals, vars typed as importLocal.Iface /
+// importLocal.Recv, and short composite assigns (b := pkga.Box{}).
+func importAllowedReceivers(content []byte, pkgDirs, ourPkgDirs, ourReceivers map[string]bool, rootDir string, result *ingest.Result, oldLeaf string) map[string]bool {
+	importLocals := importLocalsForPackages(content, pkgDirs)
+	allowed := make(map[string]bool, len(importLocals))
+	for local := range importLocals {
+		allowed[local] = true
+	}
+	ifaceNames := interfaceNamesWithMethod(rootDir, result, ourPkgDirs, oldLeaf)
+	for local := range importLocals {
+		for _, iface := range ifaceNames {
+			for name := range varsTypedAsImported(content, local, iface) {
+				allowed[name] = true
+			}
+		}
+		for recv := range ourReceivers {
+			recv = strings.TrimPrefix(recv, "*")
+			if recv == "" {
+				continue
+			}
+			for name := range varsTypedAsImported(content, local, recv) {
+				allowed[name] = true
+			}
+			for name := range varsAssignedImportedComposite(content, local, recv) {
+				allowed[name] = true
+			}
+		}
+	}
+	return allowed
 }
 
 // findCompositeFieldKeyEdits rewrites OldLeaf keys in composite literals whose
@@ -1690,26 +1672,7 @@ func embeddedTypeFieldSelectorEdits(rootDir string, result *ingest.Result, sourc
 	for _, s := range sourceRefs {
 		sourceSet[s] = true
 	}
-	occupied := map[string]map[[2]uint32]bool{}
-	mark := func(file string, start, end uint32) {
-		file = strings.TrimPrefix(file, "./")
-		if occupied[file] == nil {
-			occupied[file] = map[[2]uint32]bool{}
-		}
-		occupied[file][[2]uint32{start, end}] = true
-	}
-	for _, ent := range result.Entities {
-		if sourceSet[ent.Reference] {
-			ref := ingest.ParseReference(ent.Reference)
-			mark(ref.Path, ent.StartByte, ent.EndByte)
-		}
-	}
-	for _, reln := range result.Relations {
-		if sourceSet[reln.Target] {
-			ref := ingest.ParseReference(reln.Reference)
-			mark(ref.Path, reln.StartByte, reln.EndByte)
-		}
-	}
+	occupied := ingest.MarkEntityRelationSpans(result, sourceSet)
 
 	var edits []ingest.Edit
 	for _, f := range result.Files {
@@ -1726,10 +1689,9 @@ func embeddedTypeFieldSelectorEdits(rootDir string, result *ingest.Result, sourc
 		}
 		occ := occupied[rel]
 		for _, e := range findSelectorLeafEdits(rel, content, oldLeaf, newLeaf, nil) {
-			if occ[[2]uint32{e.StartByte, e.EndByte}] {
-				continue
+			if !ingest.SpanOccupied(occ, e.StartByte, e.EndByte) {
+				edits = append(edits, e)
 			}
-			edits = append(edits, e)
 		}
 	}
 	return edits
@@ -2372,7 +2334,7 @@ func findSelectorLeafEdits(file string, content []byte, oldLeaf, newLeaf string,
 		}
 		// Receiver must be an identifier (pkg.Leaf / recv.Leaf), not Type{}.Leaf.
 		// Complex operands (type assert, index, call, composite, paren) are
-		// handled by findComplexOperandSelectorEdits / findCompositeLiteralSelectorEdits.
+		// handled by findComplexOperandSelectorEdits.
 		recvStart := dot - 1
 		if recvStart < 0 || !ingest.IsIdentChar(text[recvStart]) {
 			off = end
@@ -2394,54 +2356,6 @@ func findSelectorLeafEdits(file string, content []byte, oldLeaf, newLeaf string,
 		})
 		off = end
 	}
-	return edits
-}
-
-// findCompositeLiteralSelectorEdits rewrites Type{}.Method / &Type{}.Method when
-// the composite type is one of ourReceivers (or the method leaf is unique).
-func findCompositeLiteralSelectorEdits(file string, content []byte, oldLeaf, newLeaf string, ourReceivers, foreignReceivers map[string]bool) []ingest.Edit {
-	pf, err := ingest.ParseSource(content, ".go", "")
-	if err != nil {
-		return nil
-	}
-	defer pf.Close()
-
-	var edits []ingest.Edit
-	var walk func(n *grammar.Node)
-	walk = func(n *grammar.Node) {
-		if n == nil || n.IsNull() {
-			return
-		}
-		if n.Type() == "selector_expression" {
-			operand := ingest.ChildByField(n, "operand")
-			field := ingest.ChildByField(n, "field")
-			if field != nil && ingest.NodeText(field, content) == oldLeaf {
-				typ := compositeLiteralTypeName(operand, content)
-				if typ != "" {
-					ok := false
-					if ourReceivers[typ] {
-						ok = true
-					} else if foreignReceivers[typ] {
-						ok = false
-					} else if len(foreignReceivers) == 0 {
-						ok = true
-					}
-					if ok {
-						edits = append(edits, ingest.Edit{
-							File:      file,
-							StartByte: field.StartByte(),
-							EndByte:   field.EndByte(),
-							NewText:   newLeaf,
-						})
-					}
-				}
-			}
-		}
-		for i := uint32(0); i < n.ChildCount(); i++ {
-			walk(n.Child(i))
-		}
-	}
-	walk(pf.Root)
 	return edits
 }
 
@@ -2508,31 +2422,26 @@ func findComplexOperandSelectorEdits(file string, content []byte, oldLeaf, newLe
 		if n.Type() == "selector_expression" {
 			operand := ingest.ChildByField(n, "operand")
 			field := ingest.ChildByField(n, "field")
-			if field != nil && ingest.NodeText(field, content) == oldLeaf && operand != nil {
-				if !goOperandIsBareIdent(operand) {
-					ok := false
-					if typ := goComplexOperandType(operand, content); typ != "" {
-						typ = strings.TrimPrefix(typ, "*")
-						if ourReceivers[typ] {
-							ok = true
-						} else if foreignReceivers[typ] {
-							ok = false
-						} else if uniqueLeaf {
-							// Interface or other non-foreign type with unique leaf.
-							ok = true
-						}
-					} else if uniqueLeaf {
-						// Index/call/paren-ident/etc. without static type: only when unique.
+			if field != nil && ingest.NodeText(field, content) == oldLeaf && operand != nil && !goOperandIsBareIdent(operand) {
+				ok := false
+				if typ := goComplexOperandType(operand, content); typ != "" {
+					typ = strings.TrimPrefix(typ, "*")
+					if ourReceivers[typ] {
+						ok = true
+					} else if !foreignReceivers[typ] && uniqueLeaf {
 						ok = true
 					}
-					if ok {
-						edits = append(edits, ingest.Edit{
-							File:      file,
-							StartByte: field.StartByte(),
-							EndByte:   field.EndByte(),
-							NewText:   newLeaf,
-						})
-					}
+				} else if uniqueLeaf {
+					// Index/call/paren-ident/etc. without static type: only when unique.
+					ok = true
+				}
+				if ok {
+					edits = append(edits, ingest.Edit{
+						File:      file,
+						StartByte: field.StartByte(),
+						EndByte:   field.EndByte(),
+						NewText:   newLeaf,
+					})
 				}
 			}
 		}
@@ -2557,6 +2466,10 @@ func goComplexOperandType(n *grammar.Node, content []byte) string {
 	if n == nil {
 		return ""
 	}
+	// Prefer full composite resolution (T{}, &T{}, bare type_identifier children).
+	if t := compositeLiteralTypeName(n, content); t != "" {
+		return t
+	}
 	switch n.Type() {
 	case "parenthesized_expression":
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -2570,13 +2483,8 @@ func goComplexOperandType(n *grammar.Node, content []byte) string {
 		if t := ingest.ChildByField(n, "type"); t != nil {
 			return typeNameFromTypeNode(t, content)
 		}
-	case "composite_literal":
-		if t := ingest.ChildByField(n, "type"); t != nil {
-			return typeNameFromTypeNode(t, content)
-		}
 	case "unary_expression":
-		// &T{} method calls and (*T).M method expressions.
-		// Prefer a nested complex type; otherwise treat *Ident as type name T.
+		// (*T).M method expressions where the operand is not a composite.
 		var starIdent string
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			ch := n.Child(i)

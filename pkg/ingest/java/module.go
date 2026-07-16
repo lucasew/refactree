@@ -494,35 +494,18 @@ func extractJavaConstructor(fe *ingest.FileExtract, n *grammar.Node, source []by
 }
 
 func extractJavaField(fe *ingest.FileExtract, n *grammar.Node, source []byte, typeName string) {
-	exported := javaNodeIsPublic(n)
+	// Fields walk modifiers (annotations); interface constants share the declarator path.
 	walkJavaModifiers(fe, n, source, typeName)
-	if typ := ingest.ChildByField(n, "type"); typ != nil {
-		walkJavaUsages(fe, typ, source, typeName)
-	}
-	for i := uint32(0); i < n.ChildCount(); i++ {
-		child := n.Child(i)
-		if child.Type() != "variable_declarator" {
-			continue
-		}
-		nameNode := ingest.ChildByField(child, "name")
-		if nameNode == nil {
-			continue
-		}
-		short := ingest.NodeText(nameNode, source)
-		fe.Entities = append(fe.Entities, ingest.EntityDef{
-			Name:      typeName + "." + short,
-			StartByte: nameNode.StartByte(),
-			EndByte:   nameNode.EndByte(),
-			Exported:  exported,
-		})
-		if val := ingest.ChildByField(child, "value"); val != nil {
-			walkJavaUsages(fe, val, source, typeName)
-		}
-	}
+	extractJavaTypedDeclarators(fe, n, source, typeName, javaNodeIsPublic(n))
 }
 
 func extractJavaConstant(fe *ingest.FileExtract, n *grammar.Node, source []byte, typeName string) {
-	exported := javaNodeIsPublic(n)
+	extractJavaTypedDeclarators(fe, n, source, typeName, javaNodeIsPublic(n))
+}
+
+// extractJavaTypedDeclarators records Type.name entities from variable_declarator
+// children and walks the field type + initializer usages.
+func extractJavaTypedDeclarators(fe *ingest.FileExtract, n *grammar.Node, source []byte, typeName string, exported bool) {
 	if typ := ingest.ChildByField(n, "type"); typ != nil {
 		walkJavaUsages(fe, typ, source, typeName)
 	}

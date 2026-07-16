@@ -254,9 +254,6 @@ func extractTSNamedType(fe *ingest.FileExtract, n *grammar.Node, source []byte) 
 
 // extractTSObjectTypeMembers records method_signature / property_signature
 // members under an interface_body or object_type as Type.member entities.
-
-// extractTSObjectTypeMembers records method_signature / property_signature
-// members under an interface_body or object_type as Type.member entities.
 func extractTSObjectTypeMembers(fe *ingest.FileExtract, body *grammar.Node, source []byte, typeName string) {
 	if body == nil || typeName == "" {
 		return
@@ -269,22 +266,10 @@ func extractTSObjectTypeMembers(fe *ingest.FileExtract, body *grammar.Node, sour
 			if nameNode == nil || nameNode.Type() == "computed_property_name" {
 				continue
 			}
-			short := ingest.NodeText(nameNode, source)
-			if short == "" {
-				continue
-			}
-			fe.Entities = append(fe.Entities, ingest.EntityDef{
-				Name:      typeName + "." + short,
-				StartByte: nameNode.StartByte(),
-				EndByte:   nameNode.EndByte(),
-				Exported:  true,
-			})
+			appendTSOwnerMember(fe, typeName, nameNode, source)
 		}
 	}
 }
-
-// extractTSEnumMembers records enum constants as Enum.Member entities.
-// Members may be bare property_identifier children or enum_assignment nodes.
 
 // extractTSEnumMembers records enum constants as Enum.Member entities.
 // Members may be bare property_identifier children or enum_assignment nodes.
@@ -304,20 +289,25 @@ func extractTSEnumMembers(fe *ingest.FileExtract, body *grammar.Node, source []b
 		default:
 			continue
 		}
-		if nameNode == nil {
-			continue
-		}
-		short := ingest.NodeText(nameNode, source)
-		if short == "" {
-			continue
-		}
-		fe.Entities = append(fe.Entities, ingest.EntityDef{
-			Name:      enumName + "." + short,
-			StartByte: nameNode.StartByte(),
-			EndByte:   nameNode.EndByte(),
-			Exported:  true,
-		})
+		appendTSOwnerMember(fe, enumName, nameNode, source)
 	}
+}
+
+// appendTSOwnerMember records Owner.member from a name node (exported TS surface).
+func appendTSOwnerMember(fe *ingest.FileExtract, owner string, nameNode *grammar.Node, source []byte) {
+	if nameNode == nil {
+		return
+	}
+	short := ingest.NodeText(nameNode, source)
+	if short == "" {
+		return
+	}
+	fe.Entities = append(fe.Entities, ingest.EntityDef{
+		Name:      owner + "." + short,
+		StartByte: nameNode.StartByte(),
+		EndByte:   nameNode.EndByte(),
+		Exported:  true,
+	})
 }
 
 func extractJSExport(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
@@ -866,14 +856,10 @@ func jsCallStringArg(n *grammar.Node, source []byte, name string) (string, bool)
 	return "", false
 }
 
-// bindJSRequireImports records CJS require bindings as ImportDefs (namespace or named).
-
 // jsRequireCallPath returns the string specifier for `require("…")`.
 func jsRequireCallPath(n *grammar.Node, source []byte) (string, bool) {
 	return jsCallStringArg(n, source, "require")
 }
-
-// jsCallStringArg returns the first string argument of call_expression callee `name`.
 
 // bindJSRequireImports records CJS require bindings as ImportDefs (namespace or named).
 func bindJSRequireImports(fe *ingest.FileExtract, nameNode *grammar.Node, source []byte, sourcePath string) {
@@ -939,8 +925,6 @@ func bindJSRequireImports(fe *ingest.FileExtract, nameNode *grammar.Node, source
 }
 
 // jsIsCJSExportsTarget reports whether n is `exports` or `module.exports`.
-
-// jsIsCJSExportsTarget reports whether n is `exports` or `module.exports`.
 func jsIsCJSExportsTarget(n *grammar.Node, source []byte) bool {
 	if n == nil {
 		return false
@@ -960,9 +944,6 @@ func jsIsCJSExportsTarget(n *grammar.Node, source []byte) bool {
 	}
 	return false
 }
-
-// emitJSCJSExportSurfaceUsages records property keys on CJS export assignments so
-// renaming a symbol rewrites exports.helper / module.exports = { helper: … } keys.
 
 // emitJSCJSExportSurfaceUsages records property keys on CJS export assignments so
 // renaming a symbol rewrites exports.helper / module.exports = { helper: … } keys.
