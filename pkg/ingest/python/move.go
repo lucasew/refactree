@@ -1880,7 +1880,8 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // (`for a in [A()]`, `for a in items` with `items: list[A]`,
 // `for a in d.values()` / `for k, a in d.items()` with `d: dict[K, A]`,
 // `for i, a in enumerate(items)` / `for a, b in zip(xs, ys)`,
-// `for a in reversed/sorted/list/iter(items)`),
+// `for a in reversed/sorted/list/iter(items)`,
+// `for a in filter(pred, items)` / `for a in map(A, names)`),
 // tuple/list unpack (`a, b = A(), B()`, `[a, b] = [A(), B()]`,
 // `for a, b in [(A(), B())]`), and
 // `except* A as e` → `for a in e.exceptions` (ExceptionGroup element type).
@@ -2017,6 +2018,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// for k, a in d.items() / for a, b in [(A(), B())] /
 			// for i, a in enumerate(items) / for a, b in zip(xs, ys) /
 			// for a in reversed/sorted/list/iter(items) /
+			// for a in filter(pred, items) / for a in map(A, names) /
 			// [a.m() for a in xs] / for a in e.exceptions
 			left := ingest.ChildByField(n, "left")
 			right := ingest.ChildByField(n, "right")
@@ -2090,6 +2092,8 @@ func pythonExceptClauseIsStar(n *grammar.Node) bool {
 // pythonIterableElemType recovers the element type of a for/comprehension iterable.
 // Uses known collection locals (elemOf), homogeneous Class() list/tuple/set literals,
 // element-preserving wrappers (reversed/sorted/list/tuple/set/iter),
+// filter (2nd arg iterable; pred does not change element type),
+// map when the first arg is a Class identifier (map(A, xs) → A),
 // d.values() when d's dict value type is in elemOf, or e.exceptions when e was
 // bound by except* Type as e (egElems). Does not type d.items() pairs (use unpack).
 func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
@@ -2107,7 +2111,9 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 	case "call":
 		// reversed(xs) / sorted(xs) / list(xs) / tuple(xs) / set(xs) / iter(xs) —
 		// element type equals the wrapped iterable. Nested wrappers recurse.
-		// map/filter and other transformers fail closed (different or unknown elem).
+		// filter(pred, xs) — element type equals xs (pred only selects).
+		// map(A, xs) — element type is A when first arg is a Class identifier;
+		// other map callables fail closed (unknown result type).
 		if fn := ingest.ChildByField(right, "function"); fn != nil && fn.Type() == "identifier" {
 			switch ingest.NodeText(fn, content) {
 			case "reversed", "sorted", "list", "tuple", "set", "iter":
@@ -2116,6 +2122,23 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 					return ""
 				}
 				return pythonIterableElemType(args[0], content, elemOf, egElems)
+			case "filter":
+				// filter(function, iterable) — keep iterable's element type.
+				args, ok := pythonCallPositionalArgNodes(right)
+				if !ok || len(args) < 2 {
+					return ""
+				}
+				return pythonIterableElemType(args[1], content, elemOf, egElems)
+			case "map":
+				// map(A, iterable) / map(A, ...) — Class-as-callable yields A.
+				args, ok := pythonCallPositionalArgNodes(right)
+				if !ok || len(args) == 0 {
+					return ""
+				}
+				if args[0].Type() == "identifier" {
+					return ingest.NodeText(args[0], content)
+				}
+				return ""
 			}
 		}
 		// d.values() — dict value type stored in elemOf[d]
