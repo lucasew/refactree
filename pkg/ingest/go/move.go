@@ -1782,6 +1782,11 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 	}
 	defer pf.Close()
 
+	// Same-file function result types for multi-return short-var typing:
+	// a, b := makeAB() with makeAB() (*A, *B) binds a→A, b→B so foreign same-leaf
+	// methods on b are not fail-open rewritten.
+	funcResults := sameFileFuncResultTypes(pf.Root, content)
+
 	// Collect method/function scopes and local typed bindings.
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
@@ -1802,7 +1807,7 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 			// Named results: func (r *T) M() (a *A, b *B) — a/b used in body.
 			collectResultParameterBindings(n, content, &bindings, rangeSrc)
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings, rangeSrc)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults)
 			}
 		case "function_declaration":
 			rangeSrc := map[string]rangeSourceInfo{}
@@ -1813,7 +1818,7 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 			// Without this, same-leaf foreign methods are fail-open rewritten.
 			collectResultParameterBindings(n, content, &bindings, rangeSrc)
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings, rangeSrc)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults)
 			}
 		case "func_literal":
 			// Nested / package-level func literals: func(a *A, b *B) { a.Run(); b.Run() }.
@@ -1824,7 +1829,7 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 			}
 			collectResultParameterBindings(n, content, &bindings, rangeSrc)
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings, rangeSrc)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults)
 			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -1953,6 +1958,31 @@ func parameterDeclNames(p *grammar.Node, content []byte) []string {
 		if nm := ingest.ChildByField(p, "name"); nm != nil && nm.Type() == "identifier" {
 			names = append(names, ingest.NodeText(nm, content))
 		}
+	}
+	return names
+}
+
+// varSpecNames returns all name identifiers on a var_spec (supports `var a, b = …`).
+// ChildByField("name") only yields the first repeated name field.
+func varSpecNames(spec *grammar.Node, content []byte) []string {
+	if spec == nil {
+		return nil
+	}
+	var names []string
+	for i := uint32(0); i < spec.ChildCount(); i++ {
+		if spec.FieldNameForChild(i) != "name" {
+			continue
+		}
+		c := spec.Child(i)
+		if c == nil {
+			continue
+		}
+		if c.Type() == "identifier" {
+			names = append(names, ingest.NodeText(c, content))
+			continue
+		}
+		// Some grammars wrap multi-names; fall back to walking identifiers.
+		names = append(names, identListNames(c, content)...)
 	}
 	return names
 }
@@ -2125,7 +2155,9 @@ func methodDeclReceiverType(method *grammar.Node, content []byte) string {
 // aliases and select receive vars are scoped to each arm so same-leaf methods
 // on foreign arms are not rewritten. rangeSrc maps collection names
 // (params/vars) to their range element/value/key types and channel payloads.
-func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo) {
+// funcResults maps same-file function names to positional concrete result types
+// for multi-return call binding (a, b := makeAB()).
+func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo, funcResults map[string][]string) {
 	if node == nil {
 		return
 	}
@@ -2143,6 +2175,7 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 			// left := right — extract names from left, type from right (&T{} / T{} / <-ch).
 			// Multi-value RHS is position-wise: a, b := &A{}, &B{} binds a→A, b→B
 			// so foreign same-leaf methods on b are not rewritten.
+			// Multi-return call: a, b := makeAB() with makeAB() (*A, *B) likewise.
 			names := identListNames(ingest.ChildByField(n, "left"), content)
 			right := ingest.ChildByField(n, "right")
 			if chTyp, ok := channelReceiveElemType(right, content, rangeSrc); ok {
@@ -2159,21 +2192,44 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, types[i]})
 					}
 				}
-			}
-		case "var_spec":
-			names := identListNames(ingest.ChildByField(n, "name"), content)
-			if len(names) == 0 {
-				// name may be a single identifier field.
-				if nm := ingest.ChildByField(n, "name"); nm != nil && nm.Type() == "identifier" {
-					names = []string{ingest.NodeText(nm, content)}
+			} else if types := typeNamesFromCallResults(right, content, funcResults); len(types) > 0 {
+				for i, name := range names {
+					if name == "" || name == "_" {
+						continue
+					}
+					if i < len(types) && types[i] != "" {
+						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, types[i]})
+					}
 				}
 			}
+		case "var_spec":
+			// var a, b T / var a, b = … — name is a repeated field; ChildByField
+			// only returns the first, so collect every name field (like params).
+			names := varSpecNames(n, content)
 			typeN := ingest.ChildByField(n, "type")
 			valueN := ingest.ChildByField(n, "value")
 			typ := concreteNamedType(typeN, content)
 			if typ == "" {
 				if chTyp, ok := channelReceiveElemType(valueN, content, rangeSrc); ok {
 					typ = chTyp
+				} else if len(names) > 1 {
+					// var a, b = makeAB() / var a, b = &A{}, &B{} — bind positionally.
+					types := typeNamesFromMultiRHS(valueN, content)
+					if len(types) == 0 {
+						types = typeNamesFromCallResults(valueN, content, funcResults)
+					}
+					if len(types) > 0 {
+						for i, name := range names {
+							if name == "" || name == "_" {
+								continue
+							}
+							if i < len(types) && types[i] != "" {
+								*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, types[i]})
+							}
+						}
+						break
+					}
+					typ = typeNameFromRHS(valueN, content)
 				} else {
 					typ = typeNameFromRHS(valueN, content)
 				}
@@ -2416,6 +2472,7 @@ func identListNames(n *grammar.Node, content []byte) []string {
 // multi-assign RHS. expression_list yields one type per expression (empty string
 // when unknown); a single expression yields a one-element slice when typed.
 // Used so a, b := &A{}, &B{} does not type both names as A (first only).
+// Multi-return calls (a, b := makeAB()) are handled by typeNamesFromCallResults.
 func typeNamesFromMultiRHS(n *grammar.Node, content []byte) []string {
 	if n == nil {
 		return nil
@@ -2446,6 +2503,128 @@ func typeNamesFromMultiRHS(n *grammar.Node, content []byte) []string {
 		return []string{typ}
 	}
 	return nil
+}
+
+// sameFileFuncResultTypes maps function names in root to positional concrete
+// result type names (pointer star stripped). Empty slots for non-concrete
+// results (bool, error, slices, …) keep multi-return indices aligned.
+func sameFileFuncResultTypes(root *grammar.Node, content []byte) map[string][]string {
+	if root == nil {
+		return nil
+	}
+	out := map[string][]string{}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type() == "function_declaration" {
+			nameN := ingest.ChildByField(n, "name")
+			if nameN != nil && nameN.Type() == "identifier" {
+				name := ingest.NodeText(nameN, content)
+				if name != "" {
+					if types := functionResultTypes(n, content); len(types) > 0 {
+						out[name] = types
+					}
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	return out
+}
+
+// functionResultTypes returns positional concrete type names from a
+// function_declaration's result (parameter_list or single type).
+func functionResultTypes(decl *grammar.Node, content []byte) []string {
+	if decl == nil {
+		return nil
+	}
+	result := ingest.ChildByField(decl, "result")
+	if result == nil {
+		return nil
+	}
+	if result.Type() == "parameter_list" {
+		var types []string
+		any := false
+		for i := uint32(0); i < result.ChildCount(); i++ {
+			p := result.Child(i)
+			if p == nil || (p.Type() != "parameter_declaration" && p.Type() != "variadic_parameter_declaration") {
+				continue
+			}
+			typeN := ingest.ChildByField(p, "type")
+			typ := concreteNamedType(typeN, content)
+			if typ == "" {
+				// Keep alignment for multi-return (e.g. (*A, bool)).
+				typ = ""
+			} else {
+				any = true
+			}
+			// Multi-name params in results are rare; one slot per declaration.
+			names := parameterDeclNames(p, content)
+			if len(names) == 0 {
+				types = append(types, typ)
+			} else {
+				for range names {
+					types = append(types, typ)
+				}
+			}
+		}
+		if !any {
+			return nil
+		}
+		return types
+	}
+	if typ := concreteNamedType(result, content); typ != "" {
+		return []string{typ}
+	}
+	return nil
+}
+
+// typeNamesFromCallResults returns positional result types when n is a call to
+// a same-file function known in funcResults (or expression_list of one such call).
+// Used for a, b := makeAB() / var a, b = makeAB().
+func typeNamesFromCallResults(n *grammar.Node, content []byte, funcResults map[string][]string) []string {
+	if n == nil || len(funcResults) == 0 {
+		return nil
+	}
+	// expression_list → single call only (multi-return, not multi-expr).
+	if n.Type() == "expression_list" {
+		var exprs []*grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			exprs = append(exprs, c)
+		}
+		if len(exprs) != 1 {
+			return nil
+		}
+		n = exprs[0]
+	}
+	if n.Type() != "call_expression" {
+		return nil
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil || fn.Type() != "identifier" {
+		return nil
+	}
+	name := ingest.NodeText(fn, content)
+	if name == "" {
+		return nil
+	}
+	types := funcResults[name]
+	if len(types) == 0 {
+		return nil
+	}
+	// Copy so callers cannot mutate the shared map entry.
+	out := make([]string, len(types))
+	copy(out, types)
+	return out
 }
 
 // typeNameFromRHS extracts T from &T{}, T{}, new(T), (*T)(nil)-ish forms.
