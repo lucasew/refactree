@@ -960,12 +960,23 @@ func javaSwitchExprMatchesOur(sw *grammar.Node, content []byte, ourReceivers, ty
 	return false
 }
 
+// javaRenameByTypeMaps: our → rename; foreign → skip; typedLocals → rename; else unique-leaf only.
+func javaRenameByTypeMaps(name string, ourReceivers, foreignReceivers, typedLocals map[string]bool) bool {
+	if ourReceivers[name] {
+		return true
+	}
+	if foreignReceivers[name] {
+		return false
+	}
+	if typedLocals != nil && typedLocals[name] {
+		return true
+	}
+	return len(foreignReceivers) == 0
+}
+
 // javaShouldRenameMemberAccess decides whether obj.oldLeaf targets our receiver type.
-// obj may be nil for bare calls (relations usually cover those; ExtraRename still
-// can rewrite unique-leaf sites, occupied spans skip already-covered ones).
-// implementsEdges maps type → parent types (extends/implements); used for super.
+// obj may be nil for bare calls. implementsEdges maps type → parents (extends/implements).
 func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, implementsEdges map[string]map[string]bool) bool {
-	// Unwrap (expr).member — cast, ternary, and call receivers are often parenthesized.
 	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
 		var inner *grammar.Node
 		for i := uint32(0); i < obj.ChildCount(); i++ {
@@ -979,133 +990,56 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 		obj = inner
 	}
 	if obj == nil {
-		if enclosingClass != "" && ourReceivers[enclosingClass] {
-			return true
-		}
-		return len(foreignReceivers) == 0
+		return javaRenameByTypeMaps(enclosingClass, ourReceivers, foreignReceivers, nil)
 	}
-	// super.m targets a parent implementation. Rewrite when a declared parent of
-	// the enclosing type is among ourReceivers (parent/interface method rename,
-	// including hierarchy-expanded sources). Leave alone when only the enclosing
-	// type itself is ours and no parent is — parent method keeps its name.
+	// super.m: rewrite when a declared parent is among ourReceivers; leave alone when
+	// only the enclosing type itself is ours (parent method keeps its name).
 	if obj.Type() == "super" {
-		if enclosingClass == "" {
-			return len(foreignReceivers) == 0
-		}
-		if parents := implementsEdges[enclosingClass]; parents != nil {
-			for p := range parents {
-				if ourReceivers[p] {
-					return true
+		if enclosingClass != "" {
+			if parents := implementsEdges[enclosingClass]; parents != nil {
+				for p := range parents {
+					if ourReceivers[p] {
+						return true
+					}
 				}
 			}
-		}
-		if ourReceivers[enclosingClass] {
-			return false
-		}
-		if foreignReceivers[enclosingClass] {
-			return false
-		}
-		return len(foreignReceivers) == 0
-	}
-	if obj.Type() == "this" {
-		if enclosingClass == "" {
-			return len(foreignReceivers) == 0
-		}
-		if ourReceivers[enclosingClass] {
-			return true
-		}
-		if foreignReceivers[enclosingClass] {
-			return false
-		}
-		return len(foreignReceivers) == 0
-	}
-	// Nested type / enum-constant receivers: Outer.Nested.m(), Color.RED.m()
-	if obj.Type() == "field_access" {
-		text := ingest.NodeText(obj, content)
-		if ourReceivers[text] {
-			return true
-		}
-		if foreignReceivers[text] {
-			return false
-		}
-		// Color.RED.method → root type Color
-		if root := javaFieldAccessRoot(obj, content); root != "" {
-			if ourReceivers[root] {
-				return true
-			}
-			if foreignReceivers[root] {
+			if ourReceivers[enclosingClass] {
 				return false
 			}
 		}
-		return len(foreignReceivers) == 0
+		return javaRenameByTypeMaps(enclosingClass, ourReceivers, foreignReceivers, nil)
 	}
-	// new Point(1, 2).sum() — object is object_creation_expression with type field.
-	if obj.Type() == "object_creation_expression" {
-		typeN := ingest.ChildByField(obj, "type")
-		if typeN == nil {
-			return len(foreignReceivers) == 0
-		}
-		tn := javaTypeName(typeN, content)
-		if tn == "" {
-			return len(foreignReceivers) == 0
-		}
-		if ourReceivers[tn] {
-			return true
-		}
-		if foreignReceivers[tn] {
-			return false
-		}
-		return len(foreignReceivers) == 0
+	if obj.Type() == "this" {
+		return javaRenameByTypeMaps(enclosingClass, ourReceivers, foreignReceivers, nil)
 	}
-	// ((Box) o).helper() / (Box) o::helper — cast_expression type field.
-	if obj.Type() == "cast_expression" {
-		typeN := ingest.ChildByField(obj, "type")
-		if typeN == nil {
-			return len(foreignReceivers) == 0
+	// Nested type / enum-constant: Outer.Nested.m(), Color.RED.m()
+	if obj.Type() == "field_access" {
+		text := ingest.NodeText(obj, content)
+		if ourReceivers[text] || foreignReceivers[text] {
+			return ourReceivers[text]
 		}
-		tn := javaTypeName(typeN, content)
-		if tn == "" {
-			return len(foreignReceivers) == 0
-		}
-		if ourReceivers[tn] {
-			return true
-		}
-		if foreignReceivers[tn] {
-			return false
-		}
-		return len(foreignReceivers) == 0
+		return javaRenameByTypeMaps(javaFieldAccessRoot(obj, content), ourReceivers, foreignReceivers, nil)
 	}
-	// xs[0].helper() — array element type from typed local/param Box[] xs.
+	// new Point(...).sum() / ((Box) o).helper() — type field when present.
+	if obj.Type() == "object_creation_expression" || obj.Type() == "cast_expression" {
+		tn := ""
+		if typeN := ingest.ChildByField(obj, "type"); typeN != nil {
+			tn = javaTypeName(typeN, content)
+		}
+		return javaRenameByTypeMaps(tn, ourReceivers, foreignReceivers, nil)
+	}
+	// xs[0].helper() — recurse into array root (handles (xs)[0] / matrix[i][j]).
 	if obj.Type() == "array_access" {
 		arr := ingest.ChildByField(obj, "array")
 		if arr == nil {
 			return len(foreignReceivers) == 0
 		}
-		// Recurse for (xs)[0] / matrix[i][j] via parenthesized unwrap on re-entry.
 		return javaShouldRenameMemberAccess(arr, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, implementsEdges)
 	}
-	// make().helper(), (f ? a : b).helper(), and other complex receivers without
-	// a static type we can recover: only rewrite when the method leaf is unique
-	// among project method entities (no foreign same-leaf receivers).
-	if obj.Type() == "method_invocation" || obj.Type() == "ternary_expression" ||
-		obj.Type() == "binary_expression" || obj.Type() == "assignment_expression" ||
-		obj.Type() == "switch_expression" || obj.Type() == "lambda_expression" {
-		return len(foreignReceivers) == 0
+	if obj.Type() == "identifier" || obj.Type() == "type_identifier" {
+		return javaRenameByTypeMaps(ingest.NodeText(obj, content), ourReceivers, foreignReceivers, typedLocals)
 	}
-	if obj.Type() != "identifier" && obj.Type() != "type_identifier" {
-		// Unknown receiver shape: unique-leaf only.
-		return len(foreignReceivers) == 0
-	}
-	name := ingest.NodeText(obj, content)
-	if ourReceivers[name] {
-		return true
-	}
-	if foreignReceivers[name] {
-		return false
-	}
-	if typedLocals[name] {
-		return true
-	}
+	// Unknown / complex receivers without recoverable static type: unique-leaf only.
 	return len(foreignReceivers) == 0
 }
 

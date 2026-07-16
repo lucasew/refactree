@@ -382,77 +382,38 @@ func extractGoFunc(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 }
 
 func extractGoVarDecl(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
+	extractGoVarOrConstDecl(fe, n, source, scope, "var_spec", "var_spec_list")
+}
+
+func extractGoConstDecl(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
+	extractGoVarOrConstDecl(fe, n, source, scope, "const_spec", "const_spec_list")
+}
+
+func extractGoVarOrConstDecl(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope, specType, listType string) {
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		child := n.Child(i)
 		switch child.Type() {
-		case "var_spec":
-			extractGoVarSpec(fe, child, source, scope)
-		case "var_spec_list":
+		case specType:
+			extractGoVarOrConstSpec(fe, child, source, scope)
+		case listType:
 			for j := uint32(0); j < child.ChildCount(); j++ {
 				spec := child.Child(j)
-				if spec.Type() == "var_spec" {
-					extractGoVarSpec(fe, spec, source, scope)
+				if spec.Type() == specType {
+					extractGoVarOrConstSpec(fe, spec, source, scope)
 				}
 			}
 		}
 	}
 }
 
-func extractGoVarSpec(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
-	// Names may be a single identifier or a list.
-	for i := uint32(0); i < n.ChildCount(); i++ {
-		child := n.Child(i)
-		switch child.Type() {
-		case "identifier":
-			// Only the name field(s), not identifiers inside the type/value.
-			// var_spec structure: name(s), type?, value?
-			// tree-sitter-go uses field "name" for the identifier.
-		}
-	}
+// extractGoVarOrConstSpec records named entities from a var_spec/const_spec and
+// walks type/value as usages. tree-sitter-go uses field "name" for the identifier(s).
+func extractGoVarOrConstSpec(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
 	if nameNode := ingest.ChildByField(n, "name"); nameNode != nil {
 		if nameNode.Type() == "identifier" {
 			appendGoNamedEntity(fe, nameNode, source)
 		} else {
 			// identifier_list
-			for i := uint32(0); i < nameNode.ChildCount(); i++ {
-				c := nameNode.Child(i)
-				if c.Type() == "identifier" {
-					appendGoNamedEntity(fe, c, source)
-				}
-			}
-		}
-	}
-	// Type and value sides are usages (cobra.Command, etc.).
-	if typ := ingest.ChildByField(n, "type"); typ != nil {
-		walkGoUsages(fe, typ, source, scope)
-	}
-	if val := ingest.ChildByField(n, "value"); val != nil {
-		walkGoUsages(fe, val, source, scope)
-	}
-}
-
-func extractGoConstDecl(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
-	for i := uint32(0); i < n.ChildCount(); i++ {
-		child := n.Child(i)
-		switch child.Type() {
-		case "const_spec":
-			extractGoConstSpec(fe, child, source, scope)
-		case "const_spec_list":
-			for j := uint32(0); j < child.ChildCount(); j++ {
-				spec := child.Child(j)
-				if spec.Type() == "const_spec" {
-					extractGoConstSpec(fe, spec, source, scope)
-				}
-			}
-		}
-	}
-}
-
-func extractGoConstSpec(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
-	if nameNode := ingest.ChildByField(n, "name"); nameNode != nil {
-		if nameNode.Type() == "identifier" {
-			appendGoNamedEntity(fe, nameNode, source)
-		} else {
 			for i := uint32(0); i < nameNode.ChildCount(); i++ {
 				c := nameNode.Child(i)
 				if c.Type() == "identifier" {
