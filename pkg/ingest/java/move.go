@@ -1042,7 +1042,9 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // type is ours (List<A> as → as.stream().map(a -> a.m()) / as.iterator().forEachRemaining(a -> a.m())
 // / List.of(new A()).forEach(a -> a.m()) / Stream.of(new A()).map(a -> a.m())
 // / Map<K,A>.forEach((k,v) -> v.m()) / map.values().forEach(v -> v.m())
-// types a/v as A), and for (var a : as) loop variables from collection/array element types.
+// types a/v as A), for (var a : as) loop variables from collection/array element types,
+// and var locals from collection accessors (list.get(i) / map.get(k) / it.next() /
+// list.iterator().next()).
 func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]bool {
 	out := map[string]bool{}
 	if root == nil || len(ourReceivers) == 0 {
@@ -1078,7 +1080,8 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 			}
 			tn := javaTypeName(typeN, content)
 			explicitOurs := ourReceivers[tn]
-			// var a = new A() / A.make() / (A) x — recover type from initializer.
+			// var a = new A() / A.make() / (A) x / as.get(0) / m.get(k) / it.next() —
+			// recover type from initializer.
 			inferFromInit := tn == "var"
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				c := n.Child(i)
@@ -1104,6 +1107,9 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 				}
 				valN := ingest.ChildByField(c, "value")
 				if vt := javaInferExprType(valN, content); ourReceivers[vt] {
+					out[name] = true
+				} else if et := javaCollectionAccessElemType(valN, content, elemOf, valOf); ourReceivers[et] {
+					// var xa = as.get(0) / am.get("k") / as.iterator().next() / ia.next()
 					out[name] = true
 				}
 			}
@@ -1488,12 +1494,71 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 	return nil
 }
 
+// javaCollectionAccessElemType recovers the element/value type of collection
+// accessors used as var initializers:
+//
+//	as.get(i) / as.get(0)     → elemOf[as]   (List/Collection)
+//	am.get(k) / am.getOrDefault(k, d) → valOf[am] (Map; prefer value over key)
+//	ia.next()                 → elemOf[ia]   (Iterator<A>)
+//	as.iterator().next()      → elemOf[as]   (via type-preserving iterator())
+//
+// Optional.get() also works when Optional<A> is tracked in elemOf (single type arg).
+// Fail closed on other methods / unknown receivers.
+func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	for val != nil && !val.IsNull() && val.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(val, "expression")
+		if inner == nil {
+			for i := uint32(0); i < val.ChildCount(); i++ {
+				ch := val.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		val = inner
+	}
+	if val == nil || val.IsNull() || val.Type() != "method_invocation" {
+		return ""
+	}
+	nameN := ingest.ChildByField(val, "name")
+	if nameN == nil {
+		return ""
+	}
+	obj := ingest.ChildByField(val, "object")
+	switch method := ingest.NodeText(nameN, content); method {
+	case "get", "getOrDefault":
+		// Map-like (2 type args recorded in valOf) → value type; else element type.
+		// Identifier receiver only — chained gets fail closed.
+		if obj != nil && obj.Type() == "identifier" {
+			id := ingest.NodeText(obj, content)
+			if valOf != nil {
+				if vt := valOf[id]; vt != "" {
+					return vt
+				}
+			}
+			if elemOf != nil {
+				return elemOf[id]
+			}
+		}
+		return ""
+	case "next":
+		// it.next() / as.iterator().next() — element of iterator or pipeline.
+		return javaStreamPipelineElemType(obj, content, elemOf, valOf)
+	default:
+		return ""
+	}
+}
+
 // javaInferExprType recovers a simple type leaf from a var initializer expression.
 // Covers new A(), A.make() / A.getInstance() static calls, (A) expr casts,
 // homogeneous ternaries (f ? new A() : A.make()), and switch expressions whose
 // arms all infer the same type (arrow and yield forms).
 // Static Type.method() is treated as returning Type (common factory convention);
 // fail closed on other shapes / mixed arms.
+// Collection accessors (list.get / map.get / iterator.next) are handled separately
+// via javaCollectionAccessElemType (needs elemOf/valOf).
 func javaInferExprType(val *grammar.Node, content []byte) string {
 	if val == nil {
 		return ""
