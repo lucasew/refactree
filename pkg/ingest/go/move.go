@@ -1810,6 +1810,16 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 			if body := ingest.ChildByField(n, "body"); body != nil {
 				collectLocalTypeBindings(body, content, &bindings, rangeSrc)
 			}
+		case "func_literal":
+			// Nested / package-level func literals: func(a *A, b *B) { a.Run(); b.Run() }.
+			// Without param bindings, foreign same-leaf call sites are rewritten (fail-open).
+			rangeSrc := map[string]rangeSourceInfo{}
+			if params := ingest.ChildByField(n, "parameters"); params != nil {
+				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &bindings, rangeSrc)
+			}
+			if body := ingest.ChildByField(n, "body"); body != nil {
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc)
+			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
