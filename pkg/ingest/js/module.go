@@ -1019,7 +1019,6 @@ func emitJSCJSExportSurfaceUsages(fe *ingest.FileExtract, left, right *grammar.N
 // bindJSDynamicImportThen records a namespace-style import for the first
 // parameter of `import("…").then(m => …)` / `.then(function (m) { … })`.
 
-
 // bindJSDynamicImportThen records a namespace-style import for the first
 // parameter of `import("…").then(m => …)` / `.then(function (m) { … })`.
 func bindJSDynamicImportThen(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
