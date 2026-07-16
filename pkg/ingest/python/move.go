@@ -1875,12 +1875,15 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // pythonTypedLocals maps local names that are annotated or assigned as ourReceivers.
 // Covers: `b: Box`, `b = Box()`, `b: Box = ...`, as-bindings
 // (`case A() as a`, `with A() as a`, `except A as e`), walrus (`a := A()`),
-// and for/comprehension targets over known collections
-// (`for a in [A()]`, `for a in items` with `items: list[A]`).
+// for/comprehension targets over known collections
+// (`for a in [A()]`, `for a in items` with `items: list[A]`), and
+// `except* A as e` → `for a in e.exceptions` (ExceptionGroup element type).
 func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]bool {
 	out := map[string]bool{}
 	// Collection locals → element type leaf (list[A] / [A()] → "A").
 	elemOf := map[string]string{}
+	// except* Type as name → ExceptionGroup local; .exceptions elements are Type.
+	egElems := map[string]string{}
 	if root == nil || len(ourReceivers) == 0 {
 		return out
 	}
@@ -1957,18 +1960,38 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					}
 				}
 			}
+		case "except_clause":
+			// except* A as e: e is ExceptionGroup, not A. Skip as_pattern typing of e
+			// and record that e.exceptions carries A (foreign too, for shadowing).
+			if pythonExceptClauseIsStar(n) {
+				if asPat := ingest.ChildByType(n, "as_pattern"); asPat != nil {
+					if name, typ := pythonAsPatternBinding(asPat, content); name != "" && typ != "" {
+						egElems[name] = typ
+					}
+				}
+				// Walk body without re-processing as_pattern as a plain except binding.
+				for i := uint32(0); i < n.ChildCount(); i++ {
+					ch := n.Child(i)
+					if ch.Type() == "as_pattern" {
+						continue
+					}
+					walk(ch)
+				}
+				return
+			}
 		case "for_statement", "for_in_clause":
-			// for a in items / for a in [A()] / [a.m() for a in xs]
+			// for a in items / for a in [A()] / [a.m() for a in xs] / for a in e.exceptions
 			// Only simple identifier targets (fail closed on unpacking).
 			left := ingest.ChildByField(n, "left")
 			right := ingest.ChildByField(n, "right")
 			if left != nil && left.Type() == "identifier" && right != nil {
-				if et := pythonIterableElemType(right, content, elemOf); ourReceivers[et] {
+				if et := pythonIterableElemType(right, content, elemOf, egElems); ourReceivers[et] {
 					out[ingest.NodeText(left, content)] = true
 				}
 			}
 		case "as_pattern":
 			// match `case A() as a`, with `with A() as a`, except `except A as e`.
+			// except* is handled above (e is ExceptionGroup, not A).
 			// Without this, a.m() is skipped when a foreign same-leaf method exists.
 			if name, typ := pythonAsPatternBinding(n, content); name != "" && ourReceivers[typ] {
 				out[name] = true
@@ -1982,9 +2005,23 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 	return out
 }
 
+// pythonExceptClauseIsStar reports whether n is `except* ...` (PEP 654).
+func pythonExceptClauseIsStar(n *grammar.Node) bool {
+	if n == nil || n.Type() != "except_clause" {
+		return false
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		if n.Child(i).Type() == "*" {
+			return true
+		}
+	}
+	return false
+}
+
 // pythonIterableElemType recovers the element type of a for/comprehension iterable.
-// Uses known collection locals (elemOf) or homogeneous Class() list/tuple/set literals.
-func pythonIterableElemType(right *grammar.Node, content []byte, elemOf map[string]string) string {
+// Uses known collection locals (elemOf), homogeneous Class() list/tuple/set literals,
+// or e.exceptions when e was bound by except* Type as e (egElems).
+func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
 	if right == nil {
 		return ""
 	}
@@ -1996,6 +2033,17 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf map[stri
 		return elemOf[ingest.NodeText(right, content)]
 	case "list", "tuple", "set":
 		return pythonHomogeneousCtorElem(right, content)
+	case "attribute":
+		// e.exceptions from except* A as e
+		obj := ingest.ChildByField(right, "object")
+		attr := ingest.ChildByField(right, "attribute")
+		if obj == nil || attr == nil || obj.Type() != "identifier" {
+			return ""
+		}
+		if ingest.NodeText(attr, content) != "exceptions" || egElems == nil {
+			return ""
+		}
+		return egElems[ingest.NodeText(obj, content)]
 	}
 	return ""
 }
