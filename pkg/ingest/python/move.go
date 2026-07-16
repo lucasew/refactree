@@ -1876,11 +1876,13 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // Covers: `b: Box`, `b = Box()`, `b: Box = ...`, as-bindings
 // (`case A() as a`, `with A() as a`, `except A as e`), walrus (`a := A()`),
 // for/comprehension targets over known collections
-// (`for a in [A()]`, `for a in items` with `items: list[A]`), and
+// (`for a in [A()]`, `for a in items` with `items: list[A]`,
+// `for a in d.values()` / `for k, a in d.items()` with `d: dict[K, A]`),
+// tuple unpack (`a, b = A(), B()`, `for a, b in [(A(), B())]`), and
 // `except* A as e` → `for a in e.exceptions` (ExceptionGroup element type).
 func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]bool {
 	out := map[string]bool{}
-	// Collection locals → element type leaf (list[A] / [A()] → "A").
+	// Collection locals → element type leaf (list[A] / [A()] / dict value → "A").
 	elemOf := map[string]string{}
 	// except* Type as name → ExceptionGroup local; .exceptions elements are Type.
 	egElems := map[string]string{}
@@ -1948,6 +1950,18 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					}
 				}
 			}
+			// a, b = A(), B() / (a, b) = A(), B() / a, b = (A(), B())
+			if left != nil && right != nil {
+				if targets := pythonPatternIdents(left, content); len(targets) > 0 {
+					if types := pythonCtorListTypes(right, content); len(types) > 0 {
+						for i, name := range targets {
+							if i < len(types) && ourReceivers[types[i]] {
+								out[name] = true
+							}
+						}
+					}
+				}
+			}
 		case "named_expression":
 			// Walrus: (a := A()) — without this, a.m() is skipped under foreign same-leaf.
 			nameN := ingest.ChildByField(n, "name")
@@ -1980,13 +1994,38 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				return
 			}
 		case "for_statement", "for_in_clause":
-			// for a in items / for a in [A()] / [a.m() for a in xs] / for a in e.exceptions
-			// Only simple identifier targets (fail closed on unpacking).
+			// for a in items / for a in [A()] / for a in d.values() /
+			// for k, a in d.items() / for a, b in [(A(), B())] /
+			// [a.m() for a in xs] / for a in e.exceptions
 			left := ingest.ChildByField(n, "left")
 			right := ingest.ChildByField(n, "right")
-			if left != nil && left.Type() == "identifier" && right != nil {
+			if left == nil || right == nil {
+				break
+			}
+			switch left.Type() {
+			case "identifier":
 				if et := pythonIterableElemType(right, content, elemOf, egElems); ourReceivers[et] {
 					out[ingest.NodeText(left, content)] = true
+				}
+			case "pattern_list", "tuple_pattern":
+				targets := pythonPatternIdents(left, content)
+				if len(targets) == 0 {
+					break
+				}
+				// for k, v in d.items() — value type is elemOf[d] (dict value leaf).
+				if vt := pythonDictItemsValueType(right, content, elemOf); vt != "" {
+					if len(targets) >= 2 && ourReceivers[vt] {
+						out[targets[1]] = true
+					}
+					break
+				}
+				// for a, b in [(A(), B())] — position-wise Class() types.
+				if types := pythonHomogeneousPairCtorTypes(right, content); len(types) > 0 {
+					for i, name := range targets {
+						if i < len(types) && ourReceivers[types[i]] {
+							out[name] = true
+						}
+					}
 				}
 			}
 		case "as_pattern":
@@ -2020,7 +2059,8 @@ func pythonExceptClauseIsStar(n *grammar.Node) bool {
 
 // pythonIterableElemType recovers the element type of a for/comprehension iterable.
 // Uses known collection locals (elemOf), homogeneous Class() list/tuple/set literals,
-// or e.exceptions when e was bound by except* Type as e (egElems).
+// d.values() when d's dict value type is in elemOf, or e.exceptions when e was
+// bound by except* Type as e (egElems). Does not type d.items() pairs (use unpack).
 func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
 	if right == nil {
 		return ""
@@ -2033,6 +2073,13 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		return elemOf[ingest.NodeText(right, content)]
 	case "list", "tuple", "set":
 		return pythonHomogeneousCtorElem(right, content)
+	case "call":
+		// d.values() — dict value type stored in elemOf[d]
+		obj, method := pythonAttrCall(right, content)
+		if obj == "" || method != "values" || elemOf == nil {
+			return ""
+		}
+		return elemOf[obj]
 	case "attribute":
 		// e.exceptions from except* A as e
 		obj := ingest.ChildByField(right, "object")
@@ -2046,6 +2093,142 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		return egElems[ingest.NodeText(obj, content)]
 	}
 	return ""
+}
+
+// pythonAttrCall returns (objectIdent, methodName) for obj.method(...) calls.
+func pythonAttrCall(call *grammar.Node, content []byte) (obj, method string) {
+	if call == nil || call.Type() != "call" {
+		return "", ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "attribute" {
+		return "", ""
+	}
+	objN := ingest.ChildByField(fn, "object")
+	attrN := ingest.ChildByField(fn, "attribute")
+	if objN == nil || attrN == nil || objN.Type() != "identifier" {
+		return "", ""
+	}
+	return ingest.NodeText(objN, content), ingest.NodeText(attrN, content)
+}
+
+// pythonDictItemsValueType returns the value type of d.items() when d is a known
+// dict/mapping local (elemOf stores the value leaf from dict[K, V]).
+func pythonDictItemsValueType(right *grammar.Node, content []byte, elemOf map[string]string) string {
+	obj, method := pythonAttrCall(right, content)
+	if obj == "" || method != "items" || elemOf == nil {
+		return ""
+	}
+	return elemOf[obj]
+}
+
+// pythonPatternIdents returns simple identifier targets from pattern_list /
+// tuple_pattern (a, b) / (a, b). Fail closed on nested patterns.
+func pythonPatternIdents(n *grammar.Node, content []byte) []string {
+	if n == nil {
+		return nil
+	}
+	switch n.Type() {
+	case "pattern_list", "tuple_pattern":
+		// ok
+	default:
+		return nil
+	}
+	var out []string
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		switch ch.Type() {
+		case "(", ")", ",", "comment":
+			continue
+		case "identifier":
+			out = append(out, ingest.NodeText(ch, content))
+		default:
+			// Nested or starred patterns — fail closed.
+			return nil
+		}
+	}
+	return out
+}
+
+// pythonCtorListTypes returns Class leaves for A(), B() expression_list / tuple
+// rows used in unpack assignment (a, b = A(), B()).
+func pythonCtorListTypes(n *grammar.Node, content []byte) []string {
+	if n == nil {
+		return nil
+	}
+	switch n.Type() {
+	case "expression_list", "tuple":
+		// ok
+	default:
+		return nil
+	}
+	var out []string
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		switch ch.Type() {
+		case "(", ")", ",", "comment":
+			continue
+		case "call":
+			fn := ingest.ChildByField(ch, "function")
+			if fn == nil || fn.Type() != "identifier" {
+				return nil
+			}
+			out = append(out, ingest.NodeText(fn, content))
+		default:
+			return nil
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// pythonHomogeneousPairCtorTypes recovers position-wise Class() types from a
+// list/tuple/set of homogeneous pairs: [(A(), B()), (A(), B())] → ["A","B"].
+func pythonHomogeneousPairCtorTypes(collection *grammar.Node, content []byte) []string {
+	if collection == nil {
+		return nil
+	}
+	switch collection.Type() {
+	case "list", "tuple", "set":
+		// ok
+	default:
+		return nil
+	}
+	var row []string
+	saw := false
+	for i := uint32(0); i < collection.ChildCount(); i++ {
+		ch := collection.Child(i)
+		switch ch.Type() {
+		case "[", "]", "(", ")", "{", "}", ",", "comment":
+			continue
+		case "tuple", "expression_list":
+			types := pythonCtorListTypes(ch, content)
+			if len(types) == 0 {
+				return nil
+			}
+			if !saw {
+				row = types
+				saw = true
+				continue
+			}
+			if len(types) != len(row) {
+				return nil
+			}
+			for j := range row {
+				if types[j] != row[j] {
+					return nil
+				}
+			}
+		default:
+			return nil
+		}
+	}
+	if !saw {
+		return nil
+	}
+	return row
 }
 
 // pythonHomogeneousCtorElem returns T when collection is only T() calls (same T).
