@@ -1879,7 +1879,9 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `a = min(items)` / `a = max(items)` / `a = min(items, key=...)` (same element type),
 // `a = items[0]` / `a = d[k]` (element/value type of a known collection),
 // `a = items.pop()` / `a = items.pop(0)` / `a = d.pop(k)` (same element/value type),
-// as-bindings (`case A() as a`, `with A() as a`, `except A as e`), walrus (`a := A()`),
+// as-bindings (`case A() as a`, `with A() as a`, `except A as e`),
+// walrus (`a := A()`, `a := next(items)`, `a := min(items)`, `a := items.pop()`,
+// `a := items[0]` — same RHS typing as plain assignment),
 // for/comprehension targets over known collections
 // (`for a in [A()]`, `for a in items` with `items: list[A]`,
 // `for a in d.values()` / `for k, a in d.items()` with `d: dict[K, A]`,
@@ -2023,15 +2025,63 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				}
 			}
 		case "named_expression":
-			// Walrus: (a := A()) — without this, a.m() is skipped under foreign same-leaf.
+			// Walrus: (a := A()) / (a := next(items)) / (a := min(items)) /
+			// (a := items.pop()) / (a := items[0]) — mirror assignment RHS typing.
+			// Without this, a.m() is skipped under foreign same-leaf.
 			nameN := ingest.ChildByField(n, "name")
 			valueN := ingest.ChildByField(n, "value")
-			if nameN != nil && valueN != nil && valueN.Type() == "call" {
+			if nameN == nil || valueN == nil {
+				break
+			}
+			lname := ingest.NodeText(nameN, content)
+			if valueN.Type() == "call" {
 				fn := ingest.ChildByField(valueN, "function")
 				if fn != nil && fn.Type() == "identifier" {
-					if ourReceivers[ingest.NodeText(fn, content)] {
-						out[ingest.NodeText(nameN, content)] = true
+					fname := ingest.NodeText(fn, content)
+					if ourReceivers[fname] {
+						out[lname] = true
 					}
+					// a := cast(A, x)
+					if fname == "cast" {
+						if tn := pythonCastTypeArg(valueN, content); ourReceivers[tn] {
+							out[lname] = true
+						}
+					}
+					// a := next(iter(items)) / next(items) / next(reversed(items))
+					if fname == "next" {
+						if et := pythonNextElemType(valueN, content, elemOf, egElems); ourReceivers[et] {
+							out[lname] = true
+						}
+					}
+					// a := min(items) / max(items) / min(items, key=...)
+					if fname == "min" || fname == "max" {
+						if et := pythonMinMaxElemType(valueN, content, elemOf, egElems); ourReceivers[et] {
+							out[lname] = true
+						}
+					}
+				} else if fn != nil && fn.Type() == "attribute" {
+					if attr := ingest.ChildByField(fn, "attribute"); attr != nil {
+						switch ingest.NodeText(attr, content) {
+						case "cast":
+							// typing.cast(A, x)
+							if tn := pythonCastTypeArg(valueN, content); ourReceivers[tn] {
+								out[lname] = true
+							}
+						case "pop":
+							// a := items.pop() / items.pop(0) / d.pop(k)
+							obj := ingest.ChildByField(fn, "object")
+							if et := pythonIterableElemType(obj, content, elemOf, egElems); ourReceivers[et] {
+								out[lname] = true
+							}
+						}
+					}
+				}
+			}
+			// a := items[0] / a := d[k] — element/value of known collection.
+			// Slices fail closed (sequence, not element).
+			if valueN.Type() == "subscript" {
+				if et := pythonSubscriptElemType(valueN, content, elemOf, egElems); ourReceivers[et] {
+					out[lname] = true
 				}
 			}
 		case "except_clause":
