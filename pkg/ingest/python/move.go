@@ -1878,7 +1878,8 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // as-bindings (`case A() as a`, `with A() as a`, `except A as e`), walrus (`a := A()`),
 // for/comprehension targets over known collections
 // (`for a in [A()]`, `for a in items` with `items: list[A]`,
-// `for a in d.values()` / `for k, a in d.items()` with `d: dict[K, A]`),
+// `for a in d.values()` / `for k, a in d.items()` with `d: dict[K, A]`,
+// `for i, a in enumerate(items)` / `for a, b in zip(xs, ys)`),
 // tuple/list unpack (`a, b = A(), B()`, `[a, b] = [A(), B()]`,
 // `for a, b in [(A(), B())]`), and
 // `except* A as e` → `for a in e.exceptions` (ExceptionGroup element type).
@@ -2013,6 +2014,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 		case "for_statement", "for_in_clause":
 			// for a in items / for a in [A()] / for a in d.values() /
 			// for k, a in d.items() / for a, b in [(A(), B())] /
+			// for i, a in enumerate(items) / for a, b in zip(xs, ys) /
 			// [a.m() for a in xs] / for a in e.exceptions
 			left := ingest.ChildByField(n, "left")
 			right := ingest.ChildByField(n, "right")
@@ -2033,6 +2035,15 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				if vt := pythonDictItemsValueType(right, content, elemOf); vt != "" {
 					if len(targets) >= 2 && ourReceivers[vt] {
 						out[targets[1]] = true
+					}
+					break
+				}
+				// for i, a in enumerate(xs) / for a, b in zip(xs, ys)
+				if types := pythonEnumerateZipTargetTypes(right, content, elemOf, egElems); len(types) > 0 {
+					for i, name := range targets {
+						if i < len(types) && ourReceivers[types[i]] {
+							out[name] = true
+						}
 					}
 					break
 				}
@@ -2137,6 +2148,82 @@ func pythonDictItemsValueType(right *grammar.Node, content []byte, elemOf map[st
 		return ""
 	}
 	return elemOf[obj]
+}
+
+// pythonEnumerateZipTargetTypes returns per-unpack-target element types for
+// enumerate(xs) → ["", elem(xs)] (index untyped; value is the iterable element)
+// and zip(a, b, ...) → [elem(a), elem(b), ...]. Unknown args yield "" slots;
+// fails closed when the call is not bare enumerate/zip with resolvable args.
+func pythonEnumerateZipTargetTypes(right *grammar.Node, content []byte, elemOf, egElems map[string]string) []string {
+	if right == nil || right.Type() != "call" {
+		return nil
+	}
+	fn := ingest.ChildByField(right, "function")
+	if fn == nil || fn.Type() != "identifier" {
+		return nil
+	}
+	args, ok := pythonCallPositionalArgNodes(right)
+	if !ok {
+		return nil
+	}
+	switch ingest.NodeText(fn, content) {
+	case "enumerate":
+		if len(args) == 0 {
+			return nil
+		}
+		et := pythonIterableElemType(args[0], content, elemOf, egElems)
+		if et == "" {
+			return nil
+		}
+		// targets: index (untyped), element
+		return []string{"", et}
+	case "zip":
+		if len(args) == 0 {
+			return nil
+		}
+		out := make([]string, len(args))
+		any := false
+		for i, a := range args {
+			et := pythonIterableElemType(a, content, elemOf, egElems)
+			out[i] = et
+			if et != "" {
+				any = true
+			}
+		}
+		if !any {
+			return nil
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+// pythonCallPositionalArgNodes returns positional argument nodes of a call.
+// Keyword arguments are skipped. Splat (*args / **kwargs) fails closed (ok=false).
+func pythonCallPositionalArgNodes(call *grammar.Node) (args []*grammar.Node, ok bool) {
+	if call == nil || call.Type() != "call" {
+		return nil, false
+	}
+	argList := ingest.ChildByField(call, "arguments")
+	if argList == nil {
+		return nil, true
+	}
+	for i := uint32(0); i < argList.ChildCount(); i++ {
+		ch := argList.Child(i)
+		switch ch.Type() {
+		case "(", ")", ",", "comment":
+			continue
+		case "keyword_argument":
+			// enumerate(xs, start=1) / zip(a, b, strict=True) — ignore kwargs.
+			continue
+		case "list_splat", "dictionary_splat", "parenthesized_list_splat":
+			return nil, false
+		default:
+			args = append(args, ch)
+		}
+	}
+	return args, true
 }
 
 // pythonPatternIdents returns simple identifier targets from pattern_list /
