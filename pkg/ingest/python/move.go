@@ -1878,7 +1878,8 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // for/comprehension targets over known collections
 // (`for a in [A()]`, `for a in items` with `items: list[A]`,
 // `for a in d.values()` / `for k, a in d.items()` with `d: dict[K, A]`),
-// tuple unpack (`a, b = A(), B()`, `for a, b in [(A(), B())]`), and
+// tuple/list unpack (`a, b = A(), B()`, `[a, b] = [A(), B()]`,
+// `for a, b in [(A(), B())]`), and
 // `except* A as e` → `for a in e.exceptions` (ExceptionGroup element type).
 func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]bool {
 	out := map[string]bool{}
@@ -1950,7 +1951,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					}
 				}
 			}
-			// a, b = A(), B() / (a, b) = A(), B() / a, b = (A(), B())
+			// a, b = A(), B() / (a, b) = A(), B() / a, b = (A(), B()) /
+			// [a, b] = [A(), B()]
 			if left != nil && right != nil {
 				if targets := pythonPatternIdents(left, content); len(targets) > 0 {
 					if types := pythonCtorListTypes(right, content); len(types) > 0 {
@@ -2123,13 +2125,14 @@ func pythonDictItemsValueType(right *grammar.Node, content []byte, elemOf map[st
 }
 
 // pythonPatternIdents returns simple identifier targets from pattern_list /
-// tuple_pattern (a, b) / (a, b). Fail closed on nested patterns.
+// tuple_pattern / list_pattern: a, b / (a, b) / [a, b]. Fail closed on nested
+// patterns.
 func pythonPatternIdents(n *grammar.Node, content []byte) []string {
 	if n == nil {
 		return nil
 	}
 	switch n.Type() {
-	case "pattern_list", "tuple_pattern":
+	case "pattern_list", "tuple_pattern", "list_pattern":
 		// ok
 	default:
 		return nil
@@ -2138,7 +2141,7 @@ func pythonPatternIdents(n *grammar.Node, content []byte) []string {
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		ch := n.Child(i)
 		switch ch.Type() {
-		case "(", ")", ",", "comment":
+		case "(", ")", "[", "]", ",", "comment":
 			continue
 		case "identifier":
 			out = append(out, ingest.NodeText(ch, content))
@@ -2151,13 +2154,13 @@ func pythonPatternIdents(n *grammar.Node, content []byte) []string {
 }
 
 // pythonCtorListTypes returns Class leaves for A(), B() expression_list / tuple
-// rows used in unpack assignment (a, b = A(), B()).
+// / list rows used in unpack assignment (a, b = A(), B() / [a, b] = [A(), B()]).
 func pythonCtorListTypes(n *grammar.Node, content []byte) []string {
 	if n == nil {
 		return nil
 	}
 	switch n.Type() {
-	case "expression_list", "tuple":
+	case "expression_list", "tuple", "list":
 		// ok
 	default:
 		return nil
@@ -2166,7 +2169,7 @@ func pythonCtorListTypes(n *grammar.Node, content []byte) []string {
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		ch := n.Child(i)
 		switch ch.Type() {
-		case "(", ")", ",", "comment":
+		case "(", ")", "[", "]", ",", "comment":
 			continue
 		case "call":
 			fn := ingest.ChildByField(ch, "function")
