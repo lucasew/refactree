@@ -1799,6 +1799,8 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 			if params := ingest.ChildByField(n, "parameters"); params != nil {
 				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &bindings, rangeSrc)
 			}
+			// Named results: func (r *T) M() (a *A, b *B) — a/b used in body.
+			collectResultParameterBindings(n, content, &bindings, rangeSrc)
 			if body := ingest.ChildByField(n, "body"); body != nil {
 				collectLocalTypeBindings(body, content, &bindings, rangeSrc)
 			}
@@ -1807,6 +1809,9 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 			if params := ingest.ChildByField(n, "parameters"); params != nil {
 				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &bindings, rangeSrc)
 			}
+			// Named results: func Use() (a *A, b *B) { a.Run(); b.Run() }.
+			// Without this, same-leaf foreign methods are fail-open rewritten.
+			collectResultParameterBindings(n, content, &bindings, rangeSrc)
 			if body := ingest.ChildByField(n, "body"); body != nil {
 				collectLocalTypeBindings(body, content, &bindings, rangeSrc)
 			}
@@ -1817,6 +1822,7 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 			if params := ingest.ChildByField(n, "parameters"); params != nil {
 				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &bindings, rangeSrc)
 			}
+			collectResultParameterBindings(n, content, &bindings, rangeSrc)
 			if body := ingest.ChildByField(n, "body"); body != nil {
 				collectLocalTypeBindings(body, content, &bindings, rangeSrc)
 			}
@@ -1859,6 +1865,20 @@ type rangeSourceInfo struct {
 	elemType string // element (slice/array/chan) or map value named type
 	keyType  string // map key named type (only when isMap)
 	isMap    bool
+}
+
+// collectResultParameterBindings records named result params from a
+// function/method/func-literal declaration (result field is a parameter_list).
+// Unnamed results (func f() *A) have no identifiers and are skipped.
+func collectResultParameterBindings(decl *grammar.Node, content []byte, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo) {
+	if decl == nil {
+		return
+	}
+	result := ingest.ChildByField(decl, "result")
+	if result == nil || result.Type() != "parameter_list" {
+		return
+	}
+	collectParameterListBindings(result, content, decl.StartByte(), decl.EndByte(), bindings, rangeSrc)
 }
 
 // collectParameterListBindings records concrete-typed params (a *A, a, b *A)
@@ -2121,6 +2141,8 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 		switch n.Type() {
 		case "short_var_declaration":
 			// left := right — extract names from left, type from right (&T{} / T{} / <-ch).
+			// Multi-value RHS is position-wise: a, b := &A{}, &B{} binds a→A, b→B
+			// so foreign same-leaf methods on b are not rewritten.
 			names := identListNames(ingest.ChildByField(n, "left"), content)
 			right := ingest.ChildByField(n, "right")
 			if chTyp, ok := channelReceiveElemType(right, content, rangeSrc); ok {
@@ -2128,9 +2150,14 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 				if len(names) > 0 && names[0] != "" && names[0] != "_" {
 					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, names[0], chTyp})
 				}
-			} else if typ := typeNameFromRHS(right, content); typ != "" {
-				for _, name := range names {
-					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, typ})
+			} else if types := typeNamesFromMultiRHS(right, content); len(types) > 0 {
+				for i, name := range names {
+					if name == "" || name == "_" {
+						continue
+					}
+					if i < len(types) && types[i] != "" {
+						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, types[i]})
+					}
 				}
 			}
 		case "var_spec":
@@ -2385,14 +2412,59 @@ func identListNames(n *grammar.Node, content []byte) []string {
 	return names
 }
 
+// typeNamesFromMultiRHS returns position-wise concrete types for a short-var /
+// multi-assign RHS. expression_list yields one type per expression (empty string
+// when unknown); a single expression yields a one-element slice when typed.
+// Used so a, b := &A{}, &B{} does not type both names as A (first only).
+func typeNamesFromMultiRHS(n *grammar.Node, content []byte) []string {
+	if n == nil {
+		return nil
+	}
+	if n.Type() == "expression_list" {
+		var out []string
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			out = append(out, typeNameFromRHS(c, content))
+		}
+		// Drop trailing empties only when nothing was typed at all.
+		any := false
+		for _, t := range out {
+			if t != "" {
+				any = true
+				break
+			}
+		}
+		if !any {
+			return nil
+		}
+		return out
+	}
+	if typ := typeNameFromRHS(n, content); typ != "" {
+		return []string{typ}
+	}
+	return nil
+}
+
 // typeNameFromRHS extracts T from &T{}, T{}, new(T), (*T)(nil)-ish forms.
+// For expression_list, only the first expression is considered (legacy); prefer
+// typeNamesFromMultiRHS when binding multiple names.
 func typeNameFromRHS(n *grammar.Node, content []byte) string {
 	if n == nil {
 		return ""
 	}
 	// expression_list → first child
 	if n.Type() == "expression_list" && n.ChildCount() > 0 {
-		return typeNameFromRHS(n.Child(0), content)
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			return typeNameFromRHS(c, content)
+		}
+		return ""
 	}
 	switch n.Type() {
 	case "unary_expression":
