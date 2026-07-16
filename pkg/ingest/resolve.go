@@ -399,7 +399,15 @@ func resolveDirectUsage(res *Result, fe *FileExtract, u UsageDef, imports map[st
 	if target == "" {
 		target = resolveJavaNestedMember(fe, u.Scope, u.Name, allEntities)
 	}
-	// 5. Star imports (`from mod import *`): bind bare names to top-level entities
+	// 5. Class-scoped bare names when Scope.Name is an entity (e.g. Python
+	// @helper.setter inside class Box → Box.helper). Method-body scopes are
+	// Class.method; Class.method.leaf is not an entity so this stays fail-closed.
+	if target == "" && u.Scope != "" && fe != nil {
+		if t, ok := entityInFile(allEntities, u.Scope+"."+u.Name, fe.Path); ok {
+			target = t
+		}
+	}
+	// 6. Star imports (`from mod import *`): bind bare names to top-level entities
 	// in the imported module (skip private `_` names; last star wins on collision).
 	if target == "" && len(starBases) > 0 && u.Name != "" && !strings.HasPrefix(u.Name, "_") {
 		for i := len(starBases) - 1; i >= 0; i-- {

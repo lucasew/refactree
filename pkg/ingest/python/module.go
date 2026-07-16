@@ -172,25 +172,73 @@ func extractPythonTypeAlias(fe *ingest.FileExtract, n *grammar.Node, source []by
 		return
 	}
 	// tree-sitter-python: left = name type node, right = RHS type expression.
+	// Plain: type BoxAlias = list[int]  → left type → identifier
+	// Param: type Vec[T: Helper] = list[T] → left type → generic_type → identifier + type_parameter
 	left := ingest.ChildByField(n, "left")
 	if left == nil {
 		return
 	}
-	nameNode := left
-	if left.Type() == "type" {
-		for i := uint32(0); i < left.ChildCount(); i++ {
-			if left.Child(i).Type() == "identifier" {
-				nameNode = left.Child(i)
-				break
-			}
-		}
-	}
-	if nameNode.Type() != "identifier" {
+	nameNode := pythonTypeAliasNameNode(left)
+	if nameNode == nil || nameNode.Type() != "identifier" {
 		return
 	}
 	appendPythonEntity(fe, nameNode, source)
+	name := ingest.NodeText(nameNode, source)
+	// Bounds/defaults live under type_parameter nodes on the left (no field name).
+	walkPythonTypeParameterNodes(fe, left, source, name)
 	if right := ingest.ChildByField(n, "right"); right != nil {
-		walkPythonUsages(fe, right, source, ingest.NodeText(nameNode, source))
+		walkPythonUsages(fe, right, source, name)
+	}
+}
+
+// pythonTypeAliasNameNode returns the alias identifier under a type alias left field.
+func pythonTypeAliasNameNode(left *grammar.Node) *grammar.Node {
+	if left == nil || left.IsNull() {
+		return nil
+	}
+	if left.Type() == "identifier" {
+		return left
+	}
+	// Prefer direct identifier, then generic_type's head identifier.
+	var generic *grammar.Node
+	for i := uint32(0); i < left.ChildCount(); i++ {
+		ch := left.Child(i)
+		switch ch.Type() {
+		case "identifier":
+			return ch
+		case "generic_type":
+			generic = ch
+		}
+	}
+	if generic != nil {
+		for i := uint32(0); i < generic.ChildCount(); i++ {
+			if generic.Child(i).Type() == "identifier" {
+				return generic.Child(i)
+			}
+		}
+	}
+	// Nested type wrappers.
+	for i := uint32(0); i < left.ChildCount(); i++ {
+		if n := pythonTypeAliasNameNode(left.Child(i)); n != nil {
+			return n
+		}
+	}
+	return nil
+}
+
+// walkPythonTypeParameterNodes walks type_parameter subtrees under n so PEP 695
+// bounds/defaults (Helper in Vec[T: Helper]) become usages without treating the
+// alias/class name identifier as a self-usage.
+func walkPythonTypeParameterNodes(fe *ingest.FileExtract, n *grammar.Node, source []byte, scope string) {
+	if n == nil || n.IsNull() {
+		return
+	}
+	if n.Type() == "type_parameter" {
+		walkPythonUsages(fe, n, source, scope)
+		return
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		walkPythonTypeParameterNodes(fe, n.Child(i), source, scope)
 	}
 }
 
@@ -441,6 +489,10 @@ func extractPythonFunc(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 	if dec := ingest.ChildByField(n, "superclasses"); dec != nil {
 		walkPythonUsages(fe, dec, source, name)
 	}
+	// PEP 695: def use[T: Helper](...) — type parameter bounds/defaults.
+	if tps := ingest.ChildByField(n, "type_parameters"); tps != nil {
+		walkPythonUsages(fe, tps, source, name)
+	}
 	for _, field := range []string{"parameters", "return_type"} {
 		if part := ingest.ChildByField(n, field); part != nil {
 			walkPythonUsages(fe, part, source, name)
@@ -471,6 +523,10 @@ func extractPythonClass(fe *ingest.FileExtract, n *grammar.Node, source []byte, 
 
 	if bases := ingest.ChildByField(n, "superclasses"); bases != nil {
 		walkPythonUsages(fe, bases, source, className)
+	}
+	// PEP 695: class Box[T: Helper] / class Box[T = Helper] — bounds and defaults.
+	if tps := ingest.ChildByField(n, "type_parameters"); tps != nil {
+		walkPythonUsages(fe, tps, source, className)
 	}
 
 	if body := ingest.ChildByField(n, "body"); body != nil {
@@ -514,6 +570,10 @@ func extractPythonMethod(fe *ingest.FileExtract, n *grammar.Node, source []byte,
 		Exported:  len(methodShort) == 0 || methodShort[0] != '_',
 	})
 
+	// PEP 695: def use[T: Helper](self, x: T) — method type parameter bounds.
+	if tps := ingest.ChildByField(n, "type_parameters"); tps != nil {
+		walkPythonUsages(fe, tps, source, methodName)
+	}
 	for _, field := range []string{"parameters", "return_type"} {
 		if part := ingest.ChildByField(n, field); part != nil {
 			walkPythonUsages(fe, part, source, methodName)
@@ -740,6 +800,42 @@ func walkPythonUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, sc
 			walkPythonUsages(fe, ch, source, scope)
 		}
 		return
+	case "call":
+		// Box(helper=1) / NamedTuple / TypedDict / partial(Box, helper=1): keyword
+		// names are Class.field usages. Bare walk would treat keywords as free names.
+		fn := ingest.ChildByField(n, "function")
+		args := ingest.ChildByField(n, "arguments")
+		typeName := pythonCallConstructorName(fn, args, source)
+		if fn != nil {
+			walkPythonUsages(fe, fn, source, scope)
+		}
+		if args != nil {
+			for i := uint32(0); i < args.ChildCount(); i++ {
+				ch := args.Child(i)
+				switch ch.Type() {
+				case "keyword_argument":
+					nameN := ingest.ChildByField(ch, "name")
+					valN := ingest.ChildByField(ch, "value")
+					if nameN != nil && typeName != "" {
+						fe.Usages = append(fe.Usages, ingest.UsageDef{
+							Scope:     scope,
+							Name:      ingest.NodeText(nameN, source),
+							Qualifier: typeName,
+							StartByte: nameN.StartByte(),
+							EndByte:   nameN.EndByte(),
+						})
+					}
+					if valN != nil {
+						walkPythonUsages(fe, valN, source, scope)
+					}
+				case "(", ")", ",", "comment":
+					// punctuation
+				default:
+					walkPythonUsages(fe, ch, source, scope)
+				}
+			}
+		}
+		return
 	case "identifier":
 		fe.Usages = append(fe.Usages, ingest.UsageDef{
 			Scope:     scope,
@@ -767,13 +863,79 @@ func walkPythonUsages(fe *ingest.FileExtract, n *grammar.Node, source []byte, sc
 			walkPythonUsages(fe, ch, source, scope)
 		}
 		return
-	case "string", "integer", "float", "true", "false", "none", "comment":
+	case "string":
+		// Plain / bytes strings: no live identifiers. F-strings embed
+		// interpolation nodes whose expressions are real references
+		// (f"{helper()}" must rename with helper).
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "interpolation" {
+				walkPythonUsages(fe, ch, source, scope)
+			}
+		}
+		return
+	case "integer", "float", "true", "false", "none", "comment":
 		return
 	}
 
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		walkPythonUsages(fe, n.Child(i), source, scope)
 	}
+}
+
+// pythonCallConstructorName returns the type/class name whose fields are bound
+// by keyword arguments on a call: Box(...), pkg.Box(...), partial(Box, ...).
+// replace(obj, field=...) is handled in ExtraRename (typed receiver), not here.
+func pythonCallConstructorName(fn, args *grammar.Node, source []byte) string {
+	if fn == nil {
+		return ""
+	}
+	name := pythonSimpleCalleeName(fn, source)
+	if name == "" {
+		return ""
+	}
+	if name == "partial" {
+		return pythonFirstPositionalIdent(args, source)
+	}
+	if name == "replace" {
+		return ""
+	}
+	return name
+}
+
+func pythonSimpleCalleeName(fn *grammar.Node, source []byte) string {
+	if fn == nil {
+		return ""
+	}
+	switch fn.Type() {
+	case "identifier":
+		return ingest.NodeText(fn, source)
+	case "attribute":
+		if attr := ingest.ChildByField(fn, "attribute"); attr != nil {
+			return ingest.NodeText(attr, source)
+		}
+	}
+	return ""
+}
+
+// pythonFirstPositionalIdent returns the first non-keyword argument when it is
+// a bare identifier (partial(Box, helper=1) → "Box").
+func pythonFirstPositionalIdent(args *grammar.Node, source []byte) string {
+	if args == nil {
+		return ""
+	}
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		switch ch.Type() {
+		case "(", ")", ",", "comment", "keyword_argument":
+			continue
+		case "identifier":
+			return ingest.NodeText(ch, source)
+		default:
+			return ""
+		}
+	}
+	return ""
 }
 
 // pythonClassPatternTypeName returns the class name in `case Box(...):` patterns.

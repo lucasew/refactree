@@ -1,0 +1,4 @@
+{
+  "source": "path:./Main.java::Main.Color.HELPER",
+  "destination": "path:./Main.java::Main.Color.ASSIST"
+}
