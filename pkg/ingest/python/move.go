@@ -1873,7 +1873,8 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 }
 
 // pythonTypedLocals maps local names that are annotated or assigned as ourReceivers.
-// Covers: `b: Box`, `b = Box()`, `b: Box = ...`.
+// Covers: `b: Box`, `b = Box()`, `b: Box = ...`, and as-bindings
+// (`case A() as a`, `with A() as a`, `except A as e`).
 func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]bool {
 	out := map[string]bool{}
 	if root == nil || len(ourReceivers) == 0 {
@@ -1924,6 +1925,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					}
 				}
 			}
+		case "as_pattern":
+			// match `case A() as a`, with `with A() as a`, except `except A as e`.
+			// Without this, a.m() is skipped when a foreign same-leaf method exists.
+			if name, typ := pythonAsPatternBinding(n, content); name != "" && ourReceivers[typ] {
+				out[name] = true
+			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
@@ -1931,6 +1938,111 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 	}
 	walk(root)
 	return out
+}
+
+// pythonAsPatternBinding extracts (alias, typeName) from an as_pattern node.
+// typeName is the simple class leaf when the pattern is a class/call/identifier
+// we can resolve (A, A(), pkg.A, class_pattern A()).
+func pythonAsPatternBinding(n *grammar.Node, content []byte) (name, typ string) {
+	if n == nil || n.Type() != "as_pattern" {
+		return "", ""
+	}
+	var left *grammar.Node
+	var alias *grammar.Node
+	seenAs := false
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		if ch.Type() == "as" {
+			seenAs = true
+			continue
+		}
+		if !seenAs {
+			left = ch
+			continue
+		}
+		switch ch.Type() {
+		case "as_pattern_target":
+			// with/except: alias field wraps identifier
+			if id := ingest.ChildByType(ch, "identifier"); id != nil {
+				alias = id
+			}
+		case "identifier":
+			// match case: bare identifier after as
+			alias = ch
+		}
+	}
+	if left == nil || alias == nil {
+		return "", ""
+	}
+	return ingest.NodeText(alias, content), pythonPatternTypeName(left, content)
+}
+
+// pythonPatternTypeName recovers a simple type leaf from match/with/except patterns.
+func pythonPatternTypeName(n *grammar.Node, content []byte) string {
+	if n == nil || n.IsNull() {
+		return ""
+	}
+	switch n.Type() {
+	case "identifier":
+		return ingest.NodeText(n, content)
+	case "call":
+		fn := ingest.ChildByField(n, "function")
+		if fn == nil {
+			return ""
+		}
+		if fn.Type() == "identifier" {
+			return ingest.NodeText(fn, content)
+		}
+		if fn.Type() == "attribute" {
+			if attr := ingest.ChildByField(fn, "attribute"); attr != nil {
+				return ingest.NodeText(attr, content)
+			}
+		}
+		return ""
+	case "class_pattern":
+		if dn := ingest.ChildByType(n, "dotted_name"); dn != nil {
+			return pythonDottedNameLeaf(dn, content)
+		}
+		if id := ingest.ChildByType(n, "identifier"); id != nil {
+			return ingest.NodeText(id, content)
+		}
+	case "case_pattern", "pattern":
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			if t := pythonPatternTypeName(n.Child(i), content); t != "" {
+				return t
+			}
+		}
+	case "attribute":
+		if attr := ingest.ChildByField(n, "attribute"); attr != nil {
+			return ingest.NodeText(attr, content)
+		}
+	case "dotted_name":
+		return pythonDottedNameLeaf(n, content)
+	}
+	return ""
+}
+
+// pythonDottedNameLeaf returns the last identifier of a dotted_name (pkg.A → A).
+func pythonDottedNameLeaf(n *grammar.Node, content []byte) string {
+	if n == nil {
+		return ""
+	}
+	var last string
+	var walk func(x *grammar.Node)
+	walk = func(x *grammar.Node) {
+		if x == nil || x.IsNull() {
+			return
+		}
+		if x.Type() == "identifier" {
+			last = ingest.NodeText(x, content)
+			return
+		}
+		for i := uint32(0); i < x.ChildCount(); i++ {
+			walk(x.Child(i))
+		}
+	}
+	walk(n)
+	return last
 }
 
 // pythonTypeName extracts a simple class name from a type annotation node.
