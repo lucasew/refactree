@@ -1875,13 +1875,14 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // pythonTypedLocals maps local names that are annotated or assigned as ourReceivers.
 // Covers: `b: Box`, `b = Box()`, `b: Box = ...`, Optional/Union/`|` annotations
 // (`b: Optional[Box]`, `b: Box | None`, `b: Union[Box, None]`), `b = cast(Box, x)`,
-// `a = next(iter(items))` / `a = next(items)` (element type of the iterable arg),
+// `a = next(iter(items))` / `a = next(items)` / `a = next(x for x in items)`
+// (element type of the iterable arg / identity genexp),
 // `a = min(items)` / `a = max(items)` / `a = min(items, key=...)` (same element type),
 // `a = items[0]` / `a = d[k]` (element/value type of a known collection),
 // `a = items.pop()` / `a = items.pop(0)` / `a = d.pop(k)` (same element/value type),
 // as-bindings (`case A() as a`, `with A() as a`, `except A as e`),
-// walrus (`a := A()`, `a := next(items)`, `a := min(items)`, `a := items.pop()`,
-// `a := items[0]` — same RHS typing as plain assignment),
+// walrus (`a := A()`, `a := next(items)`, `a := next(x for x in items)`,
+// `a := min(items)`, `a := items.pop()`, `a := items[0]` — same RHS typing as plain assignment),
 // for/comprehension targets over known collections
 // (`for a in [A()]`, `for a in items` with `items: list[A]`,
 // `for a in d.values()` / `for k, a in d.items()` with `d: dict[K, A]`,
@@ -1959,8 +1960,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								out[lname] = true
 							}
 						}
-						// a = next(iter(items)) / next(items) / next(reversed(items)) —
-						// result type is the element type of the iterable arg.
+						// a = next(iter(items)) / next(items) / next(x for x in items) /
+						// next(reversed(items)) — result type is the element type of
+						// the iterable arg (identity genexp preserves that type).
 						if fname == "next" {
 							if et := pythonNextElemType(right, content, elemOf, egElems); ourReceivers[et] {
 								out[lname] = true
@@ -2047,7 +2049,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							out[lname] = true
 						}
 					}
-					// a := next(iter(items)) / next(items) / next(reversed(items))
+					// a := next(iter(items)) / next(items) / next(x for x in items) /
+					// next(reversed(items))
 					if fname == "next" {
 						if et := pythonNextElemType(valueN, content, elemOf, egElems); ourReceivers[et] {
 							out[lname] = true
@@ -2181,8 +2184,9 @@ func pythonExceptClauseIsStar(n *grammar.Node) bool {
 
 // pythonNextElemType recovers the element type yielded by next(iterable[, default]).
 // Uses the first positional arg's iterable element type (next(iter(items)) → A when
-// items: list[A]). Fails closed on splat args or empty call. Default arg is ignored
-// (result may be union with default at runtime; we still bind the element type).
+// items: list[A]; next(x for x in items) → A for identity genexps). Fails closed on
+// splat args or empty call. Default arg is ignored (result may be union with default
+// at runtime; we still bind the element type).
 func pythonNextElemType(call *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
 	args, ok := pythonCallPositionalArgNodes(call)
 	if !ok || len(args) == 0 {
@@ -2220,6 +2224,7 @@ func pythonSubscriptElemType(sub *grammar.Node, content []byte, elemOf, egElems 
 
 // pythonIterableElemType recovers the element type of a for/comprehension iterable.
 // Uses known collection locals (elemOf), homogeneous Class() list/tuple/set literals,
+// identity generator/list/set comprehensions (`x for x in items`),
 // element-preserving wrappers (reversed/sorted/list/tuple/set/iter),
 // filter (2nd arg iterable; pred does not change element type),
 // map when the first arg is a Class identifier (map(A, xs) → A),
@@ -2237,6 +2242,9 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		return elemOf[ingest.NodeText(right, content)]
 	case "list", "tuple", "set":
 		return pythonHomogeneousCtorElem(right, content)
+	case "generator_expression", "list_comprehension", "set_comprehension":
+		// next(x for x in items) / for a in [x for x in items] — identity body only.
+		return pythonComprehensionElemType(right, content, elemOf, egElems)
 	case "call":
 		// reversed(xs) / sorted(xs) / list(xs) / tuple(xs) / set(xs) / iter(xs) —
 		// element type equals the wrapped iterable. Nested wrappers recurse.
@@ -2369,6 +2377,8 @@ func pythonEnumerateZipTargetTypes(right *grammar.Node, content []byte, elemOf, 
 
 // pythonCallPositionalArgNodes returns positional argument nodes of a call.
 // Keyword arguments are skipped. Splat (*args / **kwargs) fails closed (ok=false).
+// Bare generator expressions (`next(x for x in items)`) attach as the arguments
+// field itself (not wrapped in argument_list) — returned as a single arg.
 func pythonCallPositionalArgNodes(call *grammar.Node) (args []*grammar.Node, ok bool) {
 	if call == nil || call.Type() != "call" {
 		return nil, false
@@ -2376,6 +2386,11 @@ func pythonCallPositionalArgNodes(call *grammar.Node) (args []*grammar.Node, ok 
 	argList := ingest.ChildByField(call, "arguments")
 	if argList == nil {
 		return nil, true
+	}
+	// next(x for x in items) — tree-sitter puts the genexp in the arguments field
+	// (no argument_list wrapper). Treat it as the sole positional arg.
+	if argList.Type() == "generator_expression" {
+		return []*grammar.Node{argList}, true
 	}
 	for i := uint32(0); i < argList.ChildCount(); i++ {
 		ch := argList.Child(i)
@@ -2392,6 +2407,51 @@ func pythonCallPositionalArgNodes(call *grammar.Node) (args []*grammar.Node, ok 
 		}
 	}
 	return args, true
+}
+
+// pythonComprehensionElemType recovers the element type of an identity
+// generator/list/set comprehension: `x for x in items` / `[x for x in items if x]`.
+// Body must be the same identifier as the single for-target; nested fors and
+// transforming bodies (`f(x) for x in items`) fail closed. if_clause is ignored
+// (filter does not change element type).
+func pythonComprehensionElemType(comp *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
+	if comp == nil {
+		return ""
+	}
+	switch comp.Type() {
+	case "generator_expression", "list_comprehension", "set_comprehension":
+		// ok
+	default:
+		return ""
+	}
+	body := ingest.ChildByField(comp, "body")
+	if body == nil || body.Type() != "identifier" {
+		return ""
+	}
+	var forClause *grammar.Node
+	forCount := 0
+	for i := uint32(0); i < comp.ChildCount(); i++ {
+		if ch := comp.Child(i); ch.Type() == "for_in_clause" {
+			forCount++
+			if forClause == nil {
+				forClause = ch
+			}
+		}
+	}
+	// Nested `for a in xs for b in ys` — fail closed (yield type is ambiguous here).
+	if forCount != 1 || forClause == nil {
+		return ""
+	}
+	left := ingest.ChildByField(forClause, "left")
+	right := ingest.ChildByField(forClause, "right")
+	if left == nil || right == nil || left.Type() != "identifier" {
+		return ""
+	}
+	// Identity only: body name must match the for-target (`x for x in items`).
+	if ingest.NodeText(body, content) != ingest.NodeText(left, content) {
+		return ""
+	}
+	return pythonIterableElemType(right, content, elemOf, egElems)
 }
 
 // pythonPatternIdents returns simple identifier targets from pattern_list /
