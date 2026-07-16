@@ -1875,6 +1875,7 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // pythonTypedLocals maps local names that are annotated or assigned as ourReceivers.
 // Covers: `b: Box`, `b = Box()`, `b: Box = ...`, Optional/Union/`|` annotations
 // (`b: Optional[Box]`, `b: Box | None`, `b: Union[Box, None]`), `b = cast(Box, x)`,
+// `a = next(iter(items))` / `a = next(items)` (element type of the iterable arg),
 // as-bindings (`case A() as a`, `with A() as a`, `except A as e`), walrus (`a := A()`),
 // for/comprehension targets over known collections
 // (`for a in [A()]`, `for a in items` with `items: list[A]`,
@@ -1950,6 +1951,13 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// a = cast(A, x) / cast("A", x)
 						if fname == "cast" {
 							if tn := pythonCastTypeArg(right, content); ourReceivers[tn] {
+								out[lname] = true
+							}
+						}
+						// a = next(iter(items)) / next(items) / next(reversed(items)) —
+						// result type is the element type of the iterable arg.
+						if fname == "next" {
+							if et := pythonNextElemType(right, content, elemOf, egElems); ourReceivers[et] {
 								out[lname] = true
 							}
 						}
@@ -2087,6 +2095,18 @@ func pythonExceptClauseIsStar(n *grammar.Node) bool {
 		}
 	}
 	return false
+}
+
+// pythonNextElemType recovers the element type yielded by next(iterable[, default]).
+// Uses the first positional arg's iterable element type (next(iter(items)) → A when
+// items: list[A]). Fails closed on splat args or empty call. Default arg is ignored
+// (result may be union with default at runtime; we still bind the element type).
+func pythonNextElemType(call *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) == 0 {
+		return ""
+	}
+	return pythonIterableElemType(args[0], content, elemOf, egElems)
 }
 
 // pythonIterableElemType recovers the element type of a for/comprehension iterable.
