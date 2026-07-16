@@ -1876,6 +1876,7 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // Covers: `b: Box`, `b = Box()`, `b: Box = ...`, Optional/Union/`|` annotations
 // (`b: Optional[Box]`, `b: Box | None`, `b: Union[Box, None]`), `b = cast(Box, x)`,
 // `a = next(iter(items))` / `a = next(items)` (element type of the iterable arg),
+// `a = items[0]` / `a = d[k]` (element/value type of a known collection),
 // as-bindings (`case A() as a`, `with A() as a`, `except A as e`), walrus (`a := A()`),
 // for/comprehension targets over known collections
 // (`for a in [A()]`, `for a in items` with `items: list[A]`,
@@ -1970,9 +1971,19 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						}
 					}
 				}
+				// a = items[0] / a = d[k] / a = list(items)[0] — element/value of collection.
+				// Slices (items[1:3]) fail closed (sequence, not element).
+				if right != nil && right.Type() == "subscript" {
+					if et := pythonSubscriptElemType(right, content, elemOf, egElems); ourReceivers[et] {
+						out[lname] = true
+					}
+				}
 				// xs = [A()] / (A(),) / [B()] — track element type for later for-loops.
+				// xs = list(items) / filter(...) — preserve element type via wrappers.
 				if right != nil {
 					if et := pythonHomogeneousCtorElem(right, content); et != "" {
+						elemOf[lname] = et
+					} else if et := pythonIterableElemType(right, content, elemOf, egElems); et != "" {
 						elemOf[lname] = et
 					}
 				}
@@ -2107,6 +2118,22 @@ func pythonNextElemType(call *grammar.Node, content []byte, elemOf, egElems map[
 		return ""
 	}
 	return pythonIterableElemType(args[0], content, elemOf, egElems)
+}
+
+// pythonSubscriptElemType recovers the element type of items[i] / d[k] when the
+// subscripted value is a known collection (elemOf / wrappers / literals).
+// Fails closed on slices (items[a:b] / items[:]) — those yield sequences, not elements.
+func pythonSubscriptElemType(sub *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
+	if sub == nil || sub.Type() != "subscript" {
+		return ""
+	}
+	for i := uint32(0); i < sub.ChildCount(); i++ {
+		if sub.Child(i).Type() == "slice" {
+			return ""
+		}
+	}
+	val := ingest.ChildByField(sub, "value")
+	return pythonIterableElemType(val, content, elemOf, egElems)
 }
 
 // pythonIterableElemType recovers the element type of a for/comprehension iterable.
