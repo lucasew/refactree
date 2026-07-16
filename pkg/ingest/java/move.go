@@ -1066,18 +1066,34 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 				break
 			}
 			tn := javaTypeName(typeN, content)
-			if !ourReceivers[tn] {
+			explicitOurs := ourReceivers[tn]
+			// var a = new A() — recover type from object_creation_expression.
+			inferFromNew := tn == "var"
+			if !explicitOurs && !inferFromNew {
 				break
 			}
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				c := n.Child(i)
-				if c.Type() == "variable_declarator" {
-					nameN := ingest.ChildByField(c, "name")
-					if nameN == nil {
-						nameN = ingest.ChildByType(c, "identifier")
-					}
-					if nameN != nil {
-						out[ingest.NodeText(nameN, content)] = true
+				if c.Type() != "variable_declarator" {
+					continue
+				}
+				nameN := ingest.ChildByField(c, "name")
+				if nameN == nil {
+					nameN = ingest.ChildByType(c, "identifier")
+				}
+				if nameN == nil {
+					continue
+				}
+				if explicitOurs {
+					out[ingest.NodeText(nameN, content)] = true
+					continue
+				}
+				valN := ingest.ChildByField(c, "value")
+				if valN != nil && valN.Type() == "object_creation_expression" {
+					if vt := ingest.ChildByField(valN, "type"); vt != nil {
+						if ourReceivers[javaTypeName(vt, content)] {
+							out[ingest.NodeText(nameN, content)] = true
+						}
 					}
 				}
 			}
@@ -1092,6 +1108,7 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 		case "instanceof_expression":
 			// Pattern matching: `x instanceof A a` binds a with type A.
 			// Without this, a.run() is skipped when foreign same-leaf methods exist.
+			// Record patterns (`x instanceof Box(A a)`) bind via record_pattern_component.
 			typeN := ingest.ChildByField(n, "right")
 			if typeN == nil {
 				typeN = ingest.ChildByField(n, "type")
@@ -1105,6 +1122,21 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 		case "type_pattern":
 			// switch/case pattern: `case A b -> …` (and guards).
 			javaBindTypePattern(n, content, ourReceivers, out)
+		case "catch_formal_parameter":
+			// catch (MyEx e) — type lives under catch_type, not a "type" field.
+			javaBindCatchFormal(n, content, ourReceivers, out)
+		case "resource":
+			// try (A a = new A()) { a.m(); }
+			typeN := ingest.ChildByField(n, "type")
+			nameN := ingest.ChildByField(n, "name")
+			if typeN != nil && nameN != nil {
+				if tn := javaTypeName(typeN, content); ourReceivers[tn] {
+					out[ingest.NodeText(nameN, content)] = true
+				}
+			}
+		case "record_pattern_component":
+			// case Box(A a) / instanceof Holder(A a) — component binding A a.
+			javaBindRecordPatternComponent(n, content, ourReceivers, out)
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
@@ -1124,6 +1156,67 @@ func javaBindTypePattern(n *grammar.Node, content []byte, ourReceivers, out map[
 		ch := n.Child(i)
 		switch ch.Type() {
 		case "type_identifier", "generic_type", "scoped_type_identifier", "array_type", "integral_type", "floating_point_type", "boolean_type":
+			typeN = ch
+		case "identifier":
+			nameN = ch
+		}
+	}
+	if typeN == nil || nameN == nil {
+		return
+	}
+	if tn := javaTypeName(typeN, content); ourReceivers[tn] {
+		out[ingest.NodeText(nameN, content)] = true
+	}
+}
+
+// javaBindCatchFormal records catch (Type e) when Type is a single our-receiver.
+// Multi-catch (A | B e) is skipped: the static type is the lub, not either arm.
+func javaBindCatchFormal(n *grammar.Node, content []byte, ourReceivers, out map[string]bool) {
+	if n == nil || n.Type() != "catch_formal_parameter" {
+		return
+	}
+	nameN := ingest.ChildByField(n, "name")
+	if nameN == nil {
+		nameN = ingest.ChildByType(n, "identifier")
+	}
+	if nameN == nil {
+		return
+	}
+	var catchType *grammar.Node
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		if n.Child(i).Type() == "catch_type" {
+			catchType = n.Child(i)
+			break
+		}
+	}
+	if catchType == nil {
+		return
+	}
+	var typeNames []string
+	for i := uint32(0); i < catchType.ChildCount(); i++ {
+		ch := catchType.Child(i)
+		switch ch.Type() {
+		case "type_identifier", "scoped_type_identifier", "generic_type":
+			if tn := javaTypeName(ch, content); tn != "" {
+				typeNames = append(typeNames, tn)
+			}
+		}
+	}
+	if len(typeNames) == 1 && ourReceivers[typeNames[0]] {
+		out[ingest.NodeText(nameN, content)] = true
+	}
+}
+
+// javaBindRecordPatternComponent records A a inside Box(A a) / Holder(A a).
+func javaBindRecordPatternComponent(n *grammar.Node, content []byte, ourReceivers, out map[string]bool) {
+	if n == nil || n.Type() != "record_pattern_component" {
+		return
+	}
+	var typeN, nameN *grammar.Node
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		switch ch.Type() {
+		case "type_identifier", "generic_type", "scoped_type_identifier", "array_type":
 			typeN = ch
 		case "identifier":
 			nameN = ch
