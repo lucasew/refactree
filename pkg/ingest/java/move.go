@@ -1039,7 +1039,8 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 
 // javaTypedLocals maps locals/params declared with our receiver types.
 // Also binds untyped stream/collection lambda params when the pipeline element
-// type is ours (List<A> as → as.stream().map(a -> a.m()) types a as A).
+// type is ours (List<A> as → as.stream().map(a -> a.m()) types a as A), and
+// for (var a : as) loop variables from collection/array element types.
 func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]bool {
 	out := map[string]bool{}
 	if root == nil || len(ourReceivers) == 0 {
@@ -1103,11 +1104,20 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 				}
 			}
 		case "enhanced_for_statement":
+			// for (A a : as) — explicit type. for (var a : as) — element of collection.
+			// Without var→elem binding, a.run() is skipped when foreign same-leaf methods exist.
 			typeN := ingest.ChildByField(n, "type")
 			nameN := ingest.ChildByField(n, "name")
 			if typeN != nil && nameN != nil {
-				if tn := javaTypeName(typeN, content); ourReceivers[tn] {
-					out[ingest.NodeText(nameN, content)] = true
+				name := ingest.NodeText(nameN, content)
+				tn := javaTypeName(typeN, content)
+				if ourReceivers[tn] {
+					out[name] = true
+				} else if tn == "var" {
+					valN := ingest.ChildByField(n, "value")
+					if et := javaStreamPipelineElemType(valN, content, elemOf); ourReceivers[et] {
+						out[name] = true
+					}
 				}
 			}
 		case "instanceof_expression":
