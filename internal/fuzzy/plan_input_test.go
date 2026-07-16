@@ -1,6 +1,7 @@
 package fuzzy
 
 import (
+	"fmt"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -64,5 +65,67 @@ func TestLoadCatalogCanvasMvEnabled(t *testing.T) {
 		if len(p.Mv.Grains) == 0 {
 			t.Fatalf("canvas project %s has empty grains", p.ID)
 		}
+	}
+}
+
+func TestNewCatalogCanvasRespectsRFT_FUZZY_PROJECT(t *testing.T) {
+	// Two mv-enabled local projects; filter must keep only the selected slug.
+	dir := t.TempDir()
+	for _, name := range []string{"alpha", "beta"} {
+		if err := os.MkdirAll(filepath.Join(dir, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name, "main.go"), []byte("package main\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	catalog := filepath.Join(dir, "projects.toml")
+	data := fmt.Sprintf(`
+[projects.alpha]
+family = "go"
+local_path = %q
+root = "."
+setup_task = "-"
+ingest_roots = ["."]
+[projects.alpha.mv]
+enabled = true
+grains = ["declaration"]
+[projects.alpha.isolate]
+setup_network = true
+check_network = false
+[projects.alpha.mise.tasks.test]
+run = "true"
+
+[projects.beta]
+family = "go"
+local_path = %q
+root = "."
+setup_task = "-"
+ingest_roots = ["."]
+[projects.beta.mv]
+enabled = true
+grains = ["declaration"]
+[projects.beta.isolate]
+setup_network = true
+check_network = false
+[projects.beta.mise.tasks.test]
+run = "true"
+`, filepath.Join(dir, "alpha"), filepath.Join(dir, "beta"))
+	if err := os.WriteFile(catalog, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("RFT_FUZZY_PROJECT", "beta")
+	canvas, err := NewCatalogCanvas(t.TempDir(), catalog, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(canvas.Projects) != 1 || canvas.Projects[0].ID != "beta" {
+		t.Fatalf("projects=%v want only beta", canvas.Projects)
+	}
+
+	t.Setenv("RFT_FUZZY_PROJECT", "nope")
+	if _, err := NewCatalogCanvas(t.TempDir(), catalog, true); err == nil {
+		t.Fatal("expected error for unknown project id")
 	}
 }

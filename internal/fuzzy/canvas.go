@@ -56,10 +56,23 @@ type CatalogCanvas struct {
 // NewCatalogCanvas builds a canvas over DefaultWorkRoot (or workRoot) and the
 // mv-enabled catalog. Call Ready before Attempt; Ready requires a warm offline
 // work-root (mise run fuzzy:prefetch).
+//
+// When RFT_FUZZY_PROJECT is set (comma-separated slugs), the canvas is limited
+// to those projects — same filter as Prefetch/Run. That lets campaigns and the
+// seed matrix run against a partially warm work-root (e.g. only workspaced).
 func NewCatalogCanvas(workRoot, catalogPath string, noIsolate bool) (*CatalogCanvas, error) {
 	projects, err := LoadCatalogCanvas(catalogPath)
 	if err != nil {
 		return nil, err
+	}
+	if ids := splitCommaIDs(os.Getenv("RFT_FUZZY_PROJECT")); len(ids) > 0 {
+		projects, err = FilterProjects(projects, ids)
+		if err != nil {
+			return nil, fmt.Errorf("RFT_FUZZY_PROJECT: %w", err)
+		}
+		if len(projects) == 0 {
+			return nil, fmt.Errorf("RFT_FUZZY_PROJECT matched no mv-enabled projects")
+		}
 	}
 	if workRoot == "" {
 		workRoot = DefaultWorkRoot()
