@@ -1931,7 +1931,10 @@ func methodDeclReceiverType(method *grammar.Node, content []byte) string {
 }
 
 // collectLocalTypeBindings appends simple local typed bindings under node
-// (short_var_declaration / var_spec) into bindings with the body's end as scope.
+// (short_var_declaration / var_spec / type-switch case arms) into bindings.
+// short_var / var_spec use the enclosing body's end as scope; type-switch
+// aliases are scoped to each type_case so same-leaf methods on foreign arms
+// are not rewritten.
 func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]identTypeBinding) {
 	if node == nil {
 		return
@@ -1969,12 +1972,59 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, typ})
 				}
 			}
+		case "type_switch_statement":
+			// switch v := x.(type) { case *T: v.M() } — bind v to T only
+			// inside each single-type case arm (multi-type cases leave v as
+			// interface-typed and unbound).
+			aliasNames := identListNames(ingest.ChildByField(n, "alias"), content)
+			if len(aliasNames) == 1 {
+				alias := aliasNames[0]
+				for i := uint32(0); i < n.ChildCount(); i++ {
+					c := n.Child(i)
+					if c == nil || c.Type() != "type_case" {
+						continue
+					}
+					if typ, ok := typeCaseSingleType(c, content); ok {
+						*bindings = append(*bindings, identTypeBinding{c.StartByte(), c.EndByte(), alias, typ})
+					}
+				}
+			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
 		}
 	}
 	walk(node)
+}
+
+// typeCaseSingleType returns the concrete type name when a type_case lists
+// exactly one type (pointer star stripped). Multi-type arms (case A, B:)
+// return ok=false because the alias is not a single concrete type there.
+func typeCaseSingleType(typeCase *grammar.Node, content []byte) (string, bool) {
+	if typeCase == nil {
+		return "", false
+	}
+	var types []string
+	for i := uint32(0); i < typeCase.ChildCount(); i++ {
+		if typeCase.FieldNameForChild(i) != "type" {
+			continue
+		}
+		c := typeCase.Child(i)
+		if c == nil || c.IsNull() {
+			continue
+		}
+		// Comma separators may appear as type-field children in some grammars.
+		if c.Type() == "," {
+			continue
+		}
+		if typ := typeNameFromTypeNode(c, content); typ != "" {
+			types = append(types, typ)
+		}
+	}
+	if len(types) != 1 {
+		return "", false
+	}
+	return types[0], true
 }
 
 func identListNames(n *grammar.Node, content []byte) []string {
