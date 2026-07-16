@@ -77,7 +77,8 @@ var prefetchMu sync.Mutex
 //
 //	RFT_FUZZY_WORK_ROOT     durable work-root
 //	RFT_FUZZY_NO_ISOLATE=1  host setup/check (no Docker)
-//	RFT_FUZZY_PROJECT       comma-separated project slugs (default: all catalog)
+//	RFT_FUZZY_PROJECT       comma-separated project slugs (default: all catalog;
+//	                        also filters NewCatalogCanvas / catalog campaigns)
 func PrefetchOnce(ctx context.Context) (workRoot string, err error) {
 	return Prefetch(ctx, PrefetchOptions{
 		WorkRoot:   DefaultWorkRoot(),

@@ -55,4 +55,11 @@ res, err := fuzzy.Run(ctx, fuzzy.Options{
 | `RFT_FUZZY_WARMUP=1` | Enable `TestPrefetchWarmup` |
 | `RFT_FUZZY_WORK_ROOT` | Durable work-root (must be set before `go test` / process start) |
 | `RFT_FUZZY_NO_ISOLATE=1` | Host setup/check |
-| `RFT_FUZZY_PROJECT` | Comma-separated slugs for prefetch |
+| `RFT_FUZZY_PROJECT` | Comma-separated slugs: limit **prefetch**, `fuzzy.Run`, and the catalog **canvas** (`TestCatalogFuzzCampaign` / seed matrix) to those projects. Use when the work-root is only partially warm (e.g. `RFT_FUZZY_PROJECT=workspaced`). |
+
+Partial warm example:
+
+```bash
+RFT_FUZZY_NO_ISOLATE=1 RFT_FUZZY_PROJECT=workspaced mise run fuzzy:prefetch
+RFT_FUZZY_NO_ISOLATE=1 RFT_FUZZY_PROJECT=workspaced FUZZTIME=2m mise run fuzzy:run
+```
