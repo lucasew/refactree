@@ -19,7 +19,6 @@ type moveDriver struct{}
 
 func (moveDriver) Language() string { return "javascript" }
 
-
 // ExpandRenameSources ties TypeScript interface methods to implementors:
 //
 //  1. Renaming Iface.method expands Class.method for classes that implement Iface.
