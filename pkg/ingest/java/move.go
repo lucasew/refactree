@@ -1039,8 +1039,8 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 
 // javaTypedLocals maps locals/params declared with our receiver types.
 // Also binds untyped stream/collection lambda params when the pipeline element
-// type is ours (List<A> as → as.stream().map(a -> a.m()) types a as A), and
-// for (var a : as) loop variables from collection/array element types.
+// type is ours (List<A> as → as.stream().map(a -> a.m()) / as.iterator().forEachRemaining(a -> a.m())
+// types a as A), and for (var a : as) loop variables from collection/array element types.
 func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]bool {
 	out := map[string]bool{}
 	if root == nil || len(ourReceivers) == 0 {
@@ -1257,7 +1257,7 @@ func javaStreamElementLambdaMethod(method string) bool {
 	switch method {
 	case "map", "mapToInt", "mapToLong", "mapToDouble",
 		"flatMap", "flatMapToInt", "flatMapToLong", "flatMapToDouble",
-		"filter", "peek", "forEach", "forEachOrdered",
+		"filter", "peek", "forEach", "forEachOrdered", "forEachRemaining",
 		"takeWhile", "dropWhile",
 		"anyMatch", "allMatch", "noneMatch",
 		"removeIf", "ifPresent":
@@ -1268,8 +1268,8 @@ func javaStreamElementLambdaMethod(method string) bool {
 }
 
 // javaStreamPipelineElemType recovers the element type of a stream pipeline object:
-// as / as.stream() / as.stream().filter(...) → elemOf[as]. Type-changing stages
-// (map/flatMap) fail closed so later lambdas are not mis-typed.
+// as / as.stream() / as.iterator() / as.stream().filter(...) → elemOf[as].
+// Type-changing stages (map/flatMap) fail closed so later lambdas are not mis-typed.
 func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf map[string]string) string {
 	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
 		inner := ingest.ChildByField(obj, "expression")
@@ -1300,7 +1300,7 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf map[st
 			return ""
 		}
 		switch ingest.NodeText(nameN, content) {
-		case "stream", "parallelStream",
+		case "stream", "parallelStream", "iterator",
 			"filter", "peek", "sorted", "distinct", "limit", "skip",
 			"unordered", "sequential", "parallel", "onClose",
 			"takeWhile", "dropWhile":
