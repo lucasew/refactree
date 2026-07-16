@@ -1873,10 +1873,14 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 }
 
 // pythonTypedLocals maps local names that are annotated or assigned as ourReceivers.
-// Covers: `b: Box`, `b = Box()`, `b: Box = ...`, and as-bindings
-// (`case A() as a`, `with A() as a`, `except A as e`).
+// Covers: `b: Box`, `b = Box()`, `b: Box = ...`, as-bindings
+// (`case A() as a`, `with A() as a`, `except A as e`), walrus (`a := A()`),
+// and for/comprehension targets over known collections
+// (`for a in [A()]`, `for a in items` with `items: list[A]`).
 func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]bool {
 	out := map[string]bool{}
+	// Collection locals → element type leaf (list[A] / [A()] → "A").
+	elemOf := map[string]string{}
 	if root == nil || len(ourReceivers) == 0 {
 		return out
 	}
@@ -1887,7 +1891,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 		}
 		switch n.Type() {
 		case "parameters", "lambda_parameters":
-			// function params: (self, b: Box) / (b: "Box")
+			// function params: (self, b: Box) / (b: "Box") / (items: list[Box])
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				p := n.Child(i)
 				switch p.Type() {
@@ -1899,8 +1903,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						nameN = ingest.ChildByType(p, "identifier")
 					}
 					if nameN != nil && typeN != nil {
+						lname := ingest.NodeText(nameN, content)
 						if tn := pythonTypeName(typeN, content); ourReceivers[tn] {
-							out[ingest.NodeText(nameN, content)] = true
+							out[lname] = true
+						}
+						// Record even foreign element types so a later `items: list[B]`
+						// shadows a prior `items: list[A]` (file-global map).
+						if et := pythonContainerElemType(typeN, content); et != "" {
+							elemOf[lname] = et
 						}
 					}
 				}
@@ -1915,6 +1925,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					if tn := pythonTypeName(typeN, content); ourReceivers[tn] {
 						out[lname] = true
 					}
+					// Foreign element types too — shadow prior same-name collections.
+					if et := pythonContainerElemType(typeN, content); et != "" {
+						elemOf[lname] = et
+					}
 				}
 				if right != nil && right.Type() == "call" {
 					fn := ingest.ChildByField(right, "function")
@@ -1923,6 +1937,34 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							out[lname] = true
 						}
 					}
+				}
+				// xs = [A()] / (A(),) / [B()] — track element type for later for-loops.
+				if right != nil {
+					if et := pythonHomogeneousCtorElem(right, content); et != "" {
+						elemOf[lname] = et
+					}
+				}
+			}
+		case "named_expression":
+			// Walrus: (a := A()) — without this, a.m() is skipped under foreign same-leaf.
+			nameN := ingest.ChildByField(n, "name")
+			valueN := ingest.ChildByField(n, "value")
+			if nameN != nil && valueN != nil && valueN.Type() == "call" {
+				fn := ingest.ChildByField(valueN, "function")
+				if fn != nil && fn.Type() == "identifier" {
+					if ourReceivers[ingest.NodeText(fn, content)] {
+						out[ingest.NodeText(nameN, content)] = true
+					}
+				}
+			}
+		case "for_statement", "for_in_clause":
+			// for a in items / for a in [A()] / [a.m() for a in xs]
+			// Only simple identifier targets (fail closed on unpacking).
+			left := ingest.ChildByField(n, "left")
+			right := ingest.ChildByField(n, "right")
+			if left != nil && left.Type() == "identifier" && right != nil {
+				if et := pythonIterableElemType(right, content, elemOf); ourReceivers[et] {
+					out[ingest.NodeText(left, content)] = true
 				}
 			}
 		case "as_pattern":
@@ -1938,6 +1980,216 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 	}
 	walk(root)
 	return out
+}
+
+// pythonIterableElemType recovers the element type of a for/comprehension iterable.
+// Uses known collection locals (elemOf) or homogeneous Class() list/tuple/set literals.
+func pythonIterableElemType(right *grammar.Node, content []byte, elemOf map[string]string) string {
+	if right == nil {
+		return ""
+	}
+	switch right.Type() {
+	case "identifier":
+		if elemOf == nil {
+			return ""
+		}
+		return elemOf[ingest.NodeText(right, content)]
+	case "list", "tuple", "set":
+		return pythonHomogeneousCtorElem(right, content)
+	}
+	return ""
+}
+
+// pythonHomogeneousCtorElem returns T when collection is only T() calls (same T).
+func pythonHomogeneousCtorElem(collection *grammar.Node, content []byte) string {
+	if collection == nil {
+		return ""
+	}
+	switch collection.Type() {
+	case "list", "tuple", "set":
+		// ok
+	default:
+		return ""
+	}
+	var elem string
+	saw := false
+	for i := uint32(0); i < collection.ChildCount(); i++ {
+		ch := collection.Child(i)
+		switch ch.Type() {
+		case "[", "]", "(", ")", "{", "}", ",", "comment":
+			continue
+		case "call":
+			fn := ingest.ChildByField(ch, "function")
+			if fn == nil || fn.Type() != "identifier" {
+				return ""
+			}
+			name := ingest.NodeText(fn, content)
+			if !saw {
+				elem = name
+				saw = true
+				continue
+			}
+			if name != elem {
+				return ""
+			}
+		default:
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return elem
+}
+
+// pythonContainerElemType extracts the element type leaf from container annotations:
+// list[A], List[A], Iterable[A], set[A], tuple[A, ...], dict[K, A] (value).
+// Returns "" when the annotation is not a resolvable single-element container.
+func pythonContainerElemType(typeN *grammar.Node, content []byte) string {
+	if typeN == nil {
+		return ""
+	}
+	if typeN.Type() == "type" && typeN.ChildCount() > 0 {
+		typeN = typeN.Child(0)
+	}
+	// Quoted: "list[A]" / 'dict[str, A]'
+	if typeN.Type() == "string" {
+		s := strings.Trim(ingest.NodeText(typeN, content), `"'`)
+		return pythonParseContainerElemString(s)
+	}
+	if typeN.Type() != "generic_type" {
+		return ""
+	}
+	// generic_type: identifier + type_parameter
+	var contName string
+	var typeParam *grammar.Node
+	for i := uint32(0); i < typeN.ChildCount(); i++ {
+		ch := typeN.Child(i)
+		switch ch.Type() {
+		case "identifier":
+			if contName == "" {
+				contName = ingest.NodeText(ch, content)
+			}
+		case "attribute":
+			// typing.List — use leaf
+			if contName == "" {
+				if attr := ingest.ChildByField(ch, "attribute"); attr != nil {
+					contName = ingest.NodeText(attr, content)
+				}
+			}
+		case "type_parameter":
+			typeParam = ch
+		}
+	}
+	if typeParam == nil {
+		return ""
+	}
+	var args []string
+	for i := uint32(0); i < typeParam.ChildCount(); i++ {
+		ch := typeParam.Child(i)
+		if ch.Type() != "type" {
+			continue
+		}
+		// Skip ellipsis in tuple[A, ...]
+		inner := ch
+		if ch.ChildCount() == 1 && ch.Child(0).Type() == "ellipsis" {
+			continue
+		}
+		if ch.ChildCount() > 0 {
+			inner = ch.Child(0)
+		}
+		if inner.Type() == "ellipsis" {
+			continue
+		}
+		if tn := pythonTypeName(ch, content); tn != "" {
+			args = append(args, tn)
+		}
+	}
+	if len(args) == 0 {
+		return ""
+	}
+	switch contName {
+	case "dict", "Dict", "Mapping", "MutableMapping", "OrderedDict", "defaultdict", "DefaultDict":
+		// value type is last type arg when there are two.
+		if len(args) == 2 {
+			return args[1]
+		}
+		return ""
+	case "list", "List", "set", "Set", "frozenset", "FrozenSet",
+		"tuple", "Tuple", "Iterable", "Iterator", "Sequence", "MutableSequence",
+		"Collection", "Container", "Generator", "AsyncIterable", "AsyncIterator",
+		"AbstractSet", "MutableSet":
+		// Single element type, or homogeneous multi (tuple[A, A]) — first only when all agree.
+		if len(args) == 1 {
+			return args[0]
+		}
+		first := args[0]
+		for _, a := range args[1:] {
+			if a != first {
+				return ""
+			}
+		}
+		return first
+	default:
+		// Unknown generic: only when exactly one type arg (deque[A], etc.).
+		if len(args) == 1 {
+			return args[0]
+		}
+		return ""
+	}
+}
+
+// pythonParseContainerElemString handles quoted annotations like "list[A]".
+func pythonParseContainerElemString(s string) string {
+	s = strings.TrimSpace(s)
+	lb := strings.IndexByte(s, '[')
+	rb := strings.LastIndexByte(s, ']')
+	if lb <= 0 || rb <= lb {
+		return ""
+	}
+	contName := strings.TrimSpace(s[:lb])
+	if i := strings.LastIndexByte(contName, '.'); i >= 0 {
+		contName = contName[i+1:]
+	}
+	inner := strings.TrimSpace(s[lb+1 : rb])
+	// Strip trailing ", ..." for tuple[A, ...]
+	parts := strings.Split(inner, ",")
+	var args []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" || p == "..." {
+			continue
+		}
+		// Take simple identifier / dotted leaf only.
+		if strings.ContainsAny(p, "[]()|") {
+			return ""
+		}
+		if i := strings.LastIndexByte(p, '.'); i >= 0 {
+			p = p[i+1:]
+		}
+		args = append(args, p)
+	}
+	if len(args) == 0 {
+		return ""
+	}
+	switch contName {
+	case "dict", "Dict", "Mapping", "MutableMapping", "OrderedDict", "defaultdict", "DefaultDict":
+		if len(args) == 2 {
+			return args[1]
+		}
+		return ""
+	default:
+		if len(args) == 1 {
+			return args[0]
+		}
+		first := args[0]
+		for _, a := range args[1:] {
+			if a != first {
+				return ""
+			}
+		}
+		return first
+	}
 }
 
 // pythonAsPatternBinding extracts (alias, typeName) from an as_pattern node.
