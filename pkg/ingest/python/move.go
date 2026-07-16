@@ -1876,6 +1876,7 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // Covers: `b: Box`, `b = Box()`, `b: Box = ...`, Optional/Union/`|` annotations
 // (`b: Optional[Box]`, `b: Box | None`, `b: Union[Box, None]`), `b = cast(Box, x)`,
 // `a = next(iter(items))` / `a = next(items)` (element type of the iterable arg),
+// `a = min(items)` / `a = max(items)` / `a = min(items, key=...)` (same element type),
 // `a = items[0]` / `a = d[k]` (element/value type of a known collection),
 // `a = items.pop()` / `a = items.pop(0)` / `a = d.pop(k)` (same element/value type),
 // as-bindings (`case A() as a`, `with A() as a`, `except A as e`), walrus (`a := A()`),
@@ -1960,6 +1961,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// result type is the element type of the iterable arg.
 						if fname == "next" {
 							if et := pythonNextElemType(right, content, elemOf, egElems); ourReceivers[et] {
+								out[lname] = true
+							}
+						}
+						// a = min(items) / max(items) / min(items, key=...) —
+						// single-iterable form yields an element of that iterable.
+						// Multi-arg min(a, b, ...) fails closed (not an iterable fold).
+						if fname == "min" || fname == "max" {
+							if et := pythonMinMaxElemType(right, content, elemOf, egElems); ourReceivers[et] {
 								out[lname] = true
 							}
 						}
@@ -2127,6 +2136,17 @@ func pythonExceptClauseIsStar(n *grammar.Node) bool {
 func pythonNextElemType(call *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
 	args, ok := pythonCallPositionalArgNodes(call)
 	if !ok || len(args) == 0 {
+		return ""
+	}
+	return pythonIterableElemType(args[0], content, elemOf, egElems)
+}
+
+// pythonMinMaxElemType recovers the element type of min(iterable) / max(iterable)
+// (optional key=/default= kwargs ignored). Only the single-positional-arg form is
+// handled — min(a, b) / max(x, y, z) compare discrete values and fail closed.
+func pythonMinMaxElemType(call *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) != 1 {
 		return ""
 	}
 	return pythonIterableElemType(args[0], content, elemOf, egElems)
