@@ -1040,6 +1040,7 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // javaTypedLocals maps locals/params declared with our receiver types.
 // Also binds untyped stream/collection lambda params when the pipeline element
 // type is ours (List<A> as → as.stream().map(a -> a.m()) / as.iterator().forEachRemaining(a -> a.m())
+// / List.of(new A()).forEach(a -> a.m()) / Stream.of(new A()).map(a -> a.m())
 // types a as A), and for (var a : as) loop variables from collection/array element types.
 func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]bool {
 	out := map[string]bool{}
@@ -1268,7 +1269,8 @@ func javaStreamElementLambdaMethod(method string) bool {
 }
 
 // javaStreamPipelineElemType recovers the element type of a stream pipeline object:
-// as / as.stream() / as.iterator() / as.stream().filter(...) → elemOf[as].
+// as / as.stream() / as.iterator() / as.stream().filter(...) → elemOf[as],
+// List.of(new A()) / Stream.of(new A()) / Arrays.asList(new A()) → "A".
 // Type-changing stages (map/flatMap) fail closed so later lambdas are not mis-typed.
 func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf map[string]string) string {
 	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
@@ -1299,12 +1301,16 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf map[st
 		if nameN == nil {
 			return ""
 		}
-		switch ingest.NodeText(nameN, content) {
+		switch name := ingest.NodeText(nameN, content); name {
 		case "stream", "parallelStream", "iterator",
 			"filter", "peek", "sorted", "distinct", "limit", "skip",
 			"unordered", "sequential", "parallel", "onClose",
 			"takeWhile", "dropWhile":
 			return javaStreamPipelineElemType(ingest.ChildByField(obj, "object"), content, elemOf)
+		case "of", "asList":
+			// List.of(new A()) / Stream.of(new A(), new A()) / Arrays.asList(new A())
+			// / Set.of(new A()) — element type from homogeneous new T(...) args.
+			return javaStaticCollectionOfElemType(obj, content, name)
 		default:
 			// map/flatMap/… change the element type — fail closed.
 			return ""
@@ -1312,6 +1318,86 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf map[st
 	default:
 		return ""
 	}
+}
+
+// javaStaticCollectionOfElemType recovers the element type of List/Stream/Set.of(...)
+// and Arrays.asList(...) when every argument is `new T(...)` with the same T.
+// Non-creation args and mixed types fail closed.
+func javaStaticCollectionOfElemType(call *grammar.Node, content []byte, method string) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	recvN := ingest.ChildByField(call, "object")
+	if recvN == nil {
+		return ""
+	}
+	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
+		return ""
+	}
+	recv := ingest.NodeText(recvN, content)
+	switch method {
+	case "of":
+		switch recv {
+		case "List", "Stream", "Set":
+			// ok
+		default:
+			return ""
+		}
+	case "asList":
+		if recv != "Arrays" {
+			return ""
+		}
+	default:
+		return ""
+	}
+	var args *grammar.Node
+	for i := uint32(0); i < call.ChildCount(); i++ {
+		if call.Child(i).Type() == "argument_list" {
+			args = call.Child(i)
+			break
+		}
+	}
+	return javaHomogeneousCreationElem(args, content)
+}
+
+// javaHomogeneousCreationElem returns T when every argument is `new T(...)` (same T).
+func javaHomogeneousCreationElem(args *grammar.Node, content []byte) string {
+	if args == nil || args.Type() != "argument_list" {
+		return ""
+	}
+	var elem string
+	saw := false
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		switch ch.Type() {
+		case "(", ")", ",", "comment":
+			continue
+		case "object_creation_expression":
+			typeN := ingest.ChildByField(ch, "type")
+			if typeN == nil {
+				return ""
+			}
+			tn := javaTypeName(typeN, content)
+			if tn == "" {
+				return ""
+			}
+			if !saw {
+				elem = tn
+				saw = true
+				continue
+			}
+			if tn != elem {
+				return ""
+			}
+		default:
+			// Identifiers / method calls / mixed shapes — fail closed.
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return elem
 }
 
 // javaInferredLambdaParamNames returns parameter names for untyped lambdas:
