@@ -1,0 +1,4 @@
+{
+  "source": "path:./box.ts::A.run",
+  "destination": "path:./box.ts::A.execute"
+}

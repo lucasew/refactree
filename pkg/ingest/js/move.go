@@ -1514,12 +1514,18 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 }
 
 // jsTypedLocals maps local names constructed as ourReceivers (const b = new Box()).
-// Also covers simple TS-style typed parameters when present as type annotations.
+// Also covers:
+//   - simple TS-style typed parameters (b: Box)
+//   - for-of loop vars when the collection is a typed array param (xs: A[] / Array<A>)
+//     or a homogeneous [new A(), …] literal
+//   - array-pattern positions from [new A(), new B()] RHS
 func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]bool {
 	out := map[string]bool{}
 	if root == nil || len(ourReceivers) == 0 {
 		return out
 	}
+	// Param/local name → element type for for-of over typed arrays.
+	elemOf := map[string]string{}
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
 		if n == nil || n.IsNull() {
@@ -1528,6 +1534,7 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 		switch n.Type() {
 		case "lexical_declaration", "variable_declaration":
 			// const box = new Box(); var box = new Box()
+			// const [a, b] = [new A(), new B()]
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
 				if child.Type() != "variable_declarator" {
@@ -1535,15 +1542,21 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 				}
 				nameN := ingest.ChildByField(child, "name")
 				valN := ingest.ChildByField(child, "value")
-				if nameN == nil || nameN.Type() != "identifier" || valN == nil {
+				if nameN == nil || valN == nil {
 					continue
 				}
-				if ctor := jsNewExpressionType(valN, content); ourReceivers[ctor] {
-					out[ingest.NodeText(nameN, content)] = true
+				if nameN.Type() == "identifier" {
+					if ctor := jsNewExpressionType(valN, content); ourReceivers[ctor] {
+						out[ingest.NodeText(nameN, content)] = true
+					}
+					continue
+				}
+				if nameN.Type() == "array_pattern" {
+					jsBindArrayPatternFromNewArray(nameN, valN, content, ourReceivers, out)
 				}
 			}
 		case "required_parameter", "optional_parameter", "assignment_pattern":
-			// TS: (b: Box) / (b: Box = ...)
+			// TS: (b: Box) / (b: Box = ...) / (xs: A[]) / (xs: Array<A>)
 			nameN := ingest.ChildByField(n, "pattern")
 			if nameN == nil {
 				nameN = ingest.ChildByField(n, "name")
@@ -1553,9 +1566,18 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 			}
 			typeN := ingest.ChildByField(n, "type")
 			if nameN != nil && nameN.Type() == "identifier" && typeN != nil {
+				name := ingest.NodeText(nameN, content)
 				if tn := jsTypeName(typeN, content); ourReceivers[tn] {
-					out[ingest.NodeText(nameN, content)] = true
+					out[name] = true
 				}
+				if el := jsArrayElementType(typeN, content); el != "" && ourReceivers[el] {
+					elemOf[name] = el
+				}
+			}
+		case "for_in_statement":
+			// for (const a of xs) / for (const x of [new A()]) — operator field is "of".
+			if op := ingest.ChildByField(n, "operator"); op != nil && ingest.NodeText(op, content) == "of" {
+				jsBindForOfLeft(ingest.ChildByField(n, "left"), ingest.ChildByField(n, "right"), content, ourReceivers, elemOf, out)
 			}
 		case "formal_parameters":
 			// plain JS has no types; walk children for TS parameters
@@ -1566,6 +1588,149 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 	}
 	walk(root)
 	return out
+}
+
+// jsBindForOfLeft types a simple for-of binding from a typed collection name or
+// a homogeneous [new T(), …] array literal.
+func jsBindForOfLeft(left, right *grammar.Node, content []byte, ourReceivers map[string]bool, elemOf map[string]string, out map[string]bool) {
+	if left == nil || right == nil || left.Type() != "identifier" || out == nil {
+		return
+	}
+	name := ingest.NodeText(left, content)
+	if name == "" {
+		return
+	}
+	switch right.Type() {
+	case "identifier":
+		if el := elemOf[ingest.NodeText(right, content)]; el != "" && ourReceivers[el] {
+			out[name] = true
+		}
+	case "array":
+		if el := jsHomogeneousNewArrayElement(right, content); el != "" && ourReceivers[el] {
+			out[name] = true
+		}
+	}
+}
+
+// jsBindArrayPatternFromNewArray binds array-pattern names to constructors from
+// a same-length [new A(), new B()] RHS. Nested patterns / rest stop the scan.
+func jsBindArrayPatternFromNewArray(pattern, val *grammar.Node, content []byte, ourReceivers map[string]bool, out map[string]bool) {
+	if pattern == nil || val == nil || pattern.Type() != "array_pattern" || val.Type() != "array" || out == nil {
+		return
+	}
+	var elems []*grammar.Node
+	for i := uint32(0); i < val.ChildCount(); i++ {
+		c := val.Child(i)
+		if c == nil {
+			continue
+		}
+		switch c.Type() {
+		case "[", "]", ",":
+			continue
+		default:
+			elems = append(elems, c)
+		}
+	}
+	pi := 0
+	for i := uint32(0); i < pattern.ChildCount(); i++ {
+		c := pattern.Child(i)
+		if c == nil {
+			continue
+		}
+		switch c.Type() {
+		case "[", "]", ",":
+			continue
+		case "identifier":
+			if pi >= len(elems) {
+				return
+			}
+			if ctor := jsNewExpressionType(elems[pi], content); ourReceivers[ctor] {
+				out[ingest.NodeText(c, content)] = true
+			}
+			pi++
+		default:
+			// rest_pattern, nested array_pattern, assignment_pattern — fail closed.
+			return
+		}
+	}
+}
+
+// jsHomogeneousNewArrayElement returns the shared constructor name when every
+// non-punctuation array element is `new T(...)` with the same T; empty otherwise.
+func jsHomogeneousNewArrayElement(arr *grammar.Node, content []byte) string {
+	if arr == nil {
+		return ""
+	}
+	var el string
+	for i := uint32(0); i < arr.ChildCount(); i++ {
+		c := arr.Child(i)
+		if c == nil {
+			continue
+		}
+		switch c.Type() {
+		case "[", "]", ",":
+			continue
+		}
+		ctor := jsNewExpressionType(c, content)
+		if ctor == "" {
+			return ""
+		}
+		if el == "" {
+			el = ctor
+		} else if el != ctor {
+			return ""
+		}
+	}
+	return el
+}
+
+// jsArrayElementType returns the element type for A[] / Array<A> / ReadonlyArray<A>
+// annotations (type_annotation or bare type node). Empty when not an array form.
+func jsArrayElementType(typeN *grammar.Node, content []byte) string {
+	if typeN == nil {
+		return ""
+	}
+	if typeN.Type() == "type_annotation" {
+		for i := uint32(0); i < typeN.ChildCount(); i++ {
+			c := typeN.Child(i)
+			if c == nil || c.Type() == ":" {
+				continue
+			}
+			typeN = c
+			break
+		}
+	}
+	switch typeN.Type() {
+	case "array_type":
+		for i := uint32(0); i < typeN.ChildCount(); i++ {
+			c := typeN.Child(i)
+			if c == nil || c.Type() == "[" || c.Type() == "]" {
+				continue
+			}
+			return jsTypeName(c, content)
+		}
+	case "generic_type":
+		nameN := ingest.ChildByField(typeN, "name")
+		if nameN == nil {
+			return ""
+		}
+		name := ingest.NodeText(nameN, content)
+		if name != "Array" && name != "ReadonlyArray" {
+			return ""
+		}
+		args := ingest.ChildByField(typeN, "type_arguments")
+		if args == nil {
+			return ""
+		}
+		for i := uint32(0); i < args.ChildCount(); i++ {
+			c := args.Child(i)
+			if c == nil || c.Type() == "<" || c.Type() == ">" || c.Type() == "," {
+				continue
+			}
+			return jsTypeName(c, content)
+		}
+	}
+	return ""
 }
 
 // jsNewExpressionType returns the constructor identifier for `new Box(...)`.
