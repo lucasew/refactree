@@ -1771,8 +1771,9 @@ type identTypeBinding struct {
 
 // selectorCallTargetTypeFunc returns a lookup for the concrete type of the
 // selector receiver expression at a leaf-identifier start byte (the char after
-// '.' in recv.Leaf). Resolves method receiver params and simple local bindings
-// (t := &T{}, var t *T, …). ok=false when the type cannot be determined.
+// '.' in recv.Leaf). Resolves method receiver params, function/method params,
+// range variables, and simple local bindings (t := &T{}, var t *T, …).
+// ok=false when the type cannot be determined.
 func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, bool) {
 	var bindings []identTypeBinding
 	pf, err := ingest.ParseSource(content, ".go", "")
@@ -1794,13 +1795,20 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 			if recvType != "" && recvName != "" {
 				bindings = append(bindings, identTypeBinding{n.StartByte(), n.EndByte(), recvName, recvType})
 			}
-			// Locals inside the method body.
+			rangeSrc := map[string]rangeSourceInfo{}
+			if params := ingest.ChildByField(n, "parameters"); params != nil {
+				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &bindings, rangeSrc)
+			}
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc)
 			}
 		case "function_declaration":
+			rangeSrc := map[string]rangeSourceInfo{}
+			if params := ingest.ChildByField(n, "parameters"); params != nil {
+				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &bindings, rangeSrc)
+			}
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc)
 			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -1833,6 +1841,143 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 		}
 		return best.typ, true
 	}
+}
+
+// rangeSourceInfo describes how to type range variables over a named collection.
+type rangeSourceInfo struct {
+	elemType string // element (slice/array/chan) or value (map) named type
+	isMap    bool
+}
+
+// collectParameterListBindings records concrete-typed params (a *A, a, b *A)
+// and container params usable as range sources (as []*A, m map[K]*B, c ...T).
+func collectParameterListBindings(paramList *grammar.Node, content []byte, scopeStart, scopeEnd uint32, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo) {
+	if paramList == nil {
+		return
+	}
+	for i := uint32(0); i < paramList.ChildCount(); i++ {
+		p := paramList.Child(i)
+		if p == nil {
+			continue
+		}
+		switch p.Type() {
+		case "parameter_declaration":
+			names := parameterDeclNames(p, content)
+			typeN := ingest.ChildByField(p, "type")
+			if typ := concreteNamedType(typeN, content); typ != "" {
+				for _, name := range names {
+					if name == "" || name == "_" {
+						continue
+					}
+					*bindings = append(*bindings, identTypeBinding{scopeStart, scopeEnd, name, typ})
+				}
+			}
+			if info, ok := rangeSourceFromTypeNode(typeN, content); ok {
+				for _, name := range names {
+					if name == "" || name == "_" {
+						continue
+					}
+					rangeSrc[name] = info
+				}
+			}
+		case "variadic_parameter_declaration":
+			// c ...*T — c is a []T-like range source; element type is T.
+			nameN := ingest.ChildByField(p, "name")
+			if nameN == nil {
+				nameN = ingest.ChildByType(p, "identifier")
+			}
+			if nameN == nil {
+				continue
+			}
+			name := ingest.NodeText(nameN, content)
+			if name == "" || name == "_" {
+				continue
+			}
+			typeN := ingest.ChildByField(p, "type")
+			if typ := typeNameFromTypeNode(typeN, content); typ != "" {
+				rangeSrc[name] = rangeSourceInfo{elemType: typ, isMap: false}
+			}
+		}
+	}
+}
+
+// parameterDeclNames returns all name identifiers on a parameter_declaration
+// (supports `a, b *T` multi-name form).
+func parameterDeclNames(p *grammar.Node, content []byte) []string {
+	if p == nil {
+		return nil
+	}
+	var names []string
+	for i := uint32(0); i < p.ChildCount(); i++ {
+		if p.FieldNameForChild(i) != "name" {
+			continue
+		}
+		c := p.Child(i)
+		if c != nil && c.Type() == "identifier" {
+			names = append(names, ingest.NodeText(c, content))
+		}
+	}
+	if len(names) == 0 {
+		if nm := ingest.ChildByField(p, "name"); nm != nil && nm.Type() == "identifier" {
+			names = append(names, ingest.NodeText(nm, content))
+		}
+	}
+	return names
+}
+
+// concreteNamedType returns T for T / *T / pkg.T / T[K], empty for slice/map/chan.
+func concreteNamedType(n *grammar.Node, content []byte) string {
+	if n == nil {
+		return ""
+	}
+	switch n.Type() {
+	case "type_identifier", "pointer_type", "generic_type", "qualified_type":
+		return typeNameFromTypeNode(n, content)
+	default:
+		return ""
+	}
+}
+
+// rangeSourceFromTypeNode reports element/value type for ranging over a typed collection.
+func rangeSourceFromTypeNode(n *grammar.Node, content []byte) (rangeSourceInfo, bool) {
+	if n == nil {
+		return rangeSourceInfo{}, false
+	}
+	switch n.Type() {
+	case "slice_type", "array_type":
+		if el := ingest.ChildByField(n, "element"); el != nil {
+			if typ := typeNameFromTypeNode(el, content); typ != "" {
+				return rangeSourceInfo{elemType: typ, isMap: false}, true
+			}
+		}
+	case "map_type":
+		if v := ingest.ChildByField(n, "value"); v != nil {
+			if typ := typeNameFromTypeNode(v, content); typ != "" {
+				return rangeSourceInfo{elemType: typ, isMap: true}, true
+			}
+		}
+	case "channel_type":
+		// chan T / <-chan T — element is the channel payload type.
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "chan" || c.Type() == "<-" {
+				continue
+			}
+			if typ := typeNameFromTypeNode(c, content); typ != "" {
+				return rangeSourceInfo{elemType: typ, isMap: false}, true
+			}
+		}
+	case "pointer_type":
+		// *[]T / *map[K]V
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "*" {
+				continue
+			}
+			return rangeSourceFromTypeNode(c, content)
+		}
+	}
+	return rangeSourceInfo{}, false
 }
 
 // selectorReceiverIdent returns the identifier immediately before '.' at leafStart.
@@ -1931,13 +2076,17 @@ func methodDeclReceiverType(method *grammar.Node, content []byte) string {
 }
 
 // collectLocalTypeBindings appends simple local typed bindings under node
-// (short_var_declaration / var_spec / type-switch case arms) into bindings.
+// (short_var_declaration / var_spec / type-switch case arms / range vars).
 // short_var / var_spec use the enclosing body's end as scope; type-switch
 // aliases are scoped to each type_case so same-leaf methods on foreign arms
-// are not rewritten.
-func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]identTypeBinding) {
+// are not rewritten. rangeSrc maps collection names (params/vars) to their
+// range element/value types for `for _, v := range xs` bindings.
+func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo) {
 	if node == nil {
 		return
+	}
+	if rangeSrc == nil {
+		rangeSrc = map[string]rangeSourceInfo{}
 	}
 	scopeEnd := node.EndByte()
 	var walk func(n *grammar.Node)
@@ -1963,13 +2112,21 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 					names = []string{ingest.NodeText(nm, content)}
 				}
 			}
-			typ := typeNameFromTypeNode(ingest.ChildByField(n, "type"), content)
+			typeN := ingest.ChildByField(n, "type")
+			typ := concreteNamedType(typeN, content)
 			if typ == "" {
 				typ = typeNameFromRHS(ingest.ChildByField(n, "value"), content)
 			}
 			if typ != "" {
 				for _, name := range names {
 					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, typ})
+				}
+			}
+			if info, ok := rangeSourceFromTypeNode(typeN, content); ok {
+				for _, name := range names {
+					if name != "" && name != "_" {
+						rangeSrc[name] = info
+					}
 				}
 			}
 		case "type_switch_statement":
@@ -1989,12 +2146,74 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 					}
 				}
 			}
+		case "for_statement":
+			// for _, v := range xs { v.M() } — bind v from range source type.
+			collectRangeClauseBindings(n, content, bindings, rangeSrc)
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
 		}
 	}
 	walk(node)
+}
+
+// collectRangeClauseBindings binds range variables inside a for_statement when
+// the range source is a known collection (param/var with slice/array/map/chan type).
+// Two-var form binds the value (names[1]); one-var form binds the element only
+// for non-map sources (map single-var yields keys, not values).
+func collectRangeClauseBindings(forStmt *grammar.Node, content []byte, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo) {
+	if forStmt == nil {
+		return
+	}
+	var clause *grammar.Node
+	for i := uint32(0); i < forStmt.ChildCount(); i++ {
+		c := forStmt.Child(i)
+		if c != nil && c.Type() == "range_clause" {
+			clause = c
+			break
+		}
+	}
+	if clause == nil {
+		return
+	}
+	names := identListNames(ingest.ChildByField(clause, "left"), content)
+	right := ingest.ChildByField(clause, "right")
+	if right == nil || len(names) == 0 {
+		return
+	}
+	info, ok := rangeSourceInfo{}, false
+	if right.Type() == "identifier" {
+		info, ok = rangeSrc[ingest.NodeText(right, content)]
+	}
+	if !ok {
+		// Composite / typed RHS: range over []T{...} / make([]*T, n) — best-effort.
+		if typ := typeNameFromRHS(right, content); typ != "" {
+			// typeNameFromRHS peels composites to named type; treat as element type
+			// only when RHS itself looks like a composite/make of a collection —
+			// for bare identifiers we already consulted rangeSrc.
+			if right.Type() != "identifier" {
+				info, ok = rangeSourceInfo{elemType: typ, isMap: false}, typ != ""
+			}
+		}
+	}
+	if !ok || info.elemType == "" {
+		return
+	}
+	scopeStart, scopeEnd := forStmt.StartByte(), forStmt.EndByte()
+	switch {
+	case len(names) >= 2:
+		// for i, v := range xs — v is element/value.
+		v := names[1]
+		if v != "" && v != "_" {
+			*bindings = append(*bindings, identTypeBinding{scopeStart, scopeEnd, v, info.elemType})
+		}
+	case len(names) == 1 && !info.isMap:
+		// for v := range xs — element for slice/array/chan; keys for maps (skip).
+		v := names[0]
+		if v != "" && v != "_" {
+			*bindings = append(*bindings, identTypeBinding{scopeStart, scopeEnd, v, info.elemType})
+		}
+	}
 }
 
 // typeCaseSingleType returns the concrete type name when a type_case lists
