@@ -1038,11 +1038,15 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 }
 
 // javaTypedLocals maps locals/params declared with our receiver types.
+// Also binds untyped stream/collection lambda params when the pipeline element
+// type is ours (List<A> as → as.stream().map(a -> a.m()) types a as A).
 func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]bool {
 	out := map[string]bool{}
 	if root == nil || len(ourReceivers) == 0 {
 		return out
 	}
+	// Collection/stream locals: name → element type leaf (List<A> as → "A").
+	elemOf := map[string]string{}
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
 		if n == nil || n.IsNull() {
@@ -1056,8 +1060,10 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 				nameN = ingest.ChildByType(n, "identifier")
 			}
 			if typeN != nil && nameN != nil {
+				name := ingest.NodeText(nameN, content)
+				javaRecordCollectionElem(typeN, name, content, elemOf)
 				if tn := javaTypeName(typeN, content); ourReceivers[tn] {
-					out[ingest.NodeText(nameN, content)] = true
+					out[name] = true
 				}
 			}
 		case "local_variable_declaration", "field_declaration":
@@ -1069,9 +1075,6 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 			explicitOurs := ourReceivers[tn]
 			// var a = new A() / A.make() / (A) x — recover type from initializer.
 			inferFromInit := tn == "var"
-			if !explicitOurs && !inferFromInit {
-				break
-			}
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				c := n.Child(i)
 				if c.Type() != "variable_declarator" {
@@ -1084,13 +1087,19 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 				if nameN == nil {
 					continue
 				}
+				name := ingest.NodeText(nameN, content)
+				// List<A> as / A[] xs — track element type even when the outer type is not ours.
+				javaRecordCollectionElem(typeN, name, content, elemOf)
 				if explicitOurs {
-					out[ingest.NodeText(nameN, content)] = true
+					out[name] = true
+					continue
+				}
+				if !inferFromInit {
 					continue
 				}
 				valN := ingest.ChildByField(c, "value")
 				if vt := javaInferExprType(valN, content); ourReceivers[vt] {
-					out[ingest.NodeText(nameN, content)] = true
+					out[name] = true
 				}
 			}
 		case "enhanced_for_statement":
@@ -1133,6 +1142,9 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 		case "record_pattern_component":
 			// case Box(A a) / instanceof Holder(A a) — component binding A a.
 			javaBindRecordPatternComponent(n, content, ourReceivers, out)
+		case "method_invocation":
+			// as.stream().map(a -> a.m()) / as.forEach(a -> a.m()) — untyped lambda params.
+			javaBindStreamLambdaParams(n, content, ourReceivers, elemOf, out)
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
@@ -1140,6 +1152,185 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 	}
 	walk(root)
 	return out
+}
+
+// javaRecordCollectionElem records name → element type for arrays and generics
+// (List<A> as → "A", A[] xs → "A", Stream<A> s → "A"). First type arg only;
+// Map key/value distinction is intentionally fail-closed for multi-arg uses.
+func javaRecordCollectionElem(typeN *grammar.Node, name string, content []byte, elemOf map[string]string) {
+	if typeN == nil || name == "" || elemOf == nil {
+		return
+	}
+	switch typeN.Type() {
+	case "array_type":
+		if elem := ingest.ChildByField(typeN, "element"); elem != nil {
+			if et := javaTypeName(elem, content); et != "" {
+				elemOf[name] = et
+			}
+		}
+	case "generic_type":
+		if et := javaFirstTypeArg(typeN, content); et != "" {
+			elemOf[name] = et
+		}
+	}
+}
+
+// javaFirstTypeArg returns the simple leaf of the first type argument of a generic_type.
+func javaFirstTypeArg(typeN *grammar.Node, content []byte) string {
+	if typeN == nil || typeN.Type() != "generic_type" {
+		return ""
+	}
+	targs := ingest.ChildByField(typeN, "type_arguments")
+	if targs == nil {
+		for i := uint32(0); i < typeN.ChildCount(); i++ {
+			if typeN.Child(i).Type() == "type_arguments" {
+				targs = typeN.Child(i)
+				break
+			}
+		}
+	}
+	if targs == nil {
+		return ""
+	}
+	for i := uint32(0); i < targs.ChildCount(); i++ {
+		ch := targs.Child(i)
+		switch ch.Type() {
+		case "type_identifier", "generic_type", "scoped_type_identifier", "array_type":
+			return javaTypeName(ch, content)
+		}
+	}
+	return ""
+}
+
+// javaBindStreamLambdaParams types untyped (inferred) lambda parameters when the
+// call is a stream/collection element consumer/mapper and the pipeline element is ours.
+// Typed (A a) -> params are already handled via formal_parameter.
+func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, elemOf map[string]string, out map[string]bool) {
+	if call == nil || call.Type() != "method_invocation" || out == nil {
+		return
+	}
+	nameN := ingest.ChildByField(call, "name")
+	if nameN == nil || !javaStreamElementLambdaMethod(ingest.NodeText(nameN, content)) {
+		return
+	}
+	et := javaStreamPipelineElemType(ingest.ChildByField(call, "object"), content, elemOf)
+	if et == "" || !ourReceivers[et] {
+		return
+	}
+	var args *grammar.Node
+	for i := uint32(0); i < call.ChildCount(); i++ {
+		if call.Child(i).Type() == "argument_list" {
+			args = call.Child(i)
+			break
+		}
+	}
+	if args == nil {
+		return
+	}
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch.Type() != "lambda_expression" {
+			continue
+		}
+		// Only unary inferred lambdas (a -> …). Multi-param needs richer typing.
+		params := javaInferredLambdaParamNames(ch, content)
+		if len(params) != 1 {
+			continue
+		}
+		out[params[0]] = true
+	}
+}
+
+// javaStreamElementLambdaMethod reports methods whose (first) functional arg is
+// applied to the stream/collection element type.
+func javaStreamElementLambdaMethod(method string) bool {
+	switch method {
+	case "map", "mapToInt", "mapToLong", "mapToDouble",
+		"flatMap", "flatMapToInt", "flatMapToLong", "flatMapToDouble",
+		"filter", "peek", "forEach", "forEachOrdered",
+		"takeWhile", "dropWhile",
+		"anyMatch", "allMatch", "noneMatch",
+		"removeIf", "ifPresent":
+		return true
+	default:
+		return false
+	}
+}
+
+// javaStreamPipelineElemType recovers the element type of a stream pipeline object:
+// as / as.stream() / as.stream().filter(...) → elemOf[as]. Type-changing stages
+// (map/flatMap) fail closed so later lambdas are not mis-typed.
+func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf map[string]string) string {
+	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(obj, "expression")
+		if inner == nil {
+			for i := uint32(0); i < obj.ChildCount(); i++ {
+				ch := obj.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		obj = inner
+	}
+	if obj == nil || obj.IsNull() {
+		return ""
+	}
+	switch obj.Type() {
+	case "identifier":
+		if elemOf == nil {
+			return ""
+		}
+		return elemOf[ingest.NodeText(obj, content)]
+	case "method_invocation":
+		nameN := ingest.ChildByField(obj, "name")
+		if nameN == nil {
+			return ""
+		}
+		switch ingest.NodeText(nameN, content) {
+		case "stream", "parallelStream",
+			"filter", "peek", "sorted", "distinct", "limit", "skip",
+			"unordered", "sequential", "parallel", "onClose",
+			"takeWhile", "dropWhile":
+			return javaStreamPipelineElemType(ingest.ChildByField(obj, "object"), content, elemOf)
+		default:
+			// map/flatMap/… change the element type — fail closed.
+			return ""
+		}
+	default:
+		return ""
+	}
+}
+
+// javaInferredLambdaParamNames returns parameter names for untyped lambdas:
+// a -> … and (a, b) -> …. Typed (A a) -> uses formal_parameters and returns nil.
+func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string {
+	if lambda == nil || lambda.Type() != "lambda_expression" {
+		return nil
+	}
+	for i := uint32(0); i < lambda.ChildCount(); i++ {
+		ch := lambda.Child(i)
+		switch ch.Type() {
+		case "->":
+			return nil
+		case "identifier":
+			return []string{ingest.NodeText(ch, content)}
+		case "inferred_parameters":
+			var names []string
+			for j := uint32(0); j < ch.ChildCount(); j++ {
+				p := ch.Child(j)
+				if p.Type() == "identifier" {
+					names = append(names, ingest.NodeText(p, content))
+				}
+			}
+			return names
+		case "formal_parameters":
+			return nil
+		}
+	}
+	return nil
 }
 
 // javaInferExprType recovers a simple type leaf from a var initializer expression.
