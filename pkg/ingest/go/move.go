@@ -1843,9 +1843,11 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 	}
 }
 
-// rangeSourceInfo describes how to type range variables over a named collection.
+// rangeSourceInfo describes how to type range variables and channel receives
+// over a named collection.
 type rangeSourceInfo struct {
-	elemType string // element (slice/array/chan) or value (map) named type
+	elemType string // element (slice/array/chan) or map value named type
+	keyType  string // map key named type (only when isMap)
 	isMap    bool
 }
 
@@ -1938,7 +1940,8 @@ func concreteNamedType(n *grammar.Node, content []byte) string {
 	}
 }
 
-// rangeSourceFromTypeNode reports element/value type for ranging over a typed collection.
+// rangeSourceFromTypeNode reports element/value (and map key) type for ranging
+// over a typed collection, or for receiving from a typed channel.
 func rangeSourceFromTypeNode(n *grammar.Node, content []byte) (rangeSourceInfo, bool) {
 	if n == nil {
 		return rangeSourceInfo{}, false
@@ -1951,13 +1954,23 @@ func rangeSourceFromTypeNode(n *grammar.Node, content []byte) (rangeSourceInfo, 
 			}
 		}
 	case "map_type":
+		info := rangeSourceInfo{isMap: true}
 		if v := ingest.ChildByField(n, "value"); v != nil {
-			if typ := typeNameFromTypeNode(v, content); typ != "" {
-				return rangeSourceInfo{elemType: typ, isMap: true}, true
-			}
+			info.elemType = typeNameFromTypeNode(v, content)
+		}
+		if k := ingest.ChildByField(n, "key"); k != nil {
+			info.keyType = typeNameFromTypeNode(k, content)
+		}
+		if info.elemType != "" || info.keyType != "" {
+			return info, true
 		}
 	case "channel_type":
-		// chan T / <-chan T — element is the channel payload type.
+		// chan T / <-chan T — prefer the value field; else first non-keyword child.
+		if v := ingest.ChildByField(n, "value"); v != nil {
+			if typ := typeNameFromTypeNode(v, content); typ != "" {
+				return rangeSourceInfo{elemType: typ, isMap: false}, true
+			}
+		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			c := n.Child(i)
 			if c == nil || c.Type() == "chan" || c.Type() == "<-" {
@@ -2076,11 +2089,12 @@ func methodDeclReceiverType(method *grammar.Node, content []byte) string {
 }
 
 // collectLocalTypeBindings appends simple local typed bindings under node
-// (short_var_declaration / var_spec / type-switch case arms / range vars).
+// (short_var_declaration / var_spec / type-switch case arms / range vars /
+// channel receives / select receive cases).
 // short_var / var_spec use the enclosing body's end as scope; type-switch
-// aliases are scoped to each type_case so same-leaf methods on foreign arms
-// are not rewritten. rangeSrc maps collection names (params/vars) to their
-// range element/value types for `for _, v := range xs` bindings.
+// aliases and select receive vars are scoped to each arm so same-leaf methods
+// on foreign arms are not rewritten. rangeSrc maps collection names
+// (params/vars) to their range element/value/key types and channel payloads.
 func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo) {
 	if node == nil {
 		return
@@ -2096,10 +2110,15 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 		}
 		switch n.Type() {
 		case "short_var_declaration":
-			// left := right — extract names from left, type from right (&T{} / T{}).
+			// left := right — extract names from left, type from right (&T{} / T{} / <-ch).
 			names := identListNames(ingest.ChildByField(n, "left"), content)
-			typ := typeNameFromRHS(ingest.ChildByField(n, "right"), content)
-			if typ != "" {
+			right := ingest.ChildByField(n, "right")
+			if chTyp, ok := channelReceiveElemType(right, content, rangeSrc); ok {
+				// a := <-ch  /  a, ok := <-ch — only the value (first name) is T.
+				if len(names) > 0 && names[0] != "" && names[0] != "_" {
+					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, names[0], chTyp})
+				}
+			} else if typ := typeNameFromRHS(right, content); typ != "" {
 				for _, name := range names {
 					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, typ})
 				}
@@ -2113,9 +2132,14 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 				}
 			}
 			typeN := ingest.ChildByField(n, "type")
+			valueN := ingest.ChildByField(n, "value")
 			typ := concreteNamedType(typeN, content)
 			if typ == "" {
-				typ = typeNameFromRHS(ingest.ChildByField(n, "value"), content)
+				if chTyp, ok := channelReceiveElemType(valueN, content, rangeSrc); ok {
+					typ = chTyp
+				} else {
+					typ = typeNameFromRHS(valueN, content)
+				}
 			}
 			if typ != "" {
 				for _, name := range names {
@@ -2149,6 +2173,12 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 		case "for_statement":
 			// for _, v := range xs { v.M() } — bind v from range source type.
 			collectRangeClauseBindings(n, content, bindings, rangeSrc)
+		case "communication_case":
+			// case x := <-ch: / case x, ok := <-ch: — bind x to channel payload,
+			// scoped to this case so same-leaf methods on other arms stay put.
+			if comm := ingest.ChildByField(n, "communication"); comm != nil && comm.Type() == "receive_statement" {
+				bindReceiveStatement(comm, content, n.StartByte(), n.EndByte(), bindings, rangeSrc)
+			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
@@ -2157,10 +2187,66 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 	walk(node)
 }
 
+// bindReceiveStatement binds the value name of `x := <-ch` / `x, ok := <-ch`
+// when ch is a known channel source.
+func bindReceiveStatement(recv *grammar.Node, content []byte, scopeStart, scopeEnd uint32, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo) {
+	if recv == nil || recv.Type() != "receive_statement" {
+		return
+	}
+	names := identListNames(ingest.ChildByField(recv, "left"), content)
+	if len(names) == 0 {
+		return
+	}
+	chTyp, ok := channelReceiveElemType(ingest.ChildByField(recv, "right"), content, rangeSrc)
+	if !ok {
+		return
+	}
+	name := names[0]
+	if name == "" || name == "_" {
+		return
+	}
+	*bindings = append(*bindings, identTypeBinding{scopeStart, scopeEnd, name, chTyp})
+}
+
+// channelReceiveElemType returns the payload type for <-ch when ch is a known
+// channel (or channel-like) source in rangeSrc.
+func channelReceiveElemType(right *grammar.Node, content []byte, rangeSrc map[string]rangeSourceInfo) (string, bool) {
+	if right == nil || rangeSrc == nil {
+		return "", false
+	}
+	// expression_list → first expression
+	if right.Type() == "expression_list" {
+		for i := uint32(0); i < right.ChildCount(); i++ {
+			c := right.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			return channelReceiveElemType(c, content, rangeSrc)
+		}
+		return "", false
+	}
+	if right.Type() != "unary_expression" {
+		return "", false
+	}
+	op := ingest.ChildByField(right, "operator")
+	if op == nil || ingest.NodeText(op, content) != "<-" {
+		return "", false
+	}
+	operand := ingest.ChildByField(right, "operand")
+	if operand == nil || operand.Type() != "identifier" {
+		return "", false
+	}
+	info, ok := rangeSrc[ingest.NodeText(operand, content)]
+	if !ok || info.isMap || info.elemType == "" {
+		return "", false
+	}
+	return info.elemType, true
+}
+
 // collectRangeClauseBindings binds range variables inside a for_statement when
 // the range source is a known collection (param/var with slice/array/map/chan type).
-// Two-var form binds the value (names[1]); one-var form binds the element only
-// for non-map sources (map single-var yields keys, not values).
+// Two-var form binds key (maps) + value; one-var form binds the element for
+// non-map sources and the key for maps.
 func collectRangeClauseBindings(forStmt *grammar.Node, content []byte, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo) {
 	if forStmt == nil {
 		return
@@ -2196,22 +2282,40 @@ func collectRangeClauseBindings(forStmt *grammar.Node, content []byte, bindings 
 			}
 		}
 	}
-	if !ok || info.elemType == "" {
+	if !ok || (info.elemType == "" && info.keyType == "") {
 		return
 	}
 	scopeStart, scopeEnd := forStmt.StartByte(), forStmt.EndByte()
 	switch {
 	case len(names) >= 2:
-		// for i, v := range xs — v is element/value.
-		v := names[1]
-		if v != "" && v != "_" {
-			*bindings = append(*bindings, identTypeBinding{scopeStart, scopeEnd, v, info.elemType})
+		// for k, v := range m — k is key (maps), v is element/value.
+		if info.isMap && info.keyType != "" {
+			k := names[0]
+			if k != "" && k != "_" {
+				*bindings = append(*bindings, identTypeBinding{scopeStart, scopeEnd, k, info.keyType})
+			}
+		}
+		if info.elemType != "" {
+			v := names[1]
+			if v != "" && v != "_" {
+				*bindings = append(*bindings, identTypeBinding{scopeStart, scopeEnd, v, info.elemType})
+			}
+		}
+	case len(names) == 1 && info.isMap:
+		// for k := range m — keys for maps.
+		if info.keyType != "" {
+			k := names[0]
+			if k != "" && k != "_" {
+				*bindings = append(*bindings, identTypeBinding{scopeStart, scopeEnd, k, info.keyType})
+			}
 		}
 	case len(names) == 1 && !info.isMap:
-		// for v := range xs — element for slice/array/chan; keys for maps (skip).
-		v := names[0]
-		if v != "" && v != "_" {
-			*bindings = append(*bindings, identTypeBinding{scopeStart, scopeEnd, v, info.elemType})
+		// for v := range xs — element for slice/array/chan.
+		if info.elemType != "" {
+			v := names[0]
+			if v != "" && v != "_" {
+				*bindings = append(*bindings, identTypeBinding{scopeStart, scopeEnd, v, info.elemType})
+			}
 		}
 	}
 }
