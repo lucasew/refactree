@@ -695,21 +695,7 @@ func jsImportsNeededByDecl(root *grammar.Node, source []byte, declStart, declEnd
 
 // jsIdentUsed checks if ident appears as a whole-word identifier in text.
 func jsIdentUsed(text, ident string) bool {
-	off := 0
-	for {
-		idx := strings.Index(text[off:], ident)
-		if idx < 0 {
-			return false
-		}
-		pos := off + idx
-		end := pos + len(ident)
-		before := pos == 0 || !ingest.IsIdentCharJava(text[pos-1])
-		after := end >= len(text) || !ingest.IsIdentCharJava(text[end])
-		if before && after {
-			return true
-		}
-		off = end
-	}
+	return ingest.IdentUsed(text, ident, ingest.IsIdentCharJava)
 }
 
 // jsImportInsertEdits produces an edit to insert import statements into a file.
@@ -762,11 +748,7 @@ func stripUnusedJSImports(file string, content []byte, decl ingest.DeclExtract) 
 	}
 	// Mask out the declaration region to see what the rest of the file uses.
 	masked := append([]byte(nil), content...)
-	for i := decl.RemoveStart; i < decl.RemoveEnd && int(i) < len(masked); i++ {
-		if masked[i] != '\n' {
-			masked[i] = ' '
-		}
-	}
+	ingest.MaskNonNewlinesInPlace(masked, int(decl.RemoveStart), int(decl.RemoveEnd))
 
 	// For each import used by the declaration, check if any of its local
 	// names are still referenced in the rest of the file.
@@ -782,11 +764,7 @@ func stripUnusedJSImports(file string, content []byte, decl ingest.DeclExtract) 
 	// Also mask out all import statements so we only check usage in
 	// the non-import body of the file.
 	for _, stmt := range stmts {
-		for i := stmt.startByte; i < stmt.endByte && int(i) < len(masked); i++ {
-			if masked[i] != '\n' {
-				masked[i] = ' '
-			}
-		}
+		ingest.MaskNonNewlinesInPlace(masked, int(stmt.startByte), int(stmt.endByte))
 	}
 	restText := string(masked)
 

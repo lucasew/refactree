@@ -453,27 +453,10 @@ func parseJavaImportSpecs(source []byte) []javaImportSpec {
 }
 
 func javaIdentUsed(text, ident string) bool {
-	if ident == "" || ident == "*" {
+	if ident == "*" {
 		return false
 	}
-	off := 0
-	for {
-		idx := strings.Index(text[off:], ident)
-		if idx < 0 {
-			return false
-		}
-		pos := off + idx
-		end := pos + len(ident)
-		if pos > 0 && ingest.IsIdentCharJava(text[pos-1]) {
-			off = end
-			continue
-		}
-		if end < len(text) && ingest.IsIdentCharJava(text[end]) {
-			off = end
-			continue
-		}
-		return true
-	}
+	return ingest.IdentUsed(text, ident, ingest.IsIdentCharJava)
 }
 
 // ensureJavaImports inserts missing import statements after the package clause.
@@ -557,19 +540,11 @@ func stripUnusedJavaImports(file string, content []byte, decl ingest.DeclExtract
 	}
 	// Mask the removed declaration so remaining body usage is visible.
 	masked := append([]byte(nil), content...)
-	for i := decl.RemoveStart; i < decl.RemoveEnd && int(i) < len(masked); i++ {
-		if masked[i] != '\n' {
-			masked[i] = ' '
-		}
-	}
+	ingest.MaskNonNewlinesInPlace(masked, int(decl.RemoveStart), int(decl.RemoveEnd))
 	// Mask import lines themselves so we do not count import idents as body use.
 	specs := parseJavaImportSpecs(content)
 	for _, spec := range specs {
-		for i := spec.startByte; i < spec.endByte && i < len(masked); i++ {
-			if masked[i] != '\n' {
-				masked[i] = ' '
-			}
-		}
+		ingest.MaskNonNewlinesInPlace(masked, int(spec.startByte), int(spec.endByte))
 	}
 	rest := string(masked)
 
