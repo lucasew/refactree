@@ -1089,6 +1089,22 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					out[ingest.NodeText(nameN, content)] = true
 				}
 			}
+		case "instanceof_expression":
+			// Pattern matching: `x instanceof A a` binds a with type A.
+			// Without this, a.run() is skipped when foreign same-leaf methods exist.
+			typeN := ingest.ChildByField(n, "right")
+			if typeN == nil {
+				typeN = ingest.ChildByField(n, "type")
+			}
+			nameN := ingest.ChildByField(n, "name")
+			if typeN != nil && nameN != nil {
+				if tn := javaTypeName(typeN, content); ourReceivers[tn] {
+					out[ingest.NodeText(nameN, content)] = true
+				}
+			}
+		case "type_pattern":
+			// switch/case pattern: `case A b -> …` (and guards).
+			javaBindTypePattern(n, content, ourReceivers, out)
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
@@ -1096,6 +1112,29 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 	}
 	walk(root)
 	return out
+}
+
+// javaBindTypePattern records a type_pattern binding (Type name) when Type is ours.
+func javaBindTypePattern(n *grammar.Node, content []byte, ourReceivers, out map[string]bool) {
+	if n == nil || n.Type() != "type_pattern" {
+		return
+	}
+	var typeN, nameN *grammar.Node
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		switch ch.Type() {
+		case "type_identifier", "generic_type", "scoped_type_identifier", "array_type", "integral_type", "floating_point_type", "boolean_type":
+			typeN = ch
+		case "identifier":
+			nameN = ch
+		}
+	}
+	if typeN == nil || nameN == nil {
+		return
+	}
+	if tn := javaTypeName(typeN, content); ourReceivers[tn] {
+		out[ingest.NodeText(nameN, content)] = true
+	}
 }
 
 // javaTypeName extracts a simple type identifier from a type node.
