@@ -26,7 +26,7 @@ require (
 exclude github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar v0.0.0
 
 require (
-	github.com/moby/moby/api v1.54.2
+	github.com/moby/moby/api v1.55.0
 	go.lsp.dev/jsonrpc2 v1.0.1
 	go.lsp.dev/protocol v1.0.1
 	go.lsp.dev/uri v1.0.1
