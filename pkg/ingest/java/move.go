@@ -1430,9 +1430,11 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 }
 
 // javaInferExprType recovers a simple type leaf from a var initializer expression.
-// Covers new A(), A.make() / A.getInstance() static calls, and (A) expr casts.
+// Covers new A(), A.make() / A.getInstance() static calls, (A) expr casts,
+// homogeneous ternaries (f ? new A() : A.make()), and switch expressions whose
+// arms all infer the same type (arrow and yield forms).
 // Static Type.method() is treated as returning Type (common factory convention);
-// fail closed on other shapes.
+// fail closed on other shapes / mixed arms.
 func javaInferExprType(val *grammar.Node, content []byte) string {
 	if val == nil {
 		return ""
@@ -1476,8 +1478,175 @@ func javaInferExprType(val *grammar.Node, content []byte) string {
 		if typeN := ingest.ChildByField(val, "type"); typeN != nil {
 			return javaTypeName(typeN, content)
 		}
+	case "ternary_expression":
+		// f ? new A() : A.make() — both arms must agree.
+		cons := ingest.ChildByField(val, "consequence")
+		alt := ingest.ChildByField(val, "alternative")
+		t1 := javaInferExprType(cons, content)
+		t2 := javaInferExprType(alt, content)
+		if t1 != "" && t1 == t2 {
+			return t1
+		}
+		return ""
+	case "switch_expression":
+		return javaInferSwitchExprType(val, content)
+	case "expression_statement":
+		// switch arrow arms wrap values as expression_statement ("new A();").
+		return javaInferExprType(javaFirstExprChild(val), content)
 	}
 	return ""
+}
+
+// javaInferSwitchExprType recovers the type of a switch expression when every
+// arm yields the same inferable type (case 0 -> new A(); / yield A.make()).
+// Mixed types or uninferable arms fail closed.
+func javaInferSwitchExprType(sw *grammar.Node, content []byte) string {
+	if sw == nil || sw.Type() != "switch_expression" {
+		return ""
+	}
+	body := ingest.ChildByField(sw, "body")
+	if body == nil {
+		for i := uint32(0); i < sw.ChildCount(); i++ {
+			if sw.Child(i).Type() == "switch_block" {
+				body = sw.Child(i)
+				break
+			}
+		}
+	}
+	if body == nil {
+		return ""
+	}
+	var elem string
+	saw := false
+	for i := uint32(0); i < body.ChildCount(); i++ {
+		ch := body.Child(i)
+		var armExpr *grammar.Node
+		switch ch.Type() {
+		case "switch_rule":
+			// case 0 -> new A();  /  case 0 -> { yield new A(); }
+			armExpr = javaSwitchRuleResult(ch)
+		case "switch_block_statement_group":
+			// case 0: yield new A();
+			armExpr = javaSwitchGroupYieldExpr(ch)
+		default:
+			continue
+		}
+		if armExpr == nil {
+			return ""
+		}
+		tn := javaInferExprType(armExpr, content)
+		if tn == "" {
+			return ""
+		}
+		if !saw {
+			elem = tn
+			saw = true
+			continue
+		}
+		if tn != elem {
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return elem
+}
+
+// javaSwitchRuleResult returns the result expression of a switch_rule arm.
+func javaSwitchRuleResult(rule *grammar.Node) *grammar.Node {
+	if rule == nil || rule.Type() != "switch_rule" {
+		return nil
+	}
+	// Children: switch_label, "->", expression_statement | block | throw_statement.
+	var afterArrow *grammar.Node
+	seenArrow := false
+	for i := uint32(0); i < rule.ChildCount(); i++ {
+		ch := rule.Child(i)
+		if ch.Type() == "->" {
+			seenArrow = true
+			continue
+		}
+		if !seenArrow {
+			continue
+		}
+		afterArrow = ch
+		break
+	}
+	if afterArrow == nil {
+		return nil
+	}
+	switch afterArrow.Type() {
+	case "expression_statement":
+		return javaFirstExprChild(afterArrow)
+	case "block":
+		// case 0 -> { yield new A(); }
+		return javaBlockSoleYieldExpr(afterArrow)
+	default:
+		// Bare expression (some grammars) or throw — try infer, else fail closed.
+		return afterArrow
+	}
+}
+
+// javaSwitchGroupYieldExpr returns the expression of a sole yield in a
+// classic switch_block_statement_group (case 0: yield new A();).
+func javaSwitchGroupYieldExpr(group *grammar.Node) *grammar.Node {
+	if group == nil {
+		return nil
+	}
+	var yieldExpr *grammar.Node
+	for i := uint32(0); i < group.ChildCount(); i++ {
+		ch := group.Child(i)
+		if ch.Type() != "yield_statement" {
+			continue
+		}
+		if yieldExpr != nil {
+			// Multiple yields — fail closed.
+			return nil
+		}
+		yieldExpr = javaFirstExprChild(ch)
+	}
+	return yieldExpr
+}
+
+// javaBlockSoleYieldExpr returns the expression of a single yield_statement in a block.
+func javaBlockSoleYieldExpr(block *grammar.Node) *grammar.Node {
+	if block == nil || block.Type() != "block" {
+		return nil
+	}
+	var yieldExpr *grammar.Node
+	for i := uint32(0); i < block.ChildCount(); i++ {
+		ch := block.Child(i)
+		if ch.Type() == "{" || ch.Type() == "}" || ch.Type() == "comment" {
+			continue
+		}
+		if ch.Type() != "yield_statement" {
+			return nil
+		}
+		if yieldExpr != nil {
+			return nil
+		}
+		yieldExpr = javaFirstExprChild(ch)
+	}
+	return yieldExpr
+}
+
+// javaFirstExprChild returns the first non-punctuation child of n (expression under
+// expression_statement / yield_statement).
+func javaFirstExprChild(n *grammar.Node) *grammar.Node {
+	if n == nil {
+		return nil
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		switch ch.Type() {
+		case "(", ")", "{", "}", ";", ":", "->", "yield", "comment", "case", "default", "switch_label":
+			continue
+		default:
+			return ch
+		}
+	}
+	return nil
 }
 
 // javaBindTypePattern records a type_pattern binding (Type name) when Type is ours.
