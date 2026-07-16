@@ -1041,10 +1041,11 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // Also binds untyped stream/collection lambda params when the pipeline element
 // type is ours (List<A> as → as.stream().map(a -> a.m()) / as.iterator().forEachRemaining(a -> a.m())
 // / List.of(new A()).forEach(a -> a.m()) / Stream.of(new A()).map(a -> a.m())
-// / Map<K,A>.forEach((k,v) -> v.m()) / map.values().forEach(v -> v.m())
-// types a/v as A), for (var a : as) loop variables from collection/array element types,
-// and var locals from collection accessors (list.get(i) / map.get(k) / it.next() /
-// list.iterator().next()).
+// / as.stream().findFirst().ifPresent(a -> a.m()) / Optional.of(new A()).ifPresent(a -> a.m())
+// / Optional<A>.ifPresent(a -> a.m()) / Map<K,A>.forEach((k,v) -> v.m()) /
+// map.values().forEach(v -> v.m()) types a/v as A), for (var a : as) loop variables
+// from collection/array element types, and var locals from collection accessors
+// (list.get(i) / map.get(k) / it.next() / list.iterator().next()).
 func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]bool {
 	out := map[string]bool{}
 	if root == nil || len(ourReceivers) == 0 {
@@ -1308,8 +1309,10 @@ func javaStreamElementLambdaMethod(method string) bool {
 
 // javaStreamPipelineElemType recovers the element type of a stream pipeline object:
 // as / as.stream() / as.iterator() / as.stream().filter(...) → elemOf[as],
+// as.stream().findFirst() / findAny() → same element (Optional wraps T; ifPresent uses T),
 // m.values() → valOf[m],
-// List.of(new A()) / Stream.of(new A()) / Arrays.asList(new A()) → "A".
+// List.of(new A()) / Stream.of(new A()) / Arrays.asList(new A()) → "A",
+// Optional.of(new A()) / Optional.ofNullable(new A()) → "A".
 // Type-changing stages (map/flatMap) fail closed so later lambdas are not mis-typed.
 func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
@@ -1344,14 +1347,17 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 		case "stream", "parallelStream", "iterator",
 			"filter", "peek", "sorted", "distinct", "limit", "skip",
 			"unordered", "sequential", "parallel", "onClose",
-			"takeWhile", "dropWhile":
+			"takeWhile", "dropWhile",
+			// findFirst/findAny return Optional<T>; element T is preserved for ifPresent.
+			"findFirst", "findAny":
 			return javaStreamPipelineElemType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
 		case "values":
 			// m.values() — Collection of map values (valOf[m]).
 			return javaMapPipelineValueType(ingest.ChildByField(obj, "object"), content, valOf)
-		case "of", "asList":
+		case "of", "asList", "ofNullable":
 			// List.of(new A()) / Stream.of(new A(), new A()) / Arrays.asList(new A())
-			// / Set.of(new A()) — element type from homogeneous new T(...) args.
+			// / Set.of(new A()) / Optional.of(new A()) / Optional.ofNullable(new A())
+			// — element type from homogeneous new T(...) args.
 			return javaStaticCollectionOfElemType(obj, content, name)
 		default:
 			// map/flatMap/… change the element type — fail closed.
@@ -1386,8 +1392,8 @@ func javaMapPipelineValueType(obj *grammar.Node, content []byte, valOf map[strin
 }
 
 // javaStaticCollectionOfElemType recovers the element type of List/Stream/Set.of(...)
-// and Arrays.asList(...) when every argument is `new T(...)` with the same T.
-// Non-creation args and mixed types fail closed.
+// Arrays.asList(...), and Optional.of/ofNullable(...) when every argument is
+// `new T(...)` with the same T. Non-creation args and mixed types fail closed.
 func javaStaticCollectionOfElemType(call *grammar.Node, content []byte, method string) string {
 	if call == nil || call.Type() != "method_invocation" {
 		return ""
@@ -1403,9 +1409,13 @@ func javaStaticCollectionOfElemType(call *grammar.Node, content []byte, method s
 	switch method {
 	case "of":
 		switch recv {
-		case "List", "Stream", "Set":
+		case "List", "Stream", "Set", "Optional":
 			// ok
 		default:
+			return ""
+		}
+	case "ofNullable":
+		if recv != "Optional" {
 			return ""
 		}
 	case "asList":
