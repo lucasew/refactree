@@ -1067,9 +1067,9 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 			}
 			tn := javaTypeName(typeN, content)
 			explicitOurs := ourReceivers[tn]
-			// var a = new A() — recover type from object_creation_expression.
-			inferFromNew := tn == "var"
-			if !explicitOurs && !inferFromNew {
+			// var a = new A() / A.make() / (A) x — recover type from initializer.
+			inferFromInit := tn == "var"
+			if !explicitOurs && !inferFromInit {
 				break
 			}
 			for i := uint32(0); i < n.ChildCount(); i++ {
@@ -1089,12 +1089,8 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					continue
 				}
 				valN := ingest.ChildByField(c, "value")
-				if valN != nil && valN.Type() == "object_creation_expression" {
-					if vt := ingest.ChildByField(valN, "type"); vt != nil {
-						if ourReceivers[javaTypeName(vt, content)] {
-							out[ingest.NodeText(nameN, content)] = true
-						}
-					}
+				if vt := javaInferExprType(valN, content); ourReceivers[vt] {
+					out[ingest.NodeText(nameN, content)] = true
 				}
 			}
 		case "enhanced_for_statement":
@@ -1144,6 +1140,57 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 	}
 	walk(root)
 	return out
+}
+
+// javaInferExprType recovers a simple type leaf from a var initializer expression.
+// Covers new A(), A.make() / A.getInstance() static calls, and (A) expr casts.
+// Static Type.method() is treated as returning Type (common factory convention);
+// fail closed on other shapes.
+func javaInferExprType(val *grammar.Node, content []byte) string {
+	if val == nil {
+		return ""
+	}
+	// Unwrap (new A()) / (A.make()).
+	for val != nil && !val.IsNull() && val.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(val, "expression")
+		if inner == nil {
+			for i := uint32(0); i < val.ChildCount(); i++ {
+				ch := val.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		if inner == nil {
+			return ""
+		}
+		val = inner
+	}
+	if val == nil || val.IsNull() {
+		return ""
+	}
+	switch val.Type() {
+	case "object_creation_expression":
+		if vt := ingest.ChildByField(val, "type"); vt != nil {
+			return javaTypeName(vt, content)
+		}
+	case "method_invocation":
+		// A.make() — object is the type name; treat return as that type.
+		obj := ingest.ChildByField(val, "object")
+		if obj == nil {
+			return ""
+		}
+		if obj.Type() == "identifier" || obj.Type() == "type_identifier" {
+			return ingest.NodeText(obj, content)
+		}
+	case "cast_expression":
+		if typeN := ingest.ChildByField(val, "type"); typeN != nil {
+			return javaTypeName(typeN, content)
+		}
+	}
+	return ""
 }
 
 // javaBindTypePattern records a type_pattern binding (Type name) when Type is ours.
