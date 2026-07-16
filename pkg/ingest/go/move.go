@@ -3033,6 +3033,11 @@ func findComplexOperandSelectorEdits(file string, content []byte, oldLeaf, newLe
 	}
 	defer pf.Close()
 
+	// Slice/map index: as[0].M / m[k].M — resolve element/value type from
+	// typed params and locals so foreign same-leaf methods are not fail-open
+	// rewritten and ours are not skipped.
+	indexElemType := collectionIndexElemTypeFunc(pf.Root, content)
+
 	uniqueLeaf := len(foreignReceivers) == 0
 	var edits []ingest.Edit
 	var walk func(n *grammar.Node)
@@ -3045,7 +3050,7 @@ func findComplexOperandSelectorEdits(file string, content []byte, oldLeaf, newLe
 			field := ingest.ChildByField(n, "field")
 			if field != nil && ingest.NodeText(field, content) == oldLeaf && operand != nil && !goOperandIsBareIdent(operand) {
 				ok := false
-				if typ := goComplexOperandType(operand, content); typ != "" {
+				if typ := goComplexOperandType(operand, content, indexElemType); typ != "" {
 					typ = strings.TrimPrefix(typ, "*")
 					if ourReceivers[typ] {
 						ok = true
@@ -3081,15 +3086,112 @@ func goOperandIsBareIdent(n *grammar.Node) bool {
 	return n != nil && n.Type() == "identifier"
 }
 
+// collectionIndexElemTypeFunc returns the element/value named type for a
+// collection identifier at a byte offset (as in as[0] / m[k]). Built from
+// function/method/func-literal params and typed local var_specs (slice, array,
+// map). ok=false when unknown.
+func collectionIndexElemTypeFunc(root *grammar.Node, content []byte) func(name string, at uint32) (string, bool) {
+	var bindings []identTypeBinding
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil {
+			return
+		}
+		switch n.Type() {
+		case "method_declaration", "function_declaration", "func_literal":
+			rangeSrc := map[string]rangeSourceInfo{}
+			var dummy []identTypeBinding
+			if params := ingest.ChildByField(n, "parameters"); params != nil {
+				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &dummy, rangeSrc)
+			}
+			// Receiver is not a collection; skip. Bind collection params to
+			// the whole decl so as[0] inside the body resolves.
+			for name, info := range rangeSrc {
+				if name == "" || name == "_" || info.elemType == "" {
+					continue
+				}
+				bindings = append(bindings, identTypeBinding{n.StartByte(), n.EndByte(), name, info.elemType})
+			}
+			if body := ingest.ChildByField(n, "body"); body != nil {
+				collectLocalCollectionElemBindings(body, content, &bindings)
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+
+	return func(name string, at uint32) (string, bool) {
+		if name == "" {
+			return "", false
+		}
+		var best *identTypeBinding
+		for i := range bindings {
+			b := &bindings[i]
+			if b.name != name {
+				continue
+			}
+			if at < b.start || at >= b.end {
+				continue
+			}
+			if best == nil || (b.end-b.start) < (best.end-best.start) {
+				best = b
+			}
+		}
+		if best == nil {
+			return "", false
+		}
+		return best.typ, true
+	}
+}
+
+// collectLocalCollectionElemBindings records slice/array/map locals from
+// var_spec with an explicit type (var as []*A / var m map[K]*B).
+func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bindings *[]identTypeBinding) {
+	if body == nil {
+		return
+	}
+	scopeEnd := body.EndByte()
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type() == "var_spec" {
+			names := varSpecNames(n, content)
+			typeN := ingest.ChildByField(n, "type")
+			if info, ok := rangeSourceFromTypeNode(typeN, content); ok && info.elemType != "" {
+				for _, name := range names {
+					if name == "" || name == "_" {
+						continue
+					}
+					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(body)
+}
+
 // goComplexOperandType returns a type name for operands we can resolve without
-// full type inference: type assert/convert, composite lit, &T{}, (*T), paren.
-func goComplexOperandType(n *grammar.Node, content []byte) string {
+// full type inference: type assert/convert, composite lit, &T{}, (*T), paren,
+// and index expressions (as[0] / m[k]) when indexElemType knows the collection.
+// indexElemType may be nil when collection typing is unavailable.
+func goComplexOperandType(n *grammar.Node, content []byte, indexElemType func(name string, at uint32) (string, bool)) string {
 	if n == nil {
 		return ""
 	}
 	// Prefer full composite resolution (T{}, &T{}, bare type_identifier children).
-	if t := compositeLiteralTypeName(n, content); t != "" {
-		return t
+	// Skip for index_expression — compositeLiteralTypeName does not apply, and
+	// we must not peel the operand into a bare type by accident.
+	if n.Type() != "index_expression" {
+		if t := compositeLiteralTypeName(n, content); t != "" {
+			return t
+		}
 	}
 	switch n.Type() {
 	case "parenthesized_expression":
@@ -3098,7 +3200,7 @@ func goComplexOperandType(n *grammar.Node, content []byte) string {
 			if ch.Type() == "(" || ch.Type() == ")" {
 				continue
 			}
-			return goComplexOperandType(ch, content)
+			return goComplexOperandType(ch, content, indexElemType)
 		}
 	case "type_assertion_expression", "type_conversion_expression":
 		if t := ingest.ChildByField(n, "type"); t != nil {
@@ -3113,7 +3215,7 @@ func goComplexOperandType(n *grammar.Node, content []byte) string {
 				starIdent = ingest.NodeText(ch, content)
 				continue
 			}
-			if t := goComplexOperandType(ch, content); t != "" {
+			if t := goComplexOperandType(ch, content, indexElemType); t != "" {
 				return t
 			}
 		}
@@ -3122,6 +3224,41 @@ func goComplexOperandType(n *grammar.Node, content []byte) string {
 		}
 	case "pointer_type", "type_identifier":
 		return typeNameFromTypeNode(n, content)
+	case "index_expression":
+		// as[0].M / m[k].M — element/value type of the collection operand.
+		op := ingest.ChildByField(n, "operand")
+		if op == nil {
+			return ""
+		}
+		// Peel (as)[0].
+		for op != nil && op.Type() == "parenthesized_expression" {
+			var inner *grammar.Node
+			for i := uint32(0); i < op.ChildCount(); i++ {
+				ch := op.Child(i)
+				if ch == nil || ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+			op = inner
+		}
+		if op == nil {
+			return ""
+		}
+		if op.Type() == "identifier" && indexElemType != nil {
+			if el, ok := indexElemType(ingest.NodeText(op, content), n.StartByte()); ok {
+				return el
+			}
+		}
+		// Typed composite index: []*A{…}[0] / map[string]*A{…}["k"].
+		if op.Type() == "composite_literal" {
+			if t := ingest.ChildByField(op, "type"); t != nil {
+				if info, ok := rangeSourceFromTypeNode(t, content); ok {
+					return info.elemType
+				}
+			}
+		}
 	}
 	return ""
 }
