@@ -1041,7 +1041,8 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // Also binds untyped stream/collection lambda params when the pipeline element
 // type is ours (List<A> as → as.stream().map(a -> a.m()) / as.iterator().forEachRemaining(a -> a.m())
 // / List.of(new A()).forEach(a -> a.m()) / Stream.of(new A()).map(a -> a.m())
-// types a as A), and for (var a : as) loop variables from collection/array element types.
+// / Map<K,A>.forEach((k,v) -> v.m()) / map.values().forEach(v -> v.m())
+// types a/v as A), and for (var a : as) loop variables from collection/array element types.
 func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]bool {
 	out := map[string]bool{}
 	if root == nil || len(ourReceivers) == 0 {
@@ -1049,6 +1050,8 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 	}
 	// Collection/stream locals: name → element type leaf (List<A> as → "A").
 	elemOf := map[string]string{}
+	// Map-like locals: name → value type leaf (Map<K,A> m → "A").
+	valOf := map[string]string{}
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
 		if n == nil || n.IsNull() {
@@ -1063,7 +1066,7 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 			}
 			if typeN != nil && nameN != nil {
 				name := ingest.NodeText(nameN, content)
-				javaRecordCollectionElem(typeN, name, content, elemOf)
+				javaRecordCollectionElem(typeN, name, content, elemOf, valOf)
 				if tn := javaTypeName(typeN, content); ourReceivers[tn] {
 					out[name] = true
 				}
@@ -1090,8 +1093,8 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					continue
 				}
 				name := ingest.NodeText(nameN, content)
-				// List<A> as / A[] xs — track element type even when the outer type is not ours.
-				javaRecordCollectionElem(typeN, name, content, elemOf)
+				// List<A> as / A[] xs / Map<K,A> m — track elem/value even when outer is not ours.
+				javaRecordCollectionElem(typeN, name, content, elemOf, valOf)
 				if explicitOurs {
 					out[name] = true
 					continue
@@ -1116,7 +1119,7 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					out[name] = true
 				} else if tn == "var" {
 					valN := ingest.ChildByField(n, "value")
-					if et := javaStreamPipelineElemType(valN, content, elemOf); ourReceivers[et] {
+					if et := javaStreamPipelineElemType(valN, content, elemOf, valOf); ourReceivers[et] {
 						out[name] = true
 					}
 				}
@@ -1154,8 +1157,9 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 			// case Box(A a) / instanceof Holder(A a) — component binding A a.
 			javaBindRecordPatternComponent(n, content, ourReceivers, out)
 		case "method_invocation":
-			// as.stream().map(a -> a.m()) / as.forEach(a -> a.m()) — untyped lambda params.
-			javaBindStreamLambdaParams(n, content, ourReceivers, elemOf, out)
+			// as.stream().map(a -> a.m()) / as.forEach(a -> a.m()) /
+			// m.forEach((k,v) -> v.m()) — untyped lambda params.
+			javaBindStreamLambdaParams(n, content, ourReceivers, elemOf, valOf, out)
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
@@ -1165,31 +1169,42 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 	return out
 }
 
-// javaRecordCollectionElem records name → element type for arrays and generics
-// (List<A> as → "A", A[] xs → "A", Stream<A> s → "A"). First type arg only;
-// Map key/value distinction is intentionally fail-closed for multi-arg uses.
-func javaRecordCollectionElem(typeN *grammar.Node, name string, content []byte, elemOf map[string]string) {
-	if typeN == nil || name == "" || elemOf == nil {
+// javaRecordCollectionElem records name → element/value types for arrays and generics
+// (List<A> as → elem "A", A[] xs → elem "A", Stream<A> s → elem "A",
+// Map<K,A> m → elem "K" (first arg) and val "A" (second arg)).
+func javaRecordCollectionElem(typeN *grammar.Node, name string, content []byte, elemOf, valOf map[string]string) {
+	if typeN == nil || name == "" {
 		return
 	}
 	switch typeN.Type() {
 	case "array_type":
+		if elemOf == nil {
+			return
+		}
 		if elem := ingest.ChildByField(typeN, "element"); elem != nil {
 			if et := javaTypeName(elem, content); et != "" {
 				elemOf[name] = et
 			}
 		}
 	case "generic_type":
-		if et := javaFirstTypeArg(typeN, content); et != "" {
-			elemOf[name] = et
+		args := javaTypeArgNames(typeN, content)
+		if len(args) == 0 {
+			return
+		}
+		if elemOf != nil {
+			elemOf[name] = args[0]
+		}
+		// Map<K,V> / HashMap<K,V> — second type arg is the value type.
+		if valOf != nil && len(args) >= 2 {
+			valOf[name] = args[1]
 		}
 	}
 }
 
-// javaFirstTypeArg returns the simple leaf of the first type argument of a generic_type.
-func javaFirstTypeArg(typeN *grammar.Node, content []byte) string {
+// javaTypeArgNames returns simple type-arg leaves of a generic_type in order.
+func javaTypeArgNames(typeN *grammar.Node, content []byte) []string {
 	if typeN == nil || typeN.Type() != "generic_type" {
-		return ""
+		return nil
 	}
 	targs := ingest.ChildByField(typeN, "type_arguments")
 	if targs == nil {
@@ -1201,33 +1216,38 @@ func javaFirstTypeArg(typeN *grammar.Node, content []byte) string {
 		}
 	}
 	if targs == nil {
-		return ""
+		return nil
 	}
+	var out []string
 	for i := uint32(0); i < targs.ChildCount(); i++ {
 		ch := targs.Child(i)
 		switch ch.Type() {
 		case "type_identifier", "generic_type", "scoped_type_identifier", "array_type":
-			return javaTypeName(ch, content)
+			if tn := javaTypeName(ch, content); tn != "" {
+				out = append(out, tn)
+			}
 		}
 	}
-	return ""
+	return out
 }
 
 // javaBindStreamLambdaParams types untyped (inferred) lambda parameters when the
-// call is a stream/collection element consumer/mapper and the pipeline element is ours.
+// call is a stream/collection element consumer/mapper and the pipeline element is ours,
+// or Map.forEach((k,v) -> …) when the map value type is ours.
 // Typed (A a) -> params are already handled via formal_parameter.
-func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, elemOf map[string]string, out map[string]bool) {
+func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, elemOf, valOf map[string]string, out map[string]bool) {
 	if call == nil || call.Type() != "method_invocation" || out == nil {
 		return
 	}
 	nameN := ingest.ChildByField(call, "name")
-	if nameN == nil || !javaStreamElementLambdaMethod(ingest.NodeText(nameN, content)) {
+	if nameN == nil {
 		return
 	}
-	et := javaStreamPipelineElemType(ingest.ChildByField(call, "object"), content, elemOf)
-	if et == "" || !ourReceivers[et] {
+	method := ingest.NodeText(nameN, content)
+	if !javaStreamElementLambdaMethod(method) {
 		return
 	}
+	obj := ingest.ChildByField(call, "object")
 	var args *grammar.Node
 	for i := uint32(0); i < call.ChildCount(); i++ {
 		if call.Child(i).Type() == "argument_list" {
@@ -1243,12 +1263,24 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 		if ch.Type() != "lambda_expression" {
 			continue
 		}
-		// Only unary inferred lambdas (a -> …). Multi-param needs richer typing.
 		params := javaInferredLambdaParamNames(ch, content)
-		if len(params) != 1 {
-			continue
+		switch len(params) {
+		case 1:
+			// Unary: stream/collection element or map.values() element.
+			et := javaStreamPipelineElemType(obj, content, elemOf, valOf)
+			if et != "" && ourReceivers[et] {
+				out[params[0]] = true
+			}
+		case 2:
+			// Map.forEach BiConsumer — second param is the map value type.
+			if method != "forEach" {
+				continue
+			}
+			vt := javaMapPipelineValueType(obj, content, valOf)
+			if vt != "" && ourReceivers[vt] {
+				out[params[1]] = true
+			}
 		}
-		out[params[0]] = true
 	}
 }
 
@@ -1270,9 +1302,10 @@ func javaStreamElementLambdaMethod(method string) bool {
 
 // javaStreamPipelineElemType recovers the element type of a stream pipeline object:
 // as / as.stream() / as.iterator() / as.stream().filter(...) → elemOf[as],
+// m.values() → valOf[m],
 // List.of(new A()) / Stream.of(new A()) / Arrays.asList(new A()) → "A".
 // Type-changing stages (map/flatMap) fail closed so later lambdas are not mis-typed.
-func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf map[string]string) string {
+func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
 		inner := ingest.ChildByField(obj, "expression")
 		if inner == nil {
@@ -1306,7 +1339,10 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf map[st
 			"filter", "peek", "sorted", "distinct", "limit", "skip",
 			"unordered", "sequential", "parallel", "onClose",
 			"takeWhile", "dropWhile":
-			return javaStreamPipelineElemType(ingest.ChildByField(obj, "object"), content, elemOf)
+			return javaStreamPipelineElemType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
+		case "values":
+			// m.values() — Collection of map values (valOf[m]).
+			return javaMapPipelineValueType(ingest.ChildByField(obj, "object"), content, valOf)
 		case "of", "asList":
 			// List.of(new A()) / Stream.of(new A(), new A()) / Arrays.asList(new A())
 			// / Set.of(new A()) — element type from homogeneous new T(...) args.
@@ -1318,6 +1354,29 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf map[st
 	default:
 		return ""
 	}
+}
+
+// javaMapPipelineValueType recovers the value type of a Map-typed expression:
+// m → valOf[m]. Fail closed on other shapes.
+func javaMapPipelineValueType(obj *grammar.Node, content []byte, valOf map[string]string) string {
+	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(obj, "expression")
+		if inner == nil {
+			for i := uint32(0); i < obj.ChildCount(); i++ {
+				ch := obj.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		obj = inner
+	}
+	if obj == nil || obj.IsNull() || obj.Type() != "identifier" || valOf == nil {
+		return ""
+	}
+	return valOf[ingest.NodeText(obj, content)]
 }
 
 // javaStaticCollectionOfElemType recovers the element type of List/Stream/Set.of(...)
