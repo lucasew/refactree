@@ -1877,6 +1877,7 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // (`b: Optional[Box]`, `b: Box | None`, `b: Union[Box, None]`), `b = cast(Box, x)`,
 // `a = next(iter(items))` / `a = next(items)` (element type of the iterable arg),
 // `a = items[0]` / `a = d[k]` (element/value type of a known collection),
+// `a = items.pop()` / `a = items.pop(0)` / `a = d.pop(k)` (same element/value type),
 // as-bindings (`case A() as a`, `with A() as a`, `except A as e`), walrus (`a := A()`),
 // for/comprehension targets over known collections
 // (`for a in [A()]`, `for a in items` with `items: list[A]`,
@@ -1963,10 +1964,21 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							}
 						}
 					} else if fn != nil && fn.Type() == "attribute" {
-						// typing.cast(A, x)
-						if attr := ingest.ChildByField(fn, "attribute"); attr != nil && ingest.NodeText(attr, content) == "cast" {
-							if tn := pythonCastTypeArg(right, content); ourReceivers[tn] {
-								out[lname] = true
+						if attr := ingest.ChildByField(fn, "attribute"); attr != nil {
+							switch ingest.NodeText(attr, content) {
+							case "cast":
+								// typing.cast(A, x)
+								if tn := pythonCastTypeArg(right, content); ourReceivers[tn] {
+									out[lname] = true
+								}
+							case "pop":
+								// a = items.pop() / items.pop(0) / d.pop(k) / list(items).pop()
+								// — element/value type of the receiver collection.
+								// popitem() and other methods are not handled (fail closed).
+								obj := ingest.ChildByField(fn, "object")
+								if et := pythonIterableElemType(obj, content, elemOf, egElems); ourReceivers[et] {
+									out[lname] = true
+								}
 							}
 						}
 					}
