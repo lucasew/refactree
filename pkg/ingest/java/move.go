@@ -1043,6 +1043,7 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // / List.of(new A()).forEach(a -> a.m()) / Stream.of(new A()).map(a -> a.m())
 // / as.stream().findFirst().ifPresent(a -> a.m()) / Optional.of(new A()).ifPresent(a -> a.m())
 // / Optional<A>.ifPresent(a -> a.m()) / Map<K,A>.forEach((k,v) -> v.m()) /
+// Map.computeIfPresent/compute/replaceAll((k,v) -> v.m()) / Map.merge((v1,v2) -> v1.m()) /
 // map.values().forEach(v -> v.m()) types a/v as A), for (var a : as) loop variables
 // from collection/array element types, and var locals from collection accessors
 // (list.get(i) / map.get(k) / it.next() / list.iterator().next()).
@@ -1165,7 +1166,8 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 			javaBindRecordPatternComponent(n, content, ourReceivers, out)
 		case "method_invocation":
 			// as.stream().map(a -> a.m()) / as.forEach(a -> a.m()) /
-			// m.forEach((k,v) -> v.m()) — untyped lambda params.
+			// m.forEach((k,v) -> v.m()) / m.computeIfPresent((k,v) -> v.m()) /
+			// m.merge((v1,v2) -> v1.m()) — untyped lambda params.
 			javaBindStreamLambdaParams(n, content, ourReceivers, elemOf, valOf, out)
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -1240,8 +1242,8 @@ func javaTypeArgNames(typeN *grammar.Node, content []byte) []string {
 
 // javaBindStreamLambdaParams types untyped (inferred) lambda parameters when the
 // call is a stream/collection element consumer/mapper and the pipeline element is ours,
-// or Map.forEach((k,v) -> …) when the map value type is ours.
-// Typed (A a) -> params are already handled via formal_parameter.
+// or Map bi-lambdas (forEach/computeIfPresent/compute/replaceAll/merge) when the map
+// value type is ours. Typed (A a) -> params are already handled via formal_parameter.
 func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, elemOf, valOf map[string]string, out map[string]bool) {
 	if call == nil || call.Type() != "method_invocation" || out == nil {
 		return
@@ -1279,12 +1281,20 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 				out[params[0]] = true
 			}
 		case 2:
-			// Map.forEach BiConsumer — second param is the map value type.
-			if method != "forEach" {
+			// Map bi-lambdas — value type from valOf[map].
+			// forEach/computeIfPresent/compute/replaceAll: (K,V) → second is V.
+			// merge: (V,V) → both params are V (BiFunction remapping).
+			if !javaMapValueBiLambdaMethod(method) {
 				continue
 			}
 			vt := javaMapPipelineValueType(obj, content, valOf)
-			if vt != "" && ourReceivers[vt] {
+			if vt == "" || !ourReceivers[vt] {
+				continue
+			}
+			if method == "merge" {
+				out[params[0]] = true
+				out[params[1]] = true
+			} else {
 				out[params[1]] = true
 			}
 		}
@@ -1292,7 +1302,7 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 }
 
 // javaStreamElementLambdaMethod reports methods whose (first) functional arg is
-// applied to the stream/collection element type.
+// applied to the stream/collection element type, or Map methods with value bi-lambdas.
 func javaStreamElementLambdaMethod(method string) bool {
 	switch method {
 	case "map", "mapToInt", "mapToLong", "mapToDouble",
@@ -1300,7 +1310,20 @@ func javaStreamElementLambdaMethod(method string) bool {
 		"filter", "peek", "forEach", "forEachOrdered", "forEachRemaining",
 		"takeWhile", "dropWhile",
 		"anyMatch", "allMatch", "noneMatch",
-		"removeIf", "ifPresent":
+		"removeIf", "ifPresent",
+		// Map value bi-lambdas (see javaMapValueBiLambdaMethod).
+		"computeIfPresent", "compute", "replaceAll", "merge":
+		return true
+	default:
+		return false
+	}
+}
+
+// javaMapValueBiLambdaMethod reports Map methods whose bi-lambda args include the
+// map value type: forEach/computeIfPresent/compute/replaceAll → (K,V), merge → (V,V).
+func javaMapValueBiLambdaMethod(method string) bool {
+	switch method {
+	case "forEach", "computeIfPresent", "compute", "replaceAll", "merge":
 		return true
 	default:
 		return false
