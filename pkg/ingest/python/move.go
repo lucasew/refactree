@@ -1878,10 +1878,11 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `a = next(iter(items))` / `a = next(items)` / `a = next(x for x in items)`
 // (element type of the iterable arg / identity genexp),
 // `a = min(items)` / `a = max(items)` / `a = min(items, key=...)` (same element type),
-// `a = items[0]` / `a = d[k]` (element/value type of a known collection),
+// `a = items[0]` / `a = d[k]` / `a = items.copy()[0]` (element/value of a known collection),
 // `a = items.pop()` / `a = items.pop(0)` / `a = d.pop(k)` (same element/value type),
 // `a = items.popleft()` (collections.deque; same element type as pop),
 // `a = d.get(k)` / `a = d.get(k, default)` (dict value type; default ignored like next),
+// `xs = items.copy()` / `xs = items or []` (elemOf preserved for later index/for),
 // `a = it.__next__()` when `it = iter(items)` (or other known iterable) has element type,
 // as-bindings (`case A() as a`, `with A() as a`, `except A as e`),
 // match sequence captures from a known collection subject
@@ -1895,6 +1896,7 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `a := it.__next__()`, `a := items[0]` — same RHS typing as plain assignment),
 // for/comprehension targets over known collections
 // (`for a in [A()]`, `for a in items` with `items: list[A]`,
+// `for a in items.copy()` / `for a in items or []`,
 // `for a in d.values()` / `for k, a in d.items()` with `d: dict[K, A]`,
 // `for i, a in enumerate(items)` / `for a, b in zip(xs, ys)`,
 // `for a in reversed/sorted/list/iter(items)`,
@@ -2575,8 +2577,11 @@ func pythonSubscriptElemType(sub *grammar.Node, content []byte, elemOf, egElems 
 // element-preserving wrappers (reversed/sorted/list/tuple/set/iter),
 // filter (2nd arg iterable; pred does not change element type),
 // map when the first arg is a Class identifier (map(A, xs) → A),
-// d.values() when d's dict value type is in elemOf, or e.exceptions when e was
-// bound by except* Type as e (egElems). Does not type d.items() pairs (use unpack).
+// items.copy() (zero-arg; same element type as receiver),
+// items or [] / items or [A()] (boolean or/and when both sides agree; empty
+// list/tuple/set is a wildcard), parenthesized forms, d.values() when d's dict
+// value type is in elemOf, or e.exceptions when e was bound by except* Type as e
+// (egElems). Does not type d.items() pairs (use unpack).
 func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
 	if right == nil {
 		return ""
@@ -2589,6 +2594,16 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		return elemOf[ingest.NodeText(right, content)]
 	case "list", "tuple", "set":
 		return pythonHomogeneousCtorElem(right, content)
+	case "parenthesized_expression":
+		// (items or []) / (xs.copy()) — unwrap and re-type the inner expression.
+		return pythonIterableElemType(pythonParenInner(right), content, elemOf, egElems)
+	case "boolean_operator":
+		// items or [] / items or [A()] / xs and ys — element type when sides agree.
+		// Empty list/tuple/set is a wildcard (does not introduce a type).
+		// Mismatched leaves (list[A] or [B()]) fail closed.
+		left := ingest.ChildByField(right, "left")
+		rightN := ingest.ChildByField(right, "right")
+		return pythonBoolOpElemType(left, rightN, content, elemOf, egElems)
 	case "generator_expression", "list_comprehension", "set_comprehension":
 		// next(x for x in items) / for a in [x for x in items] — identity body only.
 		return pythonComprehensionElemType(right, content, elemOf, egElems)
@@ -2625,12 +2640,29 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 				return ""
 			}
 		}
-		// d.values() — dict value type stored in elemOf[d]
-		obj, method := pythonAttrCall(right, content)
-		if obj == "" || method != "values" || elemOf == nil {
-			return ""
+		// items.copy() / list(items).copy() — zero-arg shallow copy preserves
+		// the receiver's element type. copy with args fails closed.
+		// d.values() — dict value type stored in elemOf[d].
+		if fn := ingest.ChildByField(right, "function"); fn != nil && fn.Type() == "attribute" {
+			if attr := ingest.ChildByField(fn, "attribute"); attr != nil {
+				switch ingest.NodeText(attr, content) {
+				case "copy":
+					args, ok := pythonCallPositionalArgNodes(right)
+					if !ok || len(args) != 0 {
+						return ""
+					}
+					obj := ingest.ChildByField(fn, "object")
+					return pythonIterableElemType(obj, content, elemOf, egElems)
+				case "values":
+					obj, method := pythonAttrCall(right, content)
+					if obj == "" || method != "values" || elemOf == nil {
+						return ""
+					}
+					return elemOf[obj]
+				}
+			}
 		}
-		return elemOf[obj]
+		return ""
 	case "attribute":
 		// e.exceptions from except* A as e
 		obj := ingest.ChildByField(right, "object")
@@ -2644,6 +2676,74 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		return egElems[ingest.NodeText(obj, content)]
 	}
 	return ""
+}
+
+// pythonParenInner returns the expression inside a parenthesized_expression,
+// preferring the "expression" field and otherwise the first non-paren child.
+func pythonParenInner(n *grammar.Node) *grammar.Node {
+	if n == nil {
+		return nil
+	}
+	if inner := ingest.ChildByField(n, "expression"); inner != nil {
+		return inner
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		if ch.Type() == "(" || ch.Type() == ")" {
+			continue
+		}
+		return ch
+	}
+	return nil
+}
+
+// pythonBoolOpElemType recovers a shared element type for `a or b` / `a and b`.
+// Both sides must agree when typed; empty list/tuple/set literals are wildcards.
+// Unknown non-empty sides fail closed (result can be either operand).
+func pythonBoolOpElemType(left, right *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
+	etL := pythonIterableElemType(left, content, elemOf, egElems)
+	etR := pythonIterableElemType(right, content, elemOf, egElems)
+	emptyL := pythonIsEmptyCollectionLiteral(left)
+	emptyR := pythonIsEmptyCollectionLiteral(right)
+	if etL != "" && etR != "" {
+		if etL == etR {
+			return etL
+		}
+		return ""
+	}
+	if etL != "" && emptyR {
+		return etL
+	}
+	if etR != "" && emptyL {
+		return etR
+	}
+	return ""
+}
+
+// pythonIsEmptyCollectionLiteral reports [] / () / {} (set) with no elements.
+// Parentheses are unwrapped. Non-collection nodes return false.
+func pythonIsEmptyCollectionLiteral(n *grammar.Node) bool {
+	for n != nil && n.Type() == "parenthesized_expression" {
+		n = pythonParenInner(n)
+	}
+	if n == nil {
+		return false
+	}
+	switch n.Type() {
+	case "list", "tuple", "set":
+		// ok
+	default:
+		return false
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		switch n.Child(i).Type() {
+		case "[", "]", "(", ")", "{", "}", ",", "comment":
+			continue
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // pythonAttrCall returns (objectIdent, methodName) for obj.method(...) calls.
