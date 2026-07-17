@@ -1063,7 +1063,8 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // Map.computeIfPresent/compute/replaceAll((k,v) -> v.m()) / Map.merge((v1,v2) -> v1.m()) /
 // map.values().forEach(v -> v.m()) types a/v as A), for (var a : as) loop variables
 // from collection/array element types, and var locals from collection accessors
-// (list.get(i) / map.get(k) / it.next() / list.iterator().next() /
+// (list.get(i) / map.get(k) / map.computeIfAbsent(k,f) / map.putIfAbsent(k,v) /
+// it.next() / list.iterator().next() /
 // queue.poll()/peek() / list.remove(i) / list.getFirst()/getLast() /
 // opt.orElse(d) / opt.orElseGet(s) / findFirst().orElse(d) /
 // Collections.min(as) / Collections.max(as) / stream.min/max().orElse(d)).
@@ -1689,6 +1690,7 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //
 //	as.get(i) / as.get(0)     → elemOf[as]   (List/Collection)
 //	am.get(k) / am.getOrDefault(k, d) → valOf[am] (Map; prefer value over key)
+//	am.computeIfAbsent(k, f) / am.putIfAbsent(k, v) → valOf[am] (Map returns V)
 //	as.remove(i) / am.remove(k) → same element/value type (index/key remove returns E/V)
 //	qa.poll() / qa.peek() / qa.element() → elemOf[qa] (Queue)
 //	da.pollFirst()/pollLast()/peekFirst()/peekLast()/pop() → elemOf[da] (Deque)
@@ -1726,6 +1728,9 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 	obj := ingest.ChildByField(val, "object")
 	switch method := ingest.NodeText(nameN, content); method {
 	case "get", "getOrDefault",
+		// Map computeIfAbsent/putIfAbsent return V (same as get for typed locals).
+		// Mapping/default args do not change the value type leaf.
+		"computeIfAbsent", "putIfAbsent",
 		// Element/value-returning mutators and endpoints (same type as get).
 		// Map.remove(k) → V via valOf; List.remove(i) → E via elemOf.
 		// remove(Object) also returns boolean at runtime for List — we still bind
