@@ -2007,6 +2007,15 @@ func rangeSourceFromTypeNode(n *grammar.Node, content []byte) (rangeSourceInfo, 
 		return rangeSourceInfo{}, false
 	}
 	switch n.Type() {
+	case "parenthesized_type":
+		// ([]*T) in type conversions — peel parens to the inner collection type.
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "(" || c.Type() == ")" {
+				continue
+			}
+			return rangeSourceFromTypeNode(c, content)
+		}
 	case "slice_type", "array_type":
 		if el := ingest.ChildByField(n, "element"); el != nil {
 			if typ := typeNameFromTypeNode(el, content); typ != "" {
@@ -3187,10 +3196,12 @@ func rangeSourceFromMakeCall(n *grammar.Node, content []byte) (rangeSourceInfo, 
 }
 
 // rangeSourceFromCollectionExpr reports element/value (and map key) type for
-// expressions that construct a typed slice/array/map: composite literals
-// ([]*T{…} / map[K]*T{…}), make(T, …), and append(slice, …) when the first
-// argument is itself such an expression. Used for short-var / untyped-var
-// collection locals and inline index operands (append([]*A{}, x)[0]).
+// expressions that construct or retype a slice/array/map: composite literals
+// ([]*T{…} / map[K]*T{…}), make(T, …), append(slice, …) when the first
+// argument is itself such an expression, and type assert/convert to a
+// collection type (x.([]*T) / ([]*T)(x) / x.(map[K]*T)). Used for short-var /
+// untyped-var collection locals and inline index operands
+// (append([]*A{}, x)[0] / x.([]*A)[0]).
 func rangeSourceFromCollectionExpr(n *grammar.Node, content []byte) (rangeSourceInfo, bool) {
 	if n == nil {
 		return rangeSourceInfo{}, false
@@ -3216,6 +3227,13 @@ func rangeSourceFromCollectionExpr(n *grammar.Node, content []byte) (rangeSource
 		return rangeSourceInfo{}, false
 	}
 	if n.Type() == "composite_literal" {
+		if t := ingest.ChildByField(n, "type"); t != nil {
+			return rangeSourceFromTypeNode(t, content)
+		}
+		return rangeSourceInfo{}, false
+	}
+	// x.([]*T) / x.(map[K]*T) / ([]*T)(x) — type field is the collection type.
+	if n.Type() == "type_assertion_expression" || n.Type() == "type_conversion_expression" {
 		if t := ingest.ChildByField(n, "type"); t != nil {
 			return rangeSourceFromTypeNode(t, content)
 		}
@@ -3251,7 +3269,7 @@ func rangeSourceFromCollectionExpr(n *grammar.Node, content []byte) (rangeSource
 // collectLocalCollectionElemBindings records slice/array/map locals from
 // var_spec with an explicit type (var as []*A / var m map[K]*B) and from
 // collection short-var / untyped var initializers:
-// make(T, …), append([]*T{}, …), []*T{…} / map[K]*T{…}.
+// make(T, …), append([]*T{}, …), []*T{…} / map[K]*T{…}, x.([]*T) / ([]*T)(x).
 func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bindings *[]identTypeBinding) {
 	if body == nil {
 		return
@@ -3404,7 +3422,8 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType func(na
 			}
 		}
 		// Typed collection index: []*A{…}[0] / make([]*A,n)[0] /
-		// append([]*A{}, x)[0] / map[string]*A{…}["k"].
+		// append([]*A{}, x)[0] / map[string]*A{…}["k"] /
+		// x.([]*A)[0] / ([]*A)(x)[0].
 		if info, ok := rangeSourceFromCollectionExpr(op, content); ok {
 			return info.elemType
 		}
