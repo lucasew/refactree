@@ -788,7 +788,7 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 		}
 	}
 
-	typedLocals := javaTypedLocals(pf.Root, content, ourSimple)
+	typedLocals, entryValOf := javaTypedLocals(pf.Root, content, ourSimple)
 
 	var edits []ingest.Edit
 	var walk func(n *grammar.Node, enclosingClass string, switchMatchesOur bool)
@@ -811,7 +811,7 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			obj := ingest.ChildByField(n, "object")
 			name := ingest.ChildByField(n, "name")
 			if name != nil && ingest.NodeText(name, content) == oldLeaf {
-				if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, implementsEdges) {
+				if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, entryValOf, implementsEdges) {
 					edits = append(edits, ingest.Edit{
 						File:      fileRel,
 						StartByte: name.StartByte(),
@@ -827,7 +827,7 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 				field = ingest.ChildByType(n, "identifier")
 			}
 			if field != nil && ingest.NodeText(field, content) == oldLeaf {
-				if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, implementsEdges) {
+				if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, entryValOf, implementsEdges) {
 					edits = append(edits, ingest.Edit{
 						File:      fileRel,
 						StartByte: field.StartByte(),
@@ -851,7 +851,7 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			if len(parts) >= 2 {
 				obj, name := parts[0], parts[len(parts)-1]
 				if name.Type() == "identifier" && ingest.NodeText(name, content) == oldLeaf {
-					if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, implementsEdges) {
+					if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, entryValOf, implementsEdges) {
 						edits = append(edits, ingest.Edit{
 							File:      fileRel,
 							StartByte: name.StartByte(),
@@ -951,7 +951,8 @@ func javaRenameByTypeMaps(name string, ourReceivers, foreignReceivers, typedLoca
 
 // javaShouldRenameMemberAccess decides whether obj.oldLeaf targets our receiver type.
 // obj may be nil for bare calls. implementsEdges maps type → parents (extends/implements).
-func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, implementsEdges map[string]map[string]bool) bool {
+// entryValOf maps Map.Entry locals → value type leaf (for e.getValue().m()).
+func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, entryValOf map[string]string, implementsEdges map[string]map[string]bool) bool {
 	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
 		var inner *grammar.Node
 		for i := uint32(0); i < obj.ChildCount(); i++ {
@@ -1009,10 +1010,24 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 		if arr == nil {
 			return len(foreignReceivers) == 0
 		}
-		return javaShouldRenameMemberAccess(arr, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, implementsEdges)
+		return javaShouldRenameMemberAccess(arr, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, entryValOf, implementsEdges)
 	}
 	if obj.Type() == "identifier" || obj.Type() == "type_identifier" {
 		return javaRenameByTypeMaps(ingest.NodeText(obj, content), ourReceivers, foreignReceivers, typedLocals)
+	}
+	// e.getValue().m() — Map.Entry local value type (entrySet for-var / forEach).
+	if obj.Type() == "method_invocation" {
+		nameN := ingest.ChildByField(obj, "name")
+		if nameN != nil && ingest.NodeText(nameN, content) == "getValue" {
+			recv := ingest.ChildByField(obj, "object")
+			if recv != nil && (recv.Type() == "identifier" || recv.Type() == "type_identifier") && entryValOf != nil {
+				if vt := entryValOf[ingest.NodeText(recv, content)]; vt != "" {
+					return javaRenameByTypeMaps(vt, ourReceivers, foreignReceivers, nil)
+				}
+			}
+		}
+		// Unknown method receivers: unique-leaf only.
+		return len(foreignReceivers) == 0
 	}
 	// Unknown / complex receivers without recoverable static type: unique-leaf only.
 	return len(foreignReceivers) == 0
@@ -1052,10 +1067,13 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // queue.poll()/peek() / list.remove(i) / list.getFirst()/getLast() /
 // opt.orElse(d) / opt.orElseGet(s) / findFirst().orElse(d) /
 // Collections.min(as) / Collections.max(as) / stream.min/max().orElse(d)).
-func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]bool {
+// entryValOf maps Map.Entry locals → value type leaf for e.getValue().m()
+// (for (var e : m.entrySet()) / m.entrySet().forEach(e -> …) / Map.Entry<K,A> e).
+func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string) {
 	out := map[string]bool{}
+	entryValOf := map[string]string{}
 	if root == nil || len(ourReceivers) == 0 {
-		return out
+		return out, entryValOf
 	}
 	// Collection/stream locals: name → element type leaf (List<A> as → "A").
 	elemOf := map[string]string{}
@@ -1078,6 +1096,9 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 				javaRecordCollectionElem(typeN, name, content, elemOf, valOf)
 				if tn := javaTypeName(typeN, content); ourReceivers[tn] {
 					out[name] = true
+				} else if vt := javaMapEntryDeclaredValueType(typeN, content); vt != "" {
+					// Map.Entry<K,A> e param — track value type for e.getValue().
+					entryValOf[name] = vt
 				}
 			}
 		case "local_variable_declaration", "field_declaration":
@@ -1109,21 +1130,28 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					out[name] = true
 					continue
 				}
+				if vt := javaMapEntryDeclaredValueType(typeN, content); vt != "" {
+					// Map.Entry<K,A> e = … — track value type for e.getValue().
+					entryValOf[name] = vt
+				}
 				if !inferFromInit {
 					continue
 				}
 				valN := ingest.ChildByField(c, "value")
 				if vt := javaInferExprType(valN, content); ourReceivers[vt] {
 					out[name] = true
-				} else if et := javaCollectionAccessElemType(valN, content, elemOf, valOf); ourReceivers[et] {
+				} else if et := javaCollectionAccessElemType(valN, content, elemOf, valOf, entryValOf); ourReceivers[et] {
 					// var xa = as.get(0) / am.get("k") / as.iterator().next() / ia.next()
 					// / qa.poll() / qa.peek() / as.remove(0) / as.getFirst()
+					// / e.getValue() when e is a Map.Entry local
 					out[name] = true
 				}
 			}
 		case "enhanced_for_statement":
 			// for (A a : as) — explicit type. for (var a : as) — element of collection.
 			// Without var→elem binding, a.run() is skipped when foreign same-leaf methods exist.
+			// for (var e : m.entrySet()) / for (Map.Entry<K,A> e : m.entrySet()) —
+			// entry is not A; bind entryValOf for e.getValue().m().
 			typeN := ingest.ChildByField(n, "type")
 			nameN := ingest.ChildByField(n, "name")
 			if typeN != nil && nameN != nil {
@@ -1136,6 +1164,11 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					if et := javaStreamPipelineElemType(valN, content, elemOf, valOf); ourReceivers[et] {
 						out[name] = true
 					}
+					if vt := javaEntrySetPipelineValueType(valN, content, valOf); vt != "" {
+						entryValOf[name] = vt
+					}
+				} else if vt := javaMapEntryDeclaredValueType(typeN, content); vt != "" {
+					entryValOf[name] = vt
 				}
 			}
 		case "instanceof_expression":
@@ -1173,15 +1206,16 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 		case "method_invocation":
 			// as.stream().map(a -> a.m()) / as.forEach(a -> a.m()) /
 			// m.forEach((k,v) -> v.m()) / m.computeIfPresent((k,v) -> v.m()) /
-			// m.merge((v1,v2) -> v1.m()) — untyped lambda params.
-			javaBindStreamLambdaParams(n, content, ourReceivers, elemOf, valOf, out)
+			// m.merge((v1,v2) -> v1.m()) / m.entrySet().forEach(e -> e.getValue().m()) —
+			// untyped lambda params (and entryValOf for entrySet).
+			javaBindStreamLambdaParams(n, content, ourReceivers, elemOf, valOf, entryValOf, out)
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
 		}
 	}
 	walk(root)
-	return out
+	return out, entryValOf
 }
 
 // javaRecordCollectionElem records name → element/value types for arrays and generics
@@ -1249,8 +1283,9 @@ func javaTypeArgNames(typeN *grammar.Node, content []byte) []string {
 // javaBindStreamLambdaParams types untyped (inferred) lambda parameters when the
 // call is a stream/collection element consumer/mapper and the pipeline element is ours,
 // or Map bi-lambdas (forEach/computeIfPresent/compute/replaceAll/merge) when the map
-// value type is ours. Typed (A a) -> params are already handled via formal_parameter.
-func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, elemOf, valOf map[string]string, out map[string]bool) {
+// value type is ours. entrySet pipelines bind entryValOf for e.getValue().m().
+// Typed (A a) -> params are already handled via formal_parameter.
+func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, elemOf, valOf, entryValOf map[string]string, out map[string]bool) {
 	if call == nil || call.Type() != "method_invocation" || out == nil {
 		return
 	}
@@ -1285,6 +1320,12 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 			et := javaStreamPipelineElemType(obj, content, elemOf, valOf)
 			if et != "" && ourReceivers[et] {
 				out[params[0]] = true
+			}
+			// m.entrySet().forEach(e -> e.getValue().m()) — param is Entry, not V.
+			if entryValOf != nil {
+				if vt := javaEntrySetPipelineValueType(obj, content, valOf); vt != "" {
+					entryValOf[params[0]] = vt
+				}
 			}
 		case 2:
 			// Map bi-lambdas — value type from valOf[map].
@@ -1476,6 +1517,60 @@ func javaMapPipelineValueType(obj *grammar.Node, content []byte, valOf map[strin
 	return valOf[ingest.NodeText(obj, content)]
 }
 
+// javaEntrySetPipelineValueType recovers the map value type from an entrySet pipeline:
+// m.entrySet() / m.entrySet().stream() / m.entrySet().stream().filter(...) → valOf[m].
+// Type-changing stages (map/flatMap) fail closed.
+func javaEntrySetPipelineValueType(obj *grammar.Node, content []byte, valOf map[string]string) string {
+	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(obj, "expression")
+		if inner == nil {
+			for i := uint32(0); i < obj.ChildCount(); i++ {
+				ch := obj.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		obj = inner
+	}
+	if obj == nil || obj.IsNull() || obj.Type() != "method_invocation" {
+		return ""
+	}
+	nameN := ingest.ChildByField(obj, "name")
+	if nameN == nil {
+		return ""
+	}
+	switch name := ingest.NodeText(nameN, content); name {
+	case "entrySet":
+		return javaMapPipelineValueType(ingest.ChildByField(obj, "object"), content, valOf)
+	case "stream", "parallelStream",
+		"filter", "peek", "sorted", "distinct", "limit", "skip",
+		"unordered", "sequential", "parallel", "onClose",
+		"takeWhile", "dropWhile":
+		return javaEntrySetPipelineValueType(ingest.ChildByField(obj, "object"), content, valOf)
+	default:
+		return ""
+	}
+}
+
+// javaMapEntryDeclaredValueType recovers V from Map.Entry<K,V> / Entry<K,V> type nodes.
+// Used for for (Map.Entry<K,A> e : …) and Map.Entry locals — value type for getValue().
+func javaMapEntryDeclaredValueType(typeN *grammar.Node, content []byte) string {
+	if typeN == nil {
+		return ""
+	}
+	if javaTypeName(typeN, content) != "Entry" {
+		return ""
+	}
+	args := javaTypeArgNames(typeN, content)
+	if len(args) < 2 {
+		return ""
+	}
+	return args[1]
+}
+
 // javaStaticCollectionOfElemType recovers the element type of List/Stream/Set.of(...)
 // Arrays.asList(...), and Optional.of/ofNullable(...) when every argument is
 // `new T(...)` with the same T. Non-creation args and mixed types fail closed.
@@ -1602,10 +1697,11 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	as.iterator().next()      → elemOf[as]   (via type-preserving iterator())
 //	oa.orElse(d) / oa.orElseGet(s) → elemOf[oa] (Optional<A>; also findFirst().orElse)
 //	Collections.min(as) / Collections.max(as[, cmp]) → elemOf[as]
+//	e.getValue()              → entryValOf[e] (Map.Entry local from entrySet)
 //
 // Optional.get() also works when Optional<A> is tracked in elemOf (single type arg).
 // Fail closed on other methods / unknown receivers.
-func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, valOf, entryValOf map[string]string) string {
 	for val != nil && !val.IsNull() && val.Type() == "parenthesized_expression" {
 		inner := ingest.ChildByField(val, "expression")
 		if inner == nil {
@@ -1652,6 +1748,12 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 			if elemOf != nil {
 				return elemOf[id]
 			}
+		}
+		return ""
+	case "getValue":
+		// e.getValue() — Map.Entry local tracked from entrySet for-var / forEach.
+		if obj != nil && obj.Type() == "identifier" && entryValOf != nil {
+			return entryValOf[ingest.NodeText(obj, content)]
 		}
 		return ""
 	case "next":
