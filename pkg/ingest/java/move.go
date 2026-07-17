@@ -1069,8 +1069,8 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // opt.orElse(d) / opt.orElseGet(s) / opt.orElseThrow([s]) / findFirst().orElse(d) /
 // Collections.min(as) / Collections.max(as) / stream.min/max().orElse(d) /
 // stream.reduce(identity, op) / reduce(op).orElse(d) / reduce(op).ifPresent(...) /
-// stream.toList() / collect(toList()) chained forEach / for (var a : …) and
-// var list = stream.toList() element tracking for later forEach / enhanced-for).
+// stream.toList() / collect(toList()/toSet()) chained forEach / for (var a : …) and
+// var list = stream.toList()/toSet() element tracking for later forEach / enhanced-for).
 // entryValOf maps Map.Entry locals → value type leaf for e.getValue().m()
 // (for (var e : m.entrySet()) / m.entrySet().forEach(e -> …) / Map.Entry<K,A> e).
 func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string) {
@@ -1150,7 +1150,7 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// / e.getValue() when e is a Map.Entry local
 					out[name] = true
 				} else if et := javaStreamPipelineElemType(valN, content, elemOf, valOf); et != "" {
-					// var list = as.stream().toList() / collect(Collectors.toList()) /
+					// var list = as.stream().toList() / collect(Collectors.toList()/toSet()) /
 					// var s = as.stream() / var opt = as.stream().findFirst() —
 					// track collection/stream/Optional element type for later
 					// list.forEach / for (var a : list) / opt.ifPresent (not a scalar A).
@@ -1391,8 +1391,8 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // as / as.stream() / as.iterator() / as.stream().filter(...) → elemOf[as],
 // as.stream().findFirst() / findAny() / min() / max() / reduce(op) → same element
 // (Optional wraps T; ifPresent / orElse use T),
-// as.stream().toList() / collect(Collectors.toList()) / collect(toList()) /
-// collect(Collectors::toList) → same element (List<T> for forEach / enhanced-for),
+// as.stream().toList() / collect(Collectors.toList()/toSet()) / collect(toList()/toSet()) /
+// collect(Collectors::toList / Collectors::toSet) → same element (Collection<T> for forEach / enhanced-for),
 // m.values() → valOf[m],
 // List.of(new A()) / Stream.of(new A()) / Arrays.asList(new A()) → "A",
 // Arrays.stream(as) / Arrays.stream(new A[]{...}) → "A",
@@ -1452,10 +1452,10 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			}
 			return javaStreamPipelineElemType(recv, content, elemOf, valOf)
 		case "collect":
-			// Stream.collect(Collectors.toList()) / collect(toList()) /
-			// collect(Collectors::toList) — List of the stream element type.
-			// Other collectors (groupingBy, mapping, …) fail closed.
-			if !javaIsToListCollector(obj, content) {
+			// Stream.collect(Collectors.toList()/toSet()) / collect(toList()/toSet()) /
+			// collect(Collectors::toList / Collectors::toSet) — Collection of the
+			// stream element type. Other collectors (groupingBy, mapping, …) fail closed.
+			if !javaIsToListOrSetCollector(obj, content) {
 				return ""
 			}
 			return javaStreamPipelineElemType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
@@ -1476,10 +1476,11 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 	}
 }
 
-// javaIsToListCollector reports Stream.collect args that produce List<T> of the
-// stream element type: Collectors.toList() / toList() (static import) /
-// Collectors::toList. Other collectors fail closed.
-func javaIsToListCollector(collectCall *grammar.Node, content []byte) bool {
+// javaIsToListOrSetCollector reports Stream.collect args that produce a
+// Collection of the stream element type: Collectors.toList()/toSet(),
+// toList()/toSet() (static import), Collectors::toList / Collectors::toSet.
+// Other collectors fail closed.
+func javaIsToListOrSetCollector(collectCall *grammar.Node, content []byte) bool {
 	if collectCall == nil {
 		return false
 	}
@@ -1511,9 +1512,14 @@ func javaIsToListCollector(collectCall *grammar.Node, content []byte) bool {
 	}
 	switch first.Type() {
 	case "method_invocation":
-		// toList() / Collectors.toList() — zero-arg only.
+		// toList()/toSet() / Collectors.toList()/toSet() — zero-arg only.
 		nameN := ingest.ChildByField(first, "name")
-		if nameN == nil || ingest.NodeText(nameN, content) != "toList" {
+		if nameN == nil {
+			return false
+		}
+		switch ingest.NodeText(nameN, content) {
+		case "toList", "toSet":
+		default:
 			return false
 		}
 		if obj := ingest.ChildByField(first, "object"); obj != nil {
@@ -1540,7 +1546,7 @@ func javaIsToListCollector(collectCall *grammar.Node, content []byte) bool {
 		}
 		return true
 	case "method_reference":
-		// Collectors::toList — children are receiver, "::", name (no stable fields).
+		// Collectors::toList / Collectors::toSet — children are receiver, "::", name.
 		var parts []*grammar.Node
 		for i := uint32(0); i < first.ChildCount(); i++ {
 			child := first.Child(i)
@@ -1553,7 +1559,12 @@ func javaIsToListCollector(collectCall *grammar.Node, content []byte) bool {
 			return false
 		}
 		obj, name := parts[0], parts[len(parts)-1]
-		if name.Type() != "identifier" || ingest.NodeText(name, content) != "toList" {
+		if name.Type() != "identifier" {
+			return false
+		}
+		switch ingest.NodeText(name, content) {
+		case "toList", "toSet":
+		default:
 			return false
 		}
 		if obj.Type() != "identifier" && obj.Type() != "type_identifier" {
