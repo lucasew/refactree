@@ -3089,7 +3089,8 @@ func goOperandIsBareIdent(n *grammar.Node) bool {
 // collectionIndexElemTypeFunc returns the element/value named type for a
 // collection identifier at a byte offset (as in as[0] / m[k]). Built from
 // function/method/func-literal params, typed local var_specs (slice, array,
-// map), and make(T, ...) short-var / var initializers. ok=false when unknown.
+// map), and collection short-var / var initializers (make, append, composite
+// []*T{…} / map[K]*T{…}). ok=false when unknown.
 func collectionIndexElemTypeFunc(root *grammar.Node, content []byte) func(name string, at uint32) (string, bool) {
 	var bindings []identTypeBinding
 	var walk func(n *grammar.Node)
@@ -3185,10 +3186,72 @@ func rangeSourceFromMakeCall(n *grammar.Node, content []byte) (rangeSourceInfo, 
 	return rangeSourceInfo{}, false
 }
 
+// rangeSourceFromCollectionExpr reports element/value (and map key) type for
+// expressions that construct a typed slice/array/map: composite literals
+// ([]*T{…} / map[K]*T{…}), make(T, …), and append(slice, …) when the first
+// argument is itself such an expression. Used for short-var / untyped-var
+// collection locals and inline index operands (append([]*A{}, x)[0]).
+func rangeSourceFromCollectionExpr(n *grammar.Node, content []byte) (rangeSourceInfo, bool) {
+	if n == nil {
+		return rangeSourceInfo{}, false
+	}
+	if n.Type() == "expression_list" {
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			return rangeSourceFromCollectionExpr(c, content)
+		}
+		return rangeSourceInfo{}, false
+	}
+	if n.Type() == "parenthesized_expression" {
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch == nil || ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			return rangeSourceFromCollectionExpr(ch, content)
+		}
+		return rangeSourceInfo{}, false
+	}
+	if n.Type() == "composite_literal" {
+		if t := ingest.ChildByField(n, "type"); t != nil {
+			return rangeSourceFromTypeNode(t, content)
+		}
+		return rangeSourceInfo{}, false
+	}
+	if n.Type() != "call_expression" {
+		return rangeSourceInfo{}, false
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil {
+		return rangeSourceInfo{}, false
+	}
+	switch ingest.NodeText(fn, content) {
+	case "make":
+		return rangeSourceFromMakeCall(n, content)
+	case "append":
+		args := ingest.ChildByField(n, "arguments")
+		if args == nil {
+			return rangeSourceInfo{}, false
+		}
+		for i := uint32(0); i < args.ChildCount(); i++ {
+			c := args.Child(i)
+			if c == nil || c.Type() == "(" || c.Type() == ")" || c.Type() == "," {
+				continue
+			}
+			// First argument is the slice: append([]*T{}, …) / append(make(...), …).
+			return rangeSourceFromCollectionExpr(c, content)
+		}
+	}
+	return rangeSourceInfo{}, false
+}
+
 // collectLocalCollectionElemBindings records slice/array/map locals from
 // var_spec with an explicit type (var as []*A / var m map[K]*B) and from
-// make(T, ...) short-var / untyped var initializers
-// (as := make([]*A, 1) / var as = make([]*A, 1)).
+// collection short-var / untyped var initializers:
+// make(T, …), append([]*T{}, …), []*T{…} / map[K]*T{…}.
 func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bindings *[]identTypeBinding) {
 	if body == nil {
 		return
@@ -3235,26 +3298,26 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 			if info, ok := rangeSourceFromTypeNode(typeN, content); ok && info.elemType != "" {
 				bindElem(n.StartByte(), names, info)
 			} else {
-				// var as = make([]*A, 1) / var as, bs = make([]*A,1), make([]*B,1)
+				// var as = make/append/[]*A{…} — bind element type positionally.
 				exprs := rhsExprs(ingest.ChildByField(n, "value"))
 				for i, name := range names {
 					if name == "" || name == "_" || i >= len(exprs) {
 						continue
 					}
-					if info, ok := rangeSourceFromMakeCall(exprs[i], content); ok && info.elemType != "" {
+					if info, ok := rangeSourceFromCollectionExpr(exprs[i], content); ok && info.elemType != "" {
 						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
 					}
 				}
 			}
 		case "short_var_declaration":
-			// as := make([]*A, 1) / as, bs := make([]*A,1), make([]*B,1)
+			// as := make/append/[]*A{…} — same positional binding.
 			names := identListNames(ingest.ChildByField(n, "left"), content)
 			exprs := rhsExprs(ingest.ChildByField(n, "right"))
 			for i, name := range names {
 				if name == "" || name == "_" || i >= len(exprs) {
 					continue
 				}
-				if info, ok := rangeSourceFromMakeCall(exprs[i], content); ok && info.elemType != "" {
+				if info, ok := rangeSourceFromCollectionExpr(exprs[i], content); ok && info.elemType != "" {
 					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
 				}
 			}
@@ -3340,19 +3403,10 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType func(na
 				return el
 			}
 		}
-		// Typed composite index: []*A{…}[0] / map[string]*A{…}["k"].
-		if op.Type() == "composite_literal" {
-			if t := ingest.ChildByField(op, "type"); t != nil {
-				if info, ok := rangeSourceFromTypeNode(t, content); ok {
-					return info.elemType
-				}
-			}
-		}
-		// make([]*A, n)[0] / make(map[string]*A)["k"].
-		if op.Type() == "call_expression" {
-			if info, ok := rangeSourceFromMakeCall(op, content); ok {
-				return info.elemType
-			}
+		// Typed collection index: []*A{…}[0] / make([]*A,n)[0] /
+		// append([]*A{}, x)[0] / map[string]*A{…}["k"].
+		if info, ok := rangeSourceFromCollectionExpr(op, content); ok {
+			return info.elemType
 		}
 	}
 	return ""
