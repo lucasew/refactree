@@ -1886,6 +1886,9 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // match sequence captures from a known collection subject
 // (`match items: case [a]:` / `case [a, *rest]:` with `items: list[A]` —
 // fixed slots are elements; *rest is a sequence of the same element type),
+// match mapping value captures from a known dict subject
+// (`match d: case {"k": a}:` / `case {"k": a as x}:` with `d: dict[K, A]` —
+// value slots are the dict value leaf; **rest fails closed),
 // walrus (`a := A()`, `a := next(items)`, `a := next(x for x in items)`,
 // `a := min(items)`, `a := items.pop()`, `a := d.get(k)`, `a := it.__next__()`,
 // `a := items[0]` — same RHS typing as plain assignment),
@@ -2209,8 +2212,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 		case "match_statement":
 			// match items: case [a]: / case [a, *rest]: — bind sequence captures
 			// from the subject's element type (items: list[A] / xs = [A()] / …).
-			// Without this, a.m() is skipped under foreign same-leaf; *rest loops
-			// also stay untyped. as_pattern cases still handled above when walked.
+			// match d: case {"k": a}: — bind mapping value captures from the
+			// subject's dict value leaf (d: dict[K, A] / …). Without this,
+			// a.m() is skipped under foreign same-leaf; *rest loops also stay
+			// untyped. as_pattern cases still handled above when walked.
 			subject := ingest.ChildByField(n, "subject")
 			if subject != nil {
 				if et := pythonIterableElemType(subject, content, elemOf, egElems); et != "" {
@@ -2242,10 +2247,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 	return out
 }
 
-// pythonBindMatchSeqPatterns binds capture names from match list/tuple patterns
-// when the match subject has element type et. Fixed slots → out (if ourReceivers);
-// *rest → elemOf (including foreign, for shadowing). Fails closed on nested /
-// class / as patterns inside the sequence (those use other binders).
+// pythonBindMatchSeqPatterns binds capture names from match list/tuple/mapping
+// patterns when the match subject has element/value type et.
+// Sequence: fixed slots → out (if ourReceivers); *rest → elemOf (including
+// foreign, for shadowing). Mapping: value captures in case {"k": a} → out;
+// **rest fails closed (mapping, not an element). Fails closed on nested /
+// class patterns inside the sequence/value (those use other binders).
 func pythonBindMatchSeqPatterns(n *grammar.Node, content []byte, et string, ourReceivers, out map[string]bool, elemOf map[string]string) {
 	if n == nil || n.IsNull() || et == "" {
 		return
@@ -2266,9 +2273,22 @@ func pythonBindMatchSeqPatterns(n *grammar.Node, content []byte, et string, ourR
 			elemOf[star] = et
 		}
 		return
+	case "dict_pattern":
+		// Mapping values are case_pattern/pattern children; keys are string /
+		// integer / dotted_name (capture keys) and are not value-typed.
+		// **rest (splat_pattern) is a mapping — fail closed.
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() != "case_pattern" && ch.Type() != "pattern" {
+				continue
+			}
+			pythonBindMatchMapValueCaptures(ch, content, et, ourReceivers, out)
+		}
+		return
 	case "case_pattern", "pattern", "as_pattern":
-		// Unwrap; for as_pattern only the left pattern can contain a sequence.
-		// (alias typing is handled by the as_pattern case in pythonTypedLocals.)
+		// Unwrap; for as_pattern only the left pattern can contain a sequence/map.
+		// (alias typing is handled by the as_pattern case in pythonTypedLocals,
+		// or by pythonBindMatchMapValueCaptures for capture-as inside mappings.)
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			ch := n.Child(i)
 			if ch.Type() == "as" || ch.Type() == "as_pattern_target" {
@@ -2285,6 +2305,67 @@ func pythonBindMatchSeqPatterns(n *grammar.Node, content []byte, et string, ourR
 	}
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		pythonBindMatchSeqPatterns(n.Child(i), content, et, ourReceivers, out, elemOf)
+	}
+}
+
+// pythonBindMatchMapValueCaptures binds simple captures (and capture-as aliases)
+// from a mapping value pattern when the dict subject's value type is et.
+// Nested class/list/or patterns fail closed (class `A() as a` is handled by
+// pythonAsPatternBinding when the tree is walked).
+func pythonBindMatchMapValueCaptures(n *grammar.Node, content []byte, et string, ourReceivers, out map[string]bool) {
+	if n == nil || n.IsNull() || et == "" {
+		return
+	}
+	// Unwrap case_pattern/pattern wrappers to the payload.
+	for n != nil && (n.Type() == "case_pattern" || n.Type() == "pattern") {
+		inner := pythonMatchPatternInner(n)
+		if inner == nil {
+			return
+		}
+		n = inner
+	}
+	if n == nil || n.IsNull() {
+		return
+	}
+	switch n.Type() {
+	case "identifier", "dotted_name":
+		name := pythonMatchCaptureName(n, content)
+		if name != "" && ourReceivers[et] {
+			out[name] = true
+		}
+	case "as_pattern":
+		// `a as x` inside a mapping value: both bind to the value (PEP 634).
+		// Left class patterns (A() as a) still get typing from pythonAsPatternBinding.
+		var left *grammar.Node
+		var alias string
+		seenAs := false
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "as" {
+				seenAs = true
+				continue
+			}
+			if !seenAs {
+				left = ch
+				continue
+			}
+			switch ch.Type() {
+			case "identifier":
+				alias = ingest.NodeText(ch, content)
+			case "as_pattern_target":
+				if id := ingest.ChildByType(ch, "identifier"); id != nil {
+					alias = ingest.NodeText(id, content)
+				}
+			}
+		}
+		if alias != "" && ourReceivers[et] {
+			out[alias] = true
+		}
+		if left != nil {
+			pythonBindMatchMapValueCaptures(left, content, et, ourReceivers, out)
+		}
+	default:
+		// Nested list/class/or/value patterns — fail closed for dict-value typing.
 	}
 }
 
