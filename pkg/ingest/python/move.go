@@ -1902,6 +1902,7 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `for a in items.copy()` / `for a in items or []`,
 // `for a in d.values()` / `for k, a in d.items()` with `d: dict[K, A]`,
 // `for i, a in enumerate(items)` / `for a, b in zip(xs, ys)`,
+// `for a, b in zip_longest(xs, ys)` / `for a, b in itertools.zip_longest(xs, ys)`,
 // `for a in reversed/sorted/list/iter(items)`,
 // `for a in filter(pred, items)` / `for a in map(A, names)`,
 // `for a in chain(xs, ys)` / `for a in itertools.chain(xs, ys)`,
@@ -2195,6 +2196,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// for a in items / for a in [A()] / for a in d.values() /
 			// for k, a in d.items() / for a, b in [(A(), B())] /
 			// for i, a in enumerate(items) / for a, b in zip(xs, ys) /
+			// for a, b in zip_longest / itertools.zip_longest /
 			// for a in reversed/sorted/list/iter(items) /
 			// for a in filter(pred, items) / for a in map(A, names) /
 			// for a in chain/islice / itertools.chain/islice /
@@ -2221,7 +2223,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					}
 					break
 				}
-				// for i, a in enumerate(xs) / for a, b in zip(xs, ys)
+				// for i, a in enumerate(xs) / for a, b in zip(xs, ys) /
+				// for a, b in zip_longest(xs, ys) / itertools.zip_longest(...)
 				if types := pythonEnumerateZipTargetTypes(right, content, elemOf, egElems); len(types) > 0 {
 					for i, name := range targets {
 						if i < len(types) && ourReceivers[types[i]] {
@@ -2898,21 +2901,45 @@ func pythonDictItemsValueType(right *grammar.Node, content []byte, elemOf map[st
 
 // pythonEnumerateZipTargetTypes returns per-unpack-target element types for
 // enumerate(xs) → ["", elem(xs)] (index untyped; value is the iterable element)
-// and zip(a, b, ...) → [elem(a), elem(b), ...]. Unknown args yield "" slots;
-// fails closed when the call is not bare enumerate/zip with resolvable args.
+// and zip / zip_longest(a, b, ...) → [elem(a), elem(b), ...].
+// zip_longest is accepted bare (from itertools import zip_longest) or as
+// itertools.zip_longest; fillvalue kwargs are ignored (same as zip strict=).
+// Unknown args yield "" slots; fails closed when the call is not a resolvable
+// enumerate/zip/zip_longest form.
 func pythonEnumerateZipTargetTypes(right *grammar.Node, content []byte, elemOf, egElems map[string]string) []string {
 	if right == nil || right.Type() != "call" {
 		return nil
 	}
 	fn := ingest.ChildByField(right, "function")
-	if fn == nil || fn.Type() != "identifier" {
+	if fn == nil {
+		return nil
+	}
+	var fname string
+	switch fn.Type() {
+	case "identifier":
+		fname = ingest.NodeText(fn, content)
+	case "attribute":
+		// itertools.zip_longest(...) only — other module attrs fail closed.
+		objN := ingest.ChildByField(fn, "object")
+		attrN := ingest.ChildByField(fn, "attribute")
+		if objN == nil || attrN == nil || objN.Type() != "identifier" {
+			return nil
+		}
+		if ingest.NodeText(objN, content) != "itertools" {
+			return nil
+		}
+		if ingest.NodeText(attrN, content) != "zip_longest" {
+			return nil
+		}
+		fname = "zip_longest"
+	default:
 		return nil
 	}
 	args, ok := pythonCallPositionalArgNodes(right)
 	if !ok {
 		return nil
 	}
-	switch ingest.NodeText(fn, content) {
+	switch fname {
 	case "enumerate":
 		if len(args) == 0 {
 			return nil
@@ -2923,7 +2950,7 @@ func pythonEnumerateZipTargetTypes(right *grammar.Node, content []byte, elemOf, 
 		}
 		// targets: index (untyped), element
 		return []string{"", et}
-	case "zip":
+	case "zip", "zip_longest":
 		if len(args) == 0 {
 			return nil
 		}
@@ -2968,7 +2995,8 @@ func pythonCallPositionalArgNodes(call *grammar.Node) (args []*grammar.Node, ok 
 		case "(", ")", ",", "comment":
 			continue
 		case "keyword_argument":
-			// enumerate(xs, start=1) / zip(a, b, strict=True) — ignore kwargs.
+			// enumerate(xs, start=1) / zip(a, b, strict=True) /
+			// zip_longest(a, b, fillvalue=None) — ignore kwargs.
 			continue
 		case "list_splat", "dictionary_splat", "parenthesized_list_splat":
 			return nil, false
