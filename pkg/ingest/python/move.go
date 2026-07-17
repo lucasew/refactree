@@ -2001,6 +2001,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								out[lname] = true
 							}
 						}
+						// a = reduce(fn, items) / reduce(fn, items, init) — from functools
+						// import reduce; result type is the iterable element (fold of same
+						// leaf). Multi-arg without iterable fails closed inside helper.
+						if fname == "reduce" {
+							if et := pythonReduceElemType(right, content, elemOf, egElems); ourReceivers[et] {
+								out[lname] = true
+							}
+						}
 					} else if fn != nil && fn.Type() == "attribute" {
 						if attr := ingest.ChildByField(fn, "attribute"); attr != nil {
 							switch ingest.NodeText(attr, content) {
@@ -2024,6 +2032,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							case "heappop":
 								// a = heapq.heappop(items) — module-qualified; element of 1st arg.
 								if et := pythonHeappopElemType(right, content, elemOf, egElems); ourReceivers[et] {
+									out[lname] = true
+								}
+							case "reduce":
+								// a = functools.reduce(fn, items[, init]) — module-qualified.
+								if et := pythonReduceElemType(right, content, elemOf, egElems); ourReceivers[et] {
 									out[lname] = true
 								}
 							case "__next__":
@@ -2134,6 +2147,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							out[lname] = true
 						}
 					}
+					// a := reduce(fn, items) / reduce(fn, items, init)
+					if fname == "reduce" {
+						if et := pythonReduceElemType(valueN, content, elemOf, egElems); ourReceivers[et] {
+							out[lname] = true
+						}
+					}
 				} else if fn != nil && fn.Type() == "attribute" {
 					if attr := ingest.ChildByField(fn, "attribute"); attr != nil {
 						switch ingest.NodeText(attr, content) {
@@ -2154,6 +2173,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						case "heappop":
 							// a := heapq.heappop(items)
 							if et := pythonHeappopElemType(valueN, content, elemOf, egElems); ourReceivers[et] {
+								out[lname] = true
+							}
+						case "reduce":
+							// a := functools.reduce(fn, items[, init])
+							if et := pythonReduceElemType(valueN, content, elemOf, egElems); ourReceivers[et] {
 								out[lname] = true
 							}
 						case "__next__":
@@ -2621,6 +2645,45 @@ func pythonHeappopElemType(call *grammar.Node, content []byte, elemOf, egElems m
 		return ""
 	}
 	return pythonNextElemType(call, content, elemOf, egElems)
+}
+
+// pythonReduceElemType recovers the element type of reduce(function, iterable)
+// / reduce(function, iterable, initializer) and functools.reduce(...).
+// The iterable is the second positional arg; its element type is the fold result
+// for same-leaf accumulators (common product case). Bare reduce (from functools
+// import reduce) and module-qualified functools.reduce are accepted; other
+// receivers fail closed. Fewer than 2 positional args fails closed.
+func pythonReduceElemType(call *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil {
+		return ""
+	}
+	switch fn.Type() {
+	case "identifier":
+		if ingest.NodeText(fn, content) != "reduce" {
+			return ""
+		}
+	case "attribute":
+		attr := ingest.ChildByField(fn, "attribute")
+		obj := ingest.ChildByField(fn, "object")
+		if attr == nil || ingest.NodeText(attr, content) != "reduce" {
+			return ""
+		}
+		if obj == nil || obj.Type() != "identifier" || ingest.NodeText(obj, content) != "functools" {
+			return ""
+		}
+	default:
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) < 2 {
+		return ""
+	}
+	// reduce(function, iterable[, initializer]) — element type of the iterable.
+	return pythonIterableElemType(args[1], content, elemOf, egElems)
 }
 
 // pythonSubscriptElemType recovers the element type of items[i] / d[k] when the
