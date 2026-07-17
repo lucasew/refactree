@@ -1058,6 +1058,7 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // / List.of(new A()).forEach(a -> a.m()) / Stream.of(new A()).map(a -> a.m())
 // / Arrays.stream(as).forEach(a -> a.m()) / Arrays.stream(new A[]{...}).map(a -> a.m())
 // / as.stream().findFirst().ifPresent(a -> a.m()) / Optional.of(new A()).ifPresent(a -> a.m())
+// / Optional.flatMap(a -> Optional.of(a)).ifPresent(x -> x.m()) / flatMap(...).orElse(d) /
 // / Optional<A>.ifPresent(a -> a.m()) / opt.ifPresentOrElse(a -> a.m(), () -> {}) /
 // / Map<K,A>.forEach((k,v) -> v.m()) /
 // Map.computeIfPresent/compute/replaceAll((k,v) -> v.m()) / Map.merge((v1,v2) -> v1.m()) /
@@ -1396,8 +1397,11 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // m.values() → valOf[m],
 // List.of(new A()) / Stream.of(new A()) / Arrays.asList(new A()) → "A",
 // Arrays.stream(as) / Arrays.stream(new A[]{...}) → "A",
-// Optional.of(new A()) / Optional.ofNullable(new A()) → "A".
-// Type-changing stages (map/flatMap) fail closed so later lambdas are not mis-typed.
+// Optional.of(new A()) / Optional.ofNullable(new A()) → "A",
+// Optional.flatMap(a -> Optional.of(a)) / ofNullable(a) / Optional::of → same element
+// when the mapper clearly rewraps T (see javaFlatMapResultElemType).
+// Type-changing stages (map / unknown flatMap mappers) fail closed so later
+// lambdas are not mis-typed.
 func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
 		inner := ingest.ChildByField(obj, "expression")
@@ -1451,6 +1455,11 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 				return javaArraysStreamElemType(obj, content, elemOf, valOf)
 			}
 			return javaStreamPipelineElemType(recv, content, elemOf, valOf)
+		case "flatMap":
+			// Optional.flatMap (and Stream.flatMap with the same rewrap shapes):
+			// recover U from mapper when clearly Optional.of/ofNullable rewrap
+			// or another tracked Optional/collection local. Unknown mappers fail closed.
+			return javaFlatMapResultElemType(obj, content, elemOf, valOf)
 		case "collect":
 			// Stream.collect(Collectors.toList()/toSet()) / collect(toList()/toSet()) /
 			// collect(Collectors::toList / Collectors::toSet) — Collection of the
@@ -1468,12 +1477,184 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// — element type from homogeneous new T(...) args.
 			return javaStaticCollectionOfElemType(obj, content, name)
 		default:
-			// map/flatMap/… change the element type — fail closed.
+			// map/flatMapTo*/… change the element type — fail closed.
 			return ""
 		}
 	default:
 		return ""
 	}
+}
+
+// javaFlatMapResultElemType recovers T after Optional.flatMap(mapper) when the
+// mapper clearly yields Optional<T> of the same (or known) element:
+//
+//	oa.flatMap(a -> Optional.of(a)) / Optional.ofNullable(a) → elem(oa)
+//	oa.flatMap(Optional::of) / Optional::ofNullable → elem(oa)
+//	oa.flatMap(a -> other) when other is tracked in elemOf → elemOf[other]
+//	oa.flatMap(a -> Optional.of(new A())) → A
+//
+// Expression-bodied lambdas and Optional::of / ofNullable only; blocks and
+// other mappers fail closed so Stream.flatMap type changes stay unbound.
+func javaFlatMapResultElemType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	var args *grammar.Node
+	for i := uint32(0); i < call.ChildCount(); i++ {
+		if call.Child(i).Type() == "argument_list" {
+			args = call.Child(i)
+			break
+		}
+	}
+	if args == nil {
+		return ""
+	}
+	var first *grammar.Node
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		switch ch.Type() {
+		case "(", ")", ",", "comment":
+			continue
+		default:
+			first = ch
+		}
+		if first != nil {
+			break
+		}
+	}
+	if first == nil {
+		return ""
+	}
+	recv := ingest.ChildByField(call, "object")
+	switch first.Type() {
+	case "method_reference":
+		if javaIsOptionalOfMethodRef(first, content) {
+			return javaStreamPipelineElemType(recv, content, elemOf, valOf)
+		}
+		return ""
+	case "lambda_expression":
+		body := ingest.ChildByField(first, "body")
+		if body == nil {
+			return ""
+		}
+		params := javaInferredLambdaParamNames(first, content)
+		param := ""
+		if len(params) == 1 {
+			param = params[0]
+		}
+		return javaFlatMapMapperBodyElemType(body, param, recv, content, elemOf, valOf)
+	default:
+		return ""
+	}
+}
+
+// javaIsOptionalOfMethodRef reports Optional::of / Optional::ofNullable.
+func javaIsOptionalOfMethodRef(ref *grammar.Node, content []byte) bool {
+	if ref == nil || ref.Type() != "method_reference" {
+		return false
+	}
+	var parts []*grammar.Node
+	for i := uint32(0); i < ref.ChildCount(); i++ {
+		ch := ref.Child(i)
+		if ch.Type() == "::" {
+			continue
+		}
+		parts = append(parts, ch)
+	}
+	if len(parts) < 2 {
+		return false
+	}
+	obj, name := parts[0], parts[len(parts)-1]
+	if (obj.Type() != "identifier" && obj.Type() != "type_identifier") || name.Type() != "identifier" {
+		return false
+	}
+	if ingest.NodeText(obj, content) != "Optional" {
+		return false
+	}
+	switch ingest.NodeText(name, content) {
+	case "of", "ofNullable":
+		return true
+	default:
+		return false
+	}
+}
+
+// javaFlatMapMapperBodyElemType recovers U from an expression-bodied flatMap mapper.
+func javaFlatMapMapperBodyElemType(body *grammar.Node, param string, recv *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	for body != nil && !body.IsNull() && body.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(body, "expression")
+		if inner == nil {
+			for i := uint32(0); i < body.ChildCount(); i++ {
+				ch := body.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		body = inner
+	}
+	if body == nil || body.IsNull() {
+		return ""
+	}
+	switch body.Type() {
+	case "identifier":
+		// a -> otherOpt (Optional/collection local tracked in elemOf).
+		if elemOf == nil {
+			return ""
+		}
+		return elemOf[ingest.NodeText(body, content)]
+	case "method_invocation":
+		nameN := ingest.ChildByField(body, "name")
+		if nameN == nil {
+			return ""
+		}
+		name := ingest.NodeText(nameN, content)
+		switch name {
+		case "of", "ofNullable":
+			obj := ingest.ChildByField(body, "object")
+			if obj == nil || (obj.Type() != "identifier" && obj.Type() != "type_identifier") {
+				return ""
+			}
+			if ingest.NodeText(obj, content) != "Optional" {
+				return ""
+			}
+			// a -> Optional.of(a) / ofNullable(a) — same element as receiver.
+			if arg := javaFirstCallArg(body); arg != nil && arg.Type() == "identifier" && param != "" && ingest.NodeText(arg, content) == param {
+				return javaStreamPipelineElemType(recv, content, elemOf, valOf)
+			}
+			// a -> Optional.of(new A()) — element from creation args.
+			return javaStaticCollectionOfElemType(body, content, name)
+		default:
+			return ""
+		}
+	default:
+		return ""
+	}
+}
+
+// javaFirstCallArg returns the first non-punctuation argument of a method_invocation.
+func javaFirstCallArg(call *grammar.Node) *grammar.Node {
+	if call == nil {
+		return nil
+	}
+	for i := uint32(0); i < call.ChildCount(); i++ {
+		if call.Child(i).Type() != "argument_list" {
+			continue
+		}
+		al := call.Child(i)
+		for j := uint32(0); j < al.ChildCount(); j++ {
+			ch := al.Child(j)
+			switch ch.Type() {
+			case "(", ")", ",", "comment":
+				continue
+			default:
+				return ch
+			}
+		}
+	}
+	return nil
 }
 
 // javaIsToListOrSetCollector reports Stream.collect args that produce a
