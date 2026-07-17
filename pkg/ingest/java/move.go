@@ -1049,7 +1049,8 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // from collection/array element types, and var locals from collection accessors
 // (list.get(i) / map.get(k) / it.next() / list.iterator().next() /
 // queue.poll()/peek() / list.remove(i) / list.getFirst()/getLast() /
-// opt.orElse(d) / opt.orElseGet(s) / findFirst().orElse(d)).
+// opt.orElse(d) / opt.orElseGet(s) / findFirst().orElse(d) /
+// Collections.min(as) / Collections.max(as) / stream.min/max().orElse(d)).
 func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]bool {
 	out := map[string]bool{}
 	if root == nil || len(ourReceivers) == 0 {
@@ -1336,7 +1337,8 @@ func javaMapValueBiLambdaMethod(method string) bool {
 
 // javaStreamPipelineElemType recovers the element type of a stream pipeline object:
 // as / as.stream() / as.iterator() / as.stream().filter(...) → elemOf[as],
-// as.stream().findFirst() / findAny() → same element (Optional wraps T; ifPresent uses T),
+// as.stream().findFirst() / findAny() / min() / max() → same element
+// (Optional wraps T; ifPresent / orElse use T),
 // m.values() → valOf[m],
 // List.of(new A()) / Stream.of(new A()) / Arrays.asList(new A()) → "A",
 // Optional.of(new A()) / Optional.ofNullable(new A()) → "A".
@@ -1375,8 +1377,9 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			"filter", "peek", "sorted", "distinct", "limit", "skip",
 			"unordered", "sequential", "parallel", "onClose",
 			"takeWhile", "dropWhile",
-			// findFirst/findAny return Optional<T>; element T is preserved for ifPresent.
-			"findFirst", "findAny":
+			// findFirst/findAny/min/max return Optional<T>; element T is preserved
+			// for ifPresent / orElse (Comparator args do not change the element type).
+			"findFirst", "findAny", "min", "max":
 			return javaStreamPipelineElemType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
 		case "values":
 			// m.values() — Collection of map values (valOf[m]).
@@ -1543,6 +1546,7 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	ia.next()                 → elemOf[ia]   (Iterator<A>)
 //	as.iterator().next()      → elemOf[as]   (via type-preserving iterator())
 //	oa.orElse(d) / oa.orElseGet(s) → elemOf[oa] (Optional<A>; also findFirst().orElse)
+//	Collections.min(as) / Collections.max(as[, cmp]) → elemOf[as]
 //
 // Optional.get() also works when Optional<A> is tracked in elemOf (single type arg).
 // Fail closed on other methods / unknown receivers.
@@ -1602,9 +1606,50 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// Optional.orElse / orElseGet return T; receiver may be Optional<A> local
 		// or a pipeline that yields Optional (findFirst/findAny / Optional.of).
 		return javaStreamPipelineElemType(obj, content, elemOf, valOf)
+	case "min", "max":
+		// Collections.min(coll) / Collections.max(coll[, cmp]) return the element type.
+		// Stream.min/max return Optional — bind via orElse/ifPresent on the pipeline,
+		// not as a bare var of the element type.
+		return javaCollectionsMinMaxElemType(val, obj, content, elemOf, valOf)
 	default:
 		return ""
 	}
+}
+
+// javaCollectionsMinMaxElemType recovers T from Collections.min/max(coll[, cmp]).
+// First argument is the collection; Comparator does not change the element type.
+// Non-Collections receivers fail closed (Stream.min returns Optional, not T).
+func javaCollectionsMinMaxElemType(call, obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	if call == nil || obj == nil {
+		return ""
+	}
+	if obj.Type() != "identifier" && obj.Type() != "type_identifier" {
+		return ""
+	}
+	if ingest.NodeText(obj, content) != "Collections" {
+		return ""
+	}
+	var args *grammar.Node
+	for i := uint32(0); i < call.ChildCount(); i++ {
+		if call.Child(i).Type() == "argument_list" {
+			args = call.Child(i)
+			break
+		}
+	}
+	if args == nil {
+		return ""
+	}
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		switch ch.Type() {
+		case "(", ")", ",", "comment":
+			continue
+		default:
+			// Collections.min(as) / Collections.min(as, cmp) — element of first arg.
+			return javaStreamPipelineElemType(ch, content, elemOf, valOf)
+		}
+	}
+	return ""
 }
 
 // javaInferExprType recovers a simple type leaf from a var initializer expression.
