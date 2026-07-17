@@ -1514,12 +1514,19 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 }
 
 // jsTypedLocals maps local names constructed as ourReceivers (const b = new Box()).
-// Also covers simple TS-style typed parameters when present as type annotations.
+// Also covers:
+//   - simple TS-style typed parameters (b: Box)
+//   - array element types for params (xs: A[] / Array<A> / ReadonlyArray<A>)
+//   - homogeneous [new A(), …] locals as element sources
+//   - untyped forEach/map/filter/… callback params when the receiver is a known
+//     collection of ourReceivers (xs.forEach(a => a.m()) with xs: A[])
 func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]bool {
 	out := map[string]bool{}
 	if root == nil || len(ourReceivers) == 0 {
 		return out
 	}
+	// Collection name → element type leaf (for callback binding).
+	elemOf := map[string]string{}
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
 		if n == nil || n.IsNull() {
@@ -1528,6 +1535,7 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 		switch n.Type() {
 		case "lexical_declaration", "variable_declaration":
 			// const box = new Box(); var box = new Box()
+			// const xs = [new A()] — track element type for later callbacks
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
 				if child.Type() != "variable_declarator" {
@@ -1538,12 +1546,16 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 				if nameN == nil || nameN.Type() != "identifier" || valN == nil {
 					continue
 				}
+				name := ingest.NodeText(nameN, content)
 				if ctor := jsNewExpressionType(valN, content); ourReceivers[ctor] {
-					out[ingest.NodeText(nameN, content)] = true
+					out[name] = true
+				}
+				if el := jsHomogeneousNewArrayElement(valN, content); el != "" && ourReceivers[el] {
+					elemOf[name] = el
 				}
 			}
 		case "required_parameter", "optional_parameter", "assignment_pattern":
-			// TS: (b: Box) / (b: Box = ...)
+			// TS: (b: Box) / (b: Box = ...) / (xs: A[]) / (xs: Array<A>)
 			nameN := ingest.ChildByField(n, "pattern")
 			if nameN == nil {
 				nameN = ingest.ChildByField(n, "name")
@@ -1553,10 +1565,18 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 			}
 			typeN := ingest.ChildByField(n, "type")
 			if nameN != nil && nameN.Type() == "identifier" && typeN != nil {
+				name := ingest.NodeText(nameN, content)
 				if tn := jsTypeName(typeN, content); ourReceivers[tn] {
-					out[ingest.NodeText(nameN, content)] = true
+					out[name] = true
+				}
+				if el := jsArrayElementType(typeN, content); el != "" && ourReceivers[el] {
+					elemOf[name] = el
 				}
 			}
+		case "call_expression":
+			// xs.forEach(a => a.m()) / xs.map(a => a.m()) — bind first untyped
+			// callback param from known collection element type.
+			jsBindArrayCallbackParams(n, content, ourReceivers, elemOf, out)
 		case "formal_parameters":
 			// plain JS has no types; walk children for TS parameters
 		}
@@ -1566,6 +1586,205 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 	}
 	walk(root)
 	return out
+}
+
+// jsBindArrayCallbackParams types the first untyped parameter of a forEach /
+// map / filter / … callback when the call receiver is a known collection of
+// ourReceivers. Multi-param callbacks (reduce) and typed params are left alone.
+func jsBindArrayCallbackParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, elemOf map[string]string, out map[string]bool) {
+	if call == nil || call.Type() != "call_expression" || out == nil {
+		return
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "member_expression" {
+		return
+	}
+	prop := ingest.ChildByField(fn, "property")
+	if prop == nil || !jsArrayElementCallbackMethod(ingest.NodeText(prop, content)) {
+		return
+	}
+	obj := ingest.ChildByField(fn, "object")
+	if obj == nil || obj.Type() != "identifier" {
+		return
+	}
+	el := elemOf[ingest.NodeText(obj, content)]
+	if el == "" || !ourReceivers[el] {
+		return
+	}
+	args := ingest.ChildByField(call, "arguments")
+	if args == nil {
+		return
+	}
+	var cb *grammar.Node
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		c := args.Child(i)
+		if c == nil {
+			continue
+		}
+		switch c.Type() {
+		case "(", ")", ",":
+			continue
+		case "arrow_function", "function", "function_expression":
+			cb = c
+		default:
+			// First non-callback arg (thisArg, etc.) — fail closed for that call.
+			return
+		}
+		break
+	}
+	if cb == nil {
+		return
+	}
+	for _, name := range jsInferredCallbackParamNames(cb, content) {
+		if name != "" && name != "_" {
+			out[name] = true
+		}
+	}
+}
+
+// jsArrayElementCallbackMethod reports methods whose first callback argument
+// receives the collection element (not reduce/reduceRight accumulators).
+func jsArrayElementCallbackMethod(method string) bool {
+	switch method {
+	case "forEach", "map", "filter", "some", "every", "find", "findIndex",
+		"flatMap", "findLast", "findLastIndex":
+		return true
+	default:
+		return false
+	}
+}
+
+// jsInferredCallbackParamNames returns the first untyped parameter name for
+// arrow/function callbacks: `a => …`, `(a) => …`, `function(a) { … }`.
+// Typed params ((a: A) =>) are skipped (already handled as required_parameter).
+// Multi-param forms bind only the first name (element); rest/destructure fail closed.
+func jsInferredCallbackParamNames(cb *grammar.Node, content []byte) []string {
+	if cb == nil {
+		return nil
+	}
+	// arrow_function: single param as field "parameter", or formal_parameters.
+	if p := ingest.ChildByField(cb, "parameter"); p != nil && p.Type() == "identifier" {
+		return []string{ingest.NodeText(p, content)}
+	}
+	params := ingest.ChildByField(cb, "parameters")
+	if params == nil {
+		// Some grammars nest formal_parameters without a field name.
+		params = ingest.ChildByType(cb, "formal_parameters")
+	}
+	if params == nil || params.Type() != "formal_parameters" {
+		return nil
+	}
+	for i := uint32(0); i < params.ChildCount(); i++ {
+		c := params.Child(i)
+		if c == nil {
+			continue
+		}
+		switch c.Type() {
+		case "(", ")", ",":
+			continue
+		case "identifier":
+			return []string{ingest.NodeText(c, content)}
+		case "required_parameter", "optional_parameter":
+			// Typed TS param — already covered by required_parameter walk.
+			// Untyped required_parameter still has a pattern identifier.
+			if ingest.ChildByField(c, "type") != nil {
+				return nil
+			}
+			nameN := ingest.ChildByField(c, "pattern")
+			if nameN == nil {
+				nameN = ingest.ChildByField(c, "name")
+			}
+			if nameN == nil {
+				nameN = ingest.ChildByType(c, "identifier")
+			}
+			if nameN != nil && nameN.Type() == "identifier" {
+				return []string{ingest.NodeText(nameN, content)}
+			}
+			return nil
+		default:
+			// rest_pattern, object_pattern, array_pattern — fail closed.
+			return nil
+		}
+	}
+	return nil
+}
+
+// jsHomogeneousNewArrayElement returns the shared constructor name when every
+// non-punctuation array element is `new T(...)` with the same T; empty otherwise.
+func jsHomogeneousNewArrayElement(arr *grammar.Node, content []byte) string {
+	if arr == nil || arr.Type() != "array" {
+		return ""
+	}
+	var el string
+	for i := uint32(0); i < arr.ChildCount(); i++ {
+		c := arr.Child(i)
+		if c == nil {
+			continue
+		}
+		switch c.Type() {
+		case "[", "]", ",":
+			continue
+		}
+		ctor := jsNewExpressionType(c, content)
+		if ctor == "" {
+			return ""
+		}
+		if el == "" {
+			el = ctor
+		} else if el != ctor {
+			return ""
+		}
+	}
+	return el
+}
+
+// jsArrayElementType returns the element type for A[] / Array<A> / ReadonlyArray<A>
+// annotations (type_annotation or bare type node). Empty when not an array form.
+func jsArrayElementType(typeN *grammar.Node, content []byte) string {
+	if typeN == nil {
+		return ""
+	}
+	if typeN.Type() == "type_annotation" {
+		for i := uint32(0); i < typeN.ChildCount(); i++ {
+			c := typeN.Child(i)
+			if c == nil || c.Type() == ":" {
+				continue
+			}
+			typeN = c
+			break
+		}
+	}
+	switch typeN.Type() {
+	case "array_type":
+		for i := uint32(0); i < typeN.ChildCount(); i++ {
+			c := typeN.Child(i)
+			if c == nil || c.Type() == "[" || c.Type() == "]" {
+				continue
+			}
+			return jsTypeName(c, content)
+		}
+	case "generic_type":
+		nameN := ingest.ChildByField(typeN, "name")
+		if nameN == nil {
+			return ""
+		}
+		name := ingest.NodeText(nameN, content)
+		if name != "Array" && name != "ReadonlyArray" {
+			return ""
+		}
+		args := ingest.ChildByField(typeN, "type_arguments")
+		if args == nil {
+			return ""
+		}
+		for i := uint32(0); i < args.ChildCount(); i++ {
+			c := args.Child(i)
+			if c == nil || c.Type() == "<" || c.Type() == ">" || c.Type() == "," {
+				continue
+			}
+			return jsTypeName(c, content)
+		}
+	}
+	return ""
 }
 
 // jsNewExpressionType returns the constructor identifier for `new Box(...)`.
