@@ -1041,6 +1041,7 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // Also binds untyped stream/collection lambda params when the pipeline element
 // type is ours (List<A> as → as.stream().map(a -> a.m()) / as.iterator().forEachRemaining(a -> a.m())
 // / List.of(new A()).forEach(a -> a.m()) / Stream.of(new A()).map(a -> a.m())
+// / Arrays.stream(as).forEach(a -> a.m()) / Arrays.stream(new A[]{...}).map(a -> a.m())
 // / as.stream().findFirst().ifPresent(a -> a.m()) / Optional.of(new A()).ifPresent(a -> a.m())
 // / Optional<A>.ifPresent(a -> a.m()) / opt.ifPresentOrElse(a -> a.m(), () -> {}) /
 // / Map<K,A>.forEach((k,v) -> v.m()) /
@@ -1341,6 +1342,7 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // (Optional wraps T; ifPresent / orElse use T),
 // m.values() → valOf[m],
 // List.of(new A()) / Stream.of(new A()) / Arrays.asList(new A()) → "A",
+// Arrays.stream(as) / Arrays.stream(new A[]{...}) → "A",
 // Optional.of(new A()) / Optional.ofNullable(new A()) → "A".
 // Type-changing stages (map/flatMap) fail closed so later lambdas are not mis-typed.
 func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
@@ -1367,6 +1369,12 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			return ""
 		}
 		return elemOf[ingest.NodeText(obj, content)]
+	case "array_creation_expression":
+		// new A[]{...} / new A[n] — element type for Arrays.stream first arg.
+		if typeN := ingest.ChildByField(obj, "type"); typeN != nil {
+			return javaTypeName(typeN, content)
+		}
+		return ""
 	case "method_invocation":
 		nameN := ingest.ChildByField(obj, "name")
 		if nameN == nil {
@@ -1380,7 +1388,13 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// findFirst/findAny/min/max return Optional<T>; element T is preserved
 			// for ifPresent / orElse (Comparator args do not change the element type).
 			"findFirst", "findAny", "min", "max":
-			return javaStreamPipelineElemType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
+			recv := ingest.ChildByField(obj, "object")
+			// Arrays.stream(arr[, from, to]) — element type from first arg, not
+			// from receiver Arrays (unlike coll.stream() which uses elemOf[coll]).
+			if name == "stream" && javaIsArraysReceiver(recv, content) {
+				return javaArraysStreamElemType(obj, content, elemOf, valOf)
+			}
+			return javaStreamPipelineElemType(recv, content, elemOf, valOf)
 		case "values":
 			// m.values() — Collection of map values (valOf[m]).
 			return javaMapPipelineValueType(ingest.ChildByField(obj, "object"), content, valOf)
@@ -1396,6 +1410,47 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 	default:
 		return ""
 	}
+}
+
+// javaIsArraysReceiver reports whether obj is the Arrays type name (static call site).
+func javaIsArraysReceiver(obj *grammar.Node, content []byte) bool {
+	if obj == nil || obj.IsNull() {
+		return false
+	}
+	if obj.Type() != "identifier" && obj.Type() != "type_identifier" {
+		return false
+	}
+	return ingest.NodeText(obj, content) == "Arrays"
+}
+
+// javaArraysStreamElemType recovers T from Arrays.stream(T[] arr[, from, to]).
+// First argument is the array (identifier with elemOf, or new T[]{...}).
+// Range bounds do not change the element type.
+func javaArraysStreamElemType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	if call == nil {
+		return ""
+	}
+	var args *grammar.Node
+	for i := uint32(0); i < call.ChildCount(); i++ {
+		if call.Child(i).Type() == "argument_list" {
+			args = call.Child(i)
+			break
+		}
+	}
+	if args == nil {
+		return ""
+	}
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		switch ch.Type() {
+		case "(", ")", ",", "comment":
+			continue
+		default:
+			// Arrays.stream(as) / Arrays.stream(new A[]{...}) / Arrays.stream(as, 0, 1)
+			return javaStreamPipelineElemType(ch, content, elemOf, valOf)
+		}
+	}
+	return ""
 }
 
 // javaMapPipelineValueType recovers the value type of a Map-typed expression:
