@@ -1048,7 +1048,8 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // map.values().forEach(v -> v.m()) types a/v as A), for (var a : as) loop variables
 // from collection/array element types, and var locals from collection accessors
 // (list.get(i) / map.get(k) / it.next() / list.iterator().next() /
-// queue.poll()/peek() / list.remove(i) / list.getFirst()/getLast()).
+// queue.poll()/peek() / list.remove(i) / list.getFirst()/getLast() /
+// opt.orElse(d) / opt.orElseGet(s) / findFirst().orElse(d)).
 func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]bool {
 	out := map[string]bool{}
 	if root == nil || len(ourReceivers) == 0 {
@@ -1541,6 +1542,7 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	as.getFirst() / as.getLast() → elemOf[as] (SequencedCollection / List / Deque)
 //	ia.next()                 → elemOf[ia]   (Iterator<A>)
 //	as.iterator().next()      → elemOf[as]   (via type-preserving iterator())
+//	oa.orElse(d) / oa.orElseGet(s) → elemOf[oa] (Optional<A>; also findFirst().orElse)
 //
 // Optional.get() also works when Optional<A> is tracked in elemOf (single type arg).
 // Fail closed on other methods / unknown receivers.
@@ -1595,6 +1597,10 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		return ""
 	case "next":
 		// it.next() / as.iterator().next() — element of iterator or pipeline.
+		return javaStreamPipelineElemType(obj, content, elemOf, valOf)
+	case "orElse", "orElseGet":
+		// Optional.orElse / orElseGet return T; receiver may be Optional<A> local
+		// or a pipeline that yields Optional (findFirst/findAny / Optional.of).
 		return javaStreamPipelineElemType(obj, content, elemOf, valOf)
 	default:
 		return ""
