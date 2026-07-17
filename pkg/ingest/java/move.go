@@ -1068,7 +1068,9 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // queue.poll()/peek() / list.remove(i) / list.getFirst()/getLast() /
 // opt.orElse(d) / opt.orElseGet(s) / opt.orElseThrow([s]) / findFirst().orElse(d) /
 // Collections.min(as) / Collections.max(as) / stream.min/max().orElse(d) /
-// stream.reduce(identity, op) / reduce(op).orElse(d) / reduce(op).ifPresent(...)).
+// stream.reduce(identity, op) / reduce(op).orElse(d) / reduce(op).ifPresent(...) /
+// stream.toList() / collect(toList()) chained forEach / for (var a : …) and
+// var list = stream.toList() element tracking for later forEach / enhanced-for).
 // entryValOf maps Map.Entry locals → value type leaf for e.getValue().m()
 // (for (var e : m.entrySet()) / m.entrySet().forEach(e -> …) / Map.Entry<K,A> e).
 func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string) {
@@ -1147,6 +1149,12 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// / qa.poll() / qa.peek() / as.remove(0) / as.getFirst()
 					// / e.getValue() when e is a Map.Entry local
 					out[name] = true
+				} else if et := javaStreamPipelineElemType(valN, content, elemOf, valOf); et != "" {
+					// var list = as.stream().toList() / collect(Collectors.toList()) /
+					// var s = as.stream() / var opt = as.stream().findFirst() —
+					// track collection/stream/Optional element type for later
+					// list.forEach / for (var a : list) / opt.ifPresent (not a scalar A).
+					elemOf[name] = et
 				}
 			}
 		case "enhanced_for_statement":
@@ -1383,6 +1391,8 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // as / as.stream() / as.iterator() / as.stream().filter(...) → elemOf[as],
 // as.stream().findFirst() / findAny() / min() / max() / reduce(op) → same element
 // (Optional wraps T; ifPresent / orElse use T),
+// as.stream().toList() / collect(Collectors.toList()) / collect(toList()) /
+// collect(Collectors::toList) → same element (List<T> for forEach / enhanced-for),
 // m.values() → valOf[m],
 // List.of(new A()) / Stream.of(new A()) / Arrays.asList(new A()) → "A",
 // Arrays.stream(as) / Arrays.stream(new A[]{...}) → "A",
@@ -1432,7 +1442,8 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// element T is preserved for ifPresent / orElse (Comparator/op args do
 			// not change the element type). Identity reduce returns T directly —
 			// handled in javaCollectionAccessElemType for bare var targets.
-			"findFirst", "findAny", "min", "max", "reduce":
+			// toList() returns List<T> — element preserved for forEach / for-var.
+			"findFirst", "findAny", "min", "max", "reduce", "toList":
 			recv := ingest.ChildByField(obj, "object")
 			// Arrays.stream(arr[, from, to]) — element type from first arg, not
 			// from receiver Arrays (unlike coll.stream() which uses elemOf[coll]).
@@ -1440,6 +1451,14 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 				return javaArraysStreamElemType(obj, content, elemOf, valOf)
 			}
 			return javaStreamPipelineElemType(recv, content, elemOf, valOf)
+		case "collect":
+			// Stream.collect(Collectors.toList()) / collect(toList()) /
+			// collect(Collectors::toList) — List of the stream element type.
+			// Other collectors (groupingBy, mapping, …) fail closed.
+			if !javaIsToListCollector(obj, content) {
+				return ""
+			}
+			return javaStreamPipelineElemType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
 		case "values":
 			// m.values() — Collection of map values (valOf[m]).
 			return javaMapPipelineValueType(ingest.ChildByField(obj, "object"), content, valOf)
@@ -1454,6 +1473,95 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 		}
 	default:
 		return ""
+	}
+}
+
+// javaIsToListCollector reports Stream.collect args that produce List<T> of the
+// stream element type: Collectors.toList() / toList() (static import) /
+// Collectors::toList. Other collectors fail closed.
+func javaIsToListCollector(collectCall *grammar.Node, content []byte) bool {
+	if collectCall == nil {
+		return false
+	}
+	var args *grammar.Node
+	for i := uint32(0); i < collectCall.ChildCount(); i++ {
+		if collectCall.Child(i).Type() == "argument_list" {
+			args = collectCall.Child(i)
+			break
+		}
+	}
+	if args == nil {
+		return false
+	}
+	var first *grammar.Node
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		switch ch.Type() {
+		case "(", ")", ",", "comment":
+			continue
+		default:
+			first = ch
+		}
+		if first != nil {
+			break
+		}
+	}
+	if first == nil {
+		return false
+	}
+	switch first.Type() {
+	case "method_invocation":
+		// toList() / Collectors.toList() — zero-arg only.
+		nameN := ingest.ChildByField(first, "name")
+		if nameN == nil || ingest.NodeText(nameN, content) != "toList" {
+			return false
+		}
+		if obj := ingest.ChildByField(first, "object"); obj != nil {
+			if obj.Type() != "identifier" && obj.Type() != "type_identifier" {
+				return false
+			}
+			if ingest.NodeText(obj, content) != "Collectors" {
+				return false
+			}
+		}
+		for i := uint32(0); i < first.ChildCount(); i++ {
+			if first.Child(i).Type() != "argument_list" {
+				continue
+			}
+			al := first.Child(i)
+			for j := uint32(0); j < al.ChildCount(); j++ {
+				switch al.Child(j).Type() {
+				case "(", ")", "comment":
+					continue
+				default:
+					return false
+				}
+			}
+		}
+		return true
+	case "method_reference":
+		// Collectors::toList — children are receiver, "::", name (no stable fields).
+		var parts []*grammar.Node
+		for i := uint32(0); i < first.ChildCount(); i++ {
+			child := first.Child(i)
+			if child.Type() == "::" {
+				continue
+			}
+			parts = append(parts, child)
+		}
+		if len(parts) < 2 {
+			return false
+		}
+		obj, name := parts[0], parts[len(parts)-1]
+		if name.Type() != "identifier" || ingest.NodeText(name, content) != "toList" {
+			return false
+		}
+		if obj.Type() != "identifier" && obj.Type() != "type_identifier" {
+			return false
+		}
+		return ingest.NodeText(obj, content) == "Collectors"
+	default:
+		return false
 	}
 }
 
