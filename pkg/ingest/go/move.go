@@ -2546,6 +2546,86 @@ func sameFileFuncResultTypes(root *grammar.Node, content []byte) map[string][]st
 	return out
 }
 
+// sameFileFuncCollectionResults maps same-file function names to element/value
+// type info when the function has a single slice/array/map result
+// (func getA() []*A / func getM() map[K]*A / named (as []*A)). Used so
+// as := getA(); as[0].M and getA()[0].M resolve under foreign same-leaf methods.
+// Multi-result signatures are skipped (indices would need positional binding).
+func sameFileFuncCollectionResults(root *grammar.Node, content []byte) map[string]rangeSourceInfo {
+	if root == nil {
+		return nil
+	}
+	out := map[string]rangeSourceInfo{}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type() == "function_declaration" {
+			nameN := ingest.ChildByField(n, "name")
+			if nameN != nil && nameN.Type() == "identifier" {
+				name := ingest.NodeText(nameN, content)
+				if name != "" {
+					if info, ok := functionCollectionResult(n, content); ok && info.elemType != "" {
+						out[name] = info
+					}
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// functionCollectionResult reports collection element/value type when decl has
+// exactly one result that is a slice, array, or map (possibly named).
+func functionCollectionResult(decl *grammar.Node, content []byte) (rangeSourceInfo, bool) {
+	if decl == nil {
+		return rangeSourceInfo{}, false
+	}
+	result := ingest.ChildByField(decl, "result")
+	if result == nil {
+		return rangeSourceInfo{}, false
+	}
+	if result.Type() == "parameter_list" {
+		var infos []rangeSourceInfo
+		for i := uint32(0); i < result.ChildCount(); i++ {
+			p := result.Child(i)
+			if p == nil || (p.Type() != "parameter_declaration" && p.Type() != "variadic_parameter_declaration") {
+				continue
+			}
+			typeN := ingest.ChildByField(p, "type")
+			info, ok := rangeSourceFromTypeNode(typeN, content)
+			if !ok || info.elemType == "" {
+				// Non-collection result in a multi-slot list → not a pure
+				// single-collection return (e.g. ([]*A, error)).
+				return rangeSourceInfo{}, false
+			}
+			// Multi-name rare in results; one slot per declaration name, or one
+			// if unnamed.
+			names := parameterDeclNames(p, content)
+			if len(names) == 0 {
+				infos = append(infos, info)
+			} else {
+				for range names {
+					infos = append(infos, info)
+				}
+			}
+		}
+		if len(infos) != 1 {
+			return rangeSourceInfo{}, false
+		}
+		return infos[0], true
+	}
+	return rangeSourceFromTypeNode(result, content)
+}
+
 // functionResultTypes returns positional concrete type names from a
 // function_declaration's result (parameter_list or single type).
 func functionResultTypes(decl *grammar.Node, content []byte) []string {
@@ -3044,8 +3124,10 @@ func findComplexOperandSelectorEdits(file string, content []byte, oldLeaf, newLe
 
 	// Slice/map index: as[0].M / m[k].M — resolve element/value type from
 	// typed params and locals so foreign same-leaf methods are not fail-open
-	// rewritten and ours are not skipped.
-	indexElemType := collectionIndexElemTypeFunc(pf.Root, content)
+	// rewritten and ours are not skipped. Same-file func results (getA() []*A)
+	// feed short-var / inline index too.
+	funcColl := sameFileFuncCollectionResults(pf.Root, content)
+	indexElemType := collectionIndexElemTypeFunc(pf.Root, content, funcColl)
 
 	uniqueLeaf := len(foreignReceivers) == 0
 	var edits []ingest.Edit
@@ -3059,7 +3141,7 @@ func findComplexOperandSelectorEdits(file string, content []byte, oldLeaf, newLe
 			field := ingest.ChildByField(n, "field")
 			if field != nil && ingest.NodeText(field, content) == oldLeaf && operand != nil && !goOperandIsBareIdent(operand) {
 				ok := false
-				if typ := goComplexOperandType(operand, content, indexElemType); typ != "" {
+				if typ := goComplexOperandType(operand, content, indexElemType, funcColl); typ != "" {
 					typ = strings.TrimPrefix(typ, "*")
 					if ourReceivers[typ] {
 						ok = true
@@ -3099,8 +3181,9 @@ func goOperandIsBareIdent(n *grammar.Node) bool {
 // collection identifier at a byte offset (as in as[0] / m[k]). Built from
 // function/method/func-literal params, typed local var_specs (slice, array,
 // map), and collection short-var / var initializers (make, new([n]T), append,
-// composite []*T{…} / map[K]*T{…}). ok=false when unknown.
-func collectionIndexElemTypeFunc(root *grammar.Node, content []byte) func(name string, at uint32) (string, bool) {
+// composite []*T{…} / map[K]*T{…}, same-file getA() []*A). ok=false when unknown.
+// funcColl is same-file function → collection result element types (may be nil).
+func collectionIndexElemTypeFunc(root *grammar.Node, content []byte, funcColl map[string]rangeSourceInfo) func(name string, at uint32) (string, bool) {
 	var bindings []identTypeBinding
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
@@ -3123,7 +3206,7 @@ func collectionIndexElemTypeFunc(root *grammar.Node, content []byte) func(name s
 				bindings = append(bindings, identTypeBinding{n.StartByte(), n.EndByte(), name, info.elemType})
 			}
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalCollectionElemBindings(body, content, &bindings)
+				collectLocalCollectionElemBindings(body, content, &bindings, funcColl)
 			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -3200,23 +3283,25 @@ func rangeSourceFromMakeCall(n *grammar.Node, content []byte) (rangeSourceInfo, 
 // ([]*T{…} / map[K]*T{…}), make(T, …), new([n]T) (pointer-to-array is
 // indexable), append(slice, …) when the first argument is itself such an
 // expression, type assert/convert to a collection type (x.([]*T) / ([]*T)(x) /
-// x.(map[K]*T)), and slice expressions (as[:n] / as[i:] / as[:]) which preserve
-// the operand's element type. Used for short-var / untyped-var collection locals
+// x.(map[K]*T)), slice expressions (as[:n] / as[i:] / as[:]) which preserve
+// the operand's element type, and same-file calls with a single collection
+// result (getA() []*A). Used for short-var / untyped-var collection locals
 // and inline index operands (append([]*A{}, x)[0] / x.([]*A)[0] / as[:1][0] /
-// new([1]*A)[0]).
+// new([1]*A)[0] / getA()[0]).
 //
 // Prefer rangeSourceFromCollectionExprIdent when the first append argument may
 // be a known collection param/local (append(as, x) where as []*A).
 func rangeSourceFromCollectionExpr(n *grammar.Node, content []byte) (rangeSourceInfo, bool) {
-	return rangeSourceFromCollectionExprIdent(n, content, nil, 0)
+	return rangeSourceFromCollectionExprIdent(n, content, nil, 0, nil)
 }
 
 // rangeSourceFromCollectionExprIdent is rangeSourceFromCollectionExpr plus
 // optional resolution of bare collection identifiers via identElem (params and
-// prior short-var/var bindings). That covers append(as, …) / append(append(as, …), …)
-// when as is a typed slice/map local or parameter, and as[:n] / s := as[:n]
-// when as is known.
-func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identElem func(name string, at uint32) (string, bool), at uint32) (rangeSourceInfo, bool) {
+// prior short-var/var bindings) and same-file function collection results via
+// funcColl. That covers append(as, …) / append(append(as, …), …) when as is a
+// typed slice/map local or parameter, as[:n] / s := as[:n] when as is known,
+// and getA() / as := getA() when getA returns a single slice/array/map.
+func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identElem func(name string, at uint32) (string, bool), at uint32, funcColl map[string]rangeSourceInfo) (rangeSourceInfo, bool) {
 	if n == nil {
 		return rangeSourceInfo{}, false
 	}
@@ -3226,7 +3311,7 @@ func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identEl
 			if c == nil || c.Type() == "," {
 				continue
 			}
-			return rangeSourceFromCollectionExprIdent(c, content, identElem, at)
+			return rangeSourceFromCollectionExprIdent(c, content, identElem, at, funcColl)
 		}
 		return rangeSourceInfo{}, false
 	}
@@ -3236,7 +3321,7 @@ func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identEl
 			if ch == nil || ch.Type() == "(" || ch.Type() == ")" {
 				continue
 			}
-			return rangeSourceFromCollectionExprIdent(ch, content, identElem, at)
+			return rangeSourceFromCollectionExprIdent(ch, content, identElem, at, funcColl)
 		}
 		return rangeSourceInfo{}, false
 	}
@@ -3244,7 +3329,7 @@ func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identEl
 	// the sliced collection (param, local, make/append/composite, nested slice).
 	if n.Type() == "slice_expression" {
 		if op := ingest.ChildByField(n, "operand"); op != nil {
-			return rangeSourceFromCollectionExprIdent(op, content, identElem, at)
+			return rangeSourceFromCollectionExprIdent(op, content, identElem, at, funcColl)
 		}
 		return rangeSourceInfo{}, false
 	}
@@ -3295,8 +3380,15 @@ func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identEl
 				continue
 			}
 			// First argument is the slice: append([]*T{}, …) / append(as, …) /
-			// append(make(...), …).
-			return rangeSourceFromCollectionExprIdent(c, content, identElem, at)
+			// append(make(...), …) / append(getA(), …).
+			return rangeSourceFromCollectionExprIdent(c, content, identElem, at, funcColl)
+		}
+		return rangeSourceInfo{}, false
+	}
+	// Same-file helper: getA() []*A / getM() map[K]*A.
+	if fn.Type() == "identifier" && funcColl != nil {
+		if info, ok := funcColl[ingest.NodeText(fn, content)]; ok && info.elemType != "" {
+			return info, true
 		}
 	}
 	return rangeSourceInfo{}, false
@@ -3360,10 +3452,11 @@ func rangeSourceFromNewArrayCall(n *grammar.Node, content []byte) (rangeSourceIn
 // var_spec with an explicit type (var as []*A / var m map[K]*B) and from
 // collection short-var / untyped var initializers:
 // make(T, …), new([n]T), append([]*T{}, …) / append(ident, …), []*T{…} /
-// map[K]*T{…}, x.([]*T) / ([]*T)(x), as[:n] / as[i:]. append(ident, …) and
-// slice of ident resolve against params and earlier collection bindings already
-// recorded in *bindings.
-func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bindings *[]identTypeBinding) {
+// map[K]*T{…}, x.([]*T) / ([]*T)(x), as[:n] / as[i:], same-file getA() []*A.
+// append(ident, …) and slice of ident resolve against params and earlier
+// collection bindings already recorded in *bindings. funcColl maps same-file
+// function names to single collection result element types (may be nil).
+func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bindings *[]identTypeBinding, funcColl map[string]rangeSourceInfo) {
 	if body == nil {
 		return
 	}
@@ -3433,26 +3526,26 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 			if info, ok := rangeSourceFromTypeNode(typeN, content); ok && info.elemType != "" {
 				bindElem(n.StartByte(), names, info)
 			} else {
-				// var as = make/append/[]*A{…}/append(ident,…) — bind element type positionally.
+				// var as = make/append/getA()/[]*A{…}/append(ident,…) — bind element type positionally.
 				exprs := rhsExprs(ingest.ChildByField(n, "value"))
 				for i, name := range names {
 					if name == "" || name == "_" || i >= len(exprs) {
 						continue
 					}
-					if info, ok := rangeSourceFromCollectionExprIdent(exprs[i], content, lookupElem, n.StartByte()); ok && info.elemType != "" {
+					if info, ok := rangeSourceFromCollectionExprIdent(exprs[i], content, lookupElem, n.StartByte(), funcColl); ok && info.elemType != "" {
 						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
 					}
 				}
 			}
 		case "short_var_declaration":
-			// as := make/append/[]*A{…}/append(ident,…) — same positional binding.
+			// as := make/append/getA()/[]*A{…}/append(ident,…) — same positional binding.
 			names := identListNames(ingest.ChildByField(n, "left"), content)
 			exprs := rhsExprs(ingest.ChildByField(n, "right"))
 			for i, name := range names {
 				if name == "" || name == "_" || i >= len(exprs) {
 					continue
 				}
-				if info, ok := rangeSourceFromCollectionExprIdent(exprs[i], content, lookupElem, n.StartByte()); ok && info.elemType != "" {
+				if info, ok := rangeSourceFromCollectionExprIdent(exprs[i], content, lookupElem, n.StartByte(), funcColl); ok && info.elemType != "" {
 					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
 				}
 			}
@@ -3467,8 +3560,8 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 // goComplexOperandType returns a type name for operands we can resolve without
 // full type inference: type assert/convert, composite lit, &T{}, (*T), paren,
 // and index expressions (as[0] / m[k]) when indexElemType knows the collection.
-// indexElemType may be nil when collection typing is unavailable.
-func goComplexOperandType(n *grammar.Node, content []byte, indexElemType func(name string, at uint32) (string, bool)) string {
+// indexElemType / funcColl may be nil when collection typing is unavailable.
+func goComplexOperandType(n *grammar.Node, content []byte, indexElemType func(name string, at uint32) (string, bool), funcColl map[string]rangeSourceInfo) string {
 	if n == nil {
 		return ""
 	}
@@ -3487,7 +3580,7 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType func(na
 			if ch.Type() == "(" || ch.Type() == ")" {
 				continue
 			}
-			return goComplexOperandType(ch, content, indexElemType)
+			return goComplexOperandType(ch, content, indexElemType, funcColl)
 		}
 	case "type_assertion_expression", "type_conversion_expression":
 		if t := ingest.ChildByField(n, "type"); t != nil {
@@ -3502,7 +3595,7 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType func(na
 				starIdent = ingest.NodeText(ch, content)
 				continue
 			}
-			if t := goComplexOperandType(ch, content, indexElemType); t != "" {
+			if t := goComplexOperandType(ch, content, indexElemType, funcColl); t != "" {
 				return t
 			}
 		}
@@ -3541,8 +3634,8 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType func(na
 		// Typed collection index: []*A{…}[0] / make([]*A,n)[0] /
 		// append([]*A{}, x)[0] / append(as, x)[0] / map[string]*A{…}["k"] /
 		// x.([]*A)[0] / ([]*A)(x)[0] / as[:1][0] / make([]*A,n)[:1][0] /
-		// new([1]*A)[0].
-		if info, ok := rangeSourceFromCollectionExprIdent(op, content, indexElemType, n.StartByte()); ok {
+		// new([1]*A)[0] / getA()[0].
+		if info, ok := rangeSourceFromCollectionExprIdent(op, content, indexElemType, n.StartByte(), funcColl); ok {
 			return info.elemType
 		}
 	}
