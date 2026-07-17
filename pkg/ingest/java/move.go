@@ -1067,7 +1067,8 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // it.next() / list.iterator().next() /
 // queue.poll()/peek() / list.remove(i) / list.getFirst()/getLast() /
 // opt.orElse(d) / opt.orElseGet(s) / opt.orElseThrow([s]) / findFirst().orElse(d) /
-// Collections.min(as) / Collections.max(as) / stream.min/max().orElse(d)).
+// Collections.min(as) / Collections.max(as) / stream.min/max().orElse(d) /
+// stream.reduce(identity, op) / reduce(op).orElse(d) / reduce(op).ifPresent(...)).
 // entryValOf maps Map.Entry locals → value type leaf for e.getValue().m()
 // (for (var e : m.entrySet()) / m.entrySet().forEach(e -> …) / Map.Entry<K,A> e).
 func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string) {
@@ -1380,7 +1381,7 @@ func javaMapValueBiLambdaMethod(method string) bool {
 
 // javaStreamPipelineElemType recovers the element type of a stream pipeline object:
 // as / as.stream() / as.iterator() / as.stream().filter(...) → elemOf[as],
-// as.stream().findFirst() / findAny() / min() / max() → same element
+// as.stream().findFirst() / findAny() / min() / max() / reduce(op) → same element
 // (Optional wraps T; ifPresent / orElse use T),
 // m.values() → valOf[m],
 // List.of(new A()) / Stream.of(new A()) / Arrays.asList(new A()) → "A",
@@ -1427,9 +1428,11 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			"filter", "peek", "sorted", "distinct", "limit", "skip",
 			"unordered", "sequential", "parallel", "onClose",
 			"takeWhile", "dropWhile",
-			// findFirst/findAny/min/max return Optional<T>; element T is preserved
-			// for ifPresent / orElse (Comparator args do not change the element type).
-			"findFirst", "findAny", "min", "max":
+			// findFirst/findAny/min/max/reduce(BinaryOperator) return Optional<T>;
+			// element T is preserved for ifPresent / orElse (Comparator/op args do
+			// not change the element type). Identity reduce returns T directly —
+			// handled in javaCollectionAccessElemType for bare var targets.
+			"findFirst", "findAny", "min", "max", "reduce":
 			recv := ingest.ChildByField(obj, "object")
 			// Arrays.stream(arr[, from, to]) — element type from first arg, not
 			// from receiver Arrays (unlike coll.stream() which uses elemOf[coll]).
@@ -1700,10 +1703,13 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	oa.orElse(d) / oa.orElseGet(s) / oa.orElseThrow([s]) → elemOf[oa]
 //	  (Optional<A>; also findFirst().orElse / findFirst().orElseThrow)
 //	Collections.min(as) / Collections.max(as[, cmp]) → elemOf[as]
+//	stream.reduce(identity, op[, combiner]) → stream element type (returns T/U)
 //	e.getValue()              → entryValOf[e] (Map.Entry local from entrySet)
 //
 // Optional.get() also works when Optional<A> is tracked in elemOf (single type arg).
 // Fail closed on other methods / unknown receivers.
+// One-arg stream.reduce(BinaryOperator) returns Optional — use orElse/ifPresent
+// (pipeline typing), not bare var of the element type.
 func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, valOf, entryValOf map[string]string) string {
 	for val != nil && !val.IsNull() && val.Type() == "parenthesized_expression" {
 		inner := ingest.ChildByField(val, "expression")
@@ -1776,9 +1782,53 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// Stream.min/max return Optional — bind via orElse/ifPresent on the pipeline,
 		// not as a bare var of the element type.
 		return javaCollectionsMinMaxElemType(val, obj, content, elemOf, valOf)
+	case "reduce":
+		// Stream.reduce(identity, accumulator[, combiner]) returns the identity type
+		// (T for BinaryOperator; U for the 3-arg form when identity is U — we recover
+		// the stream element type, which matches the common T-identity product case).
+		// One-arg reduce(BinaryOperator) returns Optional<T> — fail closed here.
+		return javaStreamReduceIdentityElemType(val, obj, content, elemOf, valOf)
 	default:
 		return ""
 	}
+}
+
+// javaStreamReduceIdentityElemType recovers T from stream.reduce(identity, op[, comb]).
+// Identity forms have ≥2 args and a non-lambda first arg. One-arg reduce returns
+// Optional and is handled via pipeline orElse/ifPresent instead.
+func javaStreamReduceIdentityElemType(call, obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	if call == nil || obj == nil {
+		return ""
+	}
+	var args *grammar.Node
+	for i := uint32(0); i < call.ChildCount(); i++ {
+		if call.Child(i).Type() == "argument_list" {
+			args = call.Child(i)
+			break
+		}
+	}
+	if args == nil {
+		return ""
+	}
+	nReal := 0
+	var first *grammar.Node
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		switch ch.Type() {
+		case "(", ")", ",", "comment":
+			continue
+		default:
+			nReal++
+			if first == nil {
+				first = ch
+			}
+		}
+	}
+	// reduce(op) → Optional; reduce(identity, op) / reduce(identity, acc, comb) → T/U.
+	if nReal < 2 || first == nil || first.Type() == "lambda_expression" {
+		return ""
+	}
+	return javaStreamPipelineElemType(obj, content, elemOf, valOf)
 }
 
 // javaCollectionsMinMaxElemType recovers T from Collections.min/max(coll[, cmp]).
