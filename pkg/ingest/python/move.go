@@ -1880,13 +1880,15 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `a = min(items)` / `a = max(items)` / `a = min(items, key=...)` (same element type),
 // `a = items[0]` / `a = d[k]` (element/value type of a known collection),
 // `a = items.pop()` / `a = items.pop(0)` / `a = d.pop(k)` (same element/value type),
+// `a = d.get(k)` / `a = d.get(k, default)` (dict value type; default ignored like next),
 // `a = it.__next__()` when `it = iter(items)` (or other known iterable) has element type,
 // as-bindings (`case A() as a`, `with A() as a`, `except A as e`),
 // match sequence captures from a known collection subject
 // (`match items: case [a]:` / `case [a, *rest]:` with `items: list[A]` —
 // fixed slots are elements; *rest is a sequence of the same element type),
 // walrus (`a := A()`, `a := next(items)`, `a := next(x for x in items)`,
-// `a := min(items)`, `a := items.pop()`, `a := it.__next__()`, `a := items[0]` — same RHS typing as plain assignment),
+// `a := min(items)`, `a := items.pop()`, `a := d.get(k)`, `a := it.__next__()`,
+// `a := items[0]` — same RHS typing as plain assignment),
 // for/comprehension targets over known collections
 // (`for a in [A()]`, `for a in items` with `items: list[A]`,
 // `for a in d.values()` / `for k, a in d.items()` with `d: dict[K, A]`,
@@ -1989,9 +1991,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								if tn := pythonCastTypeArg(right, content); ourReceivers[tn] {
 									out[lname] = true
 								}
-							case "pop":
+							case "pop", "get":
 								// a = items.pop() / items.pop(0) / d.pop(k) / list(items).pop()
-								// — element/value type of the receiver collection.
+								// a = d.get(k) / d.get(k, default) — element/value type of
+								// the receiver collection (dict value leaf via elemOf).
+								// Default arg on get is ignored (same as next's default).
 								// popitem() and other methods are not handled (fail closed).
 								obj := ingest.ChildByField(fn, "object")
 								if et := pythonIterableElemType(obj, content, elemOf, egElems); ourReceivers[et] {
@@ -2063,8 +2067,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			}
 		case "named_expression":
 			// Walrus: (a := A()) / (a := next(items)) / (a := min(items)) /
-			// (a := items.pop()) / (a := items[0]) — mirror assignment RHS typing.
-			// Without this, a.m() is skipped under foreign same-leaf.
+			// (a := items.pop()) / (a := d.get(k)) / (a := items[0]) — mirror
+			// assignment RHS typing. Without this, a.m() is skipped under foreign same-leaf.
 			nameN := ingest.ChildByField(n, "name")
 			valueN := ingest.ChildByField(n, "value")
 			if nameN == nil || valueN == nil {
@@ -2105,8 +2109,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							if tn := pythonCastTypeArg(valueN, content); ourReceivers[tn] {
 								out[lname] = true
 							}
-						case "pop":
+						case "pop", "get":
 							// a := items.pop() / items.pop(0) / d.pop(k)
+							// a := d.get(k) / d.get(k, default)
 							obj := ingest.ChildByField(fn, "object")
 							if et := pythonIterableElemType(obj, content, elemOf, egElems); ourReceivers[et] {
 								out[lname] = true
