@@ -1046,7 +1046,8 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // Map.computeIfPresent/compute/replaceAll((k,v) -> v.m()) / Map.merge((v1,v2) -> v1.m()) /
 // map.values().forEach(v -> v.m()) types a/v as A), for (var a : as) loop variables
 // from collection/array element types, and var locals from collection accessors
-// (list.get(i) / map.get(k) / it.next() / list.iterator().next()).
+// (list.get(i) / map.get(k) / it.next() / list.iterator().next() /
+// queue.poll()/peek() / list.remove(i) / list.getFirst()/getLast()).
 func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]bool {
 	out := map[string]bool{}
 	if root == nil || len(ourReceivers) == 0 {
@@ -1112,6 +1113,7 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					out[name] = true
 				} else if et := javaCollectionAccessElemType(valN, content, elemOf, valOf); ourReceivers[et] {
 					// var xa = as.get(0) / am.get("k") / as.iterator().next() / ia.next()
+					// / qa.poll() / qa.peek() / as.remove(0) / as.getFirst()
 					out[name] = true
 				}
 			}
@@ -1532,6 +1534,10 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //
 //	as.get(i) / as.get(0)     → elemOf[as]   (List/Collection)
 //	am.get(k) / am.getOrDefault(k, d) → valOf[am] (Map; prefer value over key)
+//	as.remove(i) / am.remove(k) → same element/value type (index/key remove returns E/V)
+//	qa.poll() / qa.peek() / qa.element() → elemOf[qa] (Queue)
+//	da.pollFirst()/pollLast()/peekFirst()/peekLast()/pop() → elemOf[da] (Deque)
+//	as.getFirst() / as.getLast() → elemOf[as] (SequencedCollection / List / Deque)
 //	ia.next()                 → elemOf[ia]   (Iterator<A>)
 //	as.iterator().next()      → elemOf[as]   (via type-preserving iterator())
 //
@@ -1561,7 +1567,17 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 	}
 	obj := ingest.ChildByField(val, "object")
 	switch method := ingest.NodeText(nameN, content); method {
-	case "get", "getOrDefault":
+	case "get", "getOrDefault",
+		// Element/value-returning mutators and endpoints (same type as get).
+		// Map.remove(k) → V via valOf; List.remove(i) → E via elemOf.
+		// remove(Object) also returns boolean at runtime for List — we still bind
+		// the element type when the receiver is a known collection (fail open on
+		// the boolean overload; callers using var xa = as.remove(x) for element
+		// extract are the product case under foreign same-leaf methods).
+		"remove",
+		"poll", "peek", "element",
+		"pollFirst", "pollLast", "peekFirst", "peekLast", "pop",
+		"getFirst", "getLast":
 		// Map-like (2 type args recorded in valOf) → value type; else element type.
 		// Identifier receiver only — chained gets fail closed.
 		if obj != nil && obj.Type() == "identifier" {
