@@ -3098,8 +3098,8 @@ func goOperandIsBareIdent(n *grammar.Node) bool {
 // collectionIndexElemTypeFunc returns the element/value named type for a
 // collection identifier at a byte offset (as in as[0] / m[k]). Built from
 // function/method/func-literal params, typed local var_specs (slice, array,
-// map), and collection short-var / var initializers (make, append, composite
-// []*T{…} / map[K]*T{…}). ok=false when unknown.
+// map), and collection short-var / var initializers (make, new([n]T), append,
+// composite []*T{…} / map[K]*T{…}). ok=false when unknown.
 func collectionIndexElemTypeFunc(root *grammar.Node, content []byte) func(name string, at uint32) (string, bool) {
 	var bindings []identTypeBinding
 	var walk func(n *grammar.Node)
@@ -3197,12 +3197,13 @@ func rangeSourceFromMakeCall(n *grammar.Node, content []byte) (rangeSourceInfo, 
 
 // rangeSourceFromCollectionExpr reports element/value (and map key) type for
 // expressions that construct or retype a slice/array/map: composite literals
-// ([]*T{…} / map[K]*T{…}), make(T, …), append(slice, …) when the first
-// argument is itself such an expression, type assert/convert to a collection
-// type (x.([]*T) / ([]*T)(x) / x.(map[K]*T)), and slice expressions
-// (as[:n] / as[i:] / as[:]) which preserve the operand's element type. Used
-// for short-var / untyped-var collection locals and inline index operands
-// (append([]*A{}, x)[0] / x.([]*A)[0] / as[:1][0]).
+// ([]*T{…} / map[K]*T{…}), make(T, …), new([n]T) (pointer-to-array is
+// indexable), append(slice, …) when the first argument is itself such an
+// expression, type assert/convert to a collection type (x.([]*T) / ([]*T)(x) /
+// x.(map[K]*T)), and slice expressions (as[:n] / as[i:] / as[:]) which preserve
+// the operand's element type. Used for short-var / untyped-var collection locals
+// and inline index operands (append([]*A{}, x)[0] / x.([]*A)[0] / as[:1][0] /
+// new([1]*A)[0]).
 //
 // Prefer rangeSourceFromCollectionExprIdent when the first append argument may
 // be a known collection param/local (append(as, x) where as []*A).
@@ -3278,6 +3279,11 @@ func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identEl
 	switch ingest.NodeText(fn, content) {
 	case "make":
 		return rangeSourceFromMakeCall(n, content)
+	case "new":
+		// new([n]*T) returns *[n]*T; Go allows indexing the pointer-to-array
+		// without dereference. new([]*T) / new(map[…]) return non-indexable
+		// pointers — only array type args count as collection sources.
+		return rangeSourceFromNewArrayCall(n, content)
 	case "append":
 		args := ingest.ChildByField(n, "arguments")
 		if args == nil {
@@ -3296,13 +3302,67 @@ func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identEl
 	return rangeSourceInfo{}, false
 }
 
+// rangeSourceFromNewArrayCall reports element type for new([n]T) when the type
+// argument is an array (possibly parenthesized). Len is ignored. new([]*T) and
+// other non-array type args return false (result is not indexable).
+func rangeSourceFromNewArrayCall(n *grammar.Node, content []byte) (rangeSourceInfo, bool) {
+	if n == nil {
+		return rangeSourceInfo{}, false
+	}
+	if n.Type() == "expression_list" {
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			return rangeSourceFromNewArrayCall(c, content)
+		}
+		return rangeSourceInfo{}, false
+	}
+	if n.Type() != "call_expression" {
+		return rangeSourceInfo{}, false
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil || ingest.NodeText(fn, content) != "new" {
+		return rangeSourceInfo{}, false
+	}
+	args := ingest.ChildByField(n, "arguments")
+	if args == nil {
+		return rangeSourceInfo{}, false
+	}
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		c := args.Child(i)
+		if c == nil || c.Type() == "(" || c.Type() == ")" || c.Type() == "," {
+			continue
+		}
+		// Peel new(([n]*T)).
+		for c != nil && c.Type() == "parenthesized_type" {
+			var inner *grammar.Node
+			for j := uint32(0); j < c.ChildCount(); j++ {
+				ch := c.Child(j)
+				if ch == nil || ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+			c = inner
+		}
+		if c == nil || c.Type() != "array_type" {
+			return rangeSourceInfo{}, false
+		}
+		return rangeSourceFromTypeNode(c, content)
+	}
+	return rangeSourceInfo{}, false
+}
+
 // collectLocalCollectionElemBindings records slice/array/map locals from
 // var_spec with an explicit type (var as []*A / var m map[K]*B) and from
 // collection short-var / untyped var initializers:
-// make(T, …), append([]*T{}, …) / append(ident, …), []*T{…} / map[K]*T{…},
-// x.([]*T) / ([]*T)(x), as[:n] / as[i:]. append(ident, …) and slice of ident
-// resolve against params and earlier collection bindings already recorded
-// in *bindings.
+// make(T, …), new([n]T), append([]*T{}, …) / append(ident, …), []*T{…} /
+// map[K]*T{…}, x.([]*T) / ([]*T)(x), as[:n] / as[i:]. append(ident, …) and
+// slice of ident resolve against params and earlier collection bindings already
+// recorded in *bindings.
 func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bindings *[]identTypeBinding) {
 	if body == nil {
 		return
@@ -3480,7 +3540,8 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType func(na
 		}
 		// Typed collection index: []*A{…}[0] / make([]*A,n)[0] /
 		// append([]*A{}, x)[0] / append(as, x)[0] / map[string]*A{…}["k"] /
-		// x.([]*A)[0] / ([]*A)(x)[0] / as[:1][0] / make([]*A,n)[:1][0].
+		// x.([]*A)[0] / ([]*A)(x)[0] / as[:1][0] / make([]*A,n)[:1][0] /
+		// new([1]*A)[0].
 		if info, ok := rangeSourceFromCollectionExprIdent(op, content, indexElemType, n.StartByte()); ok {
 			return info.elemType
 		}
