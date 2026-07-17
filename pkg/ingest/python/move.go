@@ -2050,6 +2050,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							}
 						}
 					}
+					// a = itemgetter(0)(items) / operator.itemgetter(0)(items) —
+					// single-index getter applied to a collection yields an element
+					// (same as items[0]). Multi-index / other callables fail closed.
+					if et := pythonItemgetterElemType(right, content, elemOf, egElems); ourReceivers[et] {
+						out[lname] = true
+					}
 				}
 				// a = items[0] / a = d[k] / a = list(items)[0] — element/value of collection.
 				// Slices (items[1:3]) fail closed (sequence, not element).
@@ -2106,6 +2112,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 		case "named_expression":
 			// Walrus: (a := A()) / (a := next(items)) / (a := min(items)) /
 			// (a := heappop(items)) / (a := heapq.heappop(items)) /
+			// (a := reduce(...)) / (a := itemgetter(0)(items)) /
 			// (a := items.pop()) / (a := d.get(k)) / (a := d.setdefault(k)) /
 			// (a := items[0]) — mirror assignment RHS typing. Without this,
 			// a.m() is skipped under foreign same-leaf.
@@ -2188,6 +2195,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							}
 						}
 					}
+				}
+				// a := itemgetter(0)(items) / operator.itemgetter(0)(items)
+				if et := pythonItemgetterElemType(valueN, content, elemOf, egElems); ourReceivers[et] {
+					out[lname] = true
 				}
 			}
 			// a := items[0] / a := d[k] — element/value of known collection.
@@ -2684,6 +2695,56 @@ func pythonReduceElemType(call *grammar.Node, content []byte, elemOf, egElems ma
 	}
 	// reduce(function, iterable[, initializer]) — element type of the iterable.
 	return pythonIterableElemType(args[1], content, elemOf, egElems)
+}
+
+// pythonItemgetterElemType recovers the element type of
+// itemgetter(i)(collection) / operator.itemgetter(i)(collection).
+// Single-index itemgetter applied to a known collection yields one element
+// (same as collection[i]). Multi-index itemgetter(i, j, ...) returns a tuple
+// and fails closed. Bare itemgetter (from operator import itemgetter) and
+// module-qualified operator.itemgetter are accepted; other receivers fail closed.
+// Stored getters (g = itemgetter(0); a = g(items)) are not tracked.
+func pythonItemgetterElemType(call *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	// Outer call: getter(collection) — function must itself be itemgetter(...).
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "call" {
+		return ""
+	}
+	innerFn := ingest.ChildByField(fn, "function")
+	if innerFn == nil {
+		return ""
+	}
+	switch innerFn.Type() {
+	case "identifier":
+		if ingest.NodeText(innerFn, content) != "itemgetter" {
+			return ""
+		}
+	case "attribute":
+		attr := ingest.ChildByField(innerFn, "attribute")
+		obj := ingest.ChildByField(innerFn, "object")
+		if attr == nil || ingest.NodeText(attr, content) != "itemgetter" {
+			return ""
+		}
+		if obj == nil || obj.Type() != "identifier" || ingest.NodeText(obj, content) != "operator" {
+			return ""
+		}
+	default:
+		return ""
+	}
+	// itemgetter must have exactly one positional arg (the index).
+	idxArgs, ok := pythonCallPositionalArgNodes(fn)
+	if !ok || len(idxArgs) != 1 {
+		return ""
+	}
+	// Outer call: getter(collection) — exactly one positional arg.
+	collArgs, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(collArgs) != 1 {
+		return ""
+	}
+	return pythonIterableElemType(collArgs[0], content, elemOf, egElems)
 }
 
 // pythonSubscriptElemType recovers the element type of items[i] / d[k] when the
