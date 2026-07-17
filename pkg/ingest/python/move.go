@@ -1880,6 +1880,7 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `a = min(items)` / `a = max(items)` / `a = min(items, key=...)` (same element type),
 // `a = items[0]` / `a = d[k]` (element/value type of a known collection),
 // `a = items.pop()` / `a = items.pop(0)` / `a = d.pop(k)` (same element/value type),
+// `a = items.popleft()` (collections.deque; same element type as pop),
 // `a = d.get(k)` / `a = d.get(k, default)` (dict value type; default ignored like next),
 // `a = it.__next__()` when `it = iter(items)` (or other known iterable) has element type,
 // as-bindings (`case A() as a`, `with A() as a`, `except A as e`),
@@ -1890,8 +1891,8 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // (`match d: case {"k": a}:` / `case {"k": a as x}:` with `d: dict[K, A]` —
 // value slots are the dict value leaf; **rest fails closed),
 // walrus (`a := A()`, `a := next(items)`, `a := next(x for x in items)`,
-// `a := min(items)`, `a := items.pop()`, `a := d.get(k)`, `a := it.__next__()`,
-// `a := items[0]` — same RHS typing as plain assignment),
+// `a := min(items)`, `a := items.pop()`, `a := items.popleft()`, `a := d.get(k)`,
+// `a := it.__next__()`, `a := items[0]` — same RHS typing as plain assignment),
 // for/comprehension targets over known collections
 // (`for a in [A()]`, `for a in items` with `items: list[A]`,
 // `for a in d.values()` / `for k, a in d.items()` with `d: dict[K, A]`,
@@ -1994,8 +1995,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								if tn := pythonCastTypeArg(right, content); ourReceivers[tn] {
 									out[lname] = true
 								}
-							case "pop", "get":
+							case "pop", "popleft", "get":
 								// a = items.pop() / items.pop(0) / d.pop(k) / list(items).pop()
+								// a = items.popleft() (deque) — element type of receiver.
 								// a = d.get(k) / d.get(k, default) — element/value type of
 								// the receiver collection (dict value leaf via elemOf).
 								// Default arg on get is ignored (same as next's default).
@@ -2112,8 +2114,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							if tn := pythonCastTypeArg(valueN, content); ourReceivers[tn] {
 								out[lname] = true
 							}
-						case "pop", "get":
+						case "pop", "popleft", "get":
 							// a := items.pop() / items.pop(0) / d.pop(k)
+							// a := items.popleft() (deque)
 							// a := d.get(k) / d.get(k, default)
 							obj := ingest.ChildByField(fn, "object")
 							if et := pythonIterableElemType(obj, content, elemOf, egElems); ourReceivers[et] {
