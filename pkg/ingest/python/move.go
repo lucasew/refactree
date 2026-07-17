@@ -1901,7 +1901,9 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `for a in d.values()` / `for k, a in d.items()` with `d: dict[K, A]`,
 // `for i, a in enumerate(items)` / `for a, b in zip(xs, ys)`,
 // `for a in reversed/sorted/list/iter(items)`,
-// `for a in filter(pred, items)` / `for a in map(A, names)`),
+// `for a in filter(pred, items)` / `for a in map(A, names)`,
+// `for a in chain(xs, ys)` / `for a in itertools.chain(xs, ys)`,
+// `for a in islice(xs, n)` / `for a in itertools.islice(xs, n)`),
 // tuple/list unpack (`a, b = A(), B()`, `[a, b] = [A(), B()]`,
 // `a, *rest = items` / `*rest, a = items` / `a, = items` from list[A],
 // `for a, b in [(A(), B())]`), and
@@ -2170,6 +2172,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// for i, a in enumerate(items) / for a, b in zip(xs, ys) /
 			// for a in reversed/sorted/list/iter(items) /
 			// for a in filter(pred, items) / for a in map(A, names) /
+			// for a in chain/islice / itertools.chain/islice /
 			// [a.m() for a in xs] / for a in e.exceptions
 			left := ingest.ChildByField(n, "left")
 			right := ingest.ChildByField(n, "right")
@@ -2581,6 +2584,8 @@ func pythonSubscriptElemType(sub *grammar.Node, content []byte, elemOf, egElems 
 // element-preserving wrappers (reversed/sorted/list/tuple/set/iter),
 // filter (2nd arg iterable; pred does not change element type),
 // map when the first arg is a Class identifier (map(A, xs) → A),
+// chain / itertools.chain (all args agree on element type),
+// islice / itertools.islice (1st arg iterable; start/stop/step ignored),
 // items.copy() (zero-arg; same element type as receiver),
 // items or [] / items or [A()] (boolean or/and when both sides agree; empty
 // list/tuple/set is a wildcard), parenthesized forms, d.values() when d's dict
@@ -2617,6 +2622,7 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		// filter(pred, xs) — element type equals xs (pred only selects).
 		// map(A, xs) — element type is A when first arg is a Class identifier;
 		// other map callables fail closed (unknown result type).
+		// chain(xs, ys) / islice(xs, n) — itertools helpers (bare or imported).
 		if fn := ingest.ChildByField(right, "function"); fn != nil && fn.Type() == "identifier" {
 			switch ingest.NodeText(fn, content) {
 			case "reversed", "sorted", "list", "tuple", "set", "iter":
@@ -2642,11 +2648,24 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 					return ingest.NodeText(args[0], content)
 				}
 				return ""
+			case "chain":
+				// chain(*iterables) from itertools — shared element type when
+				// all args agree; any untyped or mismatched arg fails closed.
+				return pythonChainElemType(right, content, elemOf, egElems)
+			case "islice":
+				// islice(iterable, stop) / islice(iterable, start, stop[, step])
+				// — element type equals the iterable (1st arg).
+				args, ok := pythonCallPositionalArgNodes(right)
+				if !ok || len(args) == 0 {
+					return ""
+				}
+				return pythonIterableElemType(args[0], content, elemOf, egElems)
 			}
 		}
 		// items.copy() / list(items).copy() — zero-arg shallow copy preserves
 		// the receiver's element type. copy with args fails closed.
 		// d.values() — dict value type stored in elemOf[d].
+		// itertools.chain(...) / itertools.islice(...) — same as bare helpers.
 		if fn := ingest.ChildByField(right, "function"); fn != nil && fn.Type() == "attribute" {
 			if attr := ingest.ChildByField(fn, "attribute"); attr != nil {
 				switch ingest.NodeText(attr, content) {
@@ -2663,6 +2682,22 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 						return ""
 					}
 					return elemOf[obj]
+				case "chain", "islice":
+					objN := ingest.ChildByField(fn, "object")
+					if objN == nil || objN.Type() != "identifier" {
+						return ""
+					}
+					if ingest.NodeText(objN, content) != "itertools" {
+						return ""
+					}
+					if ingest.NodeText(attr, content) == "chain" {
+						return pythonChainElemType(right, content, elemOf, egElems)
+					}
+					args, ok := pythonCallPositionalArgNodes(right)
+					if !ok || len(args) == 0 {
+						return ""
+					}
+					return pythonIterableElemType(args[0], content, elemOf, egElems)
 				}
 			}
 		}
@@ -2699,6 +2734,32 @@ func pythonParenInner(n *grammar.Node) *grammar.Node {
 		return ch
 	}
 	return nil
+}
+
+// pythonChainElemType recovers the shared element type of chain(*iterables)
+// (bare or itertools.chain). Every positional arg must resolve to the same
+// non-empty element leaf; any untyped arg or mismatched leaves fails closed.
+// chain.from_iterable and *splat args fail closed (via call-arg parsing).
+func pythonChainElemType(call *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) == 0 {
+		return ""
+	}
+	var et string
+	for _, arg := range args {
+		t := pythonIterableElemType(arg, content, elemOf, egElems)
+		if t == "" {
+			return ""
+		}
+		if et == "" {
+			et = t
+			continue
+		}
+		if et != t {
+			return ""
+		}
+	}
+	return et
 }
 
 // pythonBoolOpElemType recovers a shared element type for `a or b` / `a and b`.
