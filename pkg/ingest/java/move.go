@@ -1042,7 +1042,8 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // type is ours (List<A> as → as.stream().map(a -> a.m()) / as.iterator().forEachRemaining(a -> a.m())
 // / List.of(new A()).forEach(a -> a.m()) / Stream.of(new A()).map(a -> a.m())
 // / as.stream().findFirst().ifPresent(a -> a.m()) / Optional.of(new A()).ifPresent(a -> a.m())
-// / Optional<A>.ifPresent(a -> a.m()) / Map<K,A>.forEach((k,v) -> v.m()) /
+// / Optional<A>.ifPresent(a -> a.m()) / opt.ifPresentOrElse(a -> a.m(), () -> {}) /
+// / Map<K,A>.forEach((k,v) -> v.m()) /
 // Map.computeIfPresent/compute/replaceAll((k,v) -> v.m()) / Map.merge((v1,v2) -> v1.m()) /
 // map.values().forEach(v -> v.m()) types a/v as A), for (var a : as) loop variables
 // from collection/array element types, and var locals from collection accessors
@@ -1312,7 +1313,7 @@ func javaStreamElementLambdaMethod(method string) bool {
 		"filter", "peek", "forEach", "forEachOrdered", "forEachRemaining",
 		"takeWhile", "dropWhile",
 		"anyMatch", "allMatch", "noneMatch",
-		"removeIf", "ifPresent",
+		"removeIf", "ifPresent", "ifPresentOrElse",
 		// Map value bi-lambdas (see javaMapValueBiLambdaMethod).
 		"computeIfPresent", "compute", "replaceAll", "merge":
 		return true
