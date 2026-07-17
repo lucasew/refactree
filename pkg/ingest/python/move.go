@@ -2642,7 +2642,7 @@ func pythonSubscriptElemType(sub *grammar.Node, content []byte, elemOf, egElems 
 // pythonIterableElemType recovers the element type of a for/comprehension iterable.
 // Uses known collection locals (elemOf), homogeneous Class() list/tuple/set literals,
 // identity generator/list/set comprehensions (`x for x in items`),
-// element-preserving wrappers (reversed/sorted/list/tuple/set/iter),
+// element-preserving wrappers (reversed/sorted/list/tuple/set/iter/deque),
 // filter (2nd arg iterable; pred does not change element type),
 // map when the first arg is a Class identifier (map(A, xs) → A),
 // chain / itertools.chain (all args agree on element type),
@@ -2678,15 +2678,15 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		// next(x for x in items) / for a in [x for x in items] — identity body only.
 		return pythonComprehensionElemType(right, content, elemOf, egElems)
 	case "call":
-		// reversed(xs) / sorted(xs) / list(xs) / tuple(xs) / set(xs) / iter(xs) —
-		// element type equals the wrapped iterable. Nested wrappers recurse.
-		// filter(pred, xs) — element type equals xs (pred only selects).
+		// reversed(xs) / sorted(xs) / list(xs) / tuple(xs) / set(xs) / iter(xs) /
+		// deque(xs) — element type equals the wrapped iterable. Nested wrappers
+		// recurse. filter(pred, xs) — element type equals xs (pred only selects).
 		// map(A, xs) — element type is A when first arg is a Class identifier;
 		// other map callables fail closed (unknown result type).
 		// chain(xs, ys) / islice(xs, n) — itertools helpers (bare or imported).
 		if fn := ingest.ChildByField(right, "function"); fn != nil && fn.Type() == "identifier" {
 			switch ingest.NodeText(fn, content) {
-			case "reversed", "sorted", "list", "tuple", "set", "iter":
+			case "reversed", "sorted", "list", "tuple", "set", "iter", "deque":
 				args, ok := pythonCallPositionalArgNodes(right)
 				if !ok || len(args) == 0 {
 					return ""
@@ -2727,6 +2727,7 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		// the receiver's element type. copy with args fails closed.
 		// d.values() — dict value type stored in elemOf[d].
 		// itertools.chain(...) / itertools.islice(...) — same as bare helpers.
+		// collections.deque(xs) — same element type as bare deque(xs).
 		if fn := ingest.ChildByField(right, "function"); fn != nil && fn.Type() == "attribute" {
 			if attr := ingest.ChildByField(fn, "attribute"); attr != nil {
 				switch ingest.NodeText(attr, content) {
@@ -2753,6 +2754,20 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 					}
 					if ingest.NodeText(attr, content) == "chain" {
 						return pythonChainElemType(right, content, elemOf, egElems)
+					}
+					args, ok := pythonCallPositionalArgNodes(right)
+					if !ok || len(args) == 0 {
+						return ""
+					}
+					return pythonIterableElemType(args[0], content, elemOf, egElems)
+				case "deque":
+					// collections.deque(iterable[, maxlen]) — element of 1st arg.
+					objN := ingest.ChildByField(fn, "object")
+					if objN == nil || objN.Type() != "identifier" {
+						return ""
+					}
+					if ingest.NodeText(objN, content) != "collections" {
+						return ""
 					}
 					args, ok := pythonCallPositionalArgNodes(right)
 					if !ok || len(args) == 0 {
