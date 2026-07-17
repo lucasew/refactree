@@ -1066,7 +1066,7 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // (list.get(i) / map.get(k) / map.computeIfAbsent(k,f) / map.putIfAbsent(k,v) /
 // it.next() / list.iterator().next() /
 // queue.poll()/peek() / list.remove(i) / list.getFirst()/getLast() /
-// opt.orElse(d) / opt.orElseGet(s) / findFirst().orElse(d) /
+// opt.orElse(d) / opt.orElseGet(s) / opt.orElseThrow([s]) / findFirst().orElse(d) /
 // Collections.min(as) / Collections.max(as) / stream.min/max().orElse(d)).
 // entryValOf maps Map.Entry locals → value type leaf for e.getValue().m()
 // (for (var e : m.entrySet()) / m.entrySet().forEach(e -> …) / Map.Entry<K,A> e).
@@ -1697,7 +1697,8 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	as.getFirst() / as.getLast() → elemOf[as] (SequencedCollection / List / Deque)
 //	ia.next()                 → elemOf[ia]   (Iterator<A>)
 //	as.iterator().next()      → elemOf[as]   (via type-preserving iterator())
-//	oa.orElse(d) / oa.orElseGet(s) → elemOf[oa] (Optional<A>; also findFirst().orElse)
+//	oa.orElse(d) / oa.orElseGet(s) / oa.orElseThrow([s]) → elemOf[oa]
+//	  (Optional<A>; also findFirst().orElse / findFirst().orElseThrow)
 //	Collections.min(as) / Collections.max(as[, cmp]) → elemOf[as]
 //	e.getValue()              → entryValOf[e] (Map.Entry local from entrySet)
 //
@@ -1764,9 +1765,11 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 	case "next":
 		// it.next() / as.iterator().next() — element of iterator or pipeline.
 		return javaStreamPipelineElemType(obj, content, elemOf, valOf)
-	case "orElse", "orElseGet":
-		// Optional.orElse / orElseGet return T; receiver may be Optional<A> local
-		// or a pipeline that yields Optional (findFirst/findAny / Optional.of).
+	case "orElse", "orElseGet", "orElseThrow":
+		// Optional.orElse / orElseGet / orElseThrow return T; receiver may be
+		// Optional<A> local or a pipeline that yields Optional
+		// (findFirst/findAny / Optional.of). Exception supplier on orElseThrow
+		// does not change the value type leaf.
 		return javaStreamPipelineElemType(obj, content, elemOf, valOf)
 	case "min", "max":
 		// Collections.min(coll) / Collections.max(coll[, cmp]) return the element type.
