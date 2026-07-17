@@ -1882,6 +1882,9 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `a = items.pop()` / `a = items.pop(0)` / `a = d.pop(k)` (same element/value type),
 // `a = it.__next__()` when `it = iter(items)` (or other known iterable) has element type,
 // as-bindings (`case A() as a`, `with A() as a`, `except A as e`),
+// match sequence captures from a known collection subject
+// (`match items: case [a]:` / `case [a, *rest]:` with `items: list[A]` —
+// fixed slots are elements; *rest is a sequence of the same element type),
 // walrus (`a := A()`, `a := next(items)`, `a := next(x for x in items)`,
 // `a := min(items)`, `a := items.pop()`, `a := it.__next__()`, `a := items[0]` — same RHS typing as plain assignment),
 // for/comprehension targets over known collections
@@ -2198,6 +2201,33 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			if name, typ := pythonAsPatternBinding(n, content); name != "" && ourReceivers[typ] {
 				out[name] = true
 			}
+		case "match_statement":
+			// match items: case [a]: / case [a, *rest]: — bind sequence captures
+			// from the subject's element type (items: list[A] / xs = [A()] / …).
+			// Without this, a.m() is skipped under foreign same-leaf; *rest loops
+			// also stay untyped. as_pattern cases still handled above when walked.
+			subject := ingest.ChildByField(n, "subject")
+			if subject != nil {
+				if et := pythonIterableElemType(subject, content, elemOf, egElems); et != "" {
+					body := ingest.ChildByField(n, "body")
+					if body != nil {
+						for i := uint32(0); i < body.ChildCount(); i++ {
+							ch := body.Child(i)
+							if ch.Type() != "case_clause" {
+								continue
+							}
+							// Patterns precede the consequence block.
+							for j := uint32(0); j < ch.ChildCount(); j++ {
+								p := ch.Child(j)
+								if p.Type() == "block" {
+									break
+								}
+								pythonBindMatchSeqPatterns(p, content, et, ourReceivers, out, elemOf)
+							}
+						}
+					}
+				}
+			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
@@ -2205,6 +2235,196 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 	}
 	walk(root)
 	return out
+}
+
+// pythonBindMatchSeqPatterns binds capture names from match list/tuple patterns
+// when the match subject has element type et. Fixed slots → out (if ourReceivers);
+// *rest → elemOf (including foreign, for shadowing). Fails closed on nested /
+// class / as patterns inside the sequence (those use other binders).
+func pythonBindMatchSeqPatterns(n *grammar.Node, content []byte, et string, ourReceivers, out map[string]bool, elemOf map[string]string) {
+	if n == nil || n.IsNull() || et == "" {
+		return
+	}
+	switch n.Type() {
+	case "list_pattern", "tuple_pattern":
+		fixed, star, ok := pythonMatchSeqPatternCaptures(n, content)
+		if !ok {
+			return
+		}
+		for _, name := range fixed {
+			if ourReceivers[et] {
+				out[name] = true
+			}
+		}
+		if star != "" {
+			// Foreign element types too — shadow prior same-name collections.
+			elemOf[star] = et
+		}
+		return
+	case "case_pattern", "pattern", "as_pattern":
+		// Unwrap; for as_pattern only the left pattern can contain a sequence.
+		// (alias typing is handled by the as_pattern case in pythonTypedLocals.)
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "as" || ch.Type() == "as_pattern_target" {
+				continue
+			}
+			// Skip bare alias identifier after `as`.
+			if n.Type() == "as_pattern" && ch.Type() == "identifier" {
+				// May be left (class name) or right (alias); recurse left only via
+				// sequence patterns nested deeper — safe either way (idents no-op).
+			}
+			pythonBindMatchSeqPatterns(ch, content, et, ourReceivers, out, elemOf)
+		}
+		return
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		pythonBindMatchSeqPatterns(n.Child(i), content, et, ourReceivers, out, elemOf)
+	}
+}
+
+// pythonMatchSeqPatternCaptures returns fixed capture names and optional *rest
+// from a match list_pattern / tuple_pattern (`case [a]:` / `case [a, *rest]:` /
+// `case (a, b):`). Match grammar wraps captures in case_pattern and uses
+// splat_pattern (not list_splat_pattern). Fails closed on nested patterns.
+func pythonMatchSeqPatternCaptures(n *grammar.Node, content []byte) (fixed []string, star string, ok bool) {
+	if n == nil {
+		return nil, "", false
+	}
+	switch n.Type() {
+	case "list_pattern", "tuple_pattern":
+		// ok
+	default:
+		return nil, "", false
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		switch ch.Type() {
+		case "(", ")", "[", "]", ",", "comment":
+			continue
+		case "case_pattern", "pattern":
+			inner := pythonMatchPatternInner(ch)
+			if inner == nil {
+				return nil, "", false
+			}
+			name, isStar, okCap := pythonMatchCaptureOrStar(inner, content)
+			if !okCap {
+				return nil, "", false
+			}
+			if isStar {
+				if star != "" {
+					return nil, "", false
+				}
+				star = name
+			} else {
+				fixed = append(fixed, name)
+			}
+		case "splat_pattern":
+			// Bare *rest child (some grammar shapes).
+			if star != "" {
+				return nil, "", false
+			}
+			id := ingest.ChildByType(ch, "identifier")
+			if id == nil {
+				return nil, "", false
+			}
+			star = ingest.NodeText(id, content)
+		case "identifier", "dotted_name":
+			name := pythonMatchCaptureName(ch, content)
+			if name == "" {
+				return nil, "", false
+			}
+			fixed = append(fixed, name)
+		default:
+			return nil, "", false
+		}
+	}
+	if len(fixed) == 0 && star == "" {
+		return nil, "", false
+	}
+	return fixed, star, true
+}
+
+// pythonMatchPatternInner unwraps a single case_pattern/pattern to its payload.
+func pythonMatchPatternInner(n *grammar.Node) *grammar.Node {
+	if n == nil {
+		return nil
+	}
+	for n != nil && (n.Type() == "case_pattern" || n.Type() == "pattern") {
+		var next *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			switch ch.Type() {
+			case "comment":
+				continue
+			default:
+				if next != nil {
+					// Multiple payload children — ambiguous.
+					return nil
+				}
+				next = ch
+			}
+		}
+		if next == nil {
+			return nil
+		}
+		n = next
+	}
+	return n
+}
+
+// pythonMatchCaptureOrStar returns a simple capture name, or *rest via splat_pattern.
+func pythonMatchCaptureOrStar(n *grammar.Node, content []byte) (name string, isStar bool, ok bool) {
+	if n == nil {
+		return "", false, false
+	}
+	switch n.Type() {
+	case "splat_pattern":
+		id := ingest.ChildByType(n, "identifier")
+		if id == nil {
+			return "", false, false
+		}
+		return ingest.NodeText(id, content), true, true
+	case "identifier", "dotted_name":
+		name = pythonMatchCaptureName(n, content)
+		if name == "" {
+			return "", false, false
+		}
+		return name, false, true
+	default:
+		// class_pattern, nested list/tuple, value patterns — fail closed.
+		return "", false, false
+	}
+}
+
+// pythonMatchCaptureName returns the simple identifier for a capture pattern
+// (identifier or single-segment dotted_name). Multi-segment dotted names fail closed.
+func pythonMatchCaptureName(n *grammar.Node, content []byte) string {
+	if n == nil {
+		return ""
+	}
+	switch n.Type() {
+	case "identifier":
+		return ingest.NodeText(n, content)
+	case "dotted_name":
+		var id *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() != "identifier" {
+				continue
+			}
+			if id != nil {
+				// pkg.name — not a simple capture.
+				return ""
+			}
+			id = ch
+		}
+		if id == nil {
+			return ""
+		}
+		return ingest.NodeText(id, content)
+	}
+	return ""
 }
 
 // pythonExceptClauseIsStar reports whether n is `except* ...` (PEP 654).
