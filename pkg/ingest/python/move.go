@@ -1891,6 +1891,7 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `for a in reversed/sorted/list/iter(items)`,
 // `for a in filter(pred, items)` / `for a in map(A, names)`),
 // tuple/list unpack (`a, b = A(), B()`, `[a, b] = [A(), B()]`,
+// `a, *rest = items` / `*rest, a = items` / `a, = items` from list[A],
 // `for a, b in [(A(), B())]`), and
 // `except* A as e` → `for a in e.exceptions` (ExceptionGroup element type).
 func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]bool {
@@ -2023,7 +2024,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				}
 			}
 			// a, b = A(), B() / (a, b) = A(), B() / a, b = (A(), B()) /
-			// [a, b] = [A(), B()]
+			// [a, b] = [A(), B()] /
+			// a, *rest = items / *rest, a = items / a, = items (items: list[A])
 			if left != nil && right != nil {
 				if targets := pythonPatternIdents(left, content); len(targets) > 0 {
 					if types := pythonCtorListTypes(right, content); len(types) > 0 {
@@ -2031,6 +2033,27 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							if i < len(types) && ourReceivers[types[i]] {
 								out[name] = true
 							}
+						}
+					} else if et := pythonIterableElemType(right, content, elemOf, egElems); et != "" {
+						// a, b = items / a, = items — homogeneous collection elements.
+						for _, name := range targets {
+							if ourReceivers[et] {
+								out[name] = true
+							}
+						}
+					}
+				} else if fixed, star, ok := pythonUnpackFixedAndStar(left, content); ok {
+					// a, *rest = items / *rest, a = items — fixed slots are elements;
+					// *rest is a sequence of the same element type (elemOf[rest]).
+					if et := pythonIterableElemType(right, content, elemOf, egElems); et != "" {
+						for _, name := range fixed {
+							if ourReceivers[et] {
+								out[name] = true
+							}
+						}
+						if star != "" {
+							// Foreign element types too — shadow prior same-name collections.
+							elemOf[star] = et
 						}
 					}
 				}
@@ -2471,31 +2494,55 @@ func pythonComprehensionElemType(comp *grammar.Node, content []byte, elemOf, egE
 
 // pythonPatternIdents returns simple identifier targets from pattern_list /
 // tuple_pattern / list_pattern: a, b / (a, b) / [a, b]. Fail closed on nested
-// patterns.
+// or starred patterns (use pythonUnpackFixedAndStar for *rest).
 func pythonPatternIdents(n *grammar.Node, content []byte) []string {
-	if n == nil {
+	fixed, star, ok := pythonUnpackFixedAndStar(n, content)
+	if !ok || star != "" {
 		return nil
+	}
+	return fixed
+}
+
+// pythonUnpackFixedAndStar returns non-star identifier targets and optional
+// star-bound name from pattern_list / tuple_pattern / list_pattern.
+// Supports assignment star unpack (`a, *rest` / `*rest, a`) via
+// list_splat_pattern. Fails closed on other nested patterns or multiple stars.
+func pythonUnpackFixedAndStar(n *grammar.Node, content []byte) (fixed []string, star string, ok bool) {
+	if n == nil {
+		return nil, "", false
 	}
 	switch n.Type() {
 	case "pattern_list", "tuple_pattern", "list_pattern":
 		// ok
 	default:
-		return nil
+		return nil, "", false
 	}
-	var out []string
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		ch := n.Child(i)
 		switch ch.Type() {
 		case "(", ")", "[", "]", ",", "comment":
 			continue
 		case "identifier":
-			out = append(out, ingest.NodeText(ch, content))
+			fixed = append(fixed, ingest.NodeText(ch, content))
+		case "list_splat_pattern":
+			// *rest — at most one star; binds a sequence, not an element.
+			if star != "" {
+				return nil, "", false
+			}
+			id := ingest.ChildByType(ch, "identifier")
+			if id == nil {
+				return nil, "", false
+			}
+			star = ingest.NodeText(id, content)
 		default:
-			// Nested or starred patterns — fail closed.
-			return nil
+			// Nested patterns — fail closed.
+			return nil, "", false
 		}
 	}
-	return out
+	if len(fixed) == 0 && star == "" {
+		return nil, "", false
+	}
+	return fixed, star, true
 }
 
 // pythonCtorListTypes returns Class leaves for A(), B() expression_list / tuple
