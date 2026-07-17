@@ -97,9 +97,13 @@ func discoverRoot(start string) (string, bool) {
 	}
 }
 
+// hasGit reports whether dir is a git checkout root. Accepts both a normal
+// repository (.git directory) and a linked worktree or submodule (.git file
+// with a gitdir: pointer). Requiring IsDir() skips worktrees and makes
+// discoverRoot walk past them to a wrong parent or fall back to a nested path.
 func hasGit(dir string) bool {
-	st, err := os.Stat(filepath.Join(dir, ".git"))
-	return err == nil && st.IsDir()
+	_, err := os.Stat(filepath.Join(dir, ".git"))
+	return err == nil
 }
 
 func (s *Session) markDirty() {
