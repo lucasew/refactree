@@ -3198,10 +3198,11 @@ func rangeSourceFromMakeCall(n *grammar.Node, content []byte) (rangeSourceInfo, 
 // rangeSourceFromCollectionExpr reports element/value (and map key) type for
 // expressions that construct or retype a slice/array/map: composite literals
 // ([]*T{…} / map[K]*T{…}), make(T, …), append(slice, …) when the first
-// argument is itself such an expression, and type assert/convert to a
-// collection type (x.([]*T) / ([]*T)(x) / x.(map[K]*T)). Used for short-var /
-// untyped-var collection locals and inline index operands
-// (append([]*A{}, x)[0] / x.([]*A)[0]).
+// argument is itself such an expression, type assert/convert to a collection
+// type (x.([]*T) / ([]*T)(x) / x.(map[K]*T)), and slice expressions
+// (as[:n] / as[i:] / as[:]) which preserve the operand's element type. Used
+// for short-var / untyped-var collection locals and inline index operands
+// (append([]*A{}, x)[0] / x.([]*A)[0] / as[:1][0]).
 //
 // Prefer rangeSourceFromCollectionExprIdent when the first append argument may
 // be a known collection param/local (append(as, x) where as []*A).
@@ -3212,7 +3213,8 @@ func rangeSourceFromCollectionExpr(n *grammar.Node, content []byte) (rangeSource
 // rangeSourceFromCollectionExprIdent is rangeSourceFromCollectionExpr plus
 // optional resolution of bare collection identifiers via identElem (params and
 // prior short-var/var bindings). That covers append(as, …) / append(append(as, …), …)
-// when as is a typed slice/map local or parameter.
+// when as is a typed slice/map local or parameter, and as[:n] / s := as[:n]
+// when as is known.
 func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identElem func(name string, at uint32) (string, bool), at uint32) (rangeSourceInfo, bool) {
 	if n == nil {
 		return rangeSourceInfo{}, false
@@ -3234,6 +3236,14 @@ func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identEl
 				continue
 			}
 			return rangeSourceFromCollectionExprIdent(ch, content, identElem, at)
+		}
+		return rangeSourceInfo{}, false
+	}
+	// as[:n] / as[i:] / as[i:j] / as[:] — result has the same element type as
+	// the sliced collection (param, local, make/append/composite, nested slice).
+	if n.Type() == "slice_expression" {
+		if op := ingest.ChildByField(n, "operand"); op != nil {
+			return rangeSourceFromCollectionExprIdent(op, content, identElem, at)
 		}
 		return rangeSourceInfo{}, false
 	}
@@ -3290,8 +3300,9 @@ func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identEl
 // var_spec with an explicit type (var as []*A / var m map[K]*B) and from
 // collection short-var / untyped var initializers:
 // make(T, …), append([]*T{}, …) / append(ident, …), []*T{…} / map[K]*T{…},
-// x.([]*T) / ([]*T)(x). append(ident, …) resolves ident against params and
-// earlier collection bindings already recorded in *bindings.
+// x.([]*T) / ([]*T)(x), as[:n] / as[i:]. append(ident, …) and slice of ident
+// resolve against params and earlier collection bindings already recorded
+// in *bindings.
 func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bindings *[]identTypeBinding) {
 	if body == nil {
 		return
@@ -3469,7 +3480,7 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType func(na
 		}
 		// Typed collection index: []*A{…}[0] / make([]*A,n)[0] /
 		// append([]*A{}, x)[0] / append(as, x)[0] / map[string]*A{…}["k"] /
-		// x.([]*A)[0] / ([]*A)(x)[0].
+		// x.([]*A)[0] / ([]*A)(x)[0] / as[:1][0] / make([]*A,n)[:1][0].
 		if info, ok := rangeSourceFromCollectionExprIdent(op, content, indexElemType, n.StartByte()); ok {
 			return info.elemType
 		}
