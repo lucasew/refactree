@@ -3202,7 +3202,18 @@ func rangeSourceFromMakeCall(n *grammar.Node, content []byte) (rangeSourceInfo, 
 // collection type (x.([]*T) / ([]*T)(x) / x.(map[K]*T)). Used for short-var /
 // untyped-var collection locals and inline index operands
 // (append([]*A{}, x)[0] / x.([]*A)[0]).
+//
+// Prefer rangeSourceFromCollectionExprIdent when the first append argument may
+// be a known collection param/local (append(as, x) where as []*A).
 func rangeSourceFromCollectionExpr(n *grammar.Node, content []byte) (rangeSourceInfo, bool) {
+	return rangeSourceFromCollectionExprIdent(n, content, nil, 0)
+}
+
+// rangeSourceFromCollectionExprIdent is rangeSourceFromCollectionExpr plus
+// optional resolution of bare collection identifiers via identElem (params and
+// prior short-var/var bindings). That covers append(as, …) / append(append(as, …), …)
+// when as is a typed slice/map local or parameter.
+func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identElem func(name string, at uint32) (string, bool), at uint32) (rangeSourceInfo, bool) {
 	if n == nil {
 		return rangeSourceInfo{}, false
 	}
@@ -3212,7 +3223,7 @@ func rangeSourceFromCollectionExpr(n *grammar.Node, content []byte) (rangeSource
 			if c == nil || c.Type() == "," {
 				continue
 			}
-			return rangeSourceFromCollectionExpr(c, content)
+			return rangeSourceFromCollectionExprIdent(c, content, identElem, at)
 		}
 		return rangeSourceInfo{}, false
 	}
@@ -3222,7 +3233,15 @@ func rangeSourceFromCollectionExpr(n *grammar.Node, content []byte) (rangeSource
 			if ch == nil || ch.Type() == "(" || ch.Type() == ")" {
 				continue
 			}
-			return rangeSourceFromCollectionExpr(ch, content)
+			return rangeSourceFromCollectionExprIdent(ch, content, identElem, at)
+		}
+		return rangeSourceInfo{}, false
+	}
+	if n.Type() == "identifier" {
+		if identElem != nil {
+			if el, ok := identElem(ingest.NodeText(n, content), at); ok && el != "" {
+				return rangeSourceInfo{elemType: el}, true
+			}
 		}
 		return rangeSourceInfo{}, false
 	}
@@ -3259,8 +3278,9 @@ func rangeSourceFromCollectionExpr(n *grammar.Node, content []byte) (rangeSource
 			if c == nil || c.Type() == "(" || c.Type() == ")" || c.Type() == "," {
 				continue
 			}
-			// First argument is the slice: append([]*T{}, …) / append(make(...), …).
-			return rangeSourceFromCollectionExpr(c, content)
+			// First argument is the slice: append([]*T{}, …) / append(as, …) /
+			// append(make(...), …).
+			return rangeSourceFromCollectionExprIdent(c, content, identElem, at)
 		}
 	}
 	return rangeSourceInfo{}, false
@@ -3269,12 +3289,38 @@ func rangeSourceFromCollectionExpr(n *grammar.Node, content []byte) (rangeSource
 // collectLocalCollectionElemBindings records slice/array/map locals from
 // var_spec with an explicit type (var as []*A / var m map[K]*B) and from
 // collection short-var / untyped var initializers:
-// make(T, …), append([]*T{}, …), []*T{…} / map[K]*T{…}, x.([]*T) / ([]*T)(x).
+// make(T, …), append([]*T{}, …) / append(ident, …), []*T{…} / map[K]*T{…},
+// x.([]*T) / ([]*T)(x). append(ident, …) resolves ident against params and
+// earlier collection bindings already recorded in *bindings.
 func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bindings *[]identTypeBinding) {
 	if body == nil {
 		return
 	}
 	scopeEnd := body.EndByte()
+	// Lookup collection element type for a name in already-recorded bindings
+	// (params bound by the caller, plus locals bound earlier in this walk).
+	lookupElem := func(name string, at uint32) (string, bool) {
+		if name == "" {
+			return "", false
+		}
+		var best *identTypeBinding
+		for i := range *bindings {
+			b := &(*bindings)[i]
+			if b.name != name {
+				continue
+			}
+			if at < b.start || at >= b.end {
+				continue
+			}
+			if best == nil || (b.end-b.start) < (best.end-best.start) {
+				best = b
+			}
+		}
+		if best == nil {
+			return "", false
+		}
+		return best.typ, true
+	}
 	bindElem := func(start uint32, names []string, info rangeSourceInfo) {
 		if info.elemType == "" {
 			return
@@ -3316,26 +3362,26 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 			if info, ok := rangeSourceFromTypeNode(typeN, content); ok && info.elemType != "" {
 				bindElem(n.StartByte(), names, info)
 			} else {
-				// var as = make/append/[]*A{…} — bind element type positionally.
+				// var as = make/append/[]*A{…}/append(ident,…) — bind element type positionally.
 				exprs := rhsExprs(ingest.ChildByField(n, "value"))
 				for i, name := range names {
 					if name == "" || name == "_" || i >= len(exprs) {
 						continue
 					}
-					if info, ok := rangeSourceFromCollectionExpr(exprs[i], content); ok && info.elemType != "" {
+					if info, ok := rangeSourceFromCollectionExprIdent(exprs[i], content, lookupElem, n.StartByte()); ok && info.elemType != "" {
 						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
 					}
 				}
 			}
 		case "short_var_declaration":
-			// as := make/append/[]*A{…} — same positional binding.
+			// as := make/append/[]*A{…}/append(ident,…) — same positional binding.
 			names := identListNames(ingest.ChildByField(n, "left"), content)
 			exprs := rhsExprs(ingest.ChildByField(n, "right"))
 			for i, name := range names {
 				if name == "" || name == "_" || i >= len(exprs) {
 					continue
 				}
-				if info, ok := rangeSourceFromCollectionExpr(exprs[i], content); ok && info.elemType != "" {
+				if info, ok := rangeSourceFromCollectionExprIdent(exprs[i], content, lookupElem, n.StartByte()); ok && info.elemType != "" {
 					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
 				}
 			}
@@ -3422,9 +3468,9 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType func(na
 			}
 		}
 		// Typed collection index: []*A{…}[0] / make([]*A,n)[0] /
-		// append([]*A{}, x)[0] / map[string]*A{…}["k"] /
+		// append([]*A{}, x)[0] / append(as, x)[0] / map[string]*A{…}["k"] /
 		// x.([]*A)[0] / ([]*A)(x)[0].
-		if info, ok := rangeSourceFromCollectionExpr(op, content); ok {
+		if info, ok := rangeSourceFromCollectionExprIdent(op, content, indexElemType, n.StartByte()); ok {
 			return info.elemType
 		}
 	}
