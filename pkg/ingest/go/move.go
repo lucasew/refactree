@@ -2150,7 +2150,7 @@ func methodDeclReceiverType(method *grammar.Node, content []byte) string {
 
 // collectLocalTypeBindings appends simple local typed bindings under node
 // (short_var_declaration / var_spec / type-switch case arms / range vars /
-// channel receives / select receive cases).
+// channel receives / select receive cases / slice-map index assigns).
 // short_var / var_spec use the enclosing body's end as scope; type-switch
 // aliases and select receive vars are scoped to each arm so same-leaf methods
 // on foreign arms are not rewritten. rangeSrc maps collection names
@@ -2172,16 +2172,21 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 		}
 		switch n.Type() {
 		case "short_var_declaration":
-			// left := right — extract names from left, type from right (&T{} / T{} / <-ch).
+			// left := right — extract names from left, type from right (&T{} / T{} / <-ch / xs[i]).
 			// Multi-value RHS is position-wise: a, b := &A{}, &B{} binds a→A, b→B
 			// so foreign same-leaf methods on b are not rewritten.
 			// Multi-return call: a, b := makeAB() with makeAB() (*A, *B) likewise.
+			// Index: a := xs[0] / a, ok := m[k] — only the value (first name) is elem type.
 			names := identListNames(ingest.ChildByField(n, "left"), content)
 			right := ingest.ChildByField(n, "right")
 			if chTyp, ok := channelReceiveElemType(right, content, rangeSrc); ok {
 				// a := <-ch  /  a, ok := <-ch — only the value (first name) is T.
 				if len(names) > 0 && names[0] != "" && names[0] != "_" {
 					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, names[0], chTyp})
+				}
+			} else if idxTyp, ok := indexAssignElemType(right, content, rangeSrc); ok {
+				if len(names) > 0 && names[0] != "" && names[0] != "_" {
+					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, names[0], idxTyp})
 				}
 			} else if types := typeNamesFromMultiRHS(right, content); len(types) > 0 {
 				for i, name := range names {
@@ -2212,6 +2217,19 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 			if typ == "" {
 				if chTyp, ok := channelReceiveElemType(valueN, content, rangeSrc); ok {
 					typ = chTyp
+				} else if idxTyp, ok := indexAssignElemType(valueN, content, rangeSrc); ok {
+					// var a = xs[0] / var a, ok = m[k] — only value (first name).
+					if len(names) > 0 && names[0] != "" && names[0] != "_" {
+						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, names[0], idxTyp})
+					}
+					if info, ok := rangeSourceFromTypeNode(typeN, content); ok {
+						for _, name := range names {
+							if name != "" && name != "_" {
+								rangeSrc[name] = info
+							}
+						}
+					}
+					break
 				} else if len(names) > 1 {
 					// var a, b = makeAB() / var a, b = &A{}, &B{} — bind positionally.
 					types := typeNamesFromMultiRHS(valueN, content)
@@ -2334,6 +2352,74 @@ func channelReceiveElemType(right *grammar.Node, content []byte, rangeSrc map[st
 		return "", false
 	}
 	return info.elemType, true
+}
+
+// indexAssignElemType returns the element/value type for xs[i] / m[k] when the
+// collection is a known range source (param/var) or a typed composite literal.
+// Used so a := xs[0] / a, ok := m[k] bind a for ExtraRename (same-leaf foreign
+// methods fail closed). expression_list peels to the first expression.
+func indexAssignElemType(right *grammar.Node, content []byte, rangeSrc map[string]rangeSourceInfo) (string, bool) {
+	if right == nil {
+		return "", false
+	}
+	if right.Type() == "expression_list" {
+		for i := uint32(0); i < right.ChildCount(); i++ {
+			c := right.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			return indexAssignElemType(c, content, rangeSrc)
+		}
+		return "", false
+	}
+	if right.Type() == "parenthesized_expression" {
+		for i := uint32(0); i < right.ChildCount(); i++ {
+			c := right.Child(i)
+			if c == nil || c.Type() == "(" || c.Type() == ")" {
+				continue
+			}
+			return indexAssignElemType(c, content, rangeSrc)
+		}
+		return "", false
+	}
+	if right.Type() != "index_expression" {
+		return "", false
+	}
+	op := ingest.ChildByField(right, "operand")
+	if op == nil {
+		return "", false
+	}
+	// Peel (xs)[0].
+	for op != nil && op.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < op.ChildCount(); i++ {
+			ch := op.Child(i)
+			if ch == nil || ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		op = inner
+	}
+	if op == nil {
+		return "", false
+	}
+	if op.Type() == "identifier" && rangeSrc != nil {
+		info, ok := rangeSrc[ingest.NodeText(op, content)]
+		if ok && info.elemType != "" {
+			return info.elemType, true
+		}
+	}
+	// Typed composite: []*A{…}[0] / map[string]*A{…}["k"].
+	if op.Type() == "composite_literal" {
+		if t := ingest.ChildByField(op, "type"); t != nil {
+			if info, ok := rangeSourceFromTypeNode(t, content); ok && info.elemType != "" {
+				return info.elemType, true
+			}
+		}
+	}
+	return "", false
 }
 
 // collectRangeClauseBindings binds range variables inside a for_statement when
