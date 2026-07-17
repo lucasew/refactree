@@ -1880,9 +1880,10 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `a = min(items)` / `a = max(items)` / `a = min(items, key=...)` (same element type),
 // `a = items[0]` / `a = d[k]` (element/value type of a known collection),
 // `a = items.pop()` / `a = items.pop(0)` / `a = d.pop(k)` (same element/value type),
+// `a = it.__next__()` when `it = iter(items)` (or other known iterable) has element type,
 // as-bindings (`case A() as a`, `with A() as a`, `except A as e`),
 // walrus (`a := A()`, `a := next(items)`, `a := next(x for x in items)`,
-// `a := min(items)`, `a := items.pop()`, `a := items[0]` — same RHS typing as plain assignment),
+// `a := min(items)`, `a := items.pop()`, `a := it.__next__()`, `a := items[0]` — same RHS typing as plain assignment),
 // for/comprehension targets over known collections
 // (`for a in [A()]`, `for a in items` with `items: list[A]`,
 // `for a in d.values()` / `for k, a in d.items()` with `d: dict[K, A]`,
@@ -1992,6 +1993,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								if et := pythonIterableElemType(obj, content, elemOf, egElems); ourReceivers[et] {
 									out[lname] = true
 								}
+							case "__next__":
+								// a = it.__next__() — element type of iterator/collection
+								// receiver (it = iter(items) preserves items' element type).
+								// Other methods fail closed.
+								obj := ingest.ChildByField(fn, "object")
+								if et := pythonIterableElemType(obj, content, elemOf, egElems); ourReceivers[et] {
+									out[lname] = true
+								}
 							}
 						}
 					}
@@ -2072,6 +2081,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							}
 						case "pop":
 							// a := items.pop() / items.pop(0) / d.pop(k)
+							obj := ingest.ChildByField(fn, "object")
+							if et := pythonIterableElemType(obj, content, elemOf, egElems); ourReceivers[et] {
+								out[lname] = true
+							}
+						case "__next__":
+							// a := it.__next__() — element type of iterator receiver
 							obj := ingest.ChildByField(fn, "object")
 							if et := pythonIterableElemType(obj, content, elemOf, egElems); ourReceivers[et] {
 								out[lname] = true
