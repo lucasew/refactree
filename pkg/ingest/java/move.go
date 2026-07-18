@@ -1391,9 +1391,19 @@ func javaRecordComponentIndex(root *grammar.Node, content []byte) map[string]map
 	return out
 }
 
+// javaBeanGetterName returns the JavaBeans getter leaf for a field (a → getA).
+// ASCII-first; product bean identifiers are simple Latin names.
+func javaBeanGetterName(field string) string {
+	if field == "" {
+		return ""
+	}
+	return "get" + strings.ToUpper(field[:1]) + field[1:]
+}
+
 // javaClassFieldIndex maps class type name → field name → field type leaf from
 // same-file class_declaration field_declaration (Box with A a → "Box" → {"a":"A"}).
-// Covers instance fields used as box.a.run() / var xa = box.a under foreign same-leaf methods.
+// Also indexes the JavaBeans getter name (getA) so box.getA().run() / var xa = box.getA()
+// recover the field leaf under foreign same-leaf methods (same path as ba.a() / box.a).
 func javaClassFieldIndex(root *grammar.Node, content []byte) map[string]map[string]string {
 	out := map[string]map[string]string{}
 	if root == nil {
@@ -1435,7 +1445,12 @@ func javaClassFieldIndex(root *grammar.Node, content []byte) map[string]map[stri
 						if fnameN == nil {
 							continue
 						}
-						fields[ingest.NodeText(fnameN, content)] = tn
+						fname := ingest.NodeText(fnameN, content)
+						fields[fname] = tn
+						// Bean getter getA for field a — zero-arg accessor form.
+						if getter := javaBeanGetterName(fname); getter != "" && getter != fname {
+							fields[getter] = tn
+						}
 					}
 				}
 				if len(fields) > 0 {
