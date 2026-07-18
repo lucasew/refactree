@@ -3405,6 +3405,7 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	am.compute(k, f) / am.computeIfPresent(k, f) → valOf[am] (Map returns V)
 //	am.put(k, v) / am.replace(k, v) / am.merge(k, v, remapping) → valOf[am] (Map returns V)
 //	as.remove(i) / am.remove(k) → same element/value type (index/key remove returns E/V)
+//	as.set(i, e) → elemOf[as] (List returns previous E)
 //	qa.poll() / qa.peek() / qa.element() → elemOf[qa] (Queue)
 //	da.pollFirst()/pollLast()/peekFirst()/peekLast()/pop() → elemOf[da] (Deque)
 //	as.getFirst() / as.getLast() → elemOf[as] (SequencedCollection / List / Deque)
@@ -3465,6 +3466,9 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// the boolean overload; callers using var xa = as.remove(x) for element
 		// extract are the product case under foreign same-leaf methods).
 		"remove",
+		// List.set(i, e) returns the previous element E (same type as get).
+		// Replacement arg does not change the element type leaf.
+		"set",
 		"poll", "peek", "element",
 		"pollFirst", "pollLast", "peekFirst", "peekLast", "pop",
 		"getFirst", "getLast",
