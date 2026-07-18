@@ -1454,7 +1454,8 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // toCollection(…)) / collect(Collectors::toList / toSet / toUnmodifiableList /
 // toUnmodifiableSet) / collect(collectingAndThen(toList()/toSet()/toUnmodifiable…/
 // toCollection(…), …)) / collect(filtering(pred, toList()/…)) /
-// collect(mapping(a -> a, toList()/…)) / collect(teeing(toList()/…, …, (list, …) -> list)) → same
+// collect(mapping(a -> a, toList()/…)) /
+// collect(flatMapping(a -> Stream.of(a), toList()/…)) / collect(teeing(toList()/…, …, (list, …) -> list)) → same
 // element (Collection<T> for forEach / enhanced-for),
 // m.values() → valOf[m],
 // List.of(new A()) / Stream.of(new A()) / Arrays.asList(new A()) → "A",
@@ -1549,9 +1550,11 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// toCollection(…), finisher)) /
 			// collect(Collectors.filtering(pred, toList()/…)) /
 			// collect(Collectors.mapping(a -> a, toList()/…)) (identity mapper only) /
+			// collect(Collectors.flatMapping(a -> Stream.of(a), toList()/…))
+			// (Stream.of / ofNullable rewrap only) /
 			// collect(Collectors.teeing(toList()/…, …, (list, …) -> list)) —
 			// Collection of the stream element type. Other collectors
-			// (groupingBy, type-changing mapping, toMap, …) fail closed here
+			// (groupingBy, type-changing mapping/flatMapping, toMap, …) fail closed here
 			// (toMap values recovered via javaMapPipelineValueType / javaToMapCollectValueType).
 			if !javaIsToListOrSetCollector(obj, content) {
 				return ""
@@ -2075,7 +2078,9 @@ func javaStreamIterateElemType(call *grammar.Node, content []byte) string {
 // Collection of the same element type — identity, Collections::unmodifiableList,
 // …), Collectors.filtering(pred, toList()/…) (predicate does not change element
 // type), Collectors.mapping(a -> a, toList()/…) when the mapper is identity,
-// and Collectors.teeing(d1, d2, merger) when the merger clearly returns a
+// Collectors.flatMapping(a -> Stream.of(a), toList()/…) when the mapper is a
+// Stream.of / Stream.ofNullable rewrap (or Stream::of / ofNullable), and
+// Collectors.teeing(d1, d2, merger) when the merger clearly returns a
 // toList/toSet/toUnmodifiable/toCollection downstream result. Other collectors
 // fail closed.
 func javaIsToListOrSetCollector(collectCall *grammar.Node, content []byte) bool {
@@ -2100,6 +2105,11 @@ func javaIsToListOrSetCollector(collectCall *grammar.Node, content []byte) bool 
 	}
 	// mapping(a -> a, downstream) when mapper is identity and downstream is toList/toSet/…
 	if javaIsMappingIdentityToListOrSet(first, content) {
+		return true
+	}
+	// flatMapping(a -> Stream.of(a), downstream) when mapper rewraps T as Stream<T>
+	// and downstream is toList/toSet/…
+	if javaIsFlatMappingStreamOfToListOrSet(first, content) {
 		return true
 	}
 	// teeing(d1, d2, merger) when merger returns a toList/toSet/toUnmodifiable downstream.
@@ -2277,6 +2287,127 @@ func javaIsMappingIdentityToListOrSet(n *grammar.Node, content []byte) bool {
 		return false
 	}
 	return javaIsToListOrSetCollectorExpr(args[1], content)
+}
+
+// javaIsFlatMappingStreamOfToListOrSet reports Collectors.flatMapping(mapper, downstream) /
+// flatMapping(...) (static import) when mapper rewraps the stream element as
+// Stream.of(a) / Stream.ofNullable(a) / Stream::of / Stream::ofNullable and
+// downstream is a toList/toSet/toUnmodifiableList/toUnmodifiableSet/toCollection
+// collector. Type-changing flat mappers and blocks fail closed.
+func javaIsFlatMappingStreamOfToListOrSet(n *grammar.Node, content []byte) bool {
+	if n == nil || n.Type() != "method_invocation" {
+		return false
+	}
+	nameN := ingest.ChildByField(n, "name")
+	if nameN == nil || ingest.NodeText(nameN, content) != "flatMapping" {
+		return false
+	}
+	if obj := ingest.ChildByField(n, "object"); obj != nil {
+		if obj.Type() != "identifier" && obj.Type() != "type_identifier" {
+			return false
+		}
+		if ingest.NodeText(obj, content) != "Collectors" {
+			return false
+		}
+	}
+	args := javaCallArgs(n)
+	if len(args) != 2 {
+		return false
+	}
+	if !javaIsStreamOfRewrapMapper(args[0], content) {
+		return false
+	}
+	return javaIsToListOrSetCollectorExpr(args[1], content)
+}
+
+// javaIsStreamOfRewrapMapper reports flatMapping mappers that rewrap T as Stream<T>:
+//
+//	a -> Stream.of(a) / Stream.ofNullable(a)
+//	Stream::of / Stream::ofNullable
+//
+// Blocks, multi-param forms, and other mappers fail closed.
+func javaIsStreamOfRewrapMapper(n *grammar.Node, content []byte) bool {
+	if n == nil {
+		return false
+	}
+	switch n.Type() {
+	case "method_reference":
+		return javaIsStreamOfMethodRef(n, content)
+	case "lambda_expression":
+		params := javaInferredLambdaParamNames(n, content)
+		if len(params) != 1 {
+			return false
+		}
+		body := ingest.ChildByField(n, "body")
+		for body != nil && !body.IsNull() && body.Type() == "parenthesized_expression" {
+			inner := ingest.ChildByField(body, "expression")
+			if inner == nil {
+				for i := uint32(0); i < body.ChildCount(); i++ {
+					ch := body.Child(i)
+					if ch.Type() == "(" || ch.Type() == ")" {
+						continue
+					}
+					inner = ch
+					break
+				}
+			}
+			body = inner
+		}
+		if body == nil || body.IsNull() || body.Type() != "method_invocation" {
+			return false
+		}
+		nameN := ingest.ChildByField(body, "name")
+		if nameN == nil {
+			return false
+		}
+		switch ingest.NodeText(nameN, content) {
+		case "of", "ofNullable":
+		default:
+			return false
+		}
+		obj := ingest.ChildByField(body, "object")
+		if obj == nil || (obj.Type() != "identifier" && obj.Type() != "type_identifier") {
+			return false
+		}
+		if ingest.NodeText(obj, content) != "Stream" {
+			return false
+		}
+		arg := javaFirstCallArg(body)
+		return arg != nil && arg.Type() == "identifier" && ingest.NodeText(arg, content) == params[0]
+	default:
+		return false
+	}
+}
+
+// javaIsStreamOfMethodRef reports Stream::of / Stream::ofNullable.
+func javaIsStreamOfMethodRef(ref *grammar.Node, content []byte) bool {
+	if ref == nil || ref.Type() != "method_reference" {
+		return false
+	}
+	var parts []*grammar.Node
+	for i := uint32(0); i < ref.ChildCount(); i++ {
+		ch := ref.Child(i)
+		if ch.Type() == "::" {
+			continue
+		}
+		parts = append(parts, ch)
+	}
+	if len(parts) < 2 {
+		return false
+	}
+	obj, name := parts[0], parts[len(parts)-1]
+	if (obj.Type() != "identifier" && obj.Type() != "type_identifier") || name.Type() != "identifier" {
+		return false
+	}
+	if ingest.NodeText(obj, content) != "Stream" {
+		return false
+	}
+	switch ingest.NodeText(name, content) {
+	case "of", "ofNullable":
+		return true
+	default:
+		return false
+	}
 }
 
 // javaIsIdentityLambda reports expression-bodied unary lambdas of the form a -> a
