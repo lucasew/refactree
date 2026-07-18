@@ -1880,11 +1880,13 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `a = min(items)` / `a = max(items)` / `a = min(items, key=...)` (same element type),
 // `a = choice(items)` / `a = random.choice(items)` (same element type),
 // `a = heappop(items)` / `a = heapq.heappop(items)` (heap element type; same as next),
+// `a = heappushpop(items, x)` / `a = heapreplace(items, x)` / heapq.* (same heap elem),
 // `a = items[0]` / `a = d[k]` / `a = items.copy()[0]` (element/value of a known collection),
 // `a = items.pop()` / `a = items.pop(0)` / `a = d.pop(k)` (same element/value type),
 // `a = items.popleft()` (collections.deque; same element type as pop),
 // `a = d.get(k)` / `a = d.get(k, default)` (dict value type; default ignored like next),
 // `a = d.setdefault(k)` / `a = d.setdefault(k, default)` (same dict value type),
+// `k, a = d.popitem()` (dict value leaf on 2nd unpack slot; pair itself untyped),
 // `xs = items.copy()` / `xs = items or []` (elemOf preserved for later index/for),
 // `a = it.__next__()` when `it = iter(items)` (or other known iterable) has element type,
 // as-bindings (`case A() as a`, `with A() as a`, `except A as e`),
@@ -1897,6 +1899,7 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // walrus (`a := A()`, `a := next(items)`, `a := next(x for x in items)`,
 // `a := min(items)`, `a := choice(items)`, `a := random.choice(items)`,
 // `a := heappop(items)`, `a := heapq.heappop(items)`,
+// `a := heappushpop(items, x)`, `a := heapreplace(items, x)` / heapq.*,
 // `a := items.pop()`, `a := items.popleft()`, `a := d.get(k)`,
 // `a := d.setdefault(k)`, `a := it.__next__()`, `a := items[0]` — same RHS typing as plain assignment),
 // for/comprehension targets over known collections
@@ -2034,8 +2037,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								out[lname] = true
 							}
 						}
-						// a = heappop(items) — from heapq import heappop; element of heap.
-						if fname == "heappop" {
+						// a = heappop(items) / heappushpop(items, x) / heapreplace(items, x)
+						// — from heapq import …; element of heap (1st arg).
+						if fname == "heappop" || fname == "heappushpop" || fname == "heapreplace" {
 							if et := pythonHeappopElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
 							}
@@ -2063,13 +2067,16 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								// the receiver collection (dict value leaf via elemOf).
 								// a = d.setdefault(k) / d.setdefault(k, default) — same.
 								// Default arg on get/setdefault is ignored (same as next's default).
-								// popitem() and other methods are not handled (fail closed).
+								// popitem() yields a (key, value) pair — single-name bind fails
+								// closed (pair, not value); use unpack `k, a = d.popitem()`.
+								// Other methods fail closed.
 								obj := ingest.ChildByField(fn, "object")
 								if et := pythonIterableElemType(obj, content, elemOf, egElems, typeOf); ourReceivers[et] {
 									out[lname] = true
 								}
-							case "heappop":
-								// a = heapq.heappop(items) — module-qualified; element of 1st arg.
+							case "heappop", "heappushpop", "heapreplace":
+								// a = heapq.heappop(items) / heapq.heappushpop(items, x) /
+								// heapq.heapreplace(items, x) — element of 1st arg (heap).
 								if et := pythonHeappopElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 									out[lname] = true
 								}
@@ -2123,6 +2130,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			}
 			// a, b = A(), B() / (a, b) = A(), B() / a, b = (A(), B()) /
 			// [a, b] = [A(), B()] /
+			// k, a = d.popitem() (value leaf on 2nd slot; same as for k, a in d.items()) /
 			// a, *rest = items / *rest, a = items / a, = items (items: list[A])
 			if left != nil && right != nil {
 				if targets := pythonPatternIdents(left, content); len(targets) > 0 {
@@ -2131,6 +2139,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							if i < len(types) && ourReceivers[types[i]] {
 								out[name] = true
 							}
+						}
+					} else if vt := pythonDictPopitemValueType(right, content, elemOf); vt != "" {
+						// k, a = d.popitem() — value type is elemOf[d] (dict value leaf).
+						if len(targets) >= 2 && ourReceivers[vt] {
+							out[targets[1]] = true
 						}
 					} else if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); et != "" {
 						// a, b = items / a, = items — homogeneous collection elements.
@@ -2159,6 +2172,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 		case "named_expression":
 			// Walrus: (a := A()) / (a := next(items)) / (a := min(items)) /
 			// (a := heappop(items)) / (a := heapq.heappop(items)) /
+			// (a := heappushpop(items, x)) / (a := heapreplace(items, x)) /
 			// (a := reduce(...)) / (a := itemgetter(0)(items)) /
 			// (a := items.pop()) / (a := d.get(k)) / (a := d.setdefault(k)) /
 			// (a := items[0]) — mirror assignment RHS typing. Without this,
@@ -2203,8 +2217,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							out[lname] = true
 						}
 					}
-					// a := heappop(items)
-					if fname == "heappop" {
+					// a := heappop(items) / heappushpop(items, x) / heapreplace(items, x)
+					if fname == "heappop" || fname == "heappushpop" || fname == "heapreplace" {
 						if et := pythonHeappopElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 							out[lname] = true
 						}
@@ -2232,8 +2246,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							if et := pythonIterableElemType(obj, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
 							}
-						case "heappop":
-							// a := heapq.heappop(items)
+						case "heappop", "heappushpop", "heapreplace":
+							// a := heapq.heappop(items) / heapq.heappushpop /
+							// heapq.heapreplace — element of heap (1st arg).
 							if et := pythonHeappopElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
 							}
@@ -2757,11 +2772,12 @@ func pythonRandomChoiceElemType(call *grammar.Node, content []byte, elemOf, egEl
 }
 
 // pythonHeappopElemType recovers the element type of heappop(heap) /
-// heapq.heappop(heap). The heap is the first positional arg (same element typing
-// as next(iterable)). Bare heappop (from heapq import heappop) and module-
-// qualified heapq.heappop are accepted; other receivers fail closed.
-// heappushpop / heapreplace are not handled (nlargest/nsmallest yield lists —
-// see pythonIterableElemType).
+// heappushpop(heap, item) / heapreplace(heap, item) and heapq.* forms.
+// The heap is the first positional arg (same element typing as next(iterable)).
+// Bare names (from heapq import …) and module-qualified heapq.* are accepted;
+// other receivers fail closed. Extra args (item on pushpop/replace) ignored —
+// result is always a heap element. nlargest/nsmallest yield lists — see
+// pythonIterableElemType.
 func pythonHeappopElemType(call *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
 	if call == nil || call.Type() != "call" {
 		return ""
@@ -2772,13 +2788,22 @@ func pythonHeappopElemType(call *grammar.Node, content []byte, elemOf, egElems, 
 	}
 	switch fn.Type() {
 	case "identifier":
-		if ingest.NodeText(fn, content) != "heappop" {
+		switch ingest.NodeText(fn, content) {
+		case "heappop", "heappushpop", "heapreplace":
+			// ok
+		default:
 			return ""
 		}
 	case "attribute":
 		attr := ingest.ChildByField(fn, "attribute")
 		obj := ingest.ChildByField(fn, "object")
-		if attr == nil || ingest.NodeText(attr, content) != "heappop" {
+		if attr == nil {
+			return ""
+		}
+		switch ingest.NodeText(attr, content) {
+		case "heappop", "heappushpop", "heapreplace":
+			// ok
+		default:
 			return ""
 		}
 		if obj == nil || obj.Type() != "identifier" || ingest.NodeText(obj, content) != "heapq" {
@@ -3397,6 +3422,18 @@ func pythonAttrCall(call *grammar.Node, content []byte) (obj, method string) {
 func pythonDictItemsValueType(right *grammar.Node, content []byte, elemOf map[string]string) string {
 	obj, method := pythonAttrCall(right, content)
 	if obj == "" || method != "items" || elemOf == nil {
+		return ""
+	}
+	return elemOf[obj]
+}
+
+// pythonDictPopitemValueType returns the value type of d.popitem() when d is a
+// known dict/mapping local (elemOf stores the value leaf from dict[K, V]).
+// popitem() yields a (key, value) pair — callers bind the value via unpack
+// (k, a = d.popitem()); the pair itself is not an element type.
+func pythonDictPopitemValueType(right *grammar.Node, content []byte, elemOf map[string]string) string {
+	obj, method := pythonAttrCall(right, content)
+	if obj == "" || method != "popitem" || elemOf == nil {
 		return ""
 	}
 	return elemOf[obj]
