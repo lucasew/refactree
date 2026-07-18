@@ -2546,16 +2546,17 @@ func sameFileFuncResultTypes(root *grammar.Node, content []byte) map[string][]st
 	return out
 }
 
-// sameFileFuncCollectionResults maps same-file function names to element/value
-// type info when the function has a single slice/array/map result
-// (func getA() []*A / func getM() map[K]*A / named (as []*A)). Used so
-// as := getA(); as[0].M and getA()[0].M resolve under foreign same-leaf methods.
-// Multi-result signatures are skipped (indices would need positional binding).
-func sameFileFuncCollectionResults(root *grammar.Node, content []byte) map[string]rangeSourceInfo {
+// sameFileFuncCollectionResults maps same-file function names to positional
+// collection element/value info for each result slot
+// (func getA() []*A / func getA() ([]*A, error) / func getM() map[K]*A /
+// named (as []*A, err error)). Empty-elem slots keep multi-return indices
+// aligned so as, err := getA(); as[0].M and getA()[0].M (single-result only)
+// resolve under foreign same-leaf methods.
+func sameFileFuncCollectionResults(root *grammar.Node, content []byte) map[string][]rangeSourceInfo {
 	if root == nil {
 		return nil
 	}
-	out := map[string]rangeSourceInfo{}
+	out := map[string][]rangeSourceInfo{}
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
 		if n == nil {
@@ -2566,8 +2567,8 @@ func sameFileFuncCollectionResults(root *grammar.Node, content []byte) map[strin
 			if nameN != nil && nameN.Type() == "identifier" {
 				name := ingest.NodeText(nameN, content)
 				if name != "" {
-					if info, ok := functionCollectionResult(n, content); ok && info.elemType != "" {
-						out[name] = info
+					if infos := functionCollectionResults(n, content); len(infos) > 0 {
+						out[name] = infos
 					}
 				}
 			}
@@ -2583,18 +2584,21 @@ func sameFileFuncCollectionResults(root *grammar.Node, content []byte) map[strin
 	return out
 }
 
-// functionCollectionResult reports collection element/value type when decl has
-// exactly one result that is a slice, array, or map (possibly named).
-func functionCollectionResult(decl *grammar.Node, content []byte) (rangeSourceInfo, bool) {
+// functionCollectionResults returns positional collection element/value info
+// from a function_declaration's result list. Non-collection slots (error, bool,
+// scalars) keep empty elemType so multi-return indices stay aligned
+// (e.g. ([]*A, error) → [{A}, {}]). Returns nil when no result is a collection.
+func functionCollectionResults(decl *grammar.Node, content []byte) []rangeSourceInfo {
 	if decl == nil {
-		return rangeSourceInfo{}, false
+		return nil
 	}
 	result := ingest.ChildByField(decl, "result")
 	if result == nil {
-		return rangeSourceInfo{}, false
+		return nil
 	}
 	if result.Type() == "parameter_list" {
 		var infos []rangeSourceInfo
+		any := false
 		for i := uint32(0); i < result.ChildCount(); i++ {
 			p := result.Child(i)
 			if p == nil || (p.Type() != "parameter_declaration" && p.Type() != "variadic_parameter_declaration") {
@@ -2603,9 +2607,10 @@ func functionCollectionResult(decl *grammar.Node, content []byte) (rangeSourceIn
 			typeN := ingest.ChildByField(p, "type")
 			info, ok := rangeSourceFromTypeNode(typeN, content)
 			if !ok || info.elemType == "" {
-				// Non-collection result in a multi-slot list → not a pure
-				// single-collection return (e.g. ([]*A, error)).
-				return rangeSourceInfo{}, false
+				// Non-collection slot — keep alignment (e.g. error in ([]*A, error)).
+				info = rangeSourceInfo{}
+			} else {
+				any = true
 			}
 			// Multi-name rare in results; one slot per declaration name, or one
 			// if unnamed.
@@ -2618,12 +2623,57 @@ func functionCollectionResult(decl *grammar.Node, content []byte) (rangeSourceIn
 				}
 			}
 		}
-		if len(infos) != 1 {
-			return rangeSourceInfo{}, false
+		if !any {
+			return nil
 		}
-		return infos[0], true
+		return infos
 	}
-	return rangeSourceFromTypeNode(result, content)
+	if info, ok := rangeSourceFromTypeNode(result, content); ok && info.elemType != "" {
+		return []rangeSourceInfo{info}
+	}
+	return nil
+}
+
+// collectionInfosFromCallResults returns positional collection infos when n is
+// a call to a same-file function known in funcColl (or expression_list of one
+// such call). Used for as, err := getA() / var as, err = getA().
+func collectionInfosFromCallResults(n *grammar.Node, content []byte, funcColl map[string][]rangeSourceInfo) []rangeSourceInfo {
+	if n == nil || len(funcColl) == 0 {
+		return nil
+	}
+	// expression_list → single call only (multi-return, not multi-expr).
+	if n.Type() == "expression_list" {
+		var exprs []*grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			exprs = append(exprs, c)
+		}
+		if len(exprs) != 1 {
+			return nil
+		}
+		n = exprs[0]
+	}
+	if n.Type() != "call_expression" {
+		return nil
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil || fn.Type() != "identifier" {
+		return nil
+	}
+	name := ingest.NodeText(fn, content)
+	if name == "" {
+		return nil
+	}
+	infos := funcColl[name]
+	if len(infos) == 0 {
+		return nil
+	}
+	out := make([]rangeSourceInfo, len(infos))
+	copy(out, infos)
+	return out
 }
 
 // functionResultTypes returns positional concrete type names from a
@@ -3181,9 +3231,11 @@ func goOperandIsBareIdent(n *grammar.Node) bool {
 // collection identifier at a byte offset (as in as[0] / m[k]). Built from
 // function/method/func-literal params, typed local var_specs (slice, array,
 // map), and collection short-var / var initializers (make, new([n]T), append,
-// composite []*T{…} / map[K]*T{…}, same-file getA() []*A). ok=false when unknown.
-// funcColl is same-file function → collection result element types (may be nil).
-func collectionIndexElemTypeFunc(root *grammar.Node, content []byte, funcColl map[string]rangeSourceInfo) func(name string, at uint32) (string, bool) {
+// composite []*T{…} / map[K]*T{…}, same-file getA() []*A /
+// as, err := getA() with getA() ([]*A, error)). ok=false when unknown.
+// funcColl is same-file function → positional collection result element types
+// (may be nil).
+func collectionIndexElemTypeFunc(root *grammar.Node, content []byte, funcColl map[string][]rangeSourceInfo) func(name string, at uint32) (string, bool) {
 	var bindings []identTypeBinding
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
@@ -3301,7 +3353,9 @@ func rangeSourceFromCollectionExpr(n *grammar.Node, content []byte) (rangeSource
 // funcColl. That covers append(as, …) / append(append(as, …), …) when as is a
 // typed slice/map local or parameter, as[:n] / s := as[:n] when as is known,
 // and getA() / as := getA() when getA returns a single slice/array/map.
-func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identElem func(name string, at uint32) (string, bool), at uint32, funcColl map[string]rangeSourceInfo) (rangeSourceInfo, bool) {
+// Multi-result helpers (getA() ([]*A, error)) are not valid as a lone call
+// expression value — those bind via collectLocalCollectionElemBindings.
+func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identElem func(name string, at uint32) (string, bool), at uint32, funcColl map[string][]rangeSourceInfo) (rangeSourceInfo, bool) {
 	if n == nil {
 		return rangeSourceInfo{}, false
 	}
@@ -3385,10 +3439,12 @@ func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identEl
 		}
 		return rangeSourceInfo{}, false
 	}
-	// Same-file helper: getA() []*A / getM() map[K]*A.
+	// Same-file helper with a single collection result: getA() []*A /
+	// getM() map[K]*A. Multi-result signatures cannot appear as a lone call
+	// value (compile error); those bind positionally via short-var / var.
 	if fn.Type() == "identifier" && funcColl != nil {
-		if info, ok := funcColl[ingest.NodeText(fn, content)]; ok && info.elemType != "" {
-			return info, true
+		if infos := funcColl[ingest.NodeText(fn, content)]; len(infos) == 1 && infos[0].elemType != "" {
+			return infos[0], true
 		}
 	}
 	return rangeSourceInfo{}, false
@@ -3452,11 +3508,12 @@ func rangeSourceFromNewArrayCall(n *grammar.Node, content []byte) (rangeSourceIn
 // var_spec with an explicit type (var as []*A / var m map[K]*B) and from
 // collection short-var / untyped var initializers:
 // make(T, …), new([n]T), append([]*T{}, …) / append(ident, …), []*T{…} /
-// map[K]*T{…}, x.([]*T) / ([]*T)(x), as[:n] / as[i:], same-file getA() []*A.
+// map[K]*T{…}, x.([]*T) / ([]*T)(x), as[:n] / as[i:], same-file getA() []*A /
+// multi-return as, err := getA() with getA() ([]*A, error).
 // append(ident, …) and slice of ident resolve against params and earlier
 // collection bindings already recorded in *bindings. funcColl maps same-file
-// function names to single collection result element types (may be nil).
-func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bindings *[]identTypeBinding, funcColl map[string]rangeSourceInfo) {
+// function names to positional collection result element types (may be nil).
+func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bindings *[]identTypeBinding, funcColl map[string][]rangeSourceInfo) {
 	if body == nil {
 		return
 	}
@@ -3514,6 +3571,31 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 		}
 		return out
 	}
+	// Bind names from a multi-return same-file collection call
+	// (as, err := getA() / var as, err = getA()). Returns true when the RHS
+	// was such a call (even if no collection slot bound — skip expr walk).
+	bindMultiReturnCall := func(start uint32, names []string, right *grammar.Node) bool {
+		infos := collectionInfosFromCallResults(right, content, funcColl)
+		if len(infos) == 0 {
+			return false
+		}
+		// Only multi-return needs positional slots here; single-result
+		// as := getA() still goes through the per-expr path below so
+		// getA()[0]-style inline stays consistent.
+		if len(infos) < 2 {
+			return false
+		}
+		for i, name := range names {
+			if name == "" || name == "_" || i >= len(infos) {
+				continue
+			}
+			if infos[i].elemType == "" {
+				continue
+			}
+			*bindings = append(*bindings, identTypeBinding{start, scopeEnd, name, infos[i].elemType})
+		}
+		return true
+	}
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
 		if n == nil {
@@ -3526,8 +3608,13 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 			if info, ok := rangeSourceFromTypeNode(typeN, content); ok && info.elemType != "" {
 				bindElem(n.StartByte(), names, info)
 			} else {
+				valueN := ingest.ChildByField(n, "value")
+				// var as, err = getA() — multi-return collection + non-collection.
+				if bindMultiReturnCall(n.StartByte(), names, valueN) {
+					break
+				}
 				// var as = make/append/getA()/[]*A{…}/append(ident,…) — bind element type positionally.
-				exprs := rhsExprs(ingest.ChildByField(n, "value"))
+				exprs := rhsExprs(valueN)
 				for i, name := range names {
 					if name == "" || name == "_" || i >= len(exprs) {
 						continue
@@ -3539,8 +3626,13 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 			}
 		case "short_var_declaration":
 			// as := make/append/getA()/[]*A{…}/append(ident,…) — same positional binding.
+			// as, err := getA() with getA() ([]*A, error) — multi-return slots.
 			names := identListNames(ingest.ChildByField(n, "left"), content)
-			exprs := rhsExprs(ingest.ChildByField(n, "right"))
+			right := ingest.ChildByField(n, "right")
+			if bindMultiReturnCall(n.StartByte(), names, right) {
+				break
+			}
+			exprs := rhsExprs(right)
 			for i, name := range names {
 				if name == "" || name == "_" || i >= len(exprs) {
 					continue
@@ -3561,7 +3653,7 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 // full type inference: type assert/convert, composite lit, &T{}, (*T), paren,
 // and index expressions (as[0] / m[k]) when indexElemType knows the collection.
 // indexElemType / funcColl may be nil when collection typing is unavailable.
-func goComplexOperandType(n *grammar.Node, content []byte, indexElemType func(name string, at uint32) (string, bool), funcColl map[string]rangeSourceInfo) string {
+func goComplexOperandType(n *grammar.Node, content []byte, indexElemType func(name string, at uint32) (string, bool), funcColl map[string][]rangeSourceInfo) string {
 	if n == nil {
 		return ""
 	}
