@@ -1444,6 +1444,8 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // m.values() → valOf[m],
 // List.of(new A()) / Stream.of(new A()) / Arrays.asList(new A()) → "A",
 // Collections.singletonList(new A()) → "A",
+// Collections.nCopies(n, new A()) → "A",
+// Collections.unmodifiableList(as) / synchronizedList(as) / checkedList(as, …) → elemOf[as],
 // List.copyOf(as) / Set.copyOf(as) → elemOf[as] (Collection of first-arg elements),
 // Stream.concat(s1, s2) → element type when both stream args agree,
 // Arrays.stream(as) / Arrays.stream(new A[]{...}) → "A",
@@ -1542,6 +1544,14 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// / Collections.singletonList(new A())
 			// — element type from homogeneous new T(...) args.
 			return javaStaticCollectionOfElemType(obj, content, name)
+		case "nCopies":
+			// Collections.nCopies(n, new A()) — List of T from the second arg.
+			return javaCollectionsNCopiesElemType(obj, content)
+		case "unmodifiableList", "synchronizedList", "checkedList":
+			// Collections.unmodifiableList(as) / synchronizedList(as) /
+			// checkedList(as, A.class) — Collection of first-arg element type
+			// (Class arg on checkedList ignored).
+			return javaCollectionsListWrapperElemType(obj, content, elemOf, valOf)
 		case "copyOf":
 			// List.copyOf(coll) / Set.copyOf(coll) — Collection of first-arg element type
 			// (unlike of/asList which take new T(...) args).
@@ -1836,6 +1846,63 @@ func javaListSetCopyOfElemType(call *grammar.Node, content []byte, elemOf, valOf
 	switch ingest.NodeText(recvN, content) {
 	case "List", "Set":
 	default:
+		return ""
+	}
+	first := javaFirstCallArg(call)
+	if first == nil {
+		return ""
+	}
+	return javaStreamPipelineElemType(first, content, elemOf, valOf)
+}
+
+// javaCollectionsNCopiesElemType recovers T from Collections.nCopies(n, new T(...)).
+// Count is ignored; only the second arg's creation type matters. Non-Collections
+// receivers, wrong arity, or non-creation second args fail closed.
+func javaCollectionsNCopiesElemType(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	recvN := ingest.ChildByField(call, "object")
+	if recvN == nil {
+		return ""
+	}
+	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
+		return ""
+	}
+	if ingest.NodeText(recvN, content) != "Collections" {
+		return ""
+	}
+	args := javaCallArgs(call)
+	if len(args) != 2 {
+		return ""
+	}
+	arg := args[1]
+	if arg.Type() != "object_creation_expression" {
+		return ""
+	}
+	typeN := ingest.ChildByField(arg, "type")
+	if typeN == nil {
+		return ""
+	}
+	return javaTypeName(typeN, content)
+}
+
+// javaCollectionsListWrapperElemType recovers the element type of
+// Collections.unmodifiableList(coll) / synchronizedList(coll) /
+// checkedList(coll, type). First arg's element type; the Class arg on
+// checkedList is ignored. Non-Collections receivers fail closed.
+func javaCollectionsListWrapperElemType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	recvN := ingest.ChildByField(call, "object")
+	if recvN == nil {
+		return ""
+	}
+	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
+		return ""
+	}
+	if ingest.NodeText(recvN, content) != "Collections" {
 		return ""
 	}
 	first := javaFirstCallArg(call)
