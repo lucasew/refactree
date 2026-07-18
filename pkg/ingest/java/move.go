@@ -5150,10 +5150,11 @@ func javaStaticCollectionOfElemType(call *grammar.Node, content []byte, method s
 	if recvN == nil {
 		return ""
 	}
-	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
+	// Stream / java.util.stream.Stream / List / java.util.List — leaf simple name.
+	recv := javaStaticFactoryReceiverName(recvN, content)
+	if recv == "" {
 		return ""
 	}
-	recv := ingest.NodeText(recvN, content)
 	switch method {
 	case "of":
 		switch recv {
@@ -5164,6 +5165,7 @@ func javaStaticCollectionOfElemType(call *grammar.Node, content []byte, method s
 		}
 	case "ofNullable":
 		// Optional.ofNullable(new T(...)) / Stream.ofNullable(new T(...)).
+		// Also java.util.Optional / java.util.stream.Stream FQ forms.
 		if recv != "Optional" && recv != "Stream" {
 			return ""
 		}
@@ -5192,6 +5194,35 @@ func javaStaticCollectionOfElemType(call *grammar.Node, content []byte, method s
 		}
 	}
 	return javaHomogeneousCreationElem(args, content)
+}
+
+// javaStaticFactoryReceiverName returns the simple type/class leaf of a static
+// factory receiver: Stream, List, Optional, or the outermost field of a
+// qualified form (java.util.stream.Stream → Stream). Unknown shapes fail closed.
+func javaStaticFactoryReceiverName(n *grammar.Node, content []byte) string {
+	if n == nil {
+		return ""
+	}
+	switch n.Type() {
+	case "identifier", "type_identifier":
+		return ingest.NodeText(n, content)
+	case "field_access":
+		// java.util.stream.Stream — outermost field is the simple class name.
+		if nameN := ingest.ChildByField(n, "field"); nameN != nil {
+			return ingest.NodeText(nameN, content)
+		}
+		if nameN := ingest.ChildByField(n, "name"); nameN != nil {
+			return ingest.NodeText(nameN, content)
+		}
+		return ""
+	case "scoped_type_identifier", "scoped_identifier":
+		if nameN := ingest.ChildByField(n, "name"); nameN != nil {
+			return ingest.NodeText(nameN, content)
+		}
+		return ""
+	default:
+		return ""
+	}
 }
 
 // javaHomogeneousCreationElem returns T when every argument is `new T(...)` (same T).
