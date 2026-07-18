@@ -1543,6 +1543,11 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 			// new Map([[k, new A()]]).get(k) / ma.get(k) — uniform value type.
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
+		if t := jsArrayAtElemType(obj, content, arrayLocals, typedLocals, factories); t != "" {
+			// [new A()].at(0) / as.at(-1) / Array.from([new A()]).at(0) —
+			// element peel under foreign same-leaf (same as arr[i]).
+			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
 	}
 	// (await Promise.all([new A()]))[0].run() / [new A()][0].run() /
 	// Array.from([new A()])[0].run() / Array.of(new A())[0].run() /
@@ -1723,6 +1728,10 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 					} else if t := jsArrayElemSubscriptType(valN, content, arrayLocals, out, factories); ourReceivers[t] {
 						// const a = [new A()][0] / Array.from([new A()])[0] /
 						// Array.of(new A())[0] / Object.values({k: new A()})[0]
+						out[ingest.NodeText(nameN, content)] = t
+					} else if t := jsArrayAtElemType(valN, content, arrayLocals, out, factories); ourReceivers[t] {
+						// const a = [new A()].at(0) / as.at(-1) /
+						// Array.from([new A()]).at(0) / Object.values({k: new A()}).at(0)
 						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsIteratorSourceYieldType(valN, content, generators, genLocals, arrayLocals, out, factories, mapLocals); ourReceivers[t] {
 						// const ga = genA() / const ia = [new A()].values() /
@@ -3627,6 +3636,97 @@ func jsArrayElemSubscriptType(n *grammar.Node, content []byte, arrayLocals, type
 		return ""
 	}
 	return jsArraySourceElemType(ingest.ChildByField(n, "object"), content, arrayLocals, typedLocals, factories)
+}
+
+// jsIsNumericIndexArg reports whether n is a numeric index expression suitable
+// for array element peels: a number literal or unary +/- of a number.
+func jsIsNumericIndexArg(n *grammar.Node, content []byte) bool {
+	if n == nil {
+		return false
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil {
+		return false
+	}
+	if n.Type() == "number" {
+		return true
+	}
+	if n.Type() == "unary_expression" {
+		// -1 / +0 — operator must be +/- and argument a number.
+		op := ingest.ChildByField(n, "operator")
+		arg := ingest.ChildByField(n, "argument")
+		if op == nil || arg == nil {
+			return false
+		}
+		ot := ingest.NodeText(op, content)
+		return (ot == "-" || ot == "+") && arg.Type() == "number"
+	}
+	return false
+}
+
+// jsArrayAtElemType recovers T from arr.at(i) / Array.from([new T()]).at(i) /
+// Array.of(new T()).at(i) / Object.values({k: new T()}).at(i) when the receiver
+// peels to a uniform array element type T. Single numeric arg only (incl. -1).
+// Enables [new A()].at(0).run() under foreign same-leaf methods.
+func jsArrayAtElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	args := ingest.ChildByField(n, "arguments")
+	if fn == nil || args == nil {
+		return ""
+	}
+	if fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain" {
+		return ""
+	}
+	prop := ingest.ChildByField(fn, "property")
+	if prop == nil || ingest.NodeText(prop, content) != "at" {
+		return ""
+	}
+	// Exactly one positional numeric arg.
+	var first *grammar.Node
+	count := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		count++
+		if first == nil {
+			first = ch
+		}
+	}
+	if count != 1 || first == nil || !jsIsNumericIndexArg(first, content) {
+		return ""
+	}
+	return jsArraySourceElemType(ingest.ChildByField(fn, "object"), content, arrayLocals, typedLocals, factories)
 }
 
 // jsIsSymbolIteratorIndex reports whether n is Symbol.iterator (member form).
