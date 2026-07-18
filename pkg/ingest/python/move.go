@@ -2080,7 +2080,10 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `d = asdict(box)` / `dataclasses.asdict(box)` / walrus — field keys of the
 // first positional arg (fieldOf for `d["a"].run()` / `d.get("a").run()` under
 // foreign same-leaf methods; asdict yields a dict of field values),
-// `d = vars(box)` / walrus — same field-key binding (vars yields obj.__dict__).
+// `d = vars(box)` / walrus — same field-key binding (vars yields obj.__dict__),
+// `t = astuple(box)` / `dataclasses.astuple(box)` / walrus — ordered index
+// slots of the first positional arg (fieldOf["t.#0"] for `t[0].run()`; astuple
+// yields a tuple of field values in declaration order, not named keys).
 // fieldOf maps "local.field" → field type leaf for class field access.
 // elemOf maps collection locals → element type leaf (list[A] / deque[A] /
 // dict value / Queue[A] → "A") for direct access chains under foreign same-leaf.
@@ -2407,6 +2410,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					// d = vars(box) — same field keys as asdict (obj.__dict__).
 					if tn := pythonVarsCallObjectType(right, content, typeOf); tn != "" {
 						bindFields(lname, tn)
+					}
+					// t = astuple(box) / dataclasses.astuple(box) — tuple of field
+					// values in declaration order (fieldOf["t.#i"] for t[i].run()).
+					// Index slots only — plain tuple has no named keys / attrs.
+					if tn := pythonAstupleCallObjectType(right, content, typeOf); tn != "" {
+						pythonBindNamedtupleIndexFields(lname, tn, fieldOrder, fieldIndex, fieldOf)
 					}
 				}
 				// a = items[0] / a = d[k] / a = list(items)[0] — element/value of collection.
@@ -2738,6 +2747,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// d := vars(box) — same field keys as asdict (obj.__dict__).
 				if tn := pythonVarsCallObjectType(valueN, content, typeOf); tn != "" {
 					bindFields(lname, tn)
+				}
+				// t := astuple(box) / dataclasses.astuple(box) — tuple of field
+				// values in declaration order (fieldOf["t.#i"] for t[i].run()).
+				if tn := pythonAstupleCallObjectType(valueN, content, typeOf); tn != "" {
+					pythonBindNamedtupleIndexFields(lname, tn, fieldOrder, fieldIndex, fieldOf)
 				}
 			}
 			// a := items[0] / a := d[k] — element/value of known collection.
@@ -3660,6 +3674,27 @@ func pythonAsdictCallObjectType(call *grammar.Node, content []byte, typeOf map[s
 	}
 	fn := ingest.ChildByField(call, "function")
 	if fn == nil || pythonSimpleCalleeName(fn, content) != "asdict" {
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) == 0 {
+		return ""
+	}
+	return pythonObjectExprType(args[0], content, typeOf)
+}
+
+// pythonAstupleCallObjectType recovers T from astuple(x) / dataclasses.astuple(x)
+// when the first positional arg is a typed object local or Class() ctor.
+// astuple returns a tuple of field values in declaration order (index slots via
+// pythonBindNamedtupleIndexFields + fieldOrder); not the object itself.
+// Keywords (tuple_factory=) ignored for typing. Other callees / missing first
+// arg fail closed.
+func pythonAstupleCallObjectType(call *grammar.Node, content []byte, typeOf map[string]string) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || pythonSimpleCalleeName(fn, content) != "astuple" {
 		return ""
 	}
 	args, ok := pythonCallPositionalArgNodes(call)
