@@ -1095,6 +1095,8 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // / Optional.flatMap(a -> Optional.of(a)).ifPresent(x -> x.m()) / flatMap(...).orElse(d) /
 // / Optional.map(a -> a).ifPresent(x -> x.m()) / map(...).orElse(d) /
 // / Optional<A>.ifPresent(a -> a.m()) / opt.ifPresentOrElse(a -> a.m(), () -> {}) /
+// / CompletableFuture<A>.thenAccept(a -> a.m()) / thenApply(a -> a.m()) /
+// / thenCompose(a -> …) — CF result T under foreign same-leaf methods /
 // / Map<K,A>.forEach((k,v) -> v.m()) /
 // Map.computeIfPresent/compute/replaceAll((k,v) -> v.m()) / Map.merge((v1,v2) -> v1.m()) /
 // map.values().forEach(v -> v.m()) types a/v as A), for (var a : as) loop variables
@@ -1815,6 +1817,12 @@ func javaStreamElementLambdaMethod(method string) bool {
 		"takeWhile", "dropWhile",
 		"anyMatch", "allMatch", "noneMatch",
 		"removeIf", "ifPresent", "ifPresentOrElse",
+		// CompletableFuture.thenAccept(Consumer<? super T>) /
+		// thenApply(Function<? super T,? extends U>) /
+		// thenCompose(Function<? super T,? extends CompletionStage<U>>) —
+		// unary functional arg applied to CF result T (same leaf as join/getNow).
+		// Return-type pipelines (thenApply identity + join) stay fail-closed.
+		"thenAccept", "thenApply", "thenCompose",
 		// Map value bi-lambdas (see javaMapValueBiLambdaMethod).
 		"computeIfPresent", "compute", "replaceAll", "merge",
 		// ConcurrentHashMap.reduceValues — 2-arg BiFunction on V,V and 3-arg unary
