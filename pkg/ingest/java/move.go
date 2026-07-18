@@ -1078,6 +1078,8 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // m.values() / m.forEach / m.get → group lists with element T for nested forEach / for-var.
 // collect(toMap|toConcurrentMap|toUnmodifiableMap(key, a -> a[, …])) → Map of T values:
 // var m = stream.collect(toMap(...)); m.values() / m.forEach / m.get → T.
+// Collections.unmodifiableMap/synchronizedMap/checkedMap(m) / singletonMap(k, new T()) /
+// Map.of(k, new T()) / Map.copyOf(m) → same Map value typing for values/forEach/get.
 // entryValOf maps Map.Entry locals → value type leaf for e.getValue().m()
 // (for (var e : m.entrySet()) / m.entrySet().forEach(e -> …) / Map.Entry<K,A> e).
 func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string) {
@@ -1165,8 +1167,10 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// track collection/stream/Optional element type for later
 					// list.forEach / for (var a : list) / opt.ifPresent (not a scalar A).
 					elemOf[name] = et
-				} else if et := javaToMapCollectValueType(valN, content, elemOf, valOf); et != "" {
-					// var m = as.stream().collect(Collectors.toMap(k, a -> a[, …])) —
+				} else if et := javaMapPipelineValueType(valN, content, elemOf, valOf); et != "" {
+					// var m = as.stream().collect(Collectors.toMap(k, a -> a[, …])) /
+					// Collections.unmodifiableMap(as) / Collections.singletonMap(k, new A()) /
+					// Map.of(k, new A()) / Map.copyOf(as) —
 					// Map of T values; track value T for values/forEach/get.
 					valOf[name] = et
 				} else if et := javaGroupingByCollectElemType(valN, content, elemOf, valOf); et != "" {
@@ -2529,7 +2533,12 @@ func javaArraysStreamElemType(call *grammar.Node, content []byte, elemOf, valOf 
 }
 
 // javaMapPipelineValueType recovers the value type of a Map-typed expression:
-// m → valOf[m], stream.collect(toMap(key, a -> a[, …])) → stream element type.
+// m → valOf[m],
+// stream.collect(toMap(key, a -> a[, …])) → stream element type,
+// Collections.unmodifiableMap/synchronizedMap/checkedMap(m[, …]) → valOf[m],
+// Collections.singletonMap(k, new T(...)) → T,
+// Map.of(k, new T(...), …) → T (homogeneous value creations),
+// Map.copyOf(m) → valOf[m].
 // Fail closed on other shapes (type-changing value mappers, groupingBy lists, …).
 func javaMapPipelineValueType(obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
@@ -2556,10 +2565,165 @@ func javaMapPipelineValueType(obj *grammar.Node, content []byte, elemOf, valOf m
 		}
 		return valOf[ingest.NodeText(obj, content)]
 	case "method_invocation":
-		return javaToMapCollectValueType(obj, content, elemOf, valOf)
+		nameN := ingest.ChildByField(obj, "name")
+		if nameN == nil {
+			return ""
+		}
+		switch name := ingest.NodeText(nameN, content); name {
+		case "collect":
+			return javaToMapCollectValueType(obj, content, elemOf, valOf)
+		case "unmodifiableMap", "synchronizedMap", "checkedMap",
+			"unmodifiableSortedMap", "synchronizedSortedMap", "checkedSortedMap",
+			"unmodifiableNavigableMap", "synchronizedNavigableMap", "checkedNavigableMap":
+			// Collections.*Map wrappers — value type of first-arg map (Class args ignored).
+			return javaCollectionsMapWrapperValueType(obj, content, elemOf, valOf)
+		case "singletonMap":
+			// Collections.singletonMap(k, new T(...)) — value type from second arg.
+			return javaCollectionsSingletonMapValueType(obj, content)
+		case "of":
+			// Map.of(k, new T(...), …) — homogeneous value creations at odd slots.
+			return javaMapOfValueType(obj, content)
+		case "copyOf":
+			// Map.copyOf(m) — value type of first-arg map (List/Set.copyOf stay in stream path).
+			return javaMapCopyOfValueType(obj, content, elemOf, valOf)
+		default:
+			return ""
+		}
 	default:
 		return ""
 	}
+}
+
+// javaCollectionsMapWrapperValueType recovers V from
+// Collections.unmodifiableMap/synchronizedMap/checkedMap(m[, keyClass, valueClass])
+// (and Sorted/Navigable variants). First arg's map value type; Class args ignored.
+// Non-Collections receivers fail closed.
+func javaCollectionsMapWrapperValueType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	recvN := ingest.ChildByField(call, "object")
+	if recvN == nil {
+		return ""
+	}
+	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
+		return ""
+	}
+	if ingest.NodeText(recvN, content) != "Collections" {
+		return ""
+	}
+	first := javaFirstCallArg(call)
+	if first == nil {
+		return ""
+	}
+	return javaMapPipelineValueType(first, content, elemOf, valOf)
+}
+
+// javaCollectionsSingletonMapValueType recovers T from
+// Collections.singletonMap(k, new T(...)). Key is ignored; only the second arg's
+// creation type matters. Non-Collections receivers, wrong arity, or non-creation
+// value args fail closed.
+func javaCollectionsSingletonMapValueType(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	recvN := ingest.ChildByField(call, "object")
+	if recvN == nil {
+		return ""
+	}
+	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
+		return ""
+	}
+	if ingest.NodeText(recvN, content) != "Collections" {
+		return ""
+	}
+	args := javaCallArgs(call)
+	if len(args) != 2 {
+		return ""
+	}
+	arg := args[1]
+	if arg.Type() != "object_creation_expression" {
+		return ""
+	}
+	typeN := ingest.ChildByField(arg, "type")
+	if typeN == nil {
+		return ""
+	}
+	return javaTypeName(typeN, content)
+}
+
+// javaMapOfValueType recovers T from Map.of(k1, new T(...), k2, new T(...), …)
+// when every value slot (odd index) is `new T(...)` with the same T. Empty of(),
+// odd arity, non-Map receivers, and non-creation values fail closed.
+func javaMapOfValueType(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	recvN := ingest.ChildByField(call, "object")
+	if recvN == nil {
+		return ""
+	}
+	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
+		return ""
+	}
+	if ingest.NodeText(recvN, content) != "Map" {
+		return ""
+	}
+	args := javaCallArgs(call)
+	if len(args) < 2 || len(args)%2 != 0 {
+		return ""
+	}
+	var elem string
+	saw := false
+	for i := 1; i < len(args); i += 2 {
+		arg := args[i]
+		if arg.Type() != "object_creation_expression" {
+			return ""
+		}
+		typeN := ingest.ChildByField(arg, "type")
+		if typeN == nil {
+			return ""
+		}
+		tn := javaTypeName(typeN, content)
+		if tn == "" {
+			return ""
+		}
+		if !saw {
+			elem = tn
+			saw = true
+			continue
+		}
+		if tn != elem {
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return elem
+}
+
+// javaMapCopyOfValueType recovers V from Map.copyOf(m): value type of the first
+// arg map. Receiver must be Map; other receivers (and missing args) fail closed.
+func javaMapCopyOfValueType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	recvN := ingest.ChildByField(call, "object")
+	if recvN == nil {
+		return ""
+	}
+	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
+		return ""
+	}
+	if ingest.NodeText(recvN, content) != "Map" {
+		return ""
+	}
+	first := javaFirstCallArg(call)
+	if first == nil {
+		return ""
+	}
+	return javaMapPipelineValueType(first, content, elemOf, valOf)
 }
 
 // javaIsToMapIdentityValueCollector reports
