@@ -1878,6 +1878,8 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `a = next(iter(items))` / `a = next(items)` / `a = next(x for x in items)`
 // (element type of the iterable arg / identity genexp),
 // `a = min(items)` / `a = max(items)` / `a = min(items, key=...)` (same element type),
+// `pair = min(pairs)` / `a, b = max(list(zip(...)))` when pairs is a pair-iter
+// (pairSlots + shared elemOf; same path as next(pairs) / pairs.pop()),
 // `a = choice(items)` / `a = random.choice(items)` (same element type),
 // `a = heappop(items)` / `a = heapq.heappop(items)` (heap element type; same as next),
 // `a = heappushpop(items, x)` / `a = heapreplace(items, x)` / heapq.* (same heap elem),
@@ -2063,8 +2065,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// a = min(items) / max(items) / min(items, key=...) —
 						// single-iterable form yields an element of that iterable.
 						// Multi-arg min(a, b, ...) fails closed (not an iterable fold).
+						// pair = min(pairs) when pairs is a pair-iter (list(zip(...)), …) —
+						// pair is a tuple (pairSlots + shared elemOf), not an element.
 						if fname == "min" || fname == "max" {
-							if et := pythonMinMaxElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
+							if types := pythonMinMaxPairSlots(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+								pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+							} else if et := pythonMinMaxElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
 							}
 						}
@@ -2289,9 +2295,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							out[lname] = true
 						}
 					}
-					// a := min(items) / max(items) / min(items, key=...)
+					// a := min(items) / max(items) / min(items, key=...) /
+					// pair := min(pairs) when pairs is a pair-iter (pairSlots + shared elemOf).
 					if fname == "min" || fname == "max" {
-						if et := pythonMinMaxElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
+						if types := pythonMinMaxPairSlots(valueN, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+							pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+						} else if et := pythonMinMaxElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 							out[lname] = true
 						}
 					}
@@ -3097,7 +3106,8 @@ func pythonPairSlotSubscriptType(sub *grammar.Node, content []byte, pairSlots ma
 }
 
 // pythonPairSlotsOf recovers per-slot types for a pair expression:
-// pair local (pairSlots), next(pair_iter), pair_iter.pop() / list(zip(...)).pop(),
+// pair local (pairSlots), next(pair_iter), min/max(pair_iter),
+// pair_iter.pop() / list(zip(...)).pop(),
 // or pair_iter[i] / list(zip(...))[i] (index into a pair-yielding sequence yields
 // one pair with those slots). Parenthesized forms accepted. Slices fail closed.
 func pythonPairSlotsOf(n *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string, pairSlots, pairIterSlots map[string][]string) []string {
@@ -3119,6 +3129,10 @@ func pythonPairSlotsOf(n *grammar.Node, content []byte, elemOf, egElems, typeOf 
 	case "call":
 		// next(pairs) / next(zip(xs, ys))
 		if types := pythonNextPairSlots(n, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+			return types
+		}
+		// min(pairs) / max(pairs) / min(list(zip(...))) / max(list(zip(...)), key=...)
+		if types := pythonMinMaxPairSlots(n, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
 			return types
 		}
 		// pairs.pop() / pairs.pop(0) / list(zip(...)).pop()
@@ -3270,6 +3284,31 @@ func pythonNextPairSlots(call *grammar.Node, content []byte, elemOf, egElems, ty
 	return pythonPairIterSlotsOf(args[0], content, elemOf, egElems, typeOf, pairIterSlots)
 }
 
+// pythonMinMaxPairSlots recovers pair slot types for min(pair_iter) / max(pair_iter)
+// (optional key=/default= kwargs ignored). Only the single-positional-arg form —
+// min(a, b) / max(x, y, z) fail closed (same as min/max element typing). Yields
+// the tuple slots of one pair-iter item — not an element leaf.
+func pythonMinMaxPairSlots(call *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string, pairIterSlots map[string][]string) []string {
+	if call == nil || call.Type() != "call" {
+		return nil
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "identifier" {
+		return nil
+	}
+	switch ingest.NodeText(fn, content) {
+	case "min", "max":
+		// ok
+	default:
+		return nil
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) != 1 {
+		return nil
+	}
+	return pythonPairIterSlotsOf(args[0], content, elemOf, egElems, typeOf, pairIterSlots)
+}
+
 // pythonPopPairSlots recovers pair slot types for pairs.pop() / pairs.pop(i) /
 // list(zip(...)).pop() when the receiver is a known pair-iter. Index args are
 // ignored (any pop removes one pair with the same slots). popitem and other
@@ -3294,6 +3333,7 @@ func pythonPopPairSlots(call *grammar.Node, content []byte, elemOf, egElems, typ
 // from a known pair: a, b = next(zip(...)) / a, b = next(pairs) /
 // a, b = pair / a, b = pairs[0] / a, b = list(zip(...))[0] /
 // a, b = pairs.pop() / a, b = list(zip(...)).pop() /
+// a, b = min(pairs) / a, b = max(list(zip(...))) /
 // [a, b] = next(pairs) when pair/pair-iter slots are known.
 // Parenthesized forms accepted. Untyped slots stay "" (enumerate index).
 func pythonAssignPairUnpackTypes(right *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string, pairSlots map[string][]string, pairIterSlots map[string][]string) []string {
