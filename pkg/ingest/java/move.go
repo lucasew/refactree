@@ -1726,6 +1726,8 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // same element type; Class args ignored — mirrors unmodifiableSortedMap/NavigableMap),
 // Collections.unmodifiableSequencedCollection/Set(as) / synchronizedSequencedCollection/Set(as)
 // → elemOf[as] (SequencedCollection/Set wrappers; same E — Java 21; mirrors *SequencedMap),
+// Collections.asLifoQueue(as) / checkedQueue(as, …) → elemOf[as] (Queue wrappers; same E;
+// Class arg on checkedQueue ignored — mirrors checkedList/Set),
 // Collections.list(Enumeration) / Collections.enumeration(coll) → enumeration/coll element type,
 // List.copyOf(as) / Set.copyOf(as) → elemOf[as] (Collection of first-arg elements),
 // Stream.concat(s1, s2) → element type when both stream args agree,
@@ -1879,6 +1881,7 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			"unmodifiableSequencedCollection", "synchronizedSequencedCollection",
 			"unmodifiableSequencedSet", "synchronizedSequencedSet",
 			"unmodifiableCollection", "synchronizedCollection", "checkedCollection",
+			"asLifoQueue", "checkedQueue",
 			"list", "enumeration":
 			// Collections.unmodifiableList/Set/Collection(as) /
 			// synchronizedList/Set/Collection(as) /
@@ -1892,6 +1895,8 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// Collections.unmodifiableSequencedCollection/Set(as) /
 			// synchronizedSequencedCollection/Set(as) — same E (Sequenced
 			// wrappers; Java 21; mirrors unmodifiableSequencedMap).
+			// Collections.asLifoQueue(deque) / checkedQueue(queue, A.class) —
+			// Queue of first-arg element type (Class arg ignored).
 			// Collections.list(Enumeration) — ArrayList of enumeration elements.
 			// Collections.enumeration(coll) — Enumeration of coll elements.
 			return javaCollectionsListWrapperElemType(obj, content, elemOf, valOf)
@@ -2244,6 +2249,7 @@ func javaCollectionsNCopiesElemType(call *grammar.Node, content []byte) string {
 // synchronizedSortedSet/NavigableSet(coll) / checkedSortedSet/NavigableSet(coll, type) /
 // Collections.unmodifiableSequencedCollection/Set(coll) /
 // synchronizedSequencedCollection/Set(coll) /
+// Collections.asLifoQueue(coll) / checkedQueue(coll, type) /
 // Collections.list(enumeration) / Collections.enumeration(coll).
 // First arg's element type; the Class arg on checked* is ignored.
 // Non-Collections receivers fail closed.
