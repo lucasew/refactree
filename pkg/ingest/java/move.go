@@ -1793,8 +1793,15 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 		if typeN := ingest.ChildByField(obj, "type"); typeN != nil {
 			switch typeN.Type() {
 			case "generic_type":
-				if args := javaTypeArgNames(typeN, content); len(args) == 1 {
+				args := javaTypeArgNames(typeN, content)
+				if len(args) == 1 {
 					return args[0]
+				}
+				// Map<K,V> (and other multi-arg) casts: do not peel to the value
+				// (clone → map local would yield K via elemOf). Fail closed so
+				// Map.get/forEach recover V via javaMapPipelineValueType.
+				if len(args) >= 2 {
+					return ""
 				}
 			case "array_type":
 				if elem := ingest.ChildByField(typeN, "element"); elem != nil {
@@ -3301,6 +3308,9 @@ func javaMapCopyOfKeyType(call *grammar.Node, content []byte, elemOf, valOf map[
 // Map.of(k, new T(...), …) → T (homogeneous value creations),
 // Map.ofEntries(Map.entry(k, new T(...)), …) → T (homogeneous entry values),
 // Map.copyOf(m) → valOf[m],
+// m.clone() → valOf[m] (shallow map copy; same V — typically under a Map cast),
+// (HashMap<K,V>) m.clone() / (Map<K,V>) x → V (second type-arg of generic cast;
+// single-arg List casts stay on the element pipeline),
 // m.reversed() → valOf[m] (SequencedMap view; order only),
 // m.descendingMap() → valOf[m] (NavigableMap reverse-order view),
 // m.headMap/tailMap/subMap(...) → valOf[m] (SortedMap/NavigableMap range views;
@@ -3330,6 +3340,20 @@ func javaMapPipelineValueType(obj *grammar.Node, content []byte, elemOf, valOf m
 			return ""
 		}
 		return valOf[ingest.NodeText(obj, content)]
+	case "cast_expression":
+		// (HashMap<K,V>) m.clone() / (Map<K,V>) x — recover V from a multi-arg
+		// generic cast. Single-arg List casts fail closed here (element path).
+		// Otherwise peel the cast value so type-preserving map pipelines under
+		// the cast (m.clone() when raw/unknown) still bind.
+		if typeN := ingest.ChildByField(obj, "type"); typeN != nil && typeN.Type() == "generic_type" {
+			if args := javaTypeArgNames(typeN, content); len(args) >= 2 {
+				return args[1]
+			}
+		}
+		if val := ingest.ChildByField(obj, "value"); val != nil {
+			return javaMapPipelineValueType(val, content, elemOf, valOf)
+		}
+		return ""
 	case "method_invocation":
 		nameN := ingest.ChildByField(obj, "name")
 		if nameN == nil {
@@ -3357,6 +3381,11 @@ func javaMapPipelineValueType(obj *grammar.Node, content []byte, elemOf, valOf m
 		case "copyOf":
 			// Map.copyOf(m) — value type of first-arg map (List/Set.copyOf stay in stream path).
 			return javaMapCopyOfValueType(obj, content, elemOf, valOf)
+		case "clone":
+			// m.clone() — same value type (shallow map copy; usually under a Map cast
+			// because Object.clone() returns Object). List/array clone stay on the
+			// element pipeline (no valOf on those receivers).
+			return javaMapPipelineValueType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
 		case "reversed":
 			// SequencedMap.reversed() — same value type (order only; Java 21).
 			// List/SequencedCollection.reversed stay on the element pipeline.
