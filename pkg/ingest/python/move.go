@@ -1639,7 +1639,9 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 	defer pf.Close()
 
 	// Locals whose static type we can attribute to a class (annotations / Class()).
-	typedLocals := pythonTypedLocals(pf.Root, content, ourReceivers)
+	// fieldOf maps "local.field" → field type leaf for class/dataclass field access
+	// (box.a.run() / xa = box.a under foreign same-leaf methods).
+	typedLocals, fieldOf := pythonTypedLocals(pf.Root, content, ourReceivers)
 
 	var edits []ingest.Edit
 	var walk func(n *grammar.Node, enclosingClass string)
@@ -1658,7 +1660,7 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			obj := ingest.ChildByField(n, "object")
 			attr := ingest.ChildByField(n, "attribute")
 			if obj != nil && attr != nil && ingest.NodeText(attr, content) == oldLeaf {
-				if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals) {
+				if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf) {
 					edits = append(edits, ingest.Edit{
 						File:      fileRel,
 						StartByte: attr.StartByte(),
@@ -1676,7 +1678,7 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			sub := ingest.ChildByField(n, "subscript")
 			if obj != nil && sub != nil && sub.Type() == "string" {
 				if contentN, text := pythonStringContent(sub, content); contentN != nil && text == oldLeaf {
-					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals) {
+					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf) {
 						edits = append(edits, ingest.Edit{
 							File:      fileRel,
 							StartByte: contentN.StartByte(),
@@ -1694,7 +1696,7 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 				obj := ingest.ChildByField(fn, "object")
 				attr := ingest.ChildByField(fn, "attribute")
 				if obj != nil && attr != nil && ingest.NodeText(attr, content) == "get" {
-					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals) {
+					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf) {
 						if key := pythonFirstStringArg(args); key != nil {
 							if contentN, text := pythonStringContent(key, content); contentN != nil && text == oldLeaf {
 								edits = append(edits, ingest.Edit{
@@ -1814,7 +1816,9 @@ func pythonRenameByTypeMaps(name string, ourReceivers, foreignReceivers, typedLo
 }
 
 // pythonShouldRenameAttr decides whether obj.oldLeaf is a call on one of our receivers.
-func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool) bool {
+// fieldOf maps "local.field" → field type leaf for dataclass/class field access
+// (box.a.run() under foreign same-leaf methods).
+func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, fieldOf map[string]string) bool {
 	if obj == nil {
 		return false
 	}
@@ -1854,9 +1858,16 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 		}
 		return pythonRenameByTypeMaps(name, ourReceivers, foreignReceivers, typedLocals)
 	}
+	// box.a.run() — dataclass/class field access when box is a typed local.
+	if obj.Type() == "attribute" {
+		if ft := pythonFieldAccessType(obj, content, fieldOf); ft != "" {
+			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
+		}
+		return len(foreignReceivers) == 0
+	}
 	// Complex receivers without static type: unique-leaf only.
 	switch obj.Type() {
-	case "subscript", "attribute", "conditional_expression",
+	case "subscript", "conditional_expression",
 		"binary_operator", "boolean_operator", "await":
 		return len(foreignReceivers) == 0
 	}
@@ -1967,8 +1978,11 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // tuple/list unpack (`a, b = A(), B()`, `[a, b] = [A(), B()]`,
 // `a, *rest = items` / `*rest, a = items` / `a, = items` from list[A],
 // `for a, b in [(A(), B())]`), and
-// `except* A as e` → `for a in e.exceptions` (ExceptionGroup element type).
-func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]bool {
+// `except* A as e` → `for a in e.exceptions` (ExceptionGroup element type),
+// `xa = box.a` / `box.a.run()` when box is a typed local of a class/dataclass
+// with annotated field a: A (fieldOf; under foreign same-leaf methods).
+// fieldOf maps "local.field" → field type leaf for class field access.
+func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string) {
 	out := map[string]bool{}
 	// Collection locals → element type leaf (list[A] / [A()] / dict value → "A").
 	elemOf := map[string]string{}
@@ -1984,9 +1998,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 	// (pairs = zip/enumerate/product/...; combos = combinations/batched(xs, n);
 	// for a, b in pairs / for pair in pairs).
 	pairIterSlots := map[string][]string{}
+	// Class field access: "box.a" → "A" when box is typed as a class with field a: A.
+	fieldOf := map[string]string{}
 	if root == nil || len(ourReceivers) == 0 {
-		return out
+		return out, fieldOf
 	}
+	fieldIndex := pythonClassFieldIndex(root, content)
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
 		if n == nil || n.IsNull() {
@@ -2010,6 +2027,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						if tn := pythonTypeName(typeN, content); tn != "" {
 							// Object annotation (item: A / item: B) — foreign too for shadowing.
 							typeOf[lname] = tn
+							pythonBindClassLocalFields(lname, tn, fieldIndex, fieldOf)
 							if ourReceivers[tn] {
 								out[lname] = true
 							}
@@ -2032,6 +2050,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					if tn := pythonTypeName(typeN, content); tn != "" {
 						// x: A / x: B = ... — foreign too for shadowing.
 						typeOf[lname] = tn
+						pythonBindClassLocalFields(lname, tn, fieldIndex, fieldOf)
 						if ourReceivers[tn] {
 							out[lname] = true
 						}
@@ -2049,6 +2068,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							// x = A() — Class() ctor of our receiver.
 							out[lname] = true
 							typeOf[lname] = fname
+							pythonBindClassLocalFields(lname, fname, fieldIndex, fieldOf)
 						}
 						// a = cast(A, x) / cast("A", x)
 						if fname == "cast" {
@@ -2198,6 +2218,17 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 					} else if et := pythonSubscriptElemType(right, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots); ourReceivers[et] {
 						out[lname] = true
+					}
+				}
+				// xa = box.a — dataclass/class field access when box is a typed local
+				// with annotated field a: A (under foreign same-leaf methods).
+				if right != nil && right.Type() == "attribute" {
+					if ft := pythonFieldAccessType(right, content, fieldOf); ft != "" {
+						typeOf[lname] = ft
+						pythonBindClassLocalFields(lname, ft, fieldIndex, fieldOf)
+						if ourReceivers[ft] {
+							out[lname] = true
+						}
 					}
 				}
 				// xs = [A()] / (A(),) / [B()] — track element type for later for-loops.
@@ -2427,6 +2458,16 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					out[lname] = true
 				}
 			}
+			// xa := box.a — dataclass/class field access (same as plain assignment).
+			if valueN.Type() == "attribute" {
+				if ft := pythonFieldAccessType(valueN, content, fieldOf); ft != "" {
+					typeOf[lname] = ft
+					pythonBindClassLocalFields(lname, ft, fieldIndex, fieldOf)
+					if ourReceivers[ft] {
+						out[lname] = true
+					}
+				}
+			}
 		case "except_clause":
 			// except* A as e: e is ExceptionGroup, not A. Skip as_pattern typing of e
 			// and record that e.exceptions carries A (foreign too, for shadowing).
@@ -2615,7 +2656,83 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 		}
 	}
 	walk(root)
+	return out, fieldOf
+}
+
+// pythonClassFieldIndex maps class type name → field name → field type leaf
+// from same-file class_definition annotated assignments (Box with a: A →
+// "Box" → {"a":"A"}). Covers dataclass fields and plain annotated class attrs.
+func pythonClassFieldIndex(root *grammar.Node, content []byte) map[string]map[string]string {
+	out := map[string]map[string]string{}
+	if root == nil {
+		return out
+	}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		if n.Type() == "class_definition" {
+			nameN := ingest.ChildByField(n, "name")
+			body := ingest.ChildByField(n, "body")
+			if nameN != nil && body != nil {
+				typeName := ingest.NodeText(nameN, content)
+				fields := map[string]string{}
+				for i := uint32(0); i < body.ChildCount(); i++ {
+					ch := body.Child(i)
+					// a: A / a: A = ... — annotated assignment in class body.
+					if ch.Type() != "assignment" {
+						continue
+					}
+					left := ingest.ChildByField(ch, "left")
+					typeN := ingest.ChildByField(ch, "type")
+					if left == nil || typeN == nil || left.Type() != "identifier" {
+						continue
+					}
+					if tn := pythonTypeName(typeN, content); tn != "" {
+						fields[ingest.NodeText(left, content)] = tn
+					}
+				}
+				if len(fields) > 0 {
+					out[typeName] = fields
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
 	return out
+}
+
+// pythonBindClassLocalFields records "local.field" → type for each annotated
+// field of a known same-file class type (enables box.a / xa = box.a typing).
+func pythonBindClassLocalFields(local, typeName string, index map[string]map[string]string, fieldOf map[string]string) {
+	if local == "" || typeName == "" || index == nil || fieldOf == nil {
+		return
+	}
+	fields := index[typeName]
+	if fields == nil {
+		return
+	}
+	for f, t := range fields {
+		fieldOf[local+"."+f] = t
+	}
+}
+
+// pythonFieldAccessType recovers T from box.a when box is a typed local with
+// annotated field a of type T (identifier object only; fail closed otherwise).
+func pythonFieldAccessType(attr *grammar.Node, content []byte, fieldOf map[string]string) string {
+	if attr == nil || attr.Type() != "attribute" || fieldOf == nil {
+		return ""
+	}
+	obj := ingest.ChildByField(attr, "object")
+	field := ingest.ChildByField(attr, "attribute")
+	if obj == nil || field == nil || obj.Type() != "identifier" {
+		return ""
+	}
+	return fieldOf[ingest.NodeText(obj, content)+"."+ingest.NodeText(field, content)]
 }
 
 // pythonBindMatchSeqPatterns binds capture names from match list/tuple/mapping
