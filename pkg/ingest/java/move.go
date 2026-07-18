@@ -1428,9 +1428,10 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // as / as.stream() / as.iterator() / as.stream().filter(...) → elemOf[as],
 // as.stream().findFirst() / findAny() / min() / max() / reduce(op) → same element
 // (Optional wraps T; ifPresent / orElse use T),
-// as.stream().toList() / collect(Collectors.toList()/toSet()) / collect(toList()/toSet()) /
-// collect(Collectors::toList / Collectors::toSet) /
-// collect(collectingAndThen(toList()/toSet(), …)) /
+// as.stream().toList() / collect(Collectors.toList()/toSet()/toUnmodifiableList()/
+// toUnmodifiableSet()) / collect(toList()/toSet()/toUnmodifiable…) /
+// collect(Collectors::toList / toSet / toUnmodifiableList / toUnmodifiableSet) /
+// collect(collectingAndThen(toList()/toSet()/toUnmodifiable…, …)) /
 // collect(teeing(toList()/…, …, (list, …) -> list)) → same element (Collection<T> for forEach / enhanced-for),
 // m.values() → valOf[m],
 // List.of(new A()) / Stream.of(new A()) / Arrays.asList(new A()) → "A",
@@ -1505,9 +1506,10 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// identity (a -> a) or new T(...). Unknown/type-changing mappers fail closed.
 			return javaMapResultElemType(obj, content, elemOf, valOf)
 		case "collect":
-			// Stream.collect(Collectors.toList()/toSet()) / collect(toList()/toSet()) /
-			// collect(Collectors::toList / Collectors::toSet) /
-			// collect(Collectors.collectingAndThen(toList()/toSet(), finisher)) /
+			// Stream.collect(Collectors.toList()/toSet()/toUnmodifiableList()/
+			// toUnmodifiableSet()) / collect(toList()/toSet()/toUnmodifiable…) /
+			// collect(Collectors::toList / toSet / toUnmodifiableList / toUnmodifiableSet) /
+			// collect(Collectors.collectingAndThen(toList()/toSet()/toUnmodifiable…, finisher)) /
 			// collect(Collectors.teeing(toList()/…, …, (list, …) -> list)) —
 			// Collection of the stream element type. Other collectors
 			// (groupingBy, mapping, …) fail closed.
@@ -1794,13 +1796,15 @@ func javaFirstCallArg(call *grammar.Node) *grammar.Node {
 }
 
 // javaIsToListOrSetCollector reports Stream.collect args that produce a
-// Collection of the stream element type: Collectors.toList()/toSet(),
-// toList()/toSet() (static import), Collectors::toList / Collectors::toSet,
-// Collectors.collectingAndThen(toList()/toSet(), finisher) (finisher is
-// treated as preserving Collection of the same element type — identity,
-// Collections::unmodifiableList, …), and Collectors.teeing(d1, d2, merger)
-// when the merger clearly returns a toList/toSet downstream result.
-// Other collectors fail closed.
+// Collection of the stream element type: Collectors.toList()/toSet()/
+// toUnmodifiableList()/toUnmodifiableSet(), toList()/toSet()/
+// toUnmodifiableList()/toUnmodifiableSet() (static import),
+// Collectors::toList / toSet / toUnmodifiableList / toUnmodifiableSet,
+// Collectors.collectingAndThen(toList()/toSet()/toUnmodifiable…, finisher)
+// (finisher is treated as preserving Collection of the same element type —
+// identity, Collections::unmodifiableList, …), and Collectors.teeing(d1, d2,
+// merger) when the merger clearly returns a toList/toSet/toUnmodifiable
+// downstream result. Other collectors fail closed.
 func javaIsToListOrSetCollector(collectCall *grammar.Node, content []byte) bool {
 	if collectCall == nil {
 		return false
@@ -1812,30 +1816,35 @@ func javaIsToListOrSetCollector(collectCall *grammar.Node, content []byte) bool 
 	if javaIsToListOrSetCollectorExpr(first, content) {
 		return true
 	}
-	// collectingAndThen(downstream, finisher) when downstream is toList/toSet.
+	// collectingAndThen(downstream, finisher) when downstream is toList/toSet/
+	// toUnmodifiableList/toUnmodifiableSet.
 	if javaIsCollectingAndThenToListOrSet(first, content) {
 		return true
 	}
-	// teeing(d1, d2, merger) when merger returns a toList/toSet downstream.
+	// teeing(d1, d2, merger) when merger returns a toList/toSet/toUnmodifiable downstream.
 	return javaIsTeeingToListOrSet(first, content)
 }
 
 // javaIsToListOrSetCollectorExpr reports a collector expression that yields a
-// Collection of the stream element type: toList()/toSet(), Collectors.toList()/
-// toSet(), Collectors::toList / Collectors::toSet.
+// Collection of the stream element type: toList()/toSet()/toUnmodifiableList()/
+// toUnmodifiableSet(), Collectors.toList()/toSet()/toUnmodifiableList()/
+// toUnmodifiableSet(), Collectors::toList / toSet / toUnmodifiableList /
+// toUnmodifiableSet.
 func javaIsToListOrSetCollectorExpr(n *grammar.Node, content []byte) bool {
 	if n == nil {
 		return false
 	}
 	switch n.Type() {
 	case "method_invocation":
-		// toList()/toSet() / Collectors.toList()/toSet() — zero-arg only.
+		// toList()/toSet()/toUnmodifiableList()/toUnmodifiableSet() /
+		// Collectors.toList()/toSet()/toUnmodifiableList()/toUnmodifiableSet()
+		// — zero-arg only.
 		nameN := ingest.ChildByField(n, "name")
 		if nameN == nil {
 			return false
 		}
 		switch ingest.NodeText(nameN, content) {
-		case "toList", "toSet":
+		case "toList", "toSet", "toUnmodifiableList", "toUnmodifiableSet":
 		default:
 			return false
 		}
@@ -1863,7 +1872,8 @@ func javaIsToListOrSetCollectorExpr(n *grammar.Node, content []byte) bool {
 		}
 		return true
 	case "method_reference":
-		// Collectors::toList / Collectors::toSet — children are receiver, "::", name.
+		// Collectors::toList / toSet / toUnmodifiableList / toUnmodifiableSet —
+		// children are receiver, "::", name.
 		var parts []*grammar.Node
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			child := n.Child(i)
@@ -1880,7 +1890,7 @@ func javaIsToListOrSetCollectorExpr(n *grammar.Node, content []byte) bool {
 			return false
 		}
 		switch ingest.NodeText(name, content) {
-		case "toList", "toSet":
+		case "toList", "toSet", "toUnmodifiableList", "toUnmodifiableSet":
 		default:
 			return false
 		}
@@ -1894,10 +1904,11 @@ func javaIsToListOrSetCollectorExpr(n *grammar.Node, content []byte) bool {
 }
 
 // javaIsCollectingAndThenToListOrSet reports
-// Collectors.collectingAndThen(toList()/toSet()/Collectors::toList/…, finisher)
-// / collectingAndThen(...) (static import). Downstream must itself be a
-// toList/toSet collector; finisher is not inspected (fail-open for element
-// preservation, matching common unmodifiableList / identity finishers).
+// Collectors.collectingAndThen(toList()/toSet()/toUnmodifiableList()/
+// toUnmodifiableSet()/Collectors::toList/…, finisher) / collectingAndThen(...)
+// (static import). Downstream must itself be a toList/toSet/toUnmodifiable
+// collector; finisher is not inspected (fail-open for element preservation,
+// matching common unmodifiableList / identity finishers).
 func javaIsCollectingAndThenToListOrSet(n *grammar.Node, content []byte) bool {
 	if n == nil || n.Type() != "method_invocation" {
 		return false
