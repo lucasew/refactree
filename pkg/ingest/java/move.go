@@ -1722,6 +1722,17 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 				}
 			}
 		case 2:
+			// Stream.mapMulti(BiConsumer<? super T, ? super Consumer<R>>):
+			// first param is stream element T; second is sink Consumer — leave unbound.
+			// Identity accept pipelines (mapMulti((a,c)->c.accept(a)).forEach(...))
+			// peel via javaStreamPipelineElemType / javaMapMultiResultElemType.
+			if method == "mapMulti" {
+				et := javaStreamPipelineElemType(obj, content, elemOf, valOf)
+				if et != "" && ourReceivers[et] {
+					out[params[0]] = true
+				}
+				continue
+			}
 			// CompletableFuture.whenComplete(BiConsumer<? super T,? super Throwable>) /
 			// handle(BiFunction<? super T,Throwable,? extends U>) —
 			// first param is CF result T (same leaf as thenAccept/thenApply unary).
@@ -1852,6 +1863,9 @@ func javaStreamElementLambdaMethod(method string) bool {
 	switch method {
 	case "map", "mapToInt", "mapToLong", "mapToDouble",
 		"flatMap", "flatMapToInt", "flatMapToLong", "flatMapToDouble",
+		// Stream.mapMulti(BiConsumer<? super T, ? super Consumer<R>>) — bi-lambda
+		// first param is T; second is sink. See case 2 / javaMapMultiResultElemType.
+		"mapMulti",
 		"filter", "peek", "forEach", "forEachOrdered", "forEachRemaining",
 		// Spliterator.tryAdvance(Consumer) — same element Consumer as forEachRemaining.
 		"tryAdvance",
@@ -2199,6 +2213,12 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// Optional.map / Stream.map: recover U from mapper when clearly
 			// identity (a -> a) or new T(...). Unknown/type-changing mappers fail closed.
 			return javaMapResultElemType(obj, content, elemOf, valOf)
+		case "mapMulti":
+			// Stream.mapMulti(BiConsumer): recover R when clearly accept-of-identity
+			// (a, c) -> c.accept(a) or accept(new T(...)). Unknown sinks fail closed.
+			// Enables mapMulti((a,c)->c.accept(a)).forEach(x -> x.m()) /
+			// var s = mapMulti(...); s.forEach(...) under foreign same-leaf methods.
+			return javaMapMultiResultElemType(obj, content, elemOf, valOf)
 		case "thenApply":
 			// CompletableFuture.thenApply(Function): recover U when mapper is
 			// identity (a -> a) or new T(...) — same shapes as Optional.map.
@@ -2427,6 +2447,94 @@ func javaMapResultElemType(call *grammar.Node, content []byte, elemOf, valOf map
 	}
 	recv := ingest.ChildByField(call, "object")
 	return javaMapMapperBodyElemType(body, param, recv, content, elemOf, valOf)
+}
+
+// javaMapMultiResultElemType recovers R after Stream.mapMulti(mapper) when the
+// BiConsumer clearly sinks the element (or a known construction) via accept:
+//
+//	s.mapMulti((a, c) -> c.accept(a)) → elem(s)
+//	s.mapMulti((a, c) -> c.accept(new A())) → A
+//
+// Expression-bodied lambdas only; blocks and other bodies fail closed so
+// type-changing sinks stay unbound.
+func javaMapMultiResultElemType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	var args *grammar.Node
+	for i := uint32(0); i < call.ChildCount(); i++ {
+		if call.Child(i).Type() == "argument_list" {
+			args = call.Child(i)
+			break
+		}
+	}
+	if args == nil {
+		return ""
+	}
+	var first *grammar.Node
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch.Type() == "lambda_expression" {
+			first = ch
+			break
+		}
+	}
+	if first == nil {
+		return ""
+	}
+	params := javaInferredLambdaParamNames(first, content)
+	if len(params) != 2 {
+		return ""
+	}
+	body := ingest.ChildByField(first, "body")
+	for body != nil && !body.IsNull() && body.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(body, "expression")
+		if inner == nil {
+			for i := uint32(0); i < body.ChildCount(); i++ {
+				ch := body.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		body = inner
+	}
+	if body == nil || body.IsNull() || body.Type() != "method_invocation" {
+		return ""
+	}
+	nameN := ingest.ChildByField(body, "name")
+	if nameN == nil || ingest.NodeText(nameN, content) != "accept" {
+		return ""
+	}
+	// Sink must be the Consumer param (second).
+	sink := ingest.ChildByField(body, "object")
+	if sink == nil || sink.Type() != "identifier" || ingest.NodeText(sink, content) != params[1] {
+		return ""
+	}
+	callArgs := javaCallArgs(body)
+	if len(callArgs) != 1 {
+		return ""
+	}
+	arg := callArgs[0]
+	recv := ingest.ChildByField(call, "object")
+	switch arg.Type() {
+	case "identifier":
+		// c.accept(a) — identity preserves receiver element type.
+		if ingest.NodeText(arg, content) == params[0] {
+			return javaStreamPipelineElemType(recv, content, elemOf, valOf)
+		}
+		return ""
+	case "object_creation_expression":
+		// c.accept(new A()) — element type from construction.
+		if typeN := ingest.ChildByField(arg, "type"); typeN != nil {
+			return javaTypeName(typeN, content)
+		}
+		return ""
+	default:
+		return ""
+	}
 }
 
 // javaMapMapperBodyElemType recovers U from an expression-bodied map mapper.
