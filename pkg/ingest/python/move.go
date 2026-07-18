@@ -1903,6 +1903,10 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 		if ft := pythonRecordKeyAccessType(obj, content, fieldOf); ft != "" {
 			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 		}
+		// box[0].run() — namedtuple positional field (fieldOf["box.#0"]).
+		if ft := pythonNamedtupleIndexType(obj, content, fieldOf); ft != "" {
+			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
+		}
 		if et := pythonSubscriptElemType(obj, content, elemOf, nil, nil, nil, nil); et != "" {
 			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 		}
@@ -2055,6 +2059,7 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // with annotated field a: A (fieldOf; under foreign same-leaf methods),
 // or a collections.namedtuple with field types recovered from same-file
 // constructors (`Box = namedtuple("Box", ["a","b"]); box = Box(A(), B())`),
+// including positional index `box[0].run()` / `xa = box[0]` (fieldOf["box.#0"]),
 // `xa = box["a"]` / `box["a"].run()` / `xa = box.get("a")` for TypedDict-style
 // string keys of the same annotated fields (fieldOf).
 // fieldOf maps "local.field" → field type leaf for class field access.
@@ -2083,9 +2088,16 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 	}
 	fieldIndex := pythonClassFieldIndex(root, content)
 	// namedtuple factory fields have no annotations — recover from same-file ctors.
+	// fieldNames keeps factory order so box[i] can resolve via fieldOf["box.#i"].
+	fieldNames := pythonNamedtupleFieldNames(root, content)
 	pythonMergeNamedtupleFields(root, content, fieldIndex)
 	// typing.NamedTuple("Box", [("a", A), ...]) / NamedTuple("Box", a=A, b=B).
 	pythonMergeFunctionalNamedTupleFields(root, content, fieldIndex)
+	// bindFields: annotated/named fields + ordered namedtuple index aliases.
+	bindFields := func(local, typeName string) {
+		pythonBindClassLocalFields(local, typeName, fieldIndex, fieldOf)
+		pythonBindNamedtupleIndexFields(local, typeName, fieldNames, fieldIndex, fieldOf)
+	}
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
 		if n == nil || n.IsNull() {
@@ -2109,7 +2121,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						if tn := pythonTypeName(typeN, content); tn != "" {
 							// Object annotation (item: A / item: B) — foreign too for shadowing.
 							typeOf[lname] = tn
-							pythonBindClassLocalFields(lname, tn, fieldIndex, fieldOf)
+							bindFields(lname, tn)
 							if ourReceivers[tn] {
 								out[lname] = true
 							}
@@ -2132,7 +2144,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					if tn := pythonTypeName(typeN, content); tn != "" {
 						// x: A / x: B = ... — foreign too for shadowing.
 						typeOf[lname] = tn
-						pythonBindClassLocalFields(lname, tn, fieldIndex, fieldOf)
+						bindFields(lname, tn)
 						if ourReceivers[tn] {
 							out[lname] = true
 						}
@@ -2150,12 +2162,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							// x = A() — Class() ctor of our receiver.
 							out[lname] = true
 							typeOf[lname] = fname
-							pythonBindClassLocalFields(lname, fname, fieldIndex, fieldOf)
+							bindFields(lname, fname)
 						} else if len(fieldIndex[fname]) > 0 {
 							// x = Box(...) — namedtuple/class with known fields (not our
 							// receiver); bind fieldOf so box.a.run() / xa = box.a work.
 							typeOf[lname] = fname
-							pythonBindClassLocalFields(lname, fname, fieldIndex, fieldOf)
+							bindFields(lname, fname)
 						}
 						// a = cast(A, x) / cast("A", x)
 						if fname == "cast" {
@@ -2223,7 +2235,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						if fname == "copy" || fname == "deepcopy" {
 							if tn := pythonCopyCallObjectType(right, content, typeOf); tn != "" {
 								typeOf[lname] = tn
-								pythonBindClassLocalFields(lname, tn, fieldIndex, fieldOf)
+								bindFields(lname, tn)
 								if ourReceivers[tn] {
 									out[lname] = true
 								}
@@ -2262,7 +2274,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								}
 								if ft := pythonRecordKeyAccessType(right, content, fieldOf); ft != "" {
 									typeOf[lname] = ft
-									pythonBindClassLocalFields(lname, ft, fieldIndex, fieldOf)
+									bindFields(lname, ft)
 									if ourReceivers[ft] {
 										out[lname] = true
 									}
@@ -2277,7 +2289,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								// form xs = copy.copy(items) is handled via elemOf below.
 								if tn := pythonCopyCallObjectType(right, content, typeOf); tn != "" {
 									typeOf[lname] = tn
-									pythonBindClassLocalFields(lname, tn, fieldIndex, fieldOf)
+									bindFields(lname, tn)
 									if ourReceivers[tn] {
 										out[lname] = true
 									}
@@ -2323,7 +2335,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					// xa = itemgetter("a")(box) — TypedDict/record string-key (fieldOf).
 					if ft := pythonItemgetterFieldType(right, content, fieldOf); ft != "" {
 						typeOf[lname] = ft
-						pythonBindClassLocalFields(lname, ft, fieldIndex, fieldOf)
+						bindFields(lname, ft)
 						if ourReceivers[ft] {
 							out[lname] = true
 						}
@@ -2337,7 +2349,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					// (same as box.a / box["a"]). Multi-field attrgetter fails closed.
 					if ft := pythonAttrgetterFieldType(right, content, fieldOf); ft != "" {
 						typeOf[lname] = ft
-						pythonBindClassLocalFields(lname, ft, fieldIndex, fieldOf)
+						bindFields(lname, ft)
 						if ourReceivers[ft] {
 							out[lname] = true
 						}
@@ -2345,7 +2357,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					// xa = getattr(box, "a") — builtin field access (same leaf as box.a).
 					if ft := pythonGetattrFieldType(right, content, fieldOf); ft != "" {
 						typeOf[lname] = ft
-						pythonBindClassLocalFields(lname, ft, fieldIndex, fieldOf)
+						bindFields(lname, ft)
 						if ourReceivers[ft] {
 							out[lname] = true
 						}
@@ -2364,7 +2376,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 					} else if ft := pythonRecordKeyAccessType(right, content, fieldOf); ft != "" {
 						typeOf[lname] = ft
-						pythonBindClassLocalFields(lname, ft, fieldIndex, fieldOf)
+						bindFields(lname, ft)
+						if ourReceivers[ft] {
+							out[lname] = true
+						}
+					} else if ft := pythonNamedtupleIndexType(right, content, fieldOf); ft != "" {
+						// xa = box[0] — namedtuple positional field (same leaf as box.a).
+						typeOf[lname] = ft
+						bindFields(lname, ft)
 						if ourReceivers[ft] {
 							out[lname] = true
 						}
@@ -2377,7 +2396,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				if right != nil && right.Type() == "attribute" {
 					if ft := pythonFieldAccessType(right, content, fieldOf); ft != "" {
 						typeOf[lname] = ft
-						pythonBindClassLocalFields(lname, ft, fieldIndex, fieldOf)
+						bindFields(lname, ft)
 						if ourReceivers[ft] {
 							out[lname] = true
 						}
@@ -2540,7 +2559,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					if fname == "copy" || fname == "deepcopy" {
 						if tn := pythonCopyCallObjectType(valueN, content, typeOf); tn != "" {
 							typeOf[lname] = tn
-							pythonBindClassLocalFields(lname, tn, fieldIndex, fieldOf)
+							bindFields(lname, tn)
 							if ourReceivers[tn] {
 								out[lname] = true
 							}
@@ -2570,7 +2589,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							}
 							if ft := pythonRecordKeyAccessType(valueN, content, fieldOf); ft != "" {
 								typeOf[lname] = ft
-								pythonBindClassLocalFields(lname, ft, fieldIndex, fieldOf)
+								bindFields(lname, ft)
 								if ourReceivers[ft] {
 									out[lname] = true
 								}
@@ -2583,7 +2602,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							// a := copy.copy(item) / copy.deepcopy(item) — object type of arg.
 							if tn := pythonCopyCallObjectType(valueN, content, typeOf); tn != "" {
 								typeOf[lname] = tn
-								pythonBindClassLocalFields(lname, tn, fieldIndex, fieldOf)
+								bindFields(lname, tn)
 								if ourReceivers[tn] {
 									out[lname] = true
 								}
@@ -2624,7 +2643,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// xa := itemgetter("a")(box) — TypedDict/record string-key (fieldOf).
 				if ft := pythonItemgetterFieldType(valueN, content, fieldOf); ft != "" {
 					typeOf[lname] = ft
-					pythonBindClassLocalFields(lname, ft, fieldIndex, fieldOf)
+					bindFields(lname, ft)
 					if ourReceivers[ft] {
 						out[lname] = true
 					}
@@ -2636,7 +2655,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// xa := attrgetter("a")(box) / operator.attrgetter("a")(box).
 				if ft := pythonAttrgetterFieldType(valueN, content, fieldOf); ft != "" {
 					typeOf[lname] = ft
-					pythonBindClassLocalFields(lname, ft, fieldIndex, fieldOf)
+					bindFields(lname, ft)
 					if ourReceivers[ft] {
 						out[lname] = true
 					}
@@ -2644,7 +2663,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// xa := getattr(box, "a") — builtin field access (same leaf as box.a).
 				if ft := pythonGetattrFieldType(valueN, content, fieldOf); ft != "" {
 					typeOf[lname] = ft
-					pythonBindClassLocalFields(lname, ft, fieldIndex, fieldOf)
+					bindFields(lname, ft)
 					if ourReceivers[ft] {
 						out[lname] = true
 					}
@@ -2660,7 +2679,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 				} else if ft := pythonRecordKeyAccessType(valueN, content, fieldOf); ft != "" {
 					typeOf[lname] = ft
-					pythonBindClassLocalFields(lname, ft, fieldIndex, fieldOf)
+					bindFields(lname, ft)
+					if ourReceivers[ft] {
+						out[lname] = true
+					}
+				} else if ft := pythonNamedtupleIndexType(valueN, content, fieldOf); ft != "" {
+					// xa := box[0] — namedtuple positional field (same leaf as box.a).
+					typeOf[lname] = ft
+					bindFields(lname, ft)
 					if ourReceivers[ft] {
 						out[lname] = true
 					}
@@ -2672,7 +2698,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			if valueN.Type() == "attribute" {
 				if ft := pythonFieldAccessType(valueN, content, fieldOf); ft != "" {
 					typeOf[lname] = ft
-					pythonBindClassLocalFields(lname, ft, fieldIndex, fieldOf)
+					bindFields(lname, ft)
 					if ourReceivers[ft] {
 						out[lname] = true
 					}
@@ -3259,6 +3285,53 @@ func pythonBindClassLocalFields(local, typeName string, index map[string]map[str
 	for f, t := range fields {
 		fieldOf[local+"."+f] = t
 	}
+}
+
+// pythonBindNamedtupleIndexFields records fieldOf["local.#i"] → T for factory
+// namedtuple fields in declaration order (enables box[0].run() / xa = box[0]).
+// Only when field names are known from namedtuple(...) and field types from
+// same-file constructors; missing types fail closed per index.
+func pythonBindNamedtupleIndexFields(local, typeName string, fieldNames map[string][]string, index map[string]map[string]string, fieldOf map[string]string) {
+	if local == "" || typeName == "" || fieldNames == nil || index == nil || fieldOf == nil {
+		return
+	}
+	names := fieldNames[typeName]
+	fields := index[typeName]
+	if len(names) == 0 || fields == nil {
+		return
+	}
+	for i, fname := range names {
+		if t := fields[fname]; t != "" {
+			fieldOf[local+".#"+fmt.Sprintf("%d", i)] = t
+		}
+	}
+}
+
+// pythonNamedtupleIndexType recovers T from box[0] when box is a typed
+// namedtuple local with ordered field types (fieldOf["box.#0"]). Integer
+// literal indices only; slices / non-decimal / OOB fail closed.
+func pythonNamedtupleIndexType(n *grammar.Node, content []byte, fieldOf map[string]string) string {
+	if n == nil || n.Type() != "subscript" || fieldOf == nil {
+		return ""
+	}
+	val := ingest.ChildByField(n, "value")
+	if val == nil {
+		val = ingest.ChildByField(n, "object")
+	}
+	sub := ingest.ChildByField(n, "subscript")
+	if val == nil || val.Type() != "identifier" || sub == nil || sub.Type() != "integer" {
+		return ""
+	}
+	idxText := ingest.NodeText(sub, content)
+	if idxText == "" {
+		return ""
+	}
+	for _, c := range idxText {
+		if c < '0' || c > '9' {
+			return ""
+		}
+	}
+	return fieldOf[ingest.NodeText(val, content)+".#"+idxText]
 }
 
 // pythonFieldAccessType recovers T from box.a when box is a typed local with
