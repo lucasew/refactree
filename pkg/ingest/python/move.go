@@ -1907,6 +1907,8 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `for a, b in zip(*[xs, ys])` / `for a, b in zip(*(xs, ys))`,
 // `for a, b in zip_longest(xs, ys)` / `for a, b in itertools.zip_longest(xs, ys)`,
 // `for a, b in pairwise(xs)` / `for a, b in itertools.pairwise(xs)`,
+// `for k, g in groupby(xs)` / `for k, g in itertools.groupby(xs)` —
+// group g is an iterable of xs elements (key untyped; key= ignored),
 // `for a in reversed/sorted/list/iter(items)`,
 // `for a in set(items)` / `for a in frozenset(items)`,
 // `for a in filter(pred, items)` / `for a in map(A, names)`,
@@ -2274,6 +2276,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// for a, b in zip(*[xs, ys]) / zip(*(xs, ys)) /
 			// for a, b in zip_longest / itertools.zip_longest /
 			// for a, b in pairwise / itertools.pairwise /
+			// for k, g in groupby / itertools.groupby (g → elemOf; key untyped) /
 			// for a in reversed/sorted/list/iter(items) /
 			// for a in filter(pred, items) / for a in map(A, names) /
 			// for a in chain/islice/accumulate/cycle / itertools.chain/islice/accumulate/cycle /
@@ -2314,6 +2317,17 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						if i < len(types) && ourReceivers[types[i]] {
 							out[name] = true
 						}
+					}
+					break
+				}
+				// for k, g in groupby(xs) / itertools.groupby(xs[, key]) —
+				// group g is an iterable of xs elements (key untyped; key= ignored).
+				// Bind g into elemOf so nested `for a in g` / next(g) / list(g) type.
+				// Do not put g itself into out (group is not an element of ourReceivers).
+				if et := pythonGroupbyGroupElemType(right, content, elemOf, egElems); et != "" {
+					if len(targets) >= 2 {
+						// Foreign element types too — shadow prior same-name collections.
+						elemOf[targets[1]] = et
 					}
 					break
 				}
@@ -3233,6 +3247,47 @@ func pythonDictItemsValueType(right *grammar.Node, content []byte, elemOf map[st
 		return ""
 	}
 	return elemOf[obj]
+}
+
+// pythonGroupbyGroupElemType recovers the element type of the group iterator
+// yielded by groupby(iterable[, key]) / itertools.groupby(...).
+// Yields (key, group) pairs; group iterates elements of the 1st positional arg
+// (key function ignored). Bare or itertools-qualified only; other forms fail closed.
+// Not registered in pythonIterableElemType — bare `for x in groupby(xs)` yields
+// pairs, not elements.
+func pythonGroupbyGroupElemType(right *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
+	if right == nil || right.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(right, "function")
+	if fn == nil {
+		return ""
+	}
+	switch fn.Type() {
+	case "identifier":
+		if ingest.NodeText(fn, content) != "groupby" {
+			return ""
+		}
+	case "attribute":
+		objN := ingest.ChildByField(fn, "object")
+		attrN := ingest.ChildByField(fn, "attribute")
+		if objN == nil || attrN == nil || objN.Type() != "identifier" {
+			return ""
+		}
+		if ingest.NodeText(objN, content) != "itertools" {
+			return ""
+		}
+		if ingest.NodeText(attrN, content) != "groupby" {
+			return ""
+		}
+	default:
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(right)
+	if !ok || len(args) == 0 {
+		return ""
+	}
+	return pythonIterableElemType(args[0], content, elemOf, egElems)
 }
 
 // pythonEnumerateZipTargetTypes returns per-unpack-target element types for
