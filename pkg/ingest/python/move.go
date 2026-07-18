@@ -1641,7 +1641,9 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 	// Locals whose static type we can attribute to a class (annotations / Class()).
 	// fieldOf maps "local.field" → field type leaf for class/dataclass field access
 	// (box.a.run() / xa = box.a under foreign same-leaf methods).
-	typedLocals, fieldOf := pythonTypedLocals(pf.Root, content, ourReceivers)
+	// elemOf maps collection locals → element type leaf for direct access chains
+	// (items.popleft().run() / d.get(k).run() under foreign same-leaf methods).
+	typedLocals, fieldOf, elemOf := pythonTypedLocals(pf.Root, content, ourReceivers)
 
 	var edits []ingest.Edit
 	var walk func(n *grammar.Node, enclosingClass string)
@@ -1660,7 +1662,7 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			obj := ingest.ChildByField(n, "object")
 			attr := ingest.ChildByField(n, "attribute")
 			if obj != nil && attr != nil && ingest.NodeText(attr, content) == oldLeaf {
-				if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf) {
+				if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf) {
 					edits = append(edits, ingest.Edit{
 						File:      fileRel,
 						StartByte: attr.StartByte(),
@@ -1678,7 +1680,7 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			sub := ingest.ChildByField(n, "subscript")
 			if obj != nil && sub != nil && sub.Type() == "string" {
 				if contentN, text := pythonStringContent(sub, content); contentN != nil && text == oldLeaf {
-					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf) {
+					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf) {
 						edits = append(edits, ingest.Edit{
 							File:      fileRel,
 							StartByte: contentN.StartByte(),
@@ -1696,7 +1698,7 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 				obj := ingest.ChildByField(fn, "object")
 				attr := ingest.ChildByField(fn, "attribute")
 				if obj != nil && attr != nil && ingest.NodeText(attr, content) == "get" {
-					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf) {
+					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf) {
 						if key := pythonFirstStringArg(args); key != nil {
 							if contentN, text := pythonStringContent(key, content); contentN != nil && text == oldLeaf {
 								edits = append(edits, ingest.Edit{
@@ -1818,7 +1820,9 @@ func pythonRenameByTypeMaps(name string, ourReceivers, foreignReceivers, typedLo
 // pythonShouldRenameAttr decides whether obj.oldLeaf is a call on one of our receivers.
 // fieldOf maps "local.field" → field type leaf for dataclass/class field access
 // (box.a.run() under foreign same-leaf methods).
-func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, fieldOf map[string]string) bool {
+// elemOf maps collection locals → element type leaf for direct access chains
+// (items.popleft().run() / d.get(k).run() / q.get().run() under foreign same-leaf methods).
+func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, fieldOf, elemOf map[string]string) bool {
 	if obj == nil {
 		return false
 	}
@@ -1843,13 +1847,20 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	if pythonIsSuperCall(obj, content) {
 		return enclosingClass == "" || !ourReceivers[enclosingClass]
 	}
-	// Box().method / make().method / nested call — ctor name via maps, else unique-leaf.
+	// Box().method / make().method — ctor name via maps.
+	// items.popleft().run() / d.get(k).run() / q.get().run() / items.pop().run() /
+	// list(items).pop().run() — collection/queue element accessors (same leaf as
+	// a = items.popleft(); a.run()). Unknown call receivers: unique-leaf only.
 	if obj.Type() == "call" {
-		name := ""
-		if fn := ingest.ChildByField(obj, "function"); fn != nil && fn.Type() == "identifier" {
-			name = ingest.NodeText(fn, content)
+		if fn := ingest.ChildByField(obj, "function"); fn != nil {
+			if fn.Type() == "identifier" {
+				return pythonRenameByTypeMaps(ingest.NodeText(fn, content), ourReceivers, foreignReceivers, nil)
+			}
+			if et := pythonCollectionAccessElemType(obj, content, elemOf); et != "" {
+				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+			}
 		}
-		return pythonRenameByTypeMaps(name, ourReceivers, foreignReceivers, nil)
+		return len(foreignReceivers) == 0
 	}
 	if obj.Type() == "identifier" {
 		name := ingest.NodeText(obj, content)
@@ -1872,6 +1883,35 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 		return len(foreignReceivers) == 0
 	}
 	return false
+}
+
+// pythonCollectionAccessElemType recovers the element type of a collection/
+// queue accessor call used as a method receiver:
+//
+//	items.popleft().run() / items.pop().run() / items.pop(0).run()
+//	d.get(k).run() / d.setdefault(k).run() / q.get().run()
+//	it.__next__().run() / list(items).pop().run()
+//
+// Same methods as the assignment path in pythonTypedLocals. Other methods and
+// untyped receivers fail closed ("").
+func pythonCollectionAccessElemType(call *grammar.Node, content []byte, elemOf map[string]string) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "attribute" {
+		return ""
+	}
+	attr := ingest.ChildByField(fn, "attribute")
+	if attr == nil {
+		return ""
+	}
+	switch ingest.NodeText(attr, content) {
+	case "pop", "popleft", "get", "setdefault", "__next__":
+		// Element/value type of the receiver collection (default args ignored).
+		return pythonIterableElemType(ingest.ChildByField(fn, "object"), content, elemOf, nil, nil)
+	}
+	return ""
 }
 
 // pythonIsSuperCall reports whether n is a call to super (super() / super(C, self)).
@@ -1984,7 +2024,9 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // or a collections.namedtuple with field types recovered from same-file
 // constructors (`Box = namedtuple("Box", ["a","b"]); box = Box(A(), B())`).
 // fieldOf maps "local.field" → field type leaf for class field access.
-func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string) {
+// elemOf maps collection locals → element type leaf (list[A] / deque[A] /
+// dict value / Queue[A] → "A") for direct access chains under foreign same-leaf.
+func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string, map[string]string) {
 	out := map[string]bool{}
 	// Collection locals → element type leaf (list[A] / [A()] / dict value → "A").
 	elemOf := map[string]string{}
@@ -2003,7 +2045,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 	// Class field access: "box.a" → "A" when box is typed as a class with field a: A.
 	fieldOf := map[string]string{}
 	if root == nil || len(ourReceivers) == 0 {
-		return out, fieldOf
+		return out, fieldOf, elemOf
 	}
 	fieldIndex := pythonClassFieldIndex(root, content)
 	// namedtuple factory fields have no annotations — recover from same-file ctors.
@@ -2667,7 +2709,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 		}
 	}
 	walk(root)
-	return out, fieldOf
+	return out, fieldOf, elemOf
 }
 
 // pythonClassFieldIndex maps class type name → field name → field type leaf
