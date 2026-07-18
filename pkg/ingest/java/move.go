@@ -3463,6 +3463,8 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	Collections.enumeration(as).nextElement() → elemOf[as]
 //	oa.orElse(d) / oa.orElseGet(s) / oa.orElseThrow([s]) → elemOf[oa]
 //	  (Optional<A>; also findFirst().orElse / findFirst().orElseThrow)
+//	oa.get() / as.stream().findFirst().get() / Optional.of(new A()).get() → T
+//	  (zero-arg Optional.get; List.get(i)/Map.get(k) stay identifier-only)
 //	Collections.min(as) / Collections.max(as[, cmp]) → elemOf[as]
 //	stream.reduce(identity, op[, combiner]) → stream element type (returns T/U)
 //	e.getValue() / e.setValue(v) → entryValOf[e] (Map.Entry; setValue returns previous V)
@@ -3471,7 +3473,8 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	am.firstEntry().setValue(v) / am.lastEntry().setValue(v) → valOf[am]
 //	am.pollFirstEntry()/pollLastEntry()/ceilingEntry(k)/… .getValue() → valOf[am]
 //
-// Optional.get() also works when Optional<A> is tracked in elemOf (single type arg).
+// Optional.get() works for Optional<A> locals (elemOf) and for Optional-yielding
+// pipelines (findFirst/findAny/min/max/Optional.of) via zero-arg get + pipeline.
 // Fail closed on other methods / unknown receivers.
 // One-arg stream.reduce(BinaryOperator) returns Optional — use orElse/ifPresent
 // (pipeline typing), not bare var of the element type.
@@ -3545,7 +3548,7 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// probe arg does not change the element type leaf).
 		"ceiling", "floor", "higher", "lower":
 		// Map-like (2 type args recorded in valOf) → value type; else element type.
-		// Identifier receiver only — chained gets fail closed.
+		// Identifier receiver: List.get / Map.get / Optional local get / …
 		if obj != nil && obj.Type() == "identifier" {
 			id := ingest.NodeText(obj, content)
 			if valOf != nil {
@@ -3556,6 +3559,14 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 			if elemOf != nil {
 				return elemOf[id]
 			}
+		}
+		// Optional.get() on a pipeline — zero-arg only so List.get(i) / Map.get(k)
+		// chained forms stay fail-closed:
+		//   as.stream().findFirst().get() / as.findAny().get() /
+		//   Optional.of(new A()).get() / Optional.ofNullable(new A()).get()
+		// Pipeline typing already treats findFirst/findAny/Optional.of as T.
+		if method == "get" && javaMethodCallArgCount(val) == 0 {
+			return javaStreamPipelineElemType(obj, content, elemOf, valOf)
 		}
 		return ""
 	case "getValue", "setValue":
@@ -3630,6 +3641,31 @@ func javaStreamReduceIdentityElemType(call, obj *grammar.Node, content []byte, e
 		return ""
 	}
 	return javaStreamPipelineElemType(obj, content, elemOf, valOf)
+}
+
+// javaMethodCallArgCount returns the number of real arguments on a
+// method_invocation (skips punctuation/comments in the argument_list).
+// Missing or non-call nodes yield 0.
+func javaMethodCallArgCount(call *grammar.Node) int {
+	if call == nil {
+		return 0
+	}
+	n := 0
+	for i := uint32(0); i < call.ChildCount(); i++ {
+		if call.Child(i).Type() != "argument_list" {
+			continue
+		}
+		al := call.Child(i)
+		for j := uint32(0); j < al.ChildCount(); j++ {
+			switch al.Child(j).Type() {
+			case "(", ")", ",", "comment":
+				continue
+			default:
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // javaCollectionsMinMaxElemType recovers T from Collections.min/max(coll[, cmp]).
