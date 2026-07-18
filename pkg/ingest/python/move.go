@@ -1647,7 +1647,8 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 	// so direct copy.copy(item).run() can resolve without assignment form.
 	// pairSlots maps pair locals → per-slot types (p = next(...items()); p[1].run()).
 	// factoryOf maps partial factory locals → class leaf (pa = partial(A); pa().run()).
-	typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf := pythonTypedLocals(pf.Root, content, ourReceivers)
+	// futureOf maps Future locals → result class leaf (fa.set_result(A()); fa.result().run()).
+	typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf := pythonTypedLocals(pf.Root, content, ourReceivers)
 
 	var edits []ingest.Edit
 	var walk func(n *grammar.Node, enclosingClass string)
@@ -1666,7 +1667,7 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			obj := ingest.ChildByField(n, "object")
 			attr := ingest.ChildByField(n, "attribute")
 			if obj != nil && attr != nil && ingest.NodeText(attr, content) == oldLeaf {
-				if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf) {
+				if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf) {
 					edits = append(edits, ingest.Edit{
 						File:      fileRel,
 						StartByte: attr.StartByte(),
@@ -1684,7 +1685,7 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			sub := ingest.ChildByField(n, "subscript")
 			if obj != nil && sub != nil && sub.Type() == "string" {
 				if contentN, text := pythonStringContent(sub, content); contentN != nil && text == oldLeaf {
-					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf) {
+					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf) {
 						edits = append(edits, ingest.Edit{
 							File:      fileRel,
 							StartByte: contentN.StartByte(),
@@ -1702,7 +1703,7 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 				obj := ingest.ChildByField(fn, "object")
 				attr := ingest.ChildByField(fn, "attribute")
 				if obj != nil && attr != nil && ingest.NodeText(attr, content) == "get" {
-					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf) {
+					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf) {
 						if key := pythonFirstStringArg(args); key != nil {
 							if contentN, text := pythonStringContent(key, content); contentN != nil && text == oldLeaf {
 								edits = append(edits, ingest.Edit{
@@ -1829,7 +1830,8 @@ func pythonRenameByTypeMaps(name string, ourReceivers, foreignReceivers, typedLo
 // typeOf maps object locals → type leaf (item: A → "A") for direct copy.copy(item).run()
 // and similar identity wrappers that need the arg's class leaf under foreign same-leaf.
 // factoryOf maps partial factory locals → class leaf (pa = partial(A); pa().run()).
-func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, fieldOf, elemOf, typeOf map[string]string, pairSlots map[string][]string, factoryOf map[string]string) bool {
+// futureOf maps Future locals → result class leaf (fa.set_result(A()); fa.result().run()).
+func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, fieldOf, elemOf, typeOf map[string]string, pairSlots map[string][]string, factoryOf, futureOf map[string]string) bool {
 	if obj == nil {
 		return false
 	}
@@ -1915,8 +1917,9 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 			if et := pythonPartialFactoryLocalResultType(obj, content, factoryOf); et != "" {
 				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 			}
-			// ex.submit(lambda: A()).result().run() — Future.result peel.
-			if et := pythonFutureResultCallType(obj, content); et != "" {
+			// ex.submit(lambda: A()).result().run() / fa.result().run() after
+			// fa.set_result(A()) — Future.result peel.
+			if et := pythonFutureResultCallType(obj, content, futureOf); et != "" {
 				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 			}
 			if fn.Type() == "identifier" {
@@ -2180,10 +2183,12 @@ func pythonPartialFactoryClassType(call *grammar.Node, content []byte) string {
 
 // pythonFutureResultCallType recovers T from fut.result() when fut is
 // executor.submit(lambda: T()) / submit(lambda: T()) with an expression-bodied
-// zero-arg lambda whose body is a Class() call. Enables
-// ex.submit(lambda: A()).result().run() under foreign same-leaf methods.
-// Timeout args on result() are ignored; non-submit receivers / other bodies fail closed.
-func pythonFutureResultCallType(call *grammar.Node, content []byte) string {
+// zero-arg lambda whose body is a Class() call, or when fut is a local bound via
+// futureOf from fut.set_result(T()). Enables
+// ex.submit(lambda: A()).result().run() and fa.set_result(A()); fa.result().run()
+// under foreign same-leaf methods. Timeout args on result() are ignored;
+// non-submit / non-set_result receivers fail closed.
+func pythonFutureResultCallType(call *grammar.Node, content []byte, futureOf map[string]string) string {
 	if call == nil || call.Type() != "call" {
 		return ""
 	}
@@ -2195,7 +2200,47 @@ func pythonFutureResultCallType(call *grammar.Node, content []byte) string {
 	if attr == nil || ingest.NodeText(attr, content) != "result" {
 		return ""
 	}
-	return pythonSubmitCallableResultType(ingest.ChildByField(fn, "object"), content)
+	obj := ingest.ChildByField(fn, "object")
+	if et := pythonSubmitCallableResultType(obj, content); et != "" {
+		return et
+	}
+	// fa.result() after fa.set_result(A()) — local Future result leaf.
+	if obj != nil && obj.Type() == "identifier" && futureOf != nil {
+		return futureOf[ingest.NodeText(obj, content)]
+	}
+	return ""
+}
+
+// pythonFutureSetResultType recovers T from fa.set_result(T()) / fa.set_result(T())
+// when the first positional arg is a Class() call (or bare Class identifier is
+// not accepted — result value is the instance). Enables futureOf binding for
+// fa.result().run() under foreign same-leaf methods.
+func pythonFutureSetResultType(call *grammar.Node, content []byte) (futLocal, classType string) {
+	if call == nil || call.Type() != "call" {
+		return "", ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "attribute" {
+		return "", ""
+	}
+	attr := ingest.ChildByField(fn, "attribute")
+	if attr == nil || ingest.NodeText(attr, content) != "set_result" {
+		return "", ""
+	}
+	obj := ingest.ChildByField(fn, "object")
+	if obj == nil || obj.Type() != "identifier" {
+		return "", ""
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) < 1 {
+		return "", ""
+	}
+	// set_result(A()) — Class() instance. Bare identifiers fail closed (may be a
+	// pre-built local; assignment path already binds those via typeOf).
+	if et := pythonExprClassType(args[0], content); et != "" {
+		return ingest.NodeText(obj, content), et
+	}
+	return "", ""
 }
 
 // pythonSubmitCallableResultType recovers T from executor.submit(lambda: T())
@@ -2430,7 +2475,9 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // for direct identity wrappers under foreign same-leaf (copy.copy(item).run()).
 // factoryOf maps partial factory locals → class leaf (pa = partial(A) → "A") so
 // pa().run() peels under foreign same-leaf (local itself is not an A instance).
-func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string, map[string]string, map[string]string, map[string][]string, map[string]string) {
+// futureOf maps Future locals → result class leaf (fa.set_result(A()) → "A") so
+// fa.result().run() peels under foreign same-leaf.
+func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string, map[string]string, map[string]string, map[string][]string, map[string]string, map[string]string) {
 	out := map[string]bool{}
 	// Collection locals → element type leaf (list[A] / [A()] / dict value → "A").
 	elemOf := map[string]string{}
@@ -2451,8 +2498,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 	fieldOf := map[string]string{}
 	// partial factory locals → class leaf (pa = partial(A) / functools.partial(A)).
 	factoryOf := map[string]string{}
+	// Future locals → result class leaf (fa.set_result(A()) / set_result(B())).
+	futureOf := map[string]string{}
 	if root == nil || len(ourReceivers) == 0 {
-		return out, fieldOf, elemOf, typeOf, pairSlots, factoryOf
+		return out, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf
 	}
 	fieldIndex := pythonClassFieldIndex(root, content)
 	// Declaration order for positional match class patterns (case Box(xa, xb)).
@@ -2653,6 +2702,15 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								// typing.cast(A, x)
 								if tn := pythonCastTypeArg(right, content); ourReceivers[tn] {
 									out[lname] = true
+								}
+							case "result":
+								// xa = fa.result() after fa.set_result(A()) — Future result
+								// leaf via futureOf. Also ex.submit(lambda: A()).result().
+								// Timeout args ignored. Other receivers fail closed.
+								if et := pythonFutureResultCallType(right, content, futureOf); ourReceivers[et] {
+									out[lname] = true
+									typeOf[lname] = et
+									bindFields(lname, et)
 								}
 							case "pop", "popleft", "get", "setdefault":
 								// a = items.pop() / items.pop(0) / d.pop(k) / list(items).pop()
@@ -3529,6 +3587,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// untyped unary lambda params from the iterable element type.
 			// Without this, x.m() is skipped when a foreign same-leaf method exists.
 			pythonBindIterableLambdaParams(n, content, ourReceivers, elemOf, egElems, typeOf, out)
+			// fa.set_result(A()) / fb.set_result(B()) — bind Future local → result
+			// class leaf so fa.result().run() peels under foreign same-leaf.
+			// Foreign results too for shadowing.
+			if fut, et := pythonFutureSetResultType(n, content); fut != "" && et != "" {
+				futureOf[fut] = et
+			}
 		case "as_pattern":
 			// match `case A() as a`, with `with A() as a`, except `except A as e`.
 			// except* is handled above (e is ExceptionGroup, not A).
@@ -3589,7 +3653,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 		}
 	}
 	walk(root)
-	return out, fieldOf, elemOf, typeOf, pairSlots, factoryOf
+	return out, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf
 }
 
 // pythonBindIterableLambdaParams types untyped lambda parameters when the call
