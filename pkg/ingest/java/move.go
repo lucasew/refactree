@@ -1027,6 +1027,8 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 	//   as.get(i).m() / List.of(new A()).get(i).m() — list element
 	//   oa.get().m() / oa.orElse(d).m() / findFirst().get().m() — Optional element
 	//   sa.get().m() — Supplier element (generic type arg)
+	//   ca.call().m() — Callable element (generic type arg)
+	//   fa.join().m() / fa.getNow(d).m() / fa.resultNow().m() — CompletableFuture
 	//   qa.poll().m() / as.getFirst().m() / … — other collection accessors
 	if obj.Type() == "method_invocation" {
 		if et := javaCollectionAccessElemType(obj, content, elemOf, valOf, entryValOf); et != "" {
@@ -3489,6 +3491,9 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	  (Optional<A>; also findFirst().orElse / findFirst().orElseThrow)
 //	oa.get() / as.stream().findFirst().get() / Optional.of(new A()).get() → T
 //	  (zero-arg Optional.get; also List.of(new A()).get(i) / toList().get(i) via pipeline)
+//	ca.call() → elemOf[ca] (Callable<A>; zero-arg call returns V)
+//	fa.join() / fa.resultNow() → elemOf[fa] (CompletableFuture<A>; zero-arg)
+//	fa.getNow(d) → elemOf[fa] (CompletableFuture<A>; default does not change T)
 //	Map.of(k, new A()).get(k) / Map.ofEntries(...).get(k) /
 //	  Collections.singletonMap(k, new A()).get(k) / Map.copyOf(m).get(k) → A
 //	  (map factory/pipeline value type; getOrDefault/remove/put/compute same V)
@@ -3502,6 +3507,8 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //
 // Optional.get() works for Optional<A> locals (elemOf) and for Optional-yielding
 // pipelines (findFirst/findAny/min/max/Optional.of) via zero-arg get + pipeline.
+// Callable.call / CompletableFuture.join|getNow|resultNow use the same elemOf path
+// as Supplier.get / Future.get (generic type arg → T).
 // Fail closed on other methods / unknown receivers.
 // One-arg stream.reduce(BinaryOperator) returns Optional — use orElse/ifPresent
 // (pipeline typing), not bare var of the element type.
@@ -3573,9 +3580,16 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		"first", "last",
 		// NavigableSet ceiling/floor/higher/lower return E (search endpoints;
 		// probe arg does not change the element type leaf).
-		"ceiling", "floor", "higher", "lower":
+		"ceiling", "floor", "higher", "lower",
+		// Callable.call returns V (zero-arg; same element type leaf as Supplier.get).
+		"call",
+		// CompletableFuture.join / resultNow return T (zero-arg).
+		// getNow(defaultValue) returns T (default does not change the type leaf).
+		// Future.get / CF.get already covered by "get" above.
+		"join", "getNow", "resultNow":
 		// Map-like (2 type args recorded in valOf) → value type; else element type.
-		// Identifier receiver: List.get / Map.get / Optional local get / …
+		// Identifier receiver: List.get / Map.get / Optional local get /
+		// Callable.call / CompletableFuture.join|getNow|resultNow / …
 		if obj != nil && obj.Type() == "identifier" {
 			id := ingest.NodeText(obj, content)
 			if valOf != nil {
