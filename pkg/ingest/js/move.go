@@ -1502,6 +1502,13 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 	if obj.Type() == "identifier" {
 		return jsRenameByTypeMaps(ingest.NodeText(obj, content), ourReceivers, foreignReceivers, typedLocals)
 	}
+	// await Promise.resolve(new A()) / Promise.resolve(new A()) — identity peels
+	// under foreign same-leaf methods (same leaf as const a = await …; a.run()).
+	if obj.Type() == "await_expression" || obj.Type() == "call_expression" {
+		if t := jsPromiseResolveArgType(obj, content); t != "" {
+			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
+	}
 	// Complex receivers: only when the method leaf is unique project-wide.
 	switch obj.Type() {
 	case "call_expression", "await_expression", "ternary_expression",
@@ -1528,6 +1535,7 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 		switch n.Type() {
 		case "lexical_declaration", "variable_declaration":
 			// const box = new Box(); var box = new Box()
+			// const a = await Promise.resolve(new A())
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
 				if child.Type() != "variable_declarator" {
@@ -1539,6 +1547,9 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 					continue
 				}
 				if ctor := jsNewExpressionType(valN, content); ourReceivers[ctor] {
+					out[ingest.NodeText(nameN, content)] = true
+				} else if t := jsPromiseResolveArgType(valN, content); ourReceivers[t] {
+					// await Promise.resolve(new A()) — resolved value is A.
 					out[ingest.NodeText(nameN, content)] = true
 				}
 			}
@@ -1559,6 +1570,9 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 			}
 		case "formal_parameters":
 			// plain JS has no types; walk children for TS parameters
+		case "call_expression":
+			// Promise.resolve(new A()).then(a => a.run()) — bind then callback param.
+			jsBindPromiseThenParams(n, content, ourReceivers, out)
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
@@ -1589,6 +1603,177 @@ func jsNewExpressionType(n *grammar.Node, content []byte) string {
 	}
 	if ctor.Type() == "identifier" {
 		return ingest.NodeText(ctor, content)
+	}
+	return ""
+}
+
+// jsPromiseResolveArgType recovers T from Promise.resolve(new T()) /
+// await Promise.resolve(new T()) when the single arg is a new_expression.
+// Enables (await Promise.resolve(new A())).run() and
+// const a = await Promise.resolve(new A()); a.run() under foreign same-leaf.
+// Non-Promise receivers / multi-arg / non-new args fail closed.
+func jsPromiseResolveArgType(n *grammar.Node, content []byte) string {
+	if n == nil {
+		return ""
+	}
+	// Peel await.
+	if n.Type() == "await_expression" {
+		var arg *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch == nil || ch.Type() == "await" {
+				continue
+			}
+			arg = ch
+			break
+		}
+		return jsPromiseResolveArgType(arg, content)
+	}
+	if n.Type() == "parenthesized_expression" {
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			return jsPromiseResolveArgType(ch, content)
+		}
+		return ""
+	}
+	if n.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil || fn.Type() != "member_expression" {
+		return ""
+	}
+	obj := ingest.ChildByField(fn, "object")
+	prop := ingest.ChildByField(fn, "property")
+	if obj == nil || prop == nil {
+		return ""
+	}
+	if obj.Type() != "identifier" || ingest.NodeText(obj, content) != "Promise" {
+		return ""
+	}
+	if prop.Type() != "property_identifier" || ingest.NodeText(prop, content) != "resolve" {
+		return ""
+	}
+	args := ingest.ChildByField(n, "arguments")
+	if args == nil {
+		return ""
+	}
+	var first *grammar.Node
+	count := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		c := args.Child(i)
+		if c == nil || c.Type() == "(" || c.Type() == ")" || c.Type() == "," {
+			continue
+		}
+		count++
+		if first == nil {
+			first = c
+		}
+	}
+	if count != 1 || first == nil {
+		return ""
+	}
+	return jsNewExpressionType(first, content)
+}
+
+// jsBindPromiseThenParams types the first parameter of
+// Promise.resolve(new A()).then(a => …) / .then(function(a) { … }) when the
+// call receiver is Promise.resolve(new A()). Under foreign same-leaf methods,
+// only our-receiver resolved values bind so B is preserved.
+func jsBindPromiseThenParams(call *grammar.Node, content []byte, ourReceivers, out map[string]bool) {
+	if call == nil || call.Type() != "call_expression" || out == nil {
+		return
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "member_expression" {
+		return
+	}
+	prop := ingest.ChildByField(fn, "property")
+	if prop == nil || prop.Type() != "property_identifier" || ingest.NodeText(prop, content) != "then" {
+		return
+	}
+	obj := ingest.ChildByField(fn, "object")
+	// Receiver must be Promise.resolve(new T()) (possibly parenthesized).
+	t := jsPromiseResolveArgType(obj, content)
+	if !ourReceivers[t] {
+		return
+	}
+	args := ingest.ChildByField(call, "arguments")
+	if args == nil {
+		return
+	}
+	var cb *grammar.Node
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		c := args.Child(i)
+		if c == nil || c.Type() == "(" || c.Type() == ")" || c.Type() == "," {
+			continue
+		}
+		cb = c
+		break
+	}
+	if cb == nil {
+		return
+	}
+	// Arrow: a => …  (parameter may be bare identifier or formal_parameters)
+	// Function: function(a) { … }
+	var paramName string
+	switch cb.Type() {
+	case "arrow_function":
+		// parameter is either identifier child or formal_parameters
+		if p := ingest.ChildByField(cb, "parameter"); p != nil && p.Type() == "identifier" {
+			paramName = ingest.NodeText(p, content)
+		} else if p := ingest.ChildByField(cb, "parameters"); p != nil {
+			paramName = jsFirstFormalParamName(p, content)
+		} else {
+			// Grammar may expose bare identifier as direct child before =>
+			for i := uint32(0); i < cb.ChildCount(); i++ {
+				ch := cb.Child(i)
+				if ch.Type() == "identifier" {
+					paramName = ingest.NodeText(ch, content)
+					break
+				}
+				if ch.Type() == "formal_parameters" {
+					paramName = jsFirstFormalParamName(ch, content)
+					break
+				}
+			}
+		}
+	case "function_expression", "function_declaration":
+		if p := ingest.ChildByField(cb, "parameters"); p != nil {
+			paramName = jsFirstFormalParamName(p, content)
+		}
+	}
+	if paramName != "" && paramName != "_" {
+		out[paramName] = true
+	}
+}
+
+// jsFirstFormalParamName returns the first simple identifier parameter name.
+func jsFirstFormalParamName(params *grammar.Node, content []byte) string {
+	if params == nil {
+		return ""
+	}
+	for i := uint32(0); i < params.ChildCount(); i++ {
+		ch := params.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		if ch.Type() == "identifier" {
+			return ingest.NodeText(ch, content)
+		}
+		// TS required_parameter / optional_parameter
+		if nameN := ingest.ChildByField(ch, "pattern"); nameN != nil && nameN.Type() == "identifier" {
+			return ingest.NodeText(nameN, content)
+		}
+		if nameN := ingest.ChildByField(ch, "name"); nameN != nil && nameN.Type() == "identifier" {
+			return ingest.NodeText(nameN, content)
+		}
+		if nameN := ingest.ChildByType(ch, "identifier"); nameN != nil {
+			return ingest.NodeText(nameN, content)
+		}
 	}
 	return ""
 }
