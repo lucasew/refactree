@@ -1648,7 +1648,8 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 			}
 		case 2:
 			// Map bi-lambdas — value type from valOf[map] / collect(toMap(...)).
-			// forEach/computeIfPresent/compute/replaceAll: (K,V) → second is V.
+			// forEach/computeIfPresent/compute/replaceAll/ConcurrentHashMap.search:
+			// (K,V) → second is V.
 			// merge / ConcurrentHashMap.reduceValues: (V,V) → both params are V
 			// (BiFunction remapping / reducer).
 			// groupingBy/partitioningBy maps: value is List<T> — bind elemOf on the value param.
@@ -1702,6 +1703,9 @@ func javaStreamElementLambdaMethod(method string) bool {
 		// ConcurrentHashMap reduceValues — BiFunction reducer on V,V
 		// (see javaMapValueBiLambdaMethod).
 		"reduceValues",
+		// ConcurrentHashMap.search(threshold, BiFunction<? super K,? super V,? extends U>)
+		// — (K,V) bi-lambda; value is second param (same as forEach).
+		"search",
 		// ConcurrentHashMap searchValues / forEachValue — unary Function/Consumer on V
 		// (see javaMapValueUnaryLambdaMethod).
 		"searchValues", "forEachValue":
@@ -1725,11 +1729,13 @@ func javaMapValueUnaryLambdaMethod(method string) bool {
 }
 
 // javaMapValueBiLambdaMethod reports Map methods whose bi-lambda args include the
-// map value type: forEach/computeIfPresent/compute/replaceAll → (K,V),
+// map value type: forEach/computeIfPresent/compute/replaceAll /
+// ConcurrentHashMap.search → (K,V),
 // merge / ConcurrentHashMap.reduceValues → (V,V).
 func javaMapValueBiLambdaMethod(method string) bool {
 	switch method {
-	case "forEach", "computeIfPresent", "compute", "replaceAll", "merge", "reduceValues":
+	case "forEach", "computeIfPresent", "compute", "replaceAll", "merge", "reduceValues",
+		"search":
 		return true
 	default:
 		return false
@@ -2862,6 +2868,26 @@ func javaIsIdentityLambda(n *grammar.Node, content []byte) bool {
 	if len(params) != 1 {
 		return false
 	}
+	return javaLambdaBodyIsIdent(n, content, params[0])
+}
+
+// javaIsValueIdentityBiLambda reports expression-bodied bi-lambdas that return
+// their second (value) parameter: (k, v) -> v. Used to recover U=V from
+// ConcurrentHashMap.search identity BiFunctions. Blocks / other bodies fail closed.
+func javaIsValueIdentityBiLambda(n *grammar.Node, content []byte) bool {
+	if n == nil || n.Type() != "lambda_expression" {
+		return false
+	}
+	params := javaInferredLambdaParamNames(n, content)
+	if len(params) != 2 {
+		return false
+	}
+	return javaLambdaBodyIsIdent(n, content, params[1])
+}
+
+// javaLambdaBodyIsIdent reports expression-bodied lambdas whose body is the
+// given identifier (after peeling parentheses).
+func javaLambdaBodyIsIdent(n *grammar.Node, content []byte, want string) bool {
 	body := ingest.ChildByField(n, "body")
 	for body != nil && !body.IsNull() && body.Type() == "parenthesized_expression" {
 		inner := ingest.ChildByField(body, "expression")
@@ -2880,7 +2906,7 @@ func javaIsIdentityLambda(n *grammar.Node, content []byte) bool {
 	if body == nil || body.IsNull() || body.Type() != "identifier" {
 		return false
 	}
-	return ingest.NodeText(body, content) == params[0]
+	return ingest.NodeText(body, content) == want
 }
 
 // javaIsTeeingToListOrSet reports Collectors.teeing(d1, d2, merger) /
@@ -4232,6 +4258,8 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 // BiFunction stores R in valOf at bind time (see javaRecordCollectionElem).
 // ConcurrentHashMap.searchValues(threshold, Function) returns U; identity
 // Function (a -> a) recovers V of the map (var/chain under foreign same-leaf).
+// ConcurrentHashMap.search(threshold, BiFunction) returns U; identity
+// BiFunction ((k,v) -> v) recovers V of the map (var/chain under foreign same-leaf).
 // Fail closed on other methods / unknown receivers.
 // One-arg stream.reduce(BinaryOperator) returns Optional — use orElse/ifPresent
 // (pipeline typing), not bare var of the element type.
@@ -4441,6 +4469,12 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// (var xa = m.searchValues(1L, a -> a); xa.m() / m.searchValues(1L, a -> a).m()).
 		// Non-identity / block Functions fail closed (U is not statically V).
 		return javaSearchValuesReturnType(val, obj, content, elemOf, valOf)
+	case "search":
+		// ConcurrentHashMap.search(threshold, BiFunction<? super K,? super V,? extends U>)
+		// returns U. Identity BiFunction ((k,v) -> v) yields V of the map receiver
+		// (var xa = m.search(1L, (k,v) -> v); xa.m() / m.search(1L, (k,v) -> v).m()).
+		// Non-identity / block BiFunctions fail closed (U is not statically V).
+		return javaSearchReturnType(val, obj, content, elemOf, valOf)
 	case "reduceValues":
 		// ConcurrentHashMap.reduceValues(threshold, BiFunction<? super V,? super V,? extends V>)
 		// returns V (2-arg reducer form). Threshold is ignored.
@@ -4484,6 +4518,22 @@ func javaSearchValuesReturnType(call, obj *grammar.Node, content []byte, elemOf,
 	// Function is the last arg (threshold is first).
 	fn := args[len(args)-1]
 	if !javaIsIdentityLambda(fn, content) {
+		return ""
+	}
+	return javaMapPipelineValueType(obj, content, elemOf, valOf)
+}
+
+// javaSearchReturnType recovers U from ConcurrentHashMap.search when the
+// BiFunction is a value-identity bi-lambda ((k,v) -> v), so U = V of the map.
+// Threshold arg is ignored. Non-identity BiFunctions fail closed.
+func javaSearchReturnType(call, obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	args := javaCallArgs(call)
+	if len(args) < 2 {
+		return ""
+	}
+	// BiFunction is the last arg (threshold is first).
+	fn := args[len(args)-1]
+	if !javaIsValueIdentityBiLambda(fn, content) {
 		return ""
 	}
 	return javaMapPipelineValueType(obj, content, elemOf, valOf)
