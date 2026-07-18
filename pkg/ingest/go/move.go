@@ -3159,7 +3159,8 @@ func compositeLiteralTypeName(n *grammar.Node, content []byte) string {
 }
 
 // findComplexOperandSelectorEdits rewrites recv.Method when recv is not a bare
-// identifier: v.(T).M, (v.(T)).M, xs[i].M, Make().M, T{}.M / &T{}.M, (*T).M.
+// identifier: v.(T).M, (v.(T)).M, xs[i].M, Make().M, T{}.M / &T{}.M, (*T).M,
+// (<-ch).M (channel receive payload).
 //
 // When foreign same-leaf methods exist, only rewrite when the operand type is
 // known and not a foreign receiver (same filter as identifier selectors).
@@ -3679,6 +3680,30 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType func(na
 			return typeNameFromTypeNode(t, content)
 		}
 	case "unary_expression":
+		// (<-ch).M — channel receive payload type (same leaf as a := <-ch).
+		// Under foreign same-leaf methods, assigned receive already renames via
+		// typed locals; inline (<-ch).M must recover T from the channel param.
+		if op := ingest.ChildByField(n, "operator"); op != nil && ingest.NodeText(op, content) == "<-" {
+			operand := ingest.ChildByField(n, "operand")
+			for operand != nil && operand.Type() == "parenthesized_expression" {
+				var inner *grammar.Node
+				for i := uint32(0); i < operand.ChildCount(); i++ {
+					ch := operand.Child(i)
+					if ch == nil || ch.Type() == "(" || ch.Type() == ")" {
+						continue
+					}
+					inner = ch
+					break
+				}
+				operand = inner
+			}
+			if operand != nil && operand.Type() == "identifier" && indexElemType != nil {
+				if el, ok := indexElemType(ingest.NodeText(operand, content), n.StartByte()); ok {
+					return el
+				}
+			}
+			return ""
+		}
 		// (*T).M method expressions where the operand is not a composite.
 		var starIdent string
 		for i := uint32(0); i < n.ChildCount(); i++ {
