@@ -1918,6 +1918,8 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `for batch in batched(xs, n): for a in batch` (batch → elemOf; n/strict ignored),
 // `for combo in combinations(xs, r): for a in combo` /
 // `for combo in permutations/combinations_with_replacement(...)` (combo → elemOf),
+// `for combo in product(xs, ys): for a in combo` /
+// `for combo in itertools.product(...)` (combo → elemOf when all args share type),
 // `for k, g in groupby(xs)` / `for k, g in itertools.groupby(xs)` —
 // group g is an iterable of xs elements (key untyped; key= ignored),
 // `for a in reversed/sorted/list/iter(items)`,
@@ -2329,6 +2331,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// for a, b in zip_longest / itertools.zip_longest /
 			// for a, b in pairwise / itertools.pairwise /
 			// for a, b in product / itertools.product /
+			// for combo in product / itertools.product (combo → elemOf when shared) /
 			// for a, b in combinations/permutations / itertools.* /
 			// for combo in combinations/permutations / itertools.* (combo → elemOf) /
 			// for a, b in batched / itertools.batched (each slot → elem; n ignored) /
@@ -2365,6 +2368,13 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// for combo in combinations/permutations/combinations_with_replacement —
 				// combo is a tuple of xs elements (elemOf), not an element itself.
 				if et := pythonCombPermElemType(right, content, elemOf, egElems, typeOf); et != "" {
+					elemOf[ingest.NodeText(left, content)] = et
+					break
+				}
+				// for combo in product(xs, ys) / itertools.product(...) —
+				// combo is a tuple of elements; bind elemOf when all args share type
+				// so nested `for a in combo` / next(combo) type.
+				if et := pythonProductSharedElemType(right, content, elemOf, egElems, typeOf); et != "" {
 					elemOf[ingest.NodeText(left, content)] = et
 					break
 				}
@@ -3796,6 +3806,43 @@ func pythonCombPermElemType(right *grammar.Node, content []byte, elemOf, egElems
 		return ""
 	}
 	return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
+}
+
+// pythonProductSharedElemType recovers the shared element type for
+// product(*iterables[, repeat]) / itertools.product(...) when every positional
+// iterable resolves to the same non-empty element leaf. Used to bind
+// `for combo in product(...):` into elemOf so nested `for a in combo` /
+// next(combo) type. Heterogeneous or untyped args fail closed; repeat= kwargs
+// are ignored (via positional-arg parsing).
+func pythonProductSharedElemType(right *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
+	if right == nil || right.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(right, "function")
+	if fn == nil {
+		return ""
+	}
+	switch fn.Type() {
+	case "identifier":
+		if ingest.NodeText(fn, content) != "product" {
+			return ""
+		}
+	case "attribute":
+		objN := ingest.ChildByField(fn, "object")
+		attrN := ingest.ChildByField(fn, "attribute")
+		if objN == nil || attrN == nil || objN.Type() != "identifier" {
+			return ""
+		}
+		if ingest.NodeText(objN, content) != "itertools" {
+			return ""
+		}
+		if ingest.NodeText(attrN, content) != "product" {
+			return ""
+		}
+	default:
+		return ""
+	}
+	return pythonChainElemType(right, content, elemOf, egElems, typeOf)
 }
 
 // pythonExpandSingleListTupleSplat returns the elements of a sole *list/*tuple
