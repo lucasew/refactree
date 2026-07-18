@@ -1796,7 +1796,81 @@ func javaNestedCollectionGetElemType(val *grammar.Node, content []byte, elemOf, 
 	if obj.Type() == "identifier" {
 		return elemOf["@nested."+ingest.NodeText(obj, content)]
 	}
+	// Optional.of(List.of(new A())).get() / ofNullable / orElseThrow —
+	// factory Optional wrapping a collection factory of T. Nested list element
+	// peels as T under foreign same-leaf (same leaf as Optional<List<A>> local).
+	if nest := javaOptionalOfCollectionFactoryElemType(obj, content); nest != "" {
+		return nest
+	}
 	return ""
+}
+
+// javaOptionalOfCollectionFactoryElemType recovers T when opt is
+// Optional.of(List.of(new A())) / Optional.ofNullable(Arrays.asList(new A())) /
+// Optional.of(Collections.singletonList(new A())) — Optional wrapping a
+// collection factory of T. Enables
+// Optional.of(List.of(new A())).get().get(0).m() /
+// Optional.of(List.of(new A())).orElseThrow().get(0).m() under foreign same-leaf.
+// Scalar Optional.of(new A()) / unknown args fail closed (no nested list).
+func javaOptionalOfCollectionFactoryElemType(opt *grammar.Node, content []byte) string {
+	if opt == nil || opt.IsNull() || opt.Type() != "method_invocation" {
+		return ""
+	}
+	nameN := ingest.ChildByField(opt, "name")
+	if nameN == nil {
+		return ""
+	}
+	name := ingest.NodeText(nameN, content)
+	if name != "of" && name != "ofNullable" {
+		return ""
+	}
+	recv := javaStaticFactoryReceiverName(ingest.ChildByField(opt, "object"), content)
+	if recv != "Optional" {
+		return ""
+	}
+	var args *grammar.Node
+	for i := uint32(0); i < opt.ChildCount(); i++ {
+		if opt.Child(i).Type() == "argument_list" {
+			args = opt.Child(i)
+			break
+		}
+	}
+	if args == nil {
+		return ""
+	}
+	var first *grammar.Node
+	count := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," || ch.Type() == "comment" {
+			continue
+		}
+		count++
+		if first == nil {
+			first = ch
+		}
+	}
+	// Optional.of takes one value arg (ofNullable same). Extra args fail closed.
+	if count != 1 || first == nil || first.Type() != "method_invocation" {
+		return ""
+	}
+	argNameN := ingest.ChildByField(first, "name")
+	if argNameN == nil {
+		return ""
+	}
+	argName := ingest.NodeText(argNameN, content)
+	switch argName {
+	case "of", "asList", "ofNullable", "singletonList", "singleton", "copyOf":
+		// List.of(new A()) / Arrays.asList(new A()) / Set.of(new A()) /
+		// Collections.singletonList(new A()) / List.copyOf(…) — element T is
+		// the nested list leaf (Optional holds List of T).
+		return javaStaticCollectionOfElemType(first, content, argName)
+	case "nCopies":
+		// Collections.nCopies(n, new A()) — List of T.
+		return javaCollectionsNCopiesElemType(first, content)
+	default:
+		return ""
+	}
 }
 
 // javaNestedCollectionIdentElemType recovers T from a bare identifier that is a

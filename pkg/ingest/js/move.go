@@ -4187,7 +4187,9 @@ func jsArrayIdentityElemType(n *grammar.Node, content []byte, arrayLocals, typed
 			return jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories, extra)
 		}
 		// Nested identity: aa.flatMap(xs => xs) when aa is [[new A()], …].
-		if !jsIsIdentityCallback(cb, content) {
+		// Nested identity-map: aa.flatMap(xs => xs.map(x => x)) — same leaf as
+		// identity flatten / aa.flat()[0] under foreign same-leaf.
+		if !jsIsIdentityCallback(cb, content) && !jsIsNestedIdentityMapCallback(cb, content) {
 			return ""
 		}
 		if obj != nil && obj.Type() == "identifier" && arrayLocals != nil {
@@ -6440,6 +6442,72 @@ func jsIdentityCloneType(n *grammar.Node, content []byte, typedLocals, factories
 // Parenthesized expression bodies and single-return statement blocks only.
 func jsIsIdentityCallback(cb *grammar.Node, content []byte) bool {
 	return jsCallbackReturnedParamIndex(cb, content) == 0
+}
+
+// jsIsNestedIdentityMapCallback reports whether cb is xs => xs.map(x => x) /
+// (xs) => xs.map(x => x) / (xs) => { return xs.map(x => x) } /
+// function(xs){ return xs.map(function(x){ return x }) } — identity map of the
+// first formal param. Sole return must be firstParam.map(identityCallback).
+// Enables aa.flatMap(xs => xs.map(x => x))[0].run() under foreign same-leaf
+// (same leaf as aa.flatMap(xs => xs) / aa.flat()). Non-identity map / chained
+// methods / non-param receiver fail closed.
+func jsIsNestedIdentityMapCallback(cb *grammar.Node, content []byte) bool {
+	params := jsCallbackParamNames(cb, content)
+	if len(params) == 0 {
+		return false
+	}
+	first := params[0]
+	ret := jsCallbackSoleReturnExpr(cb, content)
+	if ret == nil {
+		return false
+	}
+	for ret != nil && ret.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < ret.ChildCount(); i++ {
+			ch := ret.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		ret = inner
+	}
+	if ret == nil || ret.Type() != "call_expression" {
+		return false
+	}
+	fn := ingest.ChildByField(ret, "function")
+	args := ingest.ChildByField(ret, "arguments")
+	if fn == nil || args == nil {
+		return false
+	}
+	if fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain" {
+		return false
+	}
+	obj := ingest.ChildByField(fn, "object")
+	prop := ingest.ChildByField(fn, "property")
+	if obj == nil || prop == nil ||
+		obj.Type() != "identifier" || ingest.NodeText(obj, content) != first ||
+		ingest.NodeText(prop, content) != "map" {
+		return false
+	}
+	var mapCb *grammar.Node
+	count := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		count++
+		if mapCb == nil {
+			mapCb = ch
+		}
+	}
+	// Exactly one arg: the identity mapper. thisArg / multi-arg fail closed.
+	if count != 1 || mapCb == nil || !jsIsIdentityCallback(mapCb, content) {
+		return false
+	}
+	return true
 }
 
 // jsIsIdentityArrayCallback reports whether cb is an identity-array of its first

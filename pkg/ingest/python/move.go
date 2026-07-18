@@ -4621,6 +4621,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// from the subject's element type (items: list[A] / xs = [A()] / …).
 			// match d: case {"k": a}: — bind mapping value captures from the
 			// subject's dict value leaf (d: dict[K, A] / …).
+			// match aa: case [[xa, *_], *_]: / match da: case {"k": [xa, *_]}: —
+			// nested list/mapping patterns when subject has @nested leaf T
+			// (list[list[A]] / dict[str, list[A]]) under foreign same-leaf.
 			// match box: case {"a": xa}: — TypedDict/record key-specific value
 			// captures via fieldOf (box: Box with a: A; not homogeneous elemOf).
 			// match a: case x as xa: / case _ as xa: — bind captures from subject
@@ -4632,14 +4635,19 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				et := pythonIterableElemType(subject, content, elemOf, egElems, typeOf)
 				subjLocal := ""
 				subjType := ""
+				nest := ""
 				if subject.Type() == "identifier" {
 					subjLocal = ingest.NodeText(subject, content)
 					if typeOf != nil {
 						subjType = typeOf[subjLocal]
 					}
+					if elemOf != nil {
+						// list[list[A]] / dict[str, list[A]] nested leaf.
+						nest = elemOf["@nested."+subjLocal]
+					}
 				}
 				// Homogeneous dict/list path and TypedDict key path are independent.
-				if et != "" || subjLocal != "" || subjType != "" {
+				if et != "" || nest != "" || subjLocal != "" || subjType != "" {
 					body := ingest.ChildByField(n, "body")
 					if body != nil {
 						for i := uint32(0); i < body.ChildCount(); i++ {
@@ -4653,8 +4661,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								if p.Type() == "block" {
 									break
 								}
-								if et != "" {
-									pythonBindMatchSeqPatterns(p, content, et, ourReceivers, out, elemOf)
+								if et != "" || nest != "" {
+									pythonBindMatchSeqPatterns(p, content, et, nest, ourReceivers, out, elemOf)
 								}
 								if subjLocal != "" {
 									pythonBindMatchRecordKeyPatterns(p, content, subjLocal, fieldOf, ourReceivers, out)
@@ -6872,42 +6880,73 @@ func pythonBindMatchRecordKeyPatterns(n *grammar.Node, content []byte, local str
 }
 
 // pythonBindMatchSeqPatterns binds capture names from match list/tuple/mapping
-// patterns when the match subject has element/value type et.
-// Sequence: fixed slots → out (if ourReceivers); *rest → elemOf (including
-// foreign, for shadowing). Mapping: value captures in case {"k": a} → out;
-// **rest fails closed (mapping, not an element). Fails closed on nested /
-// class patterns inside the sequence/value (those use other binders).
+// patterns when the match subject has element/value type et and optional nest
+// leaf (list[list[A]] / dict[str, list[A]] → nest "A").
+// Sequence: fixed slots → out (if ourReceivers[et]); *rest → elemOf (including
+// foreign, for shadowing). When nest is set and et is not a receiver (container
+// name like "list"), simple fixed slots bind as list-of-nest (elemOf[row]=nest)
+// so row[0].run() peels; nested list/tuple slots bind captures as nest leaf.
+// Mapping: value captures in case {"k": a} → out; nested list value patterns
+// case {"k": [xa, *_]} bind xa as nest. **rest fails closed (mapping, not an
+// element). Class patterns inside the sequence/value fail closed (other binders).
 // TypedDict key-specific captures use pythonBindMatchRecordKeyPatterns instead.
-func pythonBindMatchSeqPatterns(n *grammar.Node, content []byte, et string, ourReceivers, out map[string]bool, elemOf map[string]string) {
-	if n == nil || n.IsNull() || et == "" {
+func pythonBindMatchSeqPatterns(n *grammar.Node, content []byte, et, nest string, ourReceivers, out map[string]bool, elemOf map[string]string) {
+	if n == nil || n.IsNull() {
+		return
+	}
+	if et == "" && nest == "" {
 		return
 	}
 	switch n.Type() {
 	case "list_pattern", "tuple_pattern":
 		fixed, star, ok := pythonMatchSeqPatternCaptures(n, content)
-		if !ok {
+		if ok {
+			for _, name := range fixed {
+				if et != "" && ourReceivers[et] {
+					out[name] = true
+				} else if nest != "" && elemOf != nil {
+					// case [row, *_] on list[list[A]] — row is list of nest.
+					elemOf[name] = nest
+				}
+			}
+			if star != "" && elemOf != nil {
+				if et != "" && ourReceivers[et] {
+					// Foreign element types too — shadow prior same-name collections.
+					elemOf[star] = et
+				} else if nest != "" {
+					// *rest on nested collection: rows are list-of-nest.
+					// for row in rest peels via @nested (same as for row in aa).
+					elemOf["@nested."+star] = nest
+				} else if et != "" {
+					elemOf[star] = et
+				}
+			}
 			return
 		}
-		for _, name := range fixed {
-			if ourReceivers[et] {
-				out[name] = true
-			}
+		// Nested sequence slots: case [[xa, *_], *_] when nest is the leaf T.
+		if nest == "" {
+			return
 		}
-		if star != "" {
-			// Foreign element types too — shadow prior same-name collections.
-			elemOf[star] = et
-		}
+		pythonBindMatchNestedSeqSlots(n, content, nest, ourReceivers, out, elemOf)
 		return
 	case "dict_pattern":
 		// Mapping values are case_pattern/pattern children; keys are string /
 		// integer / dotted_name (capture keys) and are not value-typed.
 		// **rest (splat_pattern) is a mapping — fail closed.
+		// Nested list values: case {"k": [xa, *_]} when nest is leaf T.
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			ch := n.Child(i)
 			if ch.Type() != "case_pattern" && ch.Type() != "pattern" {
 				continue
 			}
-			pythonBindMatchMapValueCaptures(ch, content, et, ourReceivers, out)
+			if nest != "" && pythonMatchPatternIsSeq(ch) {
+				// Value is list/tuple of nest — bind inner captures as nest leaf.
+				pythonBindMatchSeqPatterns(ch, content, nest, "", ourReceivers, out, elemOf)
+				continue
+			}
+			if et != "" {
+				pythonBindMatchMapValueCaptures(ch, content, et, ourReceivers, out)
+			}
 		}
 		return
 	case "case_pattern", "pattern", "as_pattern":
@@ -6924,12 +6963,148 @@ func pythonBindMatchSeqPatterns(n *grammar.Node, content []byte, et string, ourR
 				// May be left (class name) or right (alias); recurse left only via
 				// sequence patterns nested deeper — safe either way (idents no-op).
 			}
-			pythonBindMatchSeqPatterns(ch, content, et, ourReceivers, out, elemOf)
+			pythonBindMatchSeqPatterns(ch, content, et, nest, ourReceivers, out, elemOf)
 		}
 		return
 	}
 	for i := uint32(0); i < n.ChildCount(); i++ {
-		pythonBindMatchSeqPatterns(n.Child(i), content, et, ourReceivers, out, elemOf)
+		pythonBindMatchSeqPatterns(n.Child(i), content, et, nest, ourReceivers, out, elemOf)
+	}
+}
+
+// pythonMatchPatternIsSeq reports whether n (possibly wrapped) is a list/tuple
+// pattern. Used for nested mapping value peels: case {"k": [xa, *_]}.
+func pythonMatchPatternIsSeq(n *grammar.Node) bool {
+	if n == nil || n.IsNull() {
+		return false
+	}
+	for n != nil && (n.Type() == "case_pattern" || n.Type() == "pattern") {
+		inner := pythonMatchPatternInner(n)
+		if inner == nil {
+			return false
+		}
+		n = inner
+	}
+	if n == nil {
+		return false
+	}
+	return n.Type() == "list_pattern" || n.Type() == "tuple_pattern"
+}
+
+// pythonBindMatchNestedSeqSlots walks a list/tuple pattern whose flat capture
+// parse failed (nested list/class slots). Simple identifier slots bind as
+// list-of-nest (elemOf); nested list/tuple slots bind captures as nest leaf.
+// Wildcards / *_ skip; class/or/value patterns fail closed for that slot.
+func pythonBindMatchNestedSeqSlots(n *grammar.Node, content []byte, nest string, ourReceivers, out map[string]bool, elemOf map[string]string) {
+	if n == nil || nest == "" {
+		return
+	}
+	switch n.Type() {
+	case "list_pattern", "tuple_pattern":
+		// ok
+	default:
+		return
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		switch ch.Type() {
+		case "(", ")", "[", "]", ",", "comment", "_":
+			continue
+		case "splat_pattern":
+			// *rest / *_ on outer nested collection.
+			if id := ingest.ChildByType(ch, "identifier"); id != nil && elemOf != nil {
+				elemOf["@nested."+ingest.NodeText(id, content)] = nest
+			}
+			continue
+		case "case_pattern", "pattern":
+			inner := pythonMatchPatternInner(ch)
+			if inner == nil {
+				continue
+			}
+			if inner.Type() == "_" {
+				continue
+			}
+			// Nested *rest wrapped in case_pattern.
+			if inner.Type() == "splat_pattern" {
+				if id := ingest.ChildByType(inner, "identifier"); id != nil && elemOf != nil {
+					elemOf["@nested."+ingest.NodeText(id, content)] = nest
+				}
+				continue
+			}
+			switch inner.Type() {
+			case "list_pattern", "tuple_pattern":
+				// case [[xa, *_], …] — inner sequence of nest leaf.
+				pythonBindMatchSeqPatterns(inner, content, nest, "", ourReceivers, out, elemOf)
+			case "identifier", "dotted_name":
+				name := pythonMatchCaptureName(inner, content)
+				if name != "" && elemOf != nil {
+					elemOf[name] = nest
+				}
+			case "as_pattern":
+				// row as r / [xa, *_] as row — bind left + alias as list-of-nest
+				// or recurse into nested sequence left.
+				var left *grammar.Node
+				var alias string
+				seenAs := false
+				for j := uint32(0); j < inner.ChildCount(); j++ {
+					c := inner.Child(j)
+					if c.Type() == "as" {
+						seenAs = true
+						continue
+					}
+					if !seenAs {
+						left = c
+						continue
+					}
+					switch c.Type() {
+					case "identifier":
+						alias = ingest.NodeText(c, content)
+					case "as_pattern_target":
+						if id := ingest.ChildByType(c, "identifier"); id != nil {
+							alias = ingest.NodeText(id, content)
+						}
+					}
+				}
+				if left != nil {
+					for left != nil && (left.Type() == "case_pattern" || left.Type() == "pattern") {
+						innerL := pythonMatchPatternInner(left)
+						if innerL == nil {
+							break
+						}
+						left = innerL
+					}
+				}
+				if left != nil {
+					switch left.Type() {
+					case "list_pattern", "tuple_pattern":
+						pythonBindMatchSeqPatterns(left, content, nest, "", ourReceivers, out, elemOf)
+						// Whole nested sequence alias is list-of-nest, not leaf.
+						if alias != "" && elemOf != nil {
+							elemOf[alias] = nest
+						}
+					case "identifier", "dotted_name":
+						name := pythonMatchCaptureName(left, content)
+						if elemOf != nil {
+							if name != "" {
+								elemOf[name] = nest
+							}
+							if alias != "" {
+								elemOf[alias] = nest
+							}
+						}
+					}
+				}
+			default:
+				// class/or/value — fail closed for this slot.
+			}
+		case "identifier", "dotted_name":
+			name := pythonMatchCaptureName(ch, content)
+			if name != "" && elemOf != nil {
+				elemOf[name] = nest
+			}
+		default:
+			// Unknown slot shape — fail closed for this slot only.
+		}
 	}
 }
 
@@ -7028,6 +7203,22 @@ func pythonMatchSeqPatternCaptures(n *grammar.Node, content []byte) (fixed []str
 			if inner.Type() == "_" {
 				continue
 			}
+			// `a as x` inside a sequence slot: both bind (PEP 634). Nested
+			// left patterns (class/list) fail closed here — nested list slots
+			// use pythonBindMatchNestedSeqSlots instead.
+			if inner.Type() == "as_pattern" {
+				leftName, alias, okAs := pythonMatchAsCaptureNames(inner, content)
+				if !okAs {
+					return nil, "", false
+				}
+				if leftName != "" {
+					fixed = append(fixed, leftName)
+				}
+				if alias != "" {
+					fixed = append(fixed, alias)
+				}
+				continue
+			}
 			name, isStar, okCap := pythonMatchCaptureOrStar(inner, content)
 			if !okCap {
 				return nil, "", false
@@ -7099,6 +7290,64 @@ func pythonMatchPatternInner(n *grammar.Node) *grammar.Node {
 		n = next
 	}
 	return n
+}
+
+// pythonMatchAsCaptureNames returns left capture + alias from `a as x` when the
+// left side is a simple identifier capture (not class/list/or). Used for
+// sequence slots `case [a as x]:` / nested map values `case {"k": [xa as x, *_]}`.
+func pythonMatchAsCaptureNames(n *grammar.Node, content []byte) (left, alias string, ok bool) {
+	if n == nil || n.Type() != "as_pattern" {
+		return "", "", false
+	}
+	var leftN *grammar.Node
+	seenAs := false
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		if ch.Type() == "as" {
+			seenAs = true
+			continue
+		}
+		if !seenAs {
+			leftN = ch
+			continue
+		}
+		switch ch.Type() {
+		case "identifier":
+			alias = ingest.NodeText(ch, content)
+		case "as_pattern_target":
+			if id := ingest.ChildByType(ch, "identifier"); id != nil {
+				alias = ingest.NodeText(id, content)
+			}
+		}
+	}
+	if leftN != nil {
+		for leftN != nil && (leftN.Type() == "case_pattern" || leftN.Type() == "pattern") {
+			inner := pythonMatchPatternInner(leftN)
+			if inner == nil {
+				return "", "", false
+			}
+			leftN = inner
+		}
+	}
+	if leftN == nil {
+		return "", "", false
+	}
+	switch leftN.Type() {
+	case "identifier", "dotted_name":
+		left = pythonMatchCaptureName(leftN, content)
+		if left == "" {
+			return "", "", false
+		}
+	case "_":
+		// `_ as x` — only alias binds.
+	default:
+		// Nested class/list/or left — fail closed for flat seq capture parse.
+		return "", "", false
+	}
+	if left == "" && alias == "" {
+		return "", "", false
+	}
+	return left, alias, true
 }
 
 // pythonMatchCaptureOrStar returns a simple capture name, or *rest via splat_pattern.
