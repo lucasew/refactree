@@ -1245,7 +1245,7 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 
 	factories := jsSameFileFactoryReturns(pf.Root, content)
 	generators := jsSameFileGeneratorYields(pf.Root, content)
-	typedLocals, settledOf, genLocals := jsTypedLocals(pf.Root, content, ourReceivers, factories, generators)
+	typedLocals, settledOf, genLocals, arrayLocals := jsTypedLocals(pf.Root, content, ourReceivers, factories, generators)
 	// Unique method leaf: ExtraRename already rewrites every simple obj.oldLeaf.
 	// Apply the same aggressiveness to object-pattern property keys.
 	uniqueLeaf := len(foreignReceivers) == 0
@@ -1287,7 +1287,7 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 			obj := ingest.ChildByField(n, "object")
 			prop := ingest.ChildByField(n, "property")
 			if obj != nil && prop != nil && ingest.NodeText(prop, content) == oldLeaf {
-				if jsShouldRenameMember(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, settledOf, factories, generators, genLocals) {
+				if jsShouldRenameMember(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, settledOf, factories, generators, genLocals, arrayLocals) {
 					addEdit(prop.StartByte(), prop.EndByte(), newLeaf)
 				}
 			}
@@ -1304,7 +1304,7 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 			nameN := ingest.ChildByField(n, "name")
 			valN := ingest.ChildByField(n, "value")
 			if nameN != nil && nameN.Type() == "object_pattern" && valN != nil {
-				if uniqueLeaf || jsShouldRenameMember(valN, content, classHere, ourReceivers, foreignReceivers, typedLocals, settledOf, factories, generators, genLocals) {
+				if uniqueLeaf || jsShouldRenameMember(valN, content, classHere, ourReceivers, foreignReceivers, typedLocals, settledOf, factories, generators, genLocals, arrayLocals) {
 					jsCollectObjectPatternMethodEdits(nameN, content, oldLeaf, newLeaf, addEdit)
 					// Shorthand `{ helper }` also renames the local binding — rewrite
 					// bare oldLeaf identifiers later in the same statement_block.
@@ -1476,11 +1476,13 @@ func jsRenameByTypeMaps(name string, ourReceivers, foreignReceivers map[string]b
 // jsShouldRenameMember decides whether obj.oldLeaf is a call on one of our receivers.
 // factories maps same-file factory names → class leaf (makeA → A) for
 // Promise.resolve(makeA()) peels under foreign same-leaf methods.
-// settledOf maps Promise.allSettled / generator .next() result locals → value type leaf
-// so r.value.run() peels under foreign same-leaf methods.
+// settledOf maps Promise.allSettled / generator .next() / array iterator .next()
+// result locals → value type leaf so r.value.run() peels under foreign same-leaf.
 // generators maps same-file generator names → yield type leaf (genA → A).
-// genLocals maps generator instance locals → yield type (const g = genA() → g:"A").
-func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers map[string]bool, typedLocals, settledOf, factories, generators, genLocals map[string]string) bool {
+// genLocals maps generator/array-iterator instance locals → yield/elem type
+// (const g = genA() → g:"A", const ia = [new A()].values() → ia:"A").
+// arrayLocals maps array locals → uniform element type (const as = [new A()] → as:"A").
+func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers map[string]bool, typedLocals, settledOf, factories, generators, genLocals, arrayLocals map[string]string) bool {
 	if obj == nil {
 		return false
 	}
@@ -1535,13 +1537,15 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 		}
 	}
 	// r.value.run() / (await Promise.allSettled([new A()]))[0].value.run() /
-	// genA().next().value.run() / (await agenA().next()).value.run() —
+	// genA().next().value.run() / (await agenA().next()).value.run() /
+	// [new A()].values().next().value.run() /
+	// [new A()][Symbol.iterator]().next().value.run() —
 	// value peel under foreign same-leaf methods.
 	if obj.Type() == "member_expression" || obj.Type() == "member_expression_optional" || obj.Type() == "optional_chain" {
 		if t := jsPromiseAllSettledValueType(obj, content, typedLocals, settledOf, factories); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
-		if t := jsGeneratorNextValueType(obj, content, generators, genLocals); t != "" {
+		if t := jsGeneratorNextValueType(obj, content, generators, genLocals, arrayLocals, typedLocals, factories); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 	}
@@ -1559,18 +1563,23 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 // jsTypedLocals maps local names → concrete type leaf for ourReceivers
 // (const b = new Box() → "Box"). Also covers simple TS-style typed parameters
 // and Promise.resolve then callback params.
-// settledOf maps Promise.allSettled result locals / generator .next() result locals
-// → value type leaf (const [r] = await Promise.allSettled([new A()]) → r:"A",
-// const ra = genA().next() → ra:"A") so r.value peels.
+// settledOf maps Promise.allSettled result locals / generator .next() /
+// array-iterator .next() result locals → value type leaf
+// (const [r] = await Promise.allSettled([new A()]) → r:"A",
+// const ra = genA().next() → ra:"A",
+// const ra = [new A()].values().next() → ra:"A") so r.value peels.
 // factories maps same-file factory names → class leaf for Promise.resolve(makeA()).
 // generators maps same-file generator names → yield type leaf (genA → A).
-// genLocals maps generator instance locals → yield type (const g = genA() → g:"A").
-func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool, factories, generators map[string]string) (map[string]string, map[string]string, map[string]string) {
+// genLocals maps generator/array-iterator instance locals → yield/elem type
+// (const g = genA() → g:"A", const ia = [new A()].values() → ia:"A").
+// arrayLocals maps array locals → uniform element type (const as = [new A()] → as:"A").
+func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool, factories, generators map[string]string) (map[string]string, map[string]string, map[string]string, map[string]string) {
 	out := map[string]string{}
 	settledOf := map[string]string{}
 	genLocals := map[string]string{}
+	arrayLocals := map[string]string{}
 	if root == nil || len(ourReceivers) == 0 {
-		return out, settledOf, genLocals
+		return out, settledOf, genLocals, arrayLocals
 	}
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
@@ -1590,6 +1599,10 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 			// const ga = genA() — generator local of yield type A
 			// const ra = genA().next() / await agenA().next() — next result; ra.value is A
 			// const a = genA().next().value — a is A
+			// const as = [new A()] — array local of element type A
+			// const ia = [new A()].values() / [new A()][Symbol.iterator]() — iterator of A
+			// const ra = [new A()].values().next() — next result; ra.value is A
+			// const a = [new A()].values().next().value — a is A
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
 				if child.Type() != "variable_declarator" {
@@ -1615,15 +1628,19 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 					} else if t := jsIdentityCloneType(valN, content, out, factories); ourReceivers[t] {
 						// const a = structuredClone(new A()) / Object.assign(new A()[, …])
 						out[ingest.NodeText(nameN, content)] = t
-					} else if t := jsGeneratorCallYieldType(valN, content, generators, genLocals); ourReceivers[t] {
-						// const ga = genA() / const ga = agenA() — generator instance.
+					} else if t := jsUniformArrayElemType(valN, content, out, factories); ourReceivers[t] {
+						// const as = [new A() / a / makeA()] — array local of element type A.
+						arrayLocals[ingest.NodeText(nameN, content)] = t
+					} else if t := jsIteratorSourceYieldType(valN, content, generators, genLocals, arrayLocals, out, factories); ourReceivers[t] {
+						// const ga = genA() / const ia = [new A()].values() /
+						// const ia = [new A()][Symbol.iterator]() — iterator of A.
 						genLocals[ingest.NodeText(nameN, content)] = t
-					} else if t := jsGeneratorNextResultType(valN, content, generators, genLocals); ourReceivers[t] {
-						// const ra = genA().next() / await agenA().next() / ga.next()
-						// ra is IteratorResult; ra.value peels via settledOf.
+					} else if t := jsGeneratorNextResultType(valN, content, generators, genLocals, arrayLocals, out, factories); ourReceivers[t] {
+						// const ra = genA().next() / [new A()].values().next() /
+						// ia.next() — IteratorResult; ra.value peels via settledOf.
 						settledOf[ingest.NodeText(nameN, content)] = t
-					} else if t := jsGeneratorNextValueType(valN, content, generators, genLocals); ourReceivers[t] {
-						// const a = genA().next().value / (await agenA().next()).value
+					} else if t := jsGeneratorNextValueType(valN, content, generators, genLocals, arrayLocals, out, factories); ourReceivers[t] {
+						// const a = genA().next().value / [new A()].values().next().value
 						out[ingest.NodeText(nameN, content)] = t
 					}
 				} else if nameN.Type() == "array_pattern" {
@@ -1638,8 +1655,10 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 				}
 			}
 		case "for_in_statement":
-			// for (const a of genA()) / for await (const a of agenA()) —
-			// bind left when right peels to a same-file generator yield type.
+			// for (const a of genA()) / for await (const a of agenA()) /
+			// for (const a of [new A()]) / for (const a of as) /
+			// for (const a of as.values()) —
+			// bind left when right peels to a concrete element/yield type.
 			// Only `of` (not `in`); left must be a bare identifier.
 			if op := ingest.ChildByField(n, "operator"); op == nil || ingest.NodeText(op, content) != "of" {
 				break
@@ -1649,7 +1668,7 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 			if left == nil || left.Type() != "identifier" || right == nil {
 				break
 			}
-			if t := jsGeneratorCallYieldType(right, content, generators, genLocals); ourReceivers[t] {
+			if t := jsForOfElemType(right, content, generators, genLocals, arrayLocals, out, factories); ourReceivers[t] {
 				out[ingest.NodeText(left, content)] = t
 			}
 		case "required_parameter", "optional_parameter", "assignment_pattern":
@@ -1679,7 +1698,7 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 		}
 	}
 	walk(root)
-	return out, settledOf, genLocals
+	return out, settledOf, genLocals, arrayLocals
 }
 
 // jsNewExpressionType returns the constructor identifier for `new Box(...)`.
@@ -2583,10 +2602,180 @@ func jsGeneratorCallYieldType(n *grammar.Node, content []byte, generators, genLo
 	return generators[ingest.NodeText(fn, content)]
 }
 
+// jsUniformArrayElemType recovers T from [new T() / a / makeT(), …] when every
+// element peels to the same concrete type T. Empty / mixed arrays fail closed.
+func jsUniformArrayElemType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "array" {
+		return ""
+	}
+	found := ""
+	saw := false
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		el := n.Child(i)
+		if el == nil || el.Type() == "[" || el.Type() == "]" || el.Type() == "," {
+			continue
+		}
+		t := jsExprConcreteType(el, content, typedLocals, factories)
+		if t == "" {
+			return ""
+		}
+		if !saw {
+			found = t
+			saw = true
+		} else if found != t {
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return found
+}
+
+// jsArraySourceElemType recovers T from an array literal or array local whose
+// elements uniformly peel to T.
+func jsArraySourceElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil {
+		return ""
+	}
+	if t := jsUniformArrayElemType(n, content, typedLocals, factories); t != "" {
+		return t
+	}
+	if n.Type() == "identifier" && arrayLocals != nil {
+		return arrayLocals[ingest.NodeText(n, content)]
+	}
+	return ""
+}
+
+// jsIsSymbolIteratorIndex reports whether n is Symbol.iterator (member form).
+func jsIsSymbolIteratorIndex(n *grammar.Node, content []byte) bool {
+	if n == nil || (n.Type() != "member_expression" && n.Type() != "member_expression_optional" && n.Type() != "optional_chain") {
+		return false
+	}
+	obj := ingest.ChildByField(n, "object")
+	prop := ingest.ChildByField(n, "property")
+	if obj == nil || prop == nil {
+		return false
+	}
+	return obj.Type() == "identifier" && ingest.NodeText(obj, content) == "Symbol" &&
+		ingest.NodeText(prop, content) == "iterator"
+}
+
+// jsCallIsZeroArg reports whether a call_expression has no positional args.
+func jsCallIsZeroArg(n *grammar.Node) bool {
+	if n == nil || n.Type() != "call_expression" {
+		return false
+	}
+	args := ingest.ChildByField(n, "arguments")
+	if args == nil {
+		return true
+	}
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// jsArrayIteratorYieldType recovers T from arr.values() / arr[Symbol.iterator]()
+// when arr peels to a uniform array element type T. Zero-arg calls only.
+func jsArrayIteratorYieldType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "call_expression" || !jsCallIsZeroArg(n) {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil {
+		return ""
+	}
+	switch fn.Type() {
+	case "member_expression", "member_expression_optional", "optional_chain":
+		// arr.values()
+		prop := ingest.ChildByField(fn, "property")
+		if prop == nil || ingest.NodeText(prop, content) != "values" {
+			return ""
+		}
+		return jsArraySourceElemType(ingest.ChildByField(fn, "object"), content, arrayLocals, typedLocals, factories)
+	case "subscript_expression":
+		// arr[Symbol.iterator]()
+		if !jsIsSymbolIteratorIndex(ingest.ChildByField(fn, "index"), content) {
+			return ""
+		}
+		return jsArraySourceElemType(ingest.ChildByField(fn, "object"), content, arrayLocals, typedLocals, factories)
+	}
+	return ""
+}
+
+// jsIteratorSourceYieldType recovers T from a generator call/local or an array
+// iterator call (arr.values() / arr[Symbol.iterator]()) / array-iterator local.
+func jsIteratorSourceYieldType(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories map[string]string) string {
+	if t := jsGeneratorCallYieldType(n, content, generators, genLocals); t != "" {
+		return t
+	}
+	return jsArrayIteratorYieldType(n, content, arrayLocals, typedLocals, factories)
+}
+
+// jsForOfElemType recovers T from the right-hand side of for…of / for await…of:
+// generator call/local, array literal, array local, or array iterator call.
+func jsForOfElemType(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories map[string]string) string {
+	if t := jsArraySourceElemType(n, content, arrayLocals, typedLocals, factories); t != "" {
+		return t
+	}
+	return jsIteratorSourceYieldType(n, content, generators, genLocals, arrayLocals, typedLocals, factories)
+}
+
 // jsGeneratorNextResultType recovers T from genA().next() / ga.next() /
-// await agenA().next() when the receiver is a same-file generator (or gen local)
-// yielding T. Only zero-arg .next() peels (fail closed on arguments).
-func jsGeneratorNextResultType(n *grammar.Node, content []byte, generators, genLocals map[string]string) string {
+// await agenA().next() / [new A()].values().next() /
+// [new A()][Symbol.iterator]().next() / ia.next() when the receiver peels to an
+// iterator yielding T. Only zero-arg .next() peels (fail closed on arguments).
+func jsGeneratorNextResultType(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -2625,32 +2814,27 @@ func jsGeneratorNextResultType(n *grammar.Node, content []byte, generators, genL
 		return ""
 	}
 	fn := ingest.ChildByField(n, "function")
-	args := ingest.ChildByField(n, "arguments")
 	if fn == nil || (fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain") {
 		return ""
 	}
 	// Zero-arg next() only.
-	if args != nil {
-		for i := uint32(0); i < args.ChildCount(); i++ {
-			ch := args.Child(i)
-			if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
-				continue
-			}
-			return ""
-		}
+	if !jsCallIsZeroArg(n) {
+		return ""
 	}
 	prop := ingest.ChildByField(fn, "property")
 	if prop == nil || ingest.NodeText(prop, content) != "next" {
 		return ""
 	}
 	obj := ingest.ChildByField(fn, "object")
-	return jsGeneratorCallYieldType(obj, content, generators, genLocals)
+	return jsIteratorSourceYieldType(obj, content, generators, genLocals, arrayLocals, typedLocals, factories)
 }
 
 // jsGeneratorNextValueType recovers T from genA().next().value /
-// ga.next().value / (await agenA().next()).value / ra.value is handled via
-// settledOf in jsPromiseAllSettledValueType. Property must be bare "value".
-func jsGeneratorNextValueType(n *grammar.Node, content []byte, generators, genLocals map[string]string) string {
+// ga.next().value / (await agenA().next()).value /
+// [new A()].values().next().value / [new A()][Symbol.iterator]().next().value.
+// ra.value is handled via settledOf in jsPromiseAllSettledValueType.
+// Property must be bare "value".
+func jsGeneratorNextValueType(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -2665,7 +2849,7 @@ func jsGeneratorNextValueType(n *grammar.Node, content []byte, generators, genLo
 		return ""
 	}
 	obj := ingest.ChildByField(n, "object")
-	return jsGeneratorNextResultType(obj, content, generators, genLocals)
+	return jsGeneratorNextResultType(obj, content, generators, genLocals, arrayLocals, typedLocals, factories)
 }
 
 // jsIdentityCloneType recovers T from structuredClone(x) / Object.assign(x[, …])
