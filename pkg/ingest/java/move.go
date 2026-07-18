@@ -2084,7 +2084,12 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 		// var ar = new AtomicReference<>(new A()); ar.get().m() under foreign
 		// same-leaf methods). Other constructions fail closed here so
 		// new A().m() stays on the direct object_creation rename path.
-		return javaReferenceHolderCreationElemType(obj, content)
+		if et := javaReferenceHolderCreationElemType(obj, content); et != "" {
+			return et
+		}
+		// new FutureTask<>(() -> new A()) / FutureTask<>(runnable, new A()) → A
+		// (Future/Callable holder; enables .get().m() and var ft = new FutureTask<>(…)).
+		return javaFutureTaskCreationElemType(obj, content)
 	case "cast_expression":
 		// (ArrayList<A>) as.clone() / (List<A>) x / (A[]) arr.clone() —
 		// recover E from a single type-arg generic cast or array cast type.
@@ -4322,6 +4327,84 @@ func javaMapEntryCreationValueType(call *grammar.Node, content []byte) string {
 		return ""
 	}
 	return javaTypeName(typeN, content)
+}
+
+// javaFutureTaskCreationElemType recovers V from
+// new FutureTask<>(() -> new T(...)) / new FutureTask<T>(…) /
+// new FutureTask<>(runnable, new T(...)).
+// Prefers declared single type arg when present; diamond recovers V from:
+//   - Callable ctor: expression-bodied zero-arg lambda whose body is new T(...)
+//   - Runnable+result ctor: second arg new T(...) (first is Runnable)
+// Other types / arities / bodies fail closed.
+// Enables new FutureTask<>(() -> new A()).get().m() and
+// var ft = new FutureTask<>(() -> new A()); ft.get().m() under foreign
+// same-leaf methods (pipeline peel + elemOf bind).
+func javaFutureTaskCreationElemType(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "object_creation_expression" {
+		return ""
+	}
+	typeN := ingest.ChildByField(call, "type")
+	if typeN == nil {
+		return ""
+	}
+	if args := javaTypeArgNames(typeN, content); len(args) == 1 && args[0] != "" {
+		if javaTypeName(typeN, content) == "FutureTask" {
+			return args[0]
+		}
+	}
+	if javaTypeName(typeN, content) != "FutureTask" {
+		return ""
+	}
+	ctorArgs := javaCallArgs(call)
+	switch len(ctorArgs) {
+	case 1:
+		// FutureTask(Callable<V>): () -> new T(...)
+		if ctorArgs[0].Type() != "lambda_expression" {
+			return ""
+		}
+		// Zero-arg lambda only (Callable.call has no params).
+		if len(javaInferredLambdaParamNames(ctorArgs[0], content)) != 0 {
+			// Typed/empty formal params: still accept zero-param forms via child scan.
+			// Inferred non-empty fails closed (not a Callable shape).
+			return ""
+		}
+		body := ingest.ChildByField(ctorArgs[0], "body")
+		for body != nil && !body.IsNull() && body.Type() == "parenthesized_expression" {
+			inner := ingest.ChildByField(body, "expression")
+			if inner == nil {
+				for i := uint32(0); i < body.ChildCount(); i++ {
+					ch := body.Child(i)
+					if ch.Type() == "(" || ch.Type() == ")" {
+						continue
+					}
+					inner = ch
+					break
+				}
+			}
+			body = inner
+		}
+		if body == nil || body.Type() != "object_creation_expression" {
+			return ""
+		}
+		argType := ingest.ChildByField(body, "type")
+		if argType == nil {
+			return ""
+		}
+		return javaTypeName(argType, content)
+	case 2:
+		// FutureTask(Runnable, V): second arg new T(...)
+		arg := ctorArgs[1]
+		if arg.Type() != "object_creation_expression" {
+			return ""
+		}
+		argType := ingest.ChildByField(arg, "type")
+		if argType == nil {
+			return ""
+		}
+		return javaTypeName(argType, content)
+	default:
+		return ""
+	}
 }
 
 // javaReferenceHolderCreationElemType recovers V from
