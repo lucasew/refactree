@@ -1906,6 +1906,7 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `for i, a in enumerate(items)` / `for a, b in zip(xs, ys)`,
 // `for a, b in zip(*[xs, ys])` / `for a, b in zip(*(xs, ys))`,
 // `for a, b in zip_longest(xs, ys)` / `for a, b in itertools.zip_longest(xs, ys)`,
+// `for a, b in pairwise(xs)` / `for a, b in itertools.pairwise(xs)`,
 // `for a in reversed/sorted/list/iter(items)`,
 // `for a in set(items)` / `for a in frozenset(items)`,
 // `for a in filter(pred, items)` / `for a in map(A, names)`,
@@ -2272,6 +2273,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// for i, a in enumerate(items) / for a, b in zip(xs, ys) /
 			// for a, b in zip(*[xs, ys]) / zip(*(xs, ys)) /
 			// for a, b in zip_longest / itertools.zip_longest /
+			// for a, b in pairwise / itertools.pairwise /
 			// for a in reversed/sorted/list/iter(items) /
 			// for a in filter(pred, items) / for a in map(A, names) /
 			// for a in chain/islice/accumulate/cycle / itertools.chain/islice/accumulate/cycle /
@@ -2305,7 +2307,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				}
 				// for i, a in enumerate(xs) / for a, b in zip(xs, ys) /
 				// for a, b in zip(*[xs, ys]) / zip(*(xs, ys)) /
-				// for a, b in zip_longest(xs, ys) / itertools.zip_longest(...)
+				// for a, b in zip_longest(xs, ys) / itertools.zip_longest(...) /
+				// for a, b in pairwise(xs) / itertools.pairwise(xs)
 				if types := pythonEnumerateZipTargetTypes(right, content, elemOf, egElems); len(types) > 0 {
 					for i, name := range targets {
 						if i < len(types) && ourReceivers[types[i]] {
@@ -3239,8 +3242,10 @@ func pythonDictItemsValueType(right *grammar.Node, content []byte, elemOf map[st
 // to the same per-slot typing (kwargs like strict= still ignored).
 // zip_longest is accepted bare (from itertools import zip_longest) or as
 // itertools.zip_longest; fillvalue kwargs are ignored (same as zip strict=).
+// pairwise(xs) / itertools.pairwise(xs) → [elem(xs), elem(xs)] (successive
+// overlapping pairs; both slots share the iterable's element type).
 // Unknown args yield "" slots; fails closed when the call is not a resolvable
-// enumerate/zip/zip_longest form.
+// enumerate/zip/zip_longest/pairwise form.
 func pythonEnumerateZipTargetTypes(right *grammar.Node, content []byte, elemOf, egElems map[string]string) []string {
 	if right == nil || right.Type() != "call" {
 		return nil
@@ -3254,7 +3259,8 @@ func pythonEnumerateZipTargetTypes(right *grammar.Node, content []byte, elemOf, 
 	case "identifier":
 		fname = ingest.NodeText(fn, content)
 	case "attribute":
-		// itertools.zip_longest(...) only — other module attrs fail closed.
+		// itertools.zip_longest(...) / itertools.pairwise(...) only —
+		// other module attrs fail closed.
 		objN := ingest.ChildByField(fn, "object")
 		attrN := ingest.ChildByField(fn, "attribute")
 		if objN == nil || attrN == nil || objN.Type() != "identifier" {
@@ -3263,10 +3269,12 @@ func pythonEnumerateZipTargetTypes(right *grammar.Node, content []byte, elemOf, 
 		if ingest.NodeText(objN, content) != "itertools" {
 			return nil
 		}
-		if ingest.NodeText(attrN, content) != "zip_longest" {
+		switch ingest.NodeText(attrN, content) {
+		case "zip_longest", "pairwise":
+			fname = ingest.NodeText(attrN, content)
+		default:
 			return nil
 		}
-		fname = "zip_longest"
 	default:
 		return nil
 	}
@@ -3309,6 +3317,17 @@ func pythonEnumerateZipTargetTypes(right *grammar.Node, content []byte, elemOf, 
 			return nil
 		}
 		return out
+	case "pairwise":
+		// pairwise(iterable) — successive overlapping pairs; both unpack
+		// slots are elements of the iterable (1st positional arg).
+		if len(args) == 0 {
+			return nil
+		}
+		et := pythonIterableElemType(args[0], content, elemOf, egElems)
+		if et == "" {
+			return nil
+		}
+		return []string{et, et}
 	default:
 		return nil
 	}
