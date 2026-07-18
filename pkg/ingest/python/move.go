@@ -1643,7 +1643,9 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 	// (box.a.run() / xa = box.a under foreign same-leaf methods).
 	// elemOf maps collection locals → element type leaf for direct access chains
 	// (items.popleft().run() / d.get(k).run() under foreign same-leaf methods).
-	typedLocals, fieldOf, elemOf := pythonTypedLocals(pf.Root, content, ourReceivers)
+	// typeOf maps object locals → type leaf (item: A → "A"; foreign too for shadowing)
+	// so direct copy.copy(item).run() can resolve without assignment form.
+	typedLocals, fieldOf, elemOf, typeOf := pythonTypedLocals(pf.Root, content, ourReceivers)
 
 	var edits []ingest.Edit
 	var walk func(n *grammar.Node, enclosingClass string)
@@ -1662,7 +1664,7 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			obj := ingest.ChildByField(n, "object")
 			attr := ingest.ChildByField(n, "attribute")
 			if obj != nil && attr != nil && ingest.NodeText(attr, content) == oldLeaf {
-				if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf) {
+				if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf) {
 					edits = append(edits, ingest.Edit{
 						File:      fileRel,
 						StartByte: attr.StartByte(),
@@ -1680,7 +1682,7 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			sub := ingest.ChildByField(n, "subscript")
 			if obj != nil && sub != nil && sub.Type() == "string" {
 				if contentN, text := pythonStringContent(sub, content); contentN != nil && text == oldLeaf {
-					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf) {
+					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf) {
 						edits = append(edits, ingest.Edit{
 							File:      fileRel,
 							StartByte: contentN.StartByte(),
@@ -1698,7 +1700,7 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 				obj := ingest.ChildByField(fn, "object")
 				attr := ingest.ChildByField(fn, "attribute")
 				if obj != nil && attr != nil && ingest.NodeText(attr, content) == "get" {
-					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf) {
+					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf) {
 						if key := pythonFirstStringArg(args); key != nil {
 							if contentN, text := pythonStringContent(key, content); contentN != nil && text == oldLeaf {
 								edits = append(edits, ingest.Edit{
@@ -1822,7 +1824,9 @@ func pythonRenameByTypeMaps(name string, ourReceivers, foreignReceivers, typedLo
 // (box.a.run() under foreign same-leaf methods).
 // elemOf maps collection locals → element type leaf for direct access chains
 // (items.popleft().run() / d.get(k).run() / items[0].run() under foreign same-leaf methods).
-func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, fieldOf, elemOf map[string]string) bool {
+// typeOf maps object locals → type leaf (item: A → "A") for direct copy.copy(item).run()
+// and similar identity wrappers that need the arg's class leaf under foreign same-leaf.
+func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, fieldOf, elemOf, typeOf map[string]string) bool {
 	if obj == nil {
 		return false
 	}
@@ -1860,6 +1864,8 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	// string-key getter (same leaf as box["a"] / asdict(box)["a"]).
 	// copy.copy(asdict(box)["a"]).run() / copy.deepcopy(vars(box)["a"]).run() —
 	// object copy of a dict-view field key (same leaf as asdict(box)["a"].run()).
+	// copy.copy(box.a).run() / copy.copy(item).run() — field / typed-local arg
+	// (same leaf as box.a.run() / a = copy.copy(item); a.run()).
 	// items.popleft().run() / d.get(k).run() / q.get().run() / items.pop().run() /
 	// list(items).pop().run() — collection/queue element accessors (same leaf as
 	// a = items.popleft(); a.run()). Unknown call receivers: unique-leaf only.
@@ -1869,11 +1875,10 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 			if ft := pythonGetattrFieldType(obj, content, fieldOf); ft != "" {
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 			}
-			// copy.copy(asdict(box)["a"]).run() / copy.deepcopy(vars(box)["a"]).run() —
-			// preserve field type of dict-view key arg (same leaf as
-			// xa = copy.copy(asdict(box)["a"]); xa.run()). typeOf not threaded here;
-			// bare typed-local args (copy.copy(item)) still use assignment form.
-			if ft := pythonCopyCallObjectType(obj, content, nil, fieldOf); ft != "" {
+			// copy.copy(item).run() / copy.copy(box.a).run() /
+			// copy.copy(asdict(box)["a"]).run() / copy.deepcopy(...) — preserve
+			// object type of the single arg (typed local / field / dict-view key).
+			if ft := pythonCopyCallObjectType(obj, content, typeOf, fieldOf); ft != "" {
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 			}
 			if fn.Type() == "identifier" {
@@ -2130,7 +2135,9 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // fieldOf maps "local.field" → field type leaf for class field access.
 // elemOf maps collection locals → element type leaf (list[A] / deque[A] /
 // dict value / Queue[A] → "A") for direct access chains under foreign same-leaf.
-func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string, map[string]string) {
+// typeOf maps object locals → type leaf (item: A / x = A() → "A"; foreign too)
+// for direct identity wrappers under foreign same-leaf (copy.copy(item).run()).
+func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string, map[string]string, map[string]string) {
 	out := map[string]bool{}
 	// Collection locals → element type leaf (list[A] / [A()] / dict value → "A").
 	elemOf := map[string]string{}
@@ -2149,7 +2156,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 	// Class field access: "box.a" → "A" when box is typed as a class with field a: A.
 	fieldOf := map[string]string{}
 	if root == nil || len(ourReceivers) == 0 {
-		return out, fieldOf, elemOf
+		return out, fieldOf, elemOf, typeOf
 	}
 	fieldIndex := pythonClassFieldIndex(root, content)
 	// Declaration order for positional match class patterns (case Box(xa, xb)).
@@ -2306,7 +2313,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						}
 						// a = copy(item) / deepcopy(item) — from copy import copy, deepcopy;
 						// preserve object type of the single arg (same as copy.copy(item)).
-						// a = copy(asdict(box)["a"]) — dict-view field key (fieldOf).
+						// a = copy(box.a) / copy(asdict(box)["a"]) — field / dict-view key (fieldOf).
 						// Collection form xs = copy(items) is handled via elemOf below.
 						if fname == "copy" || fname == "deepcopy" {
 							if tn := pythonCopyCallObjectType(right, content, typeOf, fieldOf); tn != "" {
@@ -2372,6 +2379,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							case "copy", "deepcopy":
 								// a = copy.copy(item) / copy.deepcopy(item) — preserve object
 								// type of the single arg (typed local / Class()).
+								// a = copy.copy(box.a) / copy.copy(replace(box).a) — field leaf.
 								// a = copy.copy(asdict(box)["a"]) — dict-view field key (fieldOf).
 								// Collection form xs = copy.copy(items) is handled via elemOf below.
 								if tn := pythonCopyCallObjectType(right, content, typeOf, fieldOf); tn != "" {
@@ -3137,7 +3145,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 		}
 	}
 	walk(root)
-	return out, fieldOf, elemOf
+	return out, fieldOf, elemOf, typeOf
 }
 
 // pythonClassFieldIndex maps class type name → field name → field type leaf
@@ -3774,7 +3782,8 @@ func pythonOperatorGetterObjectLocal(n *grammar.Node, content []byte, name strin
 
 // pythonCopyCallObjectType recovers T from copy.copy(x) / copy.deepcopy(x) /
 // bare copy(x) / deepcopy(x) (from copy import copy, deepcopy) when x is a typed
-// object local or Class() ctor (typeOf / ctor name), or a dict-view field key
+// object local or Class() ctor (typeOf / ctor name), a field access box.a /
+// replace(box).a (fieldOf; same leaf as box.a), or a dict-view field key
 // access asdict(box)["a"] / vars(box)["a"] / box.__dict__["a"] / .get("a")
 // (fieldOf; same leaf as xa = asdict(box)["a"]). Collection copies use
 // pythonIterableElemType instead. Wrong arity / other modules fail closed.
@@ -3816,6 +3825,14 @@ func pythonCopyCallObjectType(call *grammar.Node, content []byte, typeOf map[str
 	}
 	if tn := pythonObjectExprType(args[0], content, typeOf); tn != "" {
 		return tn
+	}
+	// copy.copy(box.a) / copy.copy(replace(box).a) — field type of the arg
+	// (same leaf as box.a.run() / xa = box.a; xa.run()).
+	if ft := pythonFieldAccessType(args[0], content, fieldOf); ft != "" {
+		return ft
+	}
+	if ft := pythonReplaceFieldAccessType(args[0], content, fieldOf); ft != "" {
+		return ft
 	}
 	// copy.copy(asdict(box)["a"]) / copy.copy(asdict(box).get("a")) /
 	// copy.copy(vars(box)["a"]) / copy.copy(box.__dict__["a"]) — field type of
