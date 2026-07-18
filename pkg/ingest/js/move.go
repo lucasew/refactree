@@ -1835,6 +1835,9 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 			if left.Type() == "identifier" {
 				if t := jsForOfElemType(right, content, generators, genLocals, arrayLocals, out, factories, mapLocals, entryArrayLocals); ourReceivers[t] {
 					out[ingest.NodeText(left, content)] = t
+				} else if t := jsSetSourceValueType(right, content, arrayLocals, out, factories, setLocals); ourReceivers[t] {
+					// for (const a of new Set([new A()])) / for (const a of sa)
+					out[ingest.NodeText(left, content)] = t
 				} else if t := jsEntriesIterableValueType(right, content, out, factories, arrayLocals, entryArrayLocals, mapLocals); t != "" {
 					// for (const e of Object.entries({k: new A()})) /
 					// for (const e of es) / for (const e of [new A()].entries()) /
@@ -3047,14 +3050,15 @@ func jsArraySpreadElemType(n *grammar.Node, content []byte, arrayLocals, typedLo
 }
 
 // jsArrayIdentityElemType recovers T from arr.slice(…) / arr.concat(…) /
-// arr.toSpliced(…) / arr.toReversed() / arr.toSorted(…) / arr.with(i, val)
-// when the receiver peels to uniform element type T and any
-// inserted/concatenated/replaced values also peel to T. Enables
-// [new A()].slice()[0].run() / as.concat([new A()])[0].run() /
+// arr.toSpliced(…) / arr.toReversed() / arr.toSorted(…) / arr.copyWithin(…) /
+// arr.fill(val) / arr.with(i, val) when the receiver peels to uniform element
+// type T and any inserted/concatenated/replaced/filled values also peel to T.
+// Enables [new A()].slice()[0].run() / as.concat([new A()])[0].run() /
 // [new A()].toSpliced(0, 0)[0].run() / [new A()].toReversed()[0].run() /
-// [new A()].toSorted()[0].run() / [new A()].with(0, new A())[0].run()
+// [new A()].toSorted()[0].run() / [new A()].copyWithin(0)[0].run() /
+// [new A()].fill(new A())[0].run() / [new A()].with(0, new A())[0].run()
 // under foreign same-leaf methods.
-// Mixed concat/toSpliced/with inserts fail closed.
+// Mixed concat/toSpliced/with/fill inserts fail closed.
 func jsArrayIdentityElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string) string {
 	if n == nil || n.Type() != "call_expression" {
 		return ""
@@ -3074,10 +3078,35 @@ func jsArrayIdentityElemType(n *grammar.Node, content []byte, arrayLocals, typed
 	name := ingest.NodeText(prop, content)
 	obj := ingest.ChildByField(fn, "object")
 	switch name {
-	case "slice", "toReversed", "toSorted":
-		// slice / toReversed / toSorted yield elements of the same type as the
-		// receiver (comparator on toSorted is ignored; not type-changing).
+	case "slice", "toReversed", "toSorted", "copyWithin":
+		// slice / toReversed / toSorted / copyWithin yield elements of the same
+		// type as the receiver (comparator on toSorted / copyWithin indices
+		// ignored; not type-changing).
 		return jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories)
+	case "fill":
+		// arr.fill(val[, start[, end]]) — receiver elems T and val peels to T.
+		t := jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories)
+		if t == "" {
+			return ""
+		}
+		var val *grammar.Node
+		pos := 0
+		if args != nil {
+			for i := uint32(0); i < args.ChildCount(); i++ {
+				ch := args.Child(i)
+				if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+					continue
+				}
+				pos++
+				if pos == 1 {
+					val = ch
+				}
+			}
+		}
+		if pos < 1 || val == nil || jsExprConcreteType(val, content, typedLocals, factories) != t {
+			return ""
+		}
+		return t
 	case "concat":
 		t := jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories)
 		if t == "" {
