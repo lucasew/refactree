@@ -2153,6 +2153,8 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `for x in asdict(box).values()` / `for x in d.values()` after d = asdict(box) /
 // vars / `__dict__` / list(...values()) — only when all declaration-order field
 // types agree (homogeneous values; mixed fields fail closed — not a shared elemOf),
+// `for k, x in asdict(box).items()` / `for k, x in d.items()` after d = asdict(box) /
+// vars / `__dict__` — same homogeneous-values gate (value slot only; key untyped),
 // `xa = astuple(box)[0]` (synthetic `@astuple.box.#i` slots — not `box.#i`, so
 // bare `box[0]` stays unbound for non-indexable dataclasses),
 // plus assignment `xs = list(astuple(box)); xs[0]` (index slots on xs),
@@ -3067,6 +3069,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				}
 				// for k, v in d.items() — value type is elemOf[d] (dict value leaf).
 				if vt := pythonDictItemsValueType(right, content, elemOf); vt != "" {
+					if len(targets) >= 2 && ourReceivers[vt] {
+						out[targets[1]] = true
+					}
+					break
+				}
+				// for k, x in asdict(box).items() / vars / __dict__ / d.items() after
+				// d = asdict(box) — only when all field types agree (homogeneous values).
+				if vt := pythonDictViewItemsHomogeneousValueType(right, content, fieldOf); vt != "" {
 					if len(targets) >= 2 && ourReceivers[vt] {
 						out[targets[1]] = true
 					}
@@ -4093,6 +4103,47 @@ func pythonHomogeneousAstupleFieldType(local string, fieldOf map[string]string) 
 		return ""
 	}
 	return shared
+}
+
+// pythonDictViewItemsHomogeneousValueType recovers the shared value type of
+// asdict(box).items() / vars(box).items() / box.__dict__.items() /
+// d.items() after d = asdict(box) / vars / __dict__ when all declaration-order
+// field types agree (fieldOf @astuple.*.#i). Mixed field types and non-dict-view
+// forms fail closed (""). Same leaf as for k, x in d.items() with d: dict[K, A]
+// when values are uniform (key slot stays untyped).
+func pythonDictViewItemsHomogeneousValueType(n *grammar.Node, content []byte, fieldOf map[string]string) string {
+	if n == nil || fieldOf == nil {
+		return ""
+	}
+	if n.Type() == "parenthesized_expression" {
+		return pythonDictViewItemsHomogeneousValueType(pythonParenInner(n), content, fieldOf)
+	}
+	if n.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil || fn.Type() != "attribute" {
+		return ""
+	}
+	if pythonSimpleCalleeName(fn, content) != "items" {
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(n)
+	if !ok || len(args) != 0 {
+		return ""
+	}
+	obj := ingest.ChildByField(fn, "object")
+	if obj == nil {
+		return ""
+	}
+	var local string
+	if obj.Type() == "identifier" {
+		// Assigned dict-view local: bindFields recorded @astuple.d.#i.
+		local = ingest.NodeText(obj, content)
+	} else {
+		local = pythonDictViewObjectLocal(obj, content)
+	}
+	return pythonHomogeneousAstupleFieldType(local, fieldOf)
 }
 
 // pythonDictViewValuesHomogeneousType recovers the shared element type of
