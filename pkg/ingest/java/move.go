@@ -1037,6 +1037,7 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 	//   sa.get().m() — Supplier element (generic type arg)
 	//   ca.call().m() — Callable element (generic type arg)
 	//   fa.join().m() / fa.getNow(d).m() / fa.resultNow().m() — CompletableFuture
+	//   fn.apply(x).m() — Function/UnaryOperator/BiFunction result (R / T)
 	//   qa.poll().m() / as.getFirst().m() / … — other collection accessors
 	//   ba.a().m() — record component accessor (compOf from record header)
 	if obj.Type() == "method_invocation" {
@@ -1497,8 +1498,14 @@ func javaRecordCollectionElem(typeN *grammar.Node, name string, content []byte, 
 			elemOf[name] = args[0]
 		}
 		// Map<K,V> / HashMap<K,V> — second type arg is the value type.
+		// Function<T,R> — second type arg is the apply result R.
 		if valOf != nil && len(args) >= 2 {
 			valOf[name] = args[1]
+		}
+		// BiFunction<T,U,R>.apply returns R (third type arg). Prefer R over U so
+		// apply recovers the result leaf like Function's second arg (valOf).
+		if valOf != nil && len(args) >= 3 && javaTypeName(typeN, content) == "BiFunction" {
+			valOf[name] = args[2]
 		}
 	}
 }
@@ -3670,6 +3677,8 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	ca.call() → elemOf[ca] (Callable<A>; zero-arg call returns V)
 //	fa.join() / fa.resultNow() → elemOf[fa] (CompletableFuture<A>; zero-arg)
 //	fa.getNow(d) → elemOf[fa] (CompletableFuture<A>; default does not change T)
+//	fn.apply(x) → valOf[fn] / elemOf[fn] (Function<T,R> R / UnaryOperator<T> T /
+//	  BiFunction<T,U,R> R; apply args do not change the result type leaf)
 //	Map.of(k, new A()).get(k) / Map.ofEntries(...).get(k) /
 //	  Collections.singletonMap(k, new A()).get(k) / Map.copyOf(m).get(k) → A
 //	  (map factory/pipeline value type; getOrDefault/remove/put/compute same V)
@@ -3685,6 +3694,8 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 // pipelines (findFirst/findAny/min/max/Optional.of) via zero-arg get + pipeline.
 // Callable.call / CompletableFuture.join|getNow|resultNow use the same elemOf path
 // as Supplier.get / Future.get (generic type arg → T).
+// Function.apply prefers valOf (R) then elemOf (UnaryOperator/BinaryOperator T);
+// BiFunction stores R in valOf at bind time (see javaRecordCollectionElem).
 // Fail closed on other methods / unknown receivers.
 // One-arg stream.reduce(BinaryOperator) returns Optional — use orElse/ifPresent
 // (pipeline typing), not bare var of the element type.
@@ -3768,10 +3779,16 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// CompletableFuture.join / resultNow return T (zero-arg).
 		// getNow(defaultValue) returns T (default does not change the type leaf).
 		// Future.get / CF.get already covered by "get" above.
-		"join", "getNow", "resultNow":
+		"join", "getNow", "resultNow",
+		// Function.apply / UnaryOperator.apply / BiFunction.apply return R (or T when
+		// UnaryOperator/BinaryOperator). Function<T,R> stores R in valOf; UnaryOperator
+		// stores T in elemOf; BiFunction stores R in valOf (third type arg at bind).
+		// Apply arguments do not change the result type leaf.
+		"apply":
 		// Map-like (2 type args recorded in valOf) → value type; else element type.
 		// Identifier receiver: List.get / Map.get / Optional local get /
-		// Callable.call / CompletableFuture.join|getNow|resultNow / …
+		// Callable.call / CompletableFuture.join|getNow|resultNow /
+		// Function/UnaryOperator/BiFunction.apply / …
 		if obj != nil && obj.Type() == "identifier" {
 			id := ingest.NodeText(obj, content)
 			if valOf != nil {
