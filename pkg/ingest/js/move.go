@@ -1245,7 +1245,7 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 
 	factories := jsSameFileFactoryReturns(pf.Root, content)
 	generators := jsSameFileGeneratorYields(pf.Root, content)
-	typedLocals, settledOf, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals := jsTypedLocals(pf.Root, content, ourReceivers, factories, generators)
+	typedLocals, settledOf, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals := jsTypedLocals(pf.Root, content, ourReceivers, factories, generators)
 	// Unique method leaf: ExtraRename already rewrites every simple obj.oldLeaf.
 	// Apply the same aggressiveness to object-pattern property keys.
 	uniqueLeaf := len(foreignReceivers) == 0
@@ -1287,7 +1287,7 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 			obj := ingest.ChildByField(n, "object")
 			prop := ingest.ChildByField(n, "property")
 			if obj != nil && prop != nil && ingest.NodeText(prop, content) == oldLeaf {
-				if jsShouldRenameMember(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, settledOf, factories, generators, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals) {
+				if jsShouldRenameMember(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, settledOf, factories, generators, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals) {
 					addEdit(prop.StartByte(), prop.EndByte(), newLeaf)
 				}
 			}
@@ -1304,7 +1304,7 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 			nameN := ingest.ChildByField(n, "name")
 			valN := ingest.ChildByField(n, "value")
 			if nameN != nil && nameN.Type() == "object_pattern" && valN != nil {
-				if uniqueLeaf || jsShouldRenameMember(valN, content, classHere, ourReceivers, foreignReceivers, typedLocals, settledOf, factories, generators, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals) {
+				if uniqueLeaf || jsShouldRenameMember(valN, content, classHere, ourReceivers, foreignReceivers, typedLocals, settledOf, factories, generators, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals) {
 					jsCollectObjectPatternMethodEdits(nameN, content, oldLeaf, newLeaf, addEdit)
 					// Shorthand `{ helper }` also renames the local binding — rewrite
 					// bare oldLeaf identifiers later in the same statement_block.
@@ -1498,11 +1498,16 @@ func jsRenameByTypeMaps(name string, ourReceivers, foreignReceivers map[string]b
 // (const ga = Object.groupBy([new A()], …) → ga:"A") so ga[k][0].run() peels.
 // groupMapLocals maps Map.groupBy result locals → element T
 // (const ma = Map.groupBy([new A()], …) → ma:"A") so ma.get(k)[0].run() peels.
-func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers map[string]bool, typedLocals, settledOf, factories, generators, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals map[string]string) bool {
+// groupEntryLocals maps groupBy-entries pair locals → element T
+// (for (const e of Object.entries(ga)) → e:"A") so e[1][0].run() peels
+// (pair value is T[], not T — unlike scalar entryLocals).
+// groupEntryArrayLocals maps groupBy-entries array/iterator locals → element T
+// (const es = Object.entries(ga) → es:"A") so es[i][1][0].run() peels.
+func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers map[string]bool, typedLocals, settledOf, factories, generators, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals map[string]string) bool {
 	if obj == nil {
 		return false
 	}
-	extra := jsExtraLocals{objValue: objValueLocals, groupBy: groupByLocals, groupMap: groupMapLocals}
+	extra := jsExtraLocals{objValue: objValueLocals, groupBy: groupByLocals, groupMap: groupMapLocals, groupEntry: groupEntryLocals, groupEntryArray: groupEntryArrayLocals}
 	// Unwrap (new Box()) so parenthesized new expressions still match.
 	for obj != nil && obj.Type() == "parenthesized_expression" {
 		var inner *grammar.Node
@@ -1665,7 +1670,7 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 // (const ma = new Map([[k, new A()]]) → ma:"A") so ma.entries() / for-of peels.
 // objValueLocals maps plain-object locals → uniform property value type
 // (const o = Object.fromEntries([[k, new A()]]) → o:"A") so o.k.run() peels.
-func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool, factories, generators map[string]string) (map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string) {
+func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool, factories, generators map[string]string) (map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string) {
 	out := map[string]string{}
 	settledOf := map[string]string{}
 	genLocals := map[string]string{}
@@ -1681,9 +1686,13 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 	// groupByLocals / groupMapLocals: Object.groupBy / Map.groupBy result locals → element T.
 	groupByLocals := map[string]string{}
 	groupMapLocals := map[string]string{}
-	extra := jsExtraLocals{objValue: objValueLocals, groupBy: groupByLocals, groupMap: groupMapLocals}
+	// groupEntryLocals: [key, T[]] pair locals from groupBy entries → element T.
+	groupEntryLocals := map[string]string{}
+	// groupEntryArrayLocals: Object.entries(groupBy) / ma.entries() locals → element T.
+	groupEntryArrayLocals := map[string]string{}
+	extra := jsExtraLocals{objValue: objValueLocals, groupBy: groupByLocals, groupMap: groupMapLocals, groupEntry: groupEntryLocals, groupEntryArray: groupEntryArrayLocals}
 	if root == nil || len(ourReceivers) == 0 {
-		return out, settledOf, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals
+		return out, settledOf, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals
 	}
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
@@ -1808,11 +1817,36 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// ga[k][0].run() peels via groupByLocals.
 						// Bind foreign too so dual-class B rebinds fail closed.
 						groupByLocals[ingest.NodeText(nameN, content)] = t
+					} else if t := jsObjectFromEntriesGroupByElemType(valN, content, arrayLocals, out, factories, extra); t != "" {
+						// const oa = Object.fromEntries(Object.entries(ga)) /
+						// Object.fromEntries(Object.entries(Object.groupBy(...))) —
+						// reconstructs groupBy shape (property values T[]);
+						// oa[k][0].run() peels via groupByLocals.
+						// Bind foreign too so dual-class B rebinds fail closed.
+						groupByLocals[ingest.NodeText(nameN, content)] = t
 					} else if t := jsMapGroupByElemType(valN, content, arrayLocals, out, factories, extra); t != "" {
 						// const ma = Map.groupBy([new A()], fn) — Map of T[] groups;
 						// ma.get(k)[0].run() peels via groupMapLocals.
 						// Bind foreign too so dual-class B rebinds fail closed.
 						groupMapLocals[ingest.NodeText(nameN, content)] = t
+					} else if t := jsGroupByEntriesPairSubscriptElemType(valN, content, arrayLocals, out, factories, extra); t != "" {
+						// const e = Object.entries(ga)[0] / [...ma.entries()][0] —
+						// pair of group-array T[]; e[1][0] peels via groupEntryLocals.
+						// Bind foreign too so dual-class B rebinds fail closed.
+						groupEntryLocals[ingest.NodeText(nameN, content)] = t
+					} else if t := jsGroupByEntriesNextPairElemType(valN, content, arrayLocals, out, factories, extra); t != "" {
+						// const e = ma.entries().next().value /
+						// Map.groupBy(...).entries().next().value — pair of T[].
+						// Bind foreign too so dual-class B rebinds fail closed.
+						groupEntryLocals[ingest.NodeText(nameN, content)] = t
+					} else if t := jsGroupByEntriesSourceElemType(valN, content, arrayLocals, out, factories, extra); t != "" {
+						// const es = Object.entries(ga) / const ie = ma.entries() /
+						// const es = [...Object.entries(ga)] — array/iterator of
+						// [key, T[]] pairs; es[i][1][0] peels via groupEntryArrayLocals.
+						// Bind foreign too so dual-class B rebinds fail closed.
+						// Note: does not match bare Map.groupBy / ga (those are
+						// groupMap/groupBy locals, not entries sources).
+						groupEntryArrayLocals[ingest.NodeText(nameN, content)] = t
 					} else if t := jsObjectFromEntriesPropType(valN, content, out, factories, entryArrayLocals, objValueLocals); ourReceivers[t] {
 						// const a = Object.fromEntries([[k, new A()]]).k /
 						// const a = Object.fromEntries(...)["k"] / o.k after fromEntries local
@@ -1910,6 +1944,18 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 				} else if t := jsSetSourceValueType(right, content, arrayLocals, out, factories, setLocals); ourReceivers[t] {
 					// for (const a of new Set([new A()])) / for (const a of sa)
 					out[ingest.NodeText(left, content)] = t
+				} else if t := jsMapGroupByValuesElemType(right, content, arrayLocals, out, factories, extra); t != "" {
+					// for (const g of ma.values()) / Map.groupBy(...).values() —
+					// yields group arrays T[]; bind as array local of T.
+					// Bind foreign too so dual-class B rebinds fail closed.
+					arrayLocals[ingest.NodeText(left, content)] = t
+				} else if t := jsGroupByEntriesIterableElemType(right, content, arrayLocals, out, factories, extra); t != "" {
+					// for (const e of Object.entries(ga)) /
+					// for (const e of ma.entries()) / for (const e of ma) —
+					// pair of group-array T[]; e[1][0] peels via groupEntryLocals
+					// (not scalar entryLocals — pair value is T[], not T).
+					// Bind foreign too so dual-class B rebinds fail closed.
+					groupEntryLocals[ingest.NodeText(left, content)] = t
 				} else if t := jsEntriesIterableValueType(right, content, out, factories, arrayLocals, entryArrayLocals, mapLocals, setLocals, objValueLocals); t != "" {
 					// for (const e of Object.entries({k: new A()})) /
 					// for (const e of es) / for (const e of [new A()].entries()) /
@@ -1925,7 +1971,14 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 				// for (const [, a] of new Map([[k, new A()]]).entries()) /
 				// for (const [, a] of new Map([[k, new A()]])) —
 				// value slot only.
-				if t := jsEntriesIterableValueType(right, content, out, factories, arrayLocals, entryArrayLocals, mapLocals, setLocals, objValueLocals); ourReceivers[t] {
+				// GroupBy entries first: value slot is T[] (group array), not T.
+				if t := jsGroupByEntriesIterableElemType(right, content, arrayLocals, out, factories, extra); t != "" {
+					// for (const [, g] of Object.entries(ga)) /
+					// for (const [, g] of ma.entries()) / for (const [, g] of ma) —
+					// g is array of T; g[0].run() peels via arrayLocals.
+					// Bind foreign too so dual-class B rebinds fail closed.
+					jsBindEntriesArrayPattern(left, content, t, arrayLocals)
+				} else if t := jsEntriesIterableValueType(right, content, out, factories, arrayLocals, entryArrayLocals, mapLocals, setLocals, objValueLocals); ourReceivers[t] {
 					jsBindEntriesArrayPattern(left, content, t, out)
 				}
 			}
@@ -1959,7 +2012,7 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 		}
 	}
 	walk(root)
-	return out, settledOf, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals
+	return out, settledOf, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals
 }
 
 // jsNewExpressionType returns the constructor identifier for `new Box(...)`.
@@ -3031,9 +3084,11 @@ func jsUniformArrayElemType(n *grammar.Node, content []byte, typedLocals, factor
 // Nil maps fail closed. Used for Object.values(assignLocal), Object.groupBy locals,
 // and Map.groupBy peels under foreign same-leaf methods.
 type jsExtraLocals struct {
-	objValue map[string]string // Object.fromEntries / Object.assign → value T
-	groupBy  map[string]string // Object.groupBy result → element T
-	groupMap map[string]string // Map.groupBy result → element T
+	objValue         map[string]string // Object.fromEntries / Object.assign → value T
+	groupBy          map[string]string // Object.groupBy result → element T
+	groupMap         map[string]string // Map.groupBy result → element T
+	groupEntry       map[string]string // [key, T[]] pair local from groupBy entries → T
+	groupEntryArray  map[string]string // Object.entries(groupBy) / ma.entries() local → T
 }
 
 // jsArraySourceElemType recovers T from an array-like expression whose elements
@@ -3110,6 +3165,7 @@ func jsArraySourceElemType(n *grammar.Node, content []byte, arrayLocals, typedLo
 //
 //	Object.groupBy(arr, fn)[key] / Object.groupBy(arr, fn).key
 //	Object.values(Object.groupBy(arr, fn))[i]
+//	Object.fromEntries(Object.entries(groupBy))[key] / .key
 //
 // Key / index ignored (all groups are T[]). Callback ignored for typing.
 // Enables Object.groupBy([new A()], x => "k")["k"][0].run() and
@@ -3172,11 +3228,16 @@ func jsObjectGroupByGroupArrayType(n *grammar.Node, content []byte, arrayLocals,
 	if t := jsObjectGroupByElemType(obj, content, arrayLocals, typedLocals, factories, extra); t != "" {
 		return t
 	}
-	// ga[key] / ga.key after const ga = Object.groupBy(arr, fn)
+	// ga[key] / ga.key after const ga = Object.groupBy(arr, fn) /
+	// after const ga = Object.fromEntries(Object.entries(groupBy))
 	if obj.Type() == "identifier" && extra.groupBy != nil {
 		if t := extra.groupBy[ingest.NodeText(obj, content)]; t != "" {
 			return t
 		}
+	}
+	// Object.fromEntries(Object.entries(ga))[key] / .key
+	if t := jsObjectFromEntriesGroupByElemType(obj, content, arrayLocals, typedLocals, factories, extra); t != "" {
+		return t
 	}
 	// Object.values(Object.groupBy(arr, fn))[i]
 	return jsObjectValuesGroupByElemType(obj, content, arrayLocals, typedLocals, factories, extra)
@@ -3340,6 +3401,8 @@ func jsMapGroupByGroupArrayType(n *grammar.Node, content []byte, arrayLocals, ty
 //	Object.entries(ga)[i][1] after const ga = Object.groupBy(...)
 //	[...Map.groupBy(arr, fn).entries()][i][1]
 //	[...ma.entries()][i][1] after const ma = Map.groupBy(...)
+//	e[1] after for (const e of Object.entries(ga)) / ma.entries()
+//	Map.groupBy(...).entries().next().value[1] / ma.entries().next().value[1]
 //
 // Enables Object.entries(ga)[0][1][0].run() and [...ma.entries()][0][1][0].run()
 // under foreign same-leaf methods. Scalar Object.entries / Map.entries (value T)
@@ -3381,7 +3444,21 @@ func jsGroupByEntriesPairGroupArrayType(n *grammar.Node, content []byte, arrayLo
 		}
 		pair = inner
 	}
-	if pair == nil || pair.Type() != "subscript_expression" {
+	if pair == nil {
+		return ""
+	}
+	// e[1] after for (const e of Object.entries(ga)) / const e = ma.entries().next().value
+	if pair.Type() == "identifier" && extra.groupEntry != nil {
+		if t := extra.groupEntry[ingest.NodeText(pair, content)]; t != "" {
+			return t
+		}
+	}
+	// Map.groupBy(...).entries().next().value[1] / ma.entries().next().value[1]
+	if t := jsGroupByEntriesNextPairElemType(pair, content, arrayLocals, typedLocals, factories, extra); t != "" {
+		return t
+	}
+	// Object.entries(ga)[i][1] / [...ma.entries()][i][1]
+	if pair.Type() != "subscript_expression" {
 		return ""
 	}
 	pidx := ingest.ChildByField(pair, "index")
@@ -3393,8 +3470,8 @@ func jsGroupByEntriesPairGroupArrayType(n *grammar.Node, content []byte, arrayLo
 
 // jsGroupByEntriesSourceElemType recovers T from an expression that yields
 // [key, T[]] pairs over a groupBy result: Object.entries(groupBy),
-// Map.groupBy(...).entries() / ma.entries(), or a single-spread copy
-// [...Object.entries(groupBy)] / [...ma.entries()].
+// Map.groupBy(...).entries() / ma.entries(), a groupEntryArray local, or a
+// single-spread copy [...Object.entries(groupBy)] / [...ma.entries()].
 func jsGroupByEntriesSourceElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals) string {
 	if n == nil {
 		return ""
@@ -3413,6 +3490,12 @@ func jsGroupByEntriesSourceElemType(n *grammar.Node, content []byte, arrayLocals
 	}
 	if n == nil {
 		return ""
+	}
+	// const es = Object.entries(ga) / const ie = ma.entries()
+	if n.Type() == "identifier" && extra.groupEntryArray != nil {
+		if t := extra.groupEntryArray[ingest.NodeText(n, content)]; t != "" {
+			return t
+		}
 	}
 	// Object.entries(Object.groupBy(...)) / Object.entries(ga)
 	if first := jsObjectStaticCallSingleArg(n, content, "entries"); first != nil {
@@ -3491,6 +3574,195 @@ func jsGroupByEntriesSourceElemType(n *grammar.Node, content []byte, arrayLocals
 			return ""
 		}
 		return jsGroupByEntriesSourceElemType(spreadArg, content, arrayLocals, typedLocals, factories, extra)
+	}
+	return ""
+}
+
+// jsGroupByEntriesIterableElemType recovers T from an iterable of [key, T[]]
+// pairs over a groupBy result — used for for-of binding (pair local or
+// destructured group array). Covers Object.entries(groupBy), Map.groupBy
+// .entries() / ma.entries(), spread copies, and Map.groupBy / ma default
+// iterators (Map yields entries). Scalar entries sources fail closed.
+func jsGroupByEntriesIterableElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals) string {
+	if t := jsGroupByEntriesSourceElemType(n, content, arrayLocals, typedLocals, factories, extra); t != "" {
+		return t
+	}
+	// Map.groupBy(arr, fn) / ma after const ma = Map.groupBy(...) —
+	// default iterator yields [key, T[]] entries.
+	if t := jsMapGroupByElemType(n, content, arrayLocals, typedLocals, factories, extra); t != "" {
+		return t
+	}
+	if n != nil && n.Type() == "identifier" && extra.groupMap != nil {
+		if t := extra.groupMap[ingest.NodeText(n, content)]; t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
+// jsGroupByEntriesPairSubscriptElemType recovers T from a single entries-pair
+// subscript over a groupBy entries source: Object.entries(ga)[i] /
+// [...ma.entries()][i]. The expression is a [key, T[]] pair (not T) — use for
+// groupEntryLocals binding so e[1][0] peels.
+func jsGroupByEntriesPairSubscriptElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "subscript_expression" {
+		return ""
+	}
+	idx := ingest.ChildByField(n, "index")
+	if idx == nil || idx.Type() != "number" {
+		return ""
+	}
+	return jsGroupByEntriesSourceElemType(ingest.ChildByField(n, "object"), content, arrayLocals, typedLocals, factories, extra)
+}
+
+// jsGroupByEntriesNextPairElemType recovers T from a groupBy-entries iterator
+// next().value pair expression (pair value is T[], not T):
+//
+//	Map.groupBy(arr, fn).entries().next().value
+//	ma.entries().next().value after const ma = Map.groupBy(...)
+//
+// Enables …next().value[1][0].run() under foreign same-leaf methods.
+// Non-groupBy entries iterators fail closed.
+func jsGroupByEntriesNextPairElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil {
+		return ""
+	}
+	if n.Type() != "member_expression" && n.Type() != "member_expression_optional" && n.Type() != "optional_chain" {
+		return ""
+	}
+	prop := ingest.ChildByField(n, "property")
+	if prop == nil || (prop.Type() != "property_identifier" && prop.Type() != "identifier") {
+		return ""
+	}
+	if ingest.NodeText(prop, content) != "value" {
+		return ""
+	}
+	obj := ingest.ChildByField(n, "object")
+	for obj != nil && obj.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < obj.ChildCount(); i++ {
+			ch := obj.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		obj = inner
+	}
+	// …entries().next().value — require zero-arg next() on a groupBy entries source.
+	if obj == nil || obj.Type() != "call_expression" || !jsCallIsZeroArg(obj) {
+		return ""
+	}
+	fn := ingest.ChildByField(obj, "function")
+	if fn == nil || (fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain") {
+		return ""
+	}
+	nprop := ingest.ChildByField(fn, "property")
+	if nprop == nil || ingest.NodeText(nprop, content) != "next" {
+		return ""
+	}
+	return jsGroupByEntriesSourceElemType(ingest.ChildByField(fn, "object"), content, arrayLocals, typedLocals, factories, extra)
+}
+
+// jsObjectFromEntriesGroupByElemType recovers T from Object.fromEntries(iterable)
+// when iterable peels to [key, T[]] pairs over a groupBy result (Object.entries
+// of groupBy / Map.groupBy.entries). Result is Record of T[] — same shape as
+// Object.groupBy — so property access peels via jsObjectGroupByGroupArrayType.
+// Scalar fromEntries (value T) stays on the objValue path. Unknown fail closed.
+func jsObjectFromEntriesGroupByElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals) string {
+	first := jsObjectStaticCallSingleArg(n, content, "fromEntries")
+	if first == nil {
+		return ""
+	}
+	return jsGroupByEntriesSourceElemType(first, content, arrayLocals, typedLocals, factories, extra)
+}
+
+// jsMapGroupByValuesElemType recovers T from Map.groupBy(...).values() /
+// ma.values() after const ma = Map.groupBy(...) when the groupBy iterable peels
+// to T. Yields group arrays T[] (not T) — use for for-of arrayLocals binding
+// so g[0].run() peels. Zero-arg only. Non-groupBy maps fail closed.
+func jsMapGroupByValuesElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "call_expression" || !jsCallIsZeroArg(n) {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil || (fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain") {
+		return ""
+	}
+	prop := ingest.ChildByField(fn, "property")
+	if prop == nil || ingest.NodeText(prop, content) != "values" {
+		return ""
+	}
+	// Object.values is handled elsewhere — fail closed here.
+	obj := ingest.ChildByField(fn, "object")
+	if obj != nil && obj.Type() == "identifier" && ingest.NodeText(obj, content) == "Object" {
+		return ""
+	}
+	for obj != nil && obj.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < obj.ChildCount(); i++ {
+			ch := obj.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		obj = inner
+	}
+	if t := jsMapGroupByElemType(obj, content, arrayLocals, typedLocals, factories, extra); t != "" {
+		return t
+	}
+	if obj != nil && obj.Type() == "identifier" && extra.groupMap != nil {
+		if t := extra.groupMap[ingest.NodeText(obj, content)]; t != "" {
+			return t
+		}
 	}
 	return ""
 }
