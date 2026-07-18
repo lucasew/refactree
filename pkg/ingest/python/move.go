@@ -1905,6 +1905,8 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	// asdict(box)["a"].run() / vars(box)["a"].run() / box.__dict__["a"].run() —
 	// dict-view field keys of first arg / object (same leaf as d = asdict(box);
 	// d["a"].run()).
+	// astuple(box)[0].run() / dataclasses.astuple(box)[0].run() — declaration-order
+	// index slots of first arg (same leaf as t = astuple(box); t[0].run(); not box[0]).
 	// items[0].run() / d["k"].run() / list(items)[0].run() — collection subscript
 	// element (same leaf as a = items[0]; a.run()). Slices fail closed.
 	if obj.Type() == "subscript" {
@@ -1912,6 +1914,9 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 		}
 		if ft := pythonDictViewKeyAccessType(obj, content, fieldOf); ft != "" {
+			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
+		}
+		if ft := pythonAstupleIndexAccessType(obj, content, fieldOf); ft != "" {
 			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 		}
 		// box[0].run() — namedtuple positional field (fieldOf["box.#0"]).
@@ -2093,7 +2098,10 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // plus direct `box.__dict__["a"].run()` / `xa = box.__dict__["a"]`,
 // `t = astuple(box)` / `dataclasses.astuple(box)` / walrus — ordered index
 // slots of the first positional arg (fieldOf["t.#0"] for `t[0].run()`; astuple
-// yields a tuple of field values in declaration order, not named keys).
+// yields a tuple of field values in declaration order, not named keys),
+// plus direct chains `astuple(box)[0].run()` / `xa = astuple(box)[0]` (synthetic
+// `@astuple.box.#i` slots — not `box.#i`, so bare `box[0]` stays unbound for
+// non-indexable dataclasses).
 // fieldOf maps "local.field" → field type leaf for class field access.
 // elemOf maps collection locals → element type leaf (list[A] / deque[A] /
 // dict value / Queue[A] → "A") for direct access chains under foreign same-leaf.
@@ -2133,9 +2141,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 	// typing.NamedTuple("Box", [("a", A), ...]) / NamedTuple("Box", a=A, b=B).
 	pythonMergeFunctionalNamedTupleFields(root, content, fieldIndex)
 	// bindFields: annotated/named fields + ordered namedtuple index aliases.
+	// Also synthetic `@astuple.local.#i` slots for direct astuple(local)[i]
+	// (fieldOrder; not local.#i so dataclasses stay non-indexable).
 	bindFields := func(local, typeName string) {
 		pythonBindClassLocalFields(local, typeName, fieldIndex, fieldOf)
 		pythonBindNamedtupleIndexFields(local, typeName, fieldNames, fieldIndex, fieldOf)
+		pythonBindNamedtupleIndexFields("@astuple."+local, typeName, fieldOrder, fieldIndex, fieldOf)
 	}
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
@@ -2436,6 +2447,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// xa = box["a"] — TypedDict/record string-key value (fieldOf).
 				// xa = asdict(box)["a"] / vars(box)["a"] / box.__dict__["a"] — dict-view
 				// field keys (same leaf as d = asdict(box); xa = d["a"]).
+				// xa = astuple(box)[0] — declaration-order index (same leaf as t[0]).
 				// Slices (items[1:3]) fail closed (sequence, not element).
 				if right != nil && right.Type() == "subscript" {
 					if types := pythonPairSlotsOf(right, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots); len(types) > 0 {
@@ -2448,6 +2460,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							out[lname] = true
 						}
 					} else if ft := pythonDictViewKeyAccessType(right, content, fieldOf); ft != "" {
+						typeOf[lname] = ft
+						bindFields(lname, ft)
+						if ourReceivers[ft] {
+							out[lname] = true
+						}
+					} else if ft := pythonAstupleIndexAccessType(right, content, fieldOf); ft != "" {
 						typeOf[lname] = ft
 						bindFields(lname, ft)
 						if ourReceivers[ft] {
@@ -2781,6 +2799,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// xa := box["a"] — TypedDict/record string-key value (fieldOf).
 			// Slices fail closed (sequence, not element).
 			// xa := asdict(box)["a"] / vars(box)["a"] / box.__dict__["a"] — dict-view keys.
+			// xa := astuple(box)[0] — declaration-order index (same leaf as t[0]).
 			if valueN.Type() == "subscript" {
 				if types := pythonPairSlotsOf(valueN, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots); len(types) > 0 {
 					pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
@@ -2791,6 +2810,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						out[lname] = true
 					}
 				} else if ft := pythonDictViewKeyAccessType(valueN, content, fieldOf); ft != "" {
+					typeOf[lname] = ft
+					bindFields(lname, ft)
+					if ourReceivers[ft] {
+						out[lname] = true
+					}
+				} else if ft := pythonAstupleIndexAccessType(valueN, content, fieldOf); ft != "" {
 					typeOf[lname] = ft
 					bindFields(lname, ft)
 					if ourReceivers[ft] {
@@ -3767,6 +3792,58 @@ func pythonDunderDictObjectType(attr *grammar.Node, content []byte, typeOf map[s
 		return ""
 	}
 	return pythonObjectExprType(obj, content, typeOf)
+}
+
+// pythonAstupleIndexAccessType recovers T from astuple(box)[0] /
+// dataclasses.astuple(box)[0] when box is a typed local with declaration-order
+// field 0 of type T (fieldOf["@astuple.box.#0"]; same leaf as t = astuple(box);
+// t[0] / box.a). First positional arg must be an identifier local; non-decimal
+// integer indices and other callees fail closed. Does not treat bare box[0] as
+// valid (synthetic @astuple. prefix — dataclasses are not indexable).
+func pythonAstupleIndexAccessType(sub *grammar.Node, content []byte, fieldOf map[string]string) string {
+	if sub == nil || sub.Type() != "subscript" || fieldOf == nil {
+		return ""
+	}
+	val := ingest.ChildByField(sub, "value")
+	if val == nil {
+		val = ingest.ChildByField(sub, "object")
+	}
+	idxN := ingest.ChildByField(sub, "subscript")
+	if val == nil || idxN == nil || idxN.Type() != "integer" {
+		return ""
+	}
+	idxText := ingest.NodeText(idxN, content)
+	if idxText == "" {
+		return ""
+	}
+	for _, c := range idxText {
+		if c < '0' || c > '9' {
+			return ""
+		}
+	}
+	objLocal := pythonAstupleObjectLocal(val, content)
+	if objLocal == "" {
+		return ""
+	}
+	return fieldOf["@astuple."+objLocal+".#"+idxText]
+}
+
+// pythonAstupleObjectLocal recovers the identifier local whose declaration-order
+// field values are exposed by astuple(x) / dataclasses.astuple(x). Other forms
+// fail closed ("").
+func pythonAstupleObjectLocal(n *grammar.Node, content []byte) string {
+	if n == nil || n.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil || pythonSimpleCalleeName(fn, content) != "astuple" {
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(n)
+	if !ok || len(args) == 0 || args[0].Type() != "identifier" {
+		return ""
+	}
+	return ingest.NodeText(args[0], content)
 }
 
 // pythonDictViewKeyAccessType recovers T from asdict(box)["a"] / vars(box)["a"] /
