@@ -1245,7 +1245,7 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 
 	factories := jsSameFileFactoryReturns(pf.Root, content)
 	generators := jsSameFileGeneratorYields(pf.Root, content)
-	typedLocals, settledOf, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals := jsTypedLocals(pf.Root, content, ourReceivers, factories, generators)
+	typedLocals, settledOf, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals := jsTypedLocals(pf.Root, content, ourReceivers, factories, generators)
 	// Unique method leaf: ExtraRename already rewrites every simple obj.oldLeaf.
 	// Apply the same aggressiveness to object-pattern property keys.
 	uniqueLeaf := len(foreignReceivers) == 0
@@ -1287,7 +1287,7 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 			obj := ingest.ChildByField(n, "object")
 			prop := ingest.ChildByField(n, "property")
 			if obj != nil && prop != nil && ingest.NodeText(prop, content) == oldLeaf {
-				if jsShouldRenameMember(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, settledOf, factories, generators, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals) {
+				if jsShouldRenameMember(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, settledOf, factories, generators, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals) {
 					addEdit(prop.StartByte(), prop.EndByte(), newLeaf)
 				}
 			}
@@ -1304,7 +1304,7 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 			nameN := ingest.ChildByField(n, "name")
 			valN := ingest.ChildByField(n, "value")
 			if nameN != nil && nameN.Type() == "object_pattern" && valN != nil {
-				if uniqueLeaf || jsShouldRenameMember(valN, content, classHere, ourReceivers, foreignReceivers, typedLocals, settledOf, factories, generators, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals) {
+				if uniqueLeaf || jsShouldRenameMember(valN, content, classHere, ourReceivers, foreignReceivers, typedLocals, settledOf, factories, generators, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals) {
 					jsCollectObjectPatternMethodEdits(nameN, content, oldLeaf, newLeaf, addEdit)
 					// Shorthand `{ helper }` also renames the local binding — rewrite
 					// bare oldLeaf identifiers later in the same statement_block.
@@ -1492,7 +1492,9 @@ func jsRenameByTypeMaps(name string, ourReceivers, foreignReceivers map[string]b
 // entryNextLocals maps entries-iterator .next() result locals → pair value type
 // (const ra = [new A()].entries().next() → ra:"A") so ra.value[1].run() peels.
 // mapLocals maps Map locals → uniform value type (const ma = new Map([[k, new A()]]) → ma:"A").
-func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers map[string]bool, typedLocals, settledOf, factories, generators, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals map[string]string) bool {
+// objValueLocals maps plain-object locals → uniform property value type
+// (const o = Object.fromEntries([[k, new A()]]) → o:"A") so o.k.run() peels.
+func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers map[string]bool, typedLocals, settledOf, factories, generators, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals map[string]string) bool {
 	if obj == nil {
 		return false
 	}
@@ -1557,8 +1559,9 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 	// es[0][1].run() after const es = Object.entries(...) /
 	// [...Object.entries({k: new A()})][0][1].run() /
 	// e[1].run() after const e = Object.entries(...)[i] /
-	// for (const e of Object.entries(...)) e[1].run() —
-	// element / entries-value peel under foreign same-leaf.
+	// for (const e of Object.entries(...)) e[1].run() /
+	// Object.fromEntries([[k, new A()]])["k"].run() / o["k"].run() —
+	// element / entries-value / fromEntries-prop peel under foreign same-leaf.
 	if obj.Type() == "subscript_expression" {
 		if t := jsPromiseAllSubscriptType(obj, content, typedLocals, factories); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
@@ -1569,17 +1572,24 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 		if t := jsArrayElemSubscriptType(obj, content, arrayLocals, typedLocals, factories); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
+		if t := jsObjectFromEntriesPropType(obj, content, typedLocals, factories, entryArrayLocals, objValueLocals); t != "" {
+			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
 	}
 	// r.value.run() / (await Promise.allSettled([new A()]))[0].value.run() /
 	// genA().next().value.run() / (await agenA().next()).value.run() /
 	// [new A()].values().next().value.run() /
-	// [new A()][Symbol.iterator]().next().value.run() —
+	// [new A()][Symbol.iterator]().next().value.run() /
+	// Object.fromEntries([[k, new A()]]).k.run() / o.k.run() after fromEntries local —
 	// value peel under foreign same-leaf methods.
 	if obj.Type() == "member_expression" || obj.Type() == "member_expression_optional" || obj.Type() == "optional_chain" {
 		if t := jsPromiseAllSettledValueType(obj, content, typedLocals, settledOf, factories); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 		if t := jsGeneratorNextValueType(obj, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals); t != "" {
+			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
+		if t := jsObjectFromEntriesPropType(obj, content, typedLocals, factories, entryArrayLocals, objValueLocals); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 	}
@@ -1617,7 +1627,9 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 // (const ra = [new A()].entries().next() → ra:"A") so ra.value[1] peels.
 // mapLocals maps Map locals → uniform value type
 // (const ma = new Map([[k, new A()]]) → ma:"A") so ma.entries() / for-of peels.
-func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool, factories, generators map[string]string) (map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string) {
+// objValueLocals maps plain-object locals → uniform property value type
+// (const o = Object.fromEntries([[k, new A()]]) → o:"A") so o.k.run() peels.
+func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool, factories, generators map[string]string) (map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string) {
 	out := map[string]string{}
 	settledOf := map[string]string{}
 	genLocals := map[string]string{}
@@ -1626,8 +1638,9 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 	entryArrayLocals := map[string]string{}
 	entryNextLocals := map[string]string{}
 	mapLocals := map[string]string{}
+	objValueLocals := map[string]string{}
 	if root == nil || len(ourReceivers) == 0 {
-		return out, settledOf, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals
+		return out, settledOf, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals
 	}
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
@@ -1728,6 +1741,15 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// new Map(pa).get(k) peels via entryArrayLocals.
 						// Bind foreign too so dual-class B rebinds fail closed.
 						entryArrayLocals[ingest.NodeText(nameN, content)] = t
+					} else if t := jsObjectFromEntriesValueType(valN, content, out, factories, entryArrayLocals); t != "" {
+						// const o = Object.fromEntries([[k, new A()]]) / Object.fromEntries(pa) —
+						// plain object of property values T; o.k peels via objValueLocals.
+						// Bind foreign too so dual-class B rebinds fail closed.
+						objValueLocals[ingest.NodeText(nameN, content)] = t
+					} else if t := jsObjectFromEntriesPropType(valN, content, out, factories, entryArrayLocals, objValueLocals); ourReceivers[t] {
+						// const a = Object.fromEntries([[k, new A()]]).k /
+						// const a = Object.fromEntries(...)["k"] / o.k after fromEntries local
+						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsMapGetValueType(valN, content, out, factories, mapLocals, entryArrayLocals); ourReceivers[t] {
 						// const a = new Map([[k, new A()]]).get(k) / ma.get(k) / new Map(pa).get(k)
 						out[ingest.NodeText(nameN, content)] = t
@@ -1843,7 +1865,7 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 		}
 	}
 	walk(root)
-	return out, settledOf, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals
+	return out, settledOf, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals
 }
 
 // jsNewExpressionType returns the constructor identifier for `new Box(...)`.
@@ -2924,10 +2946,185 @@ func jsArrayOfElemType(n *grammar.Node, content []byte, typedLocals, factories m
 }
 
 // jsObjectValuesElemType recovers T from Object.values({…}) when every property
-// value peels to the same concrete type T. Non-object-literal / mixed / empty
-// / method / spread entries fail closed.
+// value peels to the same concrete type T. Also peels Object.values(
+// Object.fromEntries([[k, new T()]])) when fromEntries pairs agree on T.
+// Non-object-literal / mixed / empty / method / spread entries fail closed.
 func jsObjectValuesElemType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
-	return jsObjectStaticValuesCallType(n, content, typedLocals, factories, "values")
+	if t := jsObjectStaticValuesCallType(n, content, typedLocals, factories, "values"); t != "" {
+		return t
+	}
+	// Object.values(Object.fromEntries(...)) — values are fromEntries pair values.
+	// entryArrayLocals not available here; only inline fromEntries peels.
+	return jsObjectValuesFromEntriesType(n, content, typedLocals, factories, nil)
+}
+
+// jsObjectValuesFromEntriesType recovers T from Object.values(Object.fromEntries(…))
+// / Object.values(o) when o is a fromEntries object-value local.
+func jsObjectValuesFromEntriesType(n *grammar.Node, content []byte, typedLocals, factories, entryArrayLocals map[string]string) string {
+	if n == nil || n.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	args := ingest.ChildByField(n, "arguments")
+	if fn == nil || args == nil {
+		return ""
+	}
+	if fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain" {
+		return ""
+	}
+	obj := ingest.ChildByField(fn, "object")
+	prop := ingest.ChildByField(fn, "property")
+	if obj == nil || prop == nil ||
+		obj.Type() != "identifier" || ingest.NodeText(obj, content) != "Object" ||
+		ingest.NodeText(prop, content) != "values" {
+		return ""
+	}
+	var first *grammar.Node
+	count := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		count++
+		if first == nil {
+			first = ch
+		}
+	}
+	if count != 1 || first == nil {
+		return ""
+	}
+	return jsObjectFromEntriesValueType(first, content, typedLocals, factories, entryArrayLocals)
+}
+
+// jsObjectFromEntriesValueType recovers T from Object.fromEntries(iterable) when
+// the iterable peels to pairs of uniform value type T (pair-array literal,
+// pair-array local, or Object.entries({…})). Empty / mixed fail closed.
+func jsObjectFromEntriesValueType(n *grammar.Node, content []byte, typedLocals, factories, entryArrayLocals map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	args := ingest.ChildByField(n, "arguments")
+	if fn == nil || args == nil {
+		return ""
+	}
+	if fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain" {
+		return ""
+	}
+	obj := ingest.ChildByField(fn, "object")
+	prop := ingest.ChildByField(fn, "property")
+	if obj == nil || prop == nil ||
+		obj.Type() != "identifier" || ingest.NodeText(obj, content) != "Object" ||
+		ingest.NodeText(prop, content) != "fromEntries" {
+		return ""
+	}
+	var first *grammar.Node
+	count := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		count++
+		if first == nil {
+			first = ch
+		}
+	}
+	if count != 1 || first == nil {
+		return ""
+	}
+	return jsMapIterableValueType(first, content, typedLocals, factories, entryArrayLocals)
+}
+
+// jsObjectFromEntriesPropType recovers T from Object.fromEntries(…).k /
+// Object.fromEntries(…)["k"] / o.k / o["k"] when the object peels to a
+// fromEntries result (or objValueLocal) of uniform property value type T.
+// Any property key is accepted (all values are T).
+func jsObjectFromEntriesPropType(n *grammar.Node, content []byte, typedLocals, factories, entryArrayLocals, objValueLocals map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil {
+		return ""
+	}
+	var obj *grammar.Node
+	switch n.Type() {
+	case "member_expression", "member_expression_optional", "optional_chain":
+		// o.k / Object.fromEntries(...).k — property must be a simple identifier.
+		prop := ingest.ChildByField(n, "property")
+		if prop == nil {
+			return ""
+		}
+		// Reject private / computed-looking forms; bare name only.
+		if prop.Type() != "property_identifier" && prop.Type() != "identifier" {
+			return ""
+		}
+		obj = ingest.ChildByField(n, "object")
+	case "subscript_expression":
+		// o["k"] / Object.fromEntries(...)[0] — any index; values are uniform T.
+		// Still require a present index node.
+		if ingest.ChildByField(n, "index") == nil {
+			return ""
+		}
+		obj = ingest.ChildByField(n, "object")
+	default:
+		return ""
+	}
+	if obj == nil {
+		return ""
+	}
+	for obj != nil && obj.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < obj.ChildCount(); i++ {
+			ch := obj.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		obj = inner
+	}
+	if obj == nil {
+		return ""
+	}
+	if t := jsObjectFromEntriesValueType(obj, content, typedLocals, factories, entryArrayLocals); t != "" {
+		return t
+	}
+	if obj.Type() == "identifier" && objValueLocals != nil {
+		if t := objValueLocals[ingest.NodeText(obj, content)]; t != "" {
+			return t
+		}
+	}
+	return ""
 }
 
 // jsObjectEntriesValueType recovers T from Object.entries({…}) when every
