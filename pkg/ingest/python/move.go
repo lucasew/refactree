@@ -5281,8 +5281,10 @@ func pythonBindMatchMapValueCaptures(n *grammar.Node, content []byte, et string,
 
 // pythonMatchSeqPatternCaptures returns fixed capture names and optional *rest
 // from a match list_pattern / tuple_pattern (`case [a]:` / `case [a, *rest]:` /
-// `case (a, b):`). Match grammar wraps captures in case_pattern and uses
-// splat_pattern (not list_splat_pattern). Fails closed on nested patterns.
+// `case (a, b):` / `case [a, *_]:` / `case [_, a]:`). Match grammar wraps
+// captures in case_pattern and uses splat_pattern (not list_splat_pattern).
+// Non-binding wildcards `_` and `*_` are skipped (do not fail closed). Nested
+// class/or/value patterns still fail closed.
 func pythonMatchSeqPatternCaptures(n *grammar.Node, content []byte) (fixed []string, star string, ok bool) {
 	if n == nil {
 		return nil, "", false
@@ -5293,38 +5295,53 @@ func pythonMatchSeqPatternCaptures(n *grammar.Node, content []byte) (fixed []str
 	default:
 		return nil, "", false
 	}
+	sawStar := false
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		ch := n.Child(i)
 		switch ch.Type() {
 		case "(", ")", "[", "]", ",", "comment":
+			continue
+		case "_":
+			// Bare wildcard slot (some grammar shapes): non-binding.
 			continue
 		case "case_pattern", "pattern":
 			inner := pythonMatchPatternInner(ch)
 			if inner == nil {
 				return nil, "", false
 			}
+			// Wildcard `_` is non-binding: case [_, a] still types `a`.
+			if inner.Type() == "_" {
+				continue
+			}
 			name, isStar, okCap := pythonMatchCaptureOrStar(inner, content)
 			if !okCap {
 				return nil, "", false
 			}
 			if isStar {
-				if star != "" {
+				if sawStar {
 					return nil, "", false
 				}
+				sawStar = true
+				// name may be "" for non-binding `*_`.
 				star = name
 			} else {
 				fixed = append(fixed, name)
 			}
 		case "splat_pattern":
-			// Bare *rest child (some grammar shapes).
-			if star != "" {
+			// Bare *rest / *_ child (some grammar shapes).
+			if sawStar {
 				return nil, "", false
 			}
+			sawStar = true
 			id := ingest.ChildByType(ch, "identifier")
-			if id == nil {
+			if id != nil {
+				star = ingest.NodeText(id, content)
+				break
+			}
+			// `*_` — non-binding star rest (star stays empty).
+			if !pythonSplatPatternIsWildcard(ch) {
 				return nil, "", false
 			}
-			star = ingest.NodeText(id, content)
 		case "identifier", "dotted_name":
 			name := pythonMatchCaptureName(ch, content)
 			if name == "" {
@@ -5370,6 +5387,7 @@ func pythonMatchPatternInner(n *grammar.Node) *grammar.Node {
 }
 
 // pythonMatchCaptureOrStar returns a simple capture name, or *rest via splat_pattern.
+// Non-binding `*_` returns ok with empty name and isStar=true (caller skips binding).
 func pythonMatchCaptureOrStar(n *grammar.Node, content []byte) (name string, isStar bool, ok bool) {
 	if n == nil {
 		return "", false, false
@@ -5378,6 +5396,10 @@ func pythonMatchCaptureOrStar(n *grammar.Node, content []byte) (name string, isS
 	case "splat_pattern":
 		id := ingest.ChildByType(n, "identifier")
 		if id == nil {
+			// `*_` — non-binding star rest (grammar: splat_pattern with `_` child).
+			if pythonSplatPatternIsWildcard(n) {
+				return "", true, true
+			}
 			return "", false, false
 		}
 		return ingest.NodeText(id, content), true, true
@@ -5389,8 +5411,26 @@ func pythonMatchCaptureOrStar(n *grammar.Node, content []byte) (name string, isS
 		return name, false, true
 	default:
 		// class_pattern, nested list/tuple, value patterns — fail closed.
+		// (Bare `_` is handled by pythonMatchSeqPatternCaptures before calling here.)
 		return "", false, false
 	}
+}
+
+// pythonSplatPatternIsWildcard reports whether splat_pattern is non-binding `*_`
+// (has a `_` child and no identifier capture).
+func pythonSplatPatternIsWildcard(n *grammar.Node) bool {
+	if n == nil || n.Type() != "splat_pattern" {
+		return false
+	}
+	if ingest.ChildByType(n, "identifier") != nil {
+		return false
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		if n.Child(i).Type() == "_" {
+			return true
+		}
+	}
+	return false
 }
 
 // pythonMatchCaptureName returns the simple identifier for a capture pattern
