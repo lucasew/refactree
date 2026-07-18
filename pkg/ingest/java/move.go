@@ -1070,7 +1070,8 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // map.compute(k,f) / map.computeIfPresent(k,f) /
 // map.put(k,v) / map.replace(k,v) / map.merge(k,v,fn) /
 // it.next() / list.iterator().next() /
-// queue.poll()/peek() / list.remove(i) / list.getFirst()/getLast() /
+// queue.poll()/peek() / queue.take() / deque.takeFirst()/takeLast() /
+// list.remove(i) / list.getFirst()/getLast() /
 // list.removeFirst()/removeLast() /
 // opt.orElse(d) / opt.orElseGet(s) / opt.orElseThrow([s]) / findFirst().orElse(d) /
 // Collections.min(as) / Collections.max(as) / stream.min/max().orElse(d) /
@@ -1166,7 +1167,8 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					out[name] = true
 				} else if et := javaCollectionAccessElemType(valN, content, elemOf, valOf, entryValOf); ourReceivers[et] {
 					// var xa = as.get(0) / am.get("k") / as.iterator().next() / ia.next()
-					// / qa.poll() / qa.peek() / as.remove(0) / as.getFirst()
+					// / qa.poll() / qa.peek() / qa.take() / da.takeFirst()/takeLast()
+					// / as.remove(0) / as.getFirst()
 					// / as.removeFirst() / as.removeLast()
 					// / e.getValue() when e is a Map.Entry local
 					// / Map.entry(k, new A()).getValue() / am.firstEntry().getValue()
@@ -3415,7 +3417,9 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	as.remove(i) / am.remove(k) → same element/value type (index/key remove returns E/V)
 //	as.set(i, e) → elemOf[as] (List returns previous E)
 //	qa.poll() / qa.peek() / qa.element() → elemOf[qa] (Queue)
+//	qa.take() → elemOf[qa] (BlockingQueue)
 //	da.pollFirst()/pollLast()/peekFirst()/peekLast()/pop() → elemOf[da] (Deque)
+//	da.takeFirst() / da.takeLast() → elemOf[da] (BlockingDeque)
 //	as.getFirst() / as.getLast() → elemOf[as] (SequencedCollection / List / Deque)
 //	as.removeFirst() / as.removeLast() → elemOf[as] (SequencedCollection / List / Deque)
 //	ss.first() / ss.last() → elemOf[ss] (SortedSet / NavigableSet)
@@ -3480,7 +3484,11 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// Replacement arg does not change the element type leaf.
 		"set",
 		"poll", "peek", "element",
+		// BlockingQueue.take returns E (blocks until an element is available).
+		"take",
 		"pollFirst", "pollLast", "peekFirst", "peekLast", "pop",
+		// BlockingDeque.takeFirst/takeLast return E (same element type as pollFirst).
+		"takeFirst", "takeLast",
 		"getFirst", "getLast",
 		// SequencedCollection / List / Deque removeFirst/removeLast return E
 		// (Java 21; same element type as getFirst/getLast).
