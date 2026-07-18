@@ -2135,11 +2135,16 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// Enables whenComplete(...).join() / copy().join() under foreign
 			// same-leaf methods. Type-changing stages (thenApply/handle/…) stay
 			// on their own identity/rewrap peels.
+			// Optional.or(Supplier) always returns Optional of the same T by API
+			// signature (alternative Optional supplier does not change T).
+			// Enables or(...).ifPresent / or(...).orElse / var o2 = or(...);
+			// under foreign same-leaf methods. Stream has no or — Optional-only.
 			"findFirst", "findAny", "min", "max", "reduce", "toList", "toArray", "clone", "reversed", "subList",
 			"descendingSet", "headSet", "tailSet", "subSet",
 			"whenComplete", "copy", "toCompletableFuture",
 			"orTimeout", "completeOnTimeout",
-			"exceptionally", "exceptionallyCompose", "minimalCompletionStage":
+			"exceptionally", "exceptionallyCompose", "minimalCompletionStage",
+			"or":
 			recv := ingest.ChildByField(obj, "object")
 			// Arrays.stream(arr[, from, to]) — element type from first arg, not
 			// from receiver Arrays (unlike coll.stream() which uses elemOf[coll]).
