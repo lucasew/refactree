@@ -1432,7 +1432,8 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // toUnmodifiableSet()/toCollection(…)) / collect(toList()/toSet()/toUnmodifiable…/
 // toCollection(…)) / collect(Collectors::toList / toSet / toUnmodifiableList /
 // toUnmodifiableSet) / collect(collectingAndThen(toList()/toSet()/toUnmodifiable…/
-// toCollection(…), …)) / collect(teeing(toList()/…, …, (list, …) -> list)) → same
+// toCollection(…), …)) / collect(filtering(pred, toList()/…)) /
+// collect(mapping(a -> a, toList()/…)) / collect(teeing(toList()/…, …, (list, …) -> list)) → same
 // element (Collection<T> for forEach / enhanced-for),
 // m.values() → valOf[m],
 // List.of(new A()) / Stream.of(new A()) / Arrays.asList(new A()) → "A",
@@ -1516,9 +1517,11 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// toUnmodifiableList / toUnmodifiableSet) /
 			// collect(Collectors.collectingAndThen(toList()/toSet()/toUnmodifiable…/
 			// toCollection(…), finisher)) /
+			// collect(Collectors.filtering(pred, toList()/…)) /
+			// collect(Collectors.mapping(a -> a, toList()/…)) (identity mapper only) /
 			// collect(Collectors.teeing(toList()/…, …, (list, …) -> list)) —
 			// Collection of the stream element type. Other collectors
-			// (groupingBy, mapping, …) fail closed.
+			// (groupingBy, type-changing mapping, toMap, …) fail closed.
 			if !javaIsToListOrSetCollector(obj, content) {
 				return ""
 			}
@@ -1876,7 +1879,9 @@ func javaStreamConcatElemType(call *grammar.Node, content []byte, elemOf, valOf 
 // toUnmodifiableSet, Collectors.collectingAndThen(toList()/toSet()/
 // toUnmodifiable…/toCollection(…), finisher) (finisher is treated as preserving
 // Collection of the same element type — identity, Collections::unmodifiableList,
-// …), and Collectors.teeing(d1, d2, merger) when the merger clearly returns a
+// …), Collectors.filtering(pred, toList()/…) (predicate does not change element
+// type), Collectors.mapping(a -> a, toList()/…) when the mapper is identity,
+// and Collectors.teeing(d1, d2, merger) when the merger clearly returns a
 // toList/toSet/toUnmodifiable/toCollection downstream result. Other collectors
 // fail closed.
 func javaIsToListOrSetCollector(collectCall *grammar.Node, content []byte) bool {
@@ -1893,6 +1898,14 @@ func javaIsToListOrSetCollector(collectCall *grammar.Node, content []byte) bool 
 	// collectingAndThen(downstream, finisher) when downstream is toList/toSet/
 	// toUnmodifiableList/toUnmodifiableSet.
 	if javaIsCollectingAndThenToListOrSet(first, content) {
+		return true
+	}
+	// filtering(pred, downstream) when downstream is toList/toSet/…
+	if javaIsFilteringToListOrSet(first, content) {
+		return true
+	}
+	// mapping(a -> a, downstream) when mapper is identity and downstream is toList/toSet/…
+	if javaIsMappingIdentityToListOrSet(first, content) {
 		return true
 	}
 	// teeing(d1, d2, merger) when merger returns a toList/toSet/toUnmodifiable downstream.
@@ -2012,6 +2025,95 @@ func javaIsCollectingAndThenToListOrSet(n *grammar.Node, content []byte) bool {
 		}
 	}
 	return javaIsToListOrSetCollectorExpr(javaFirstCallArg(n), content)
+}
+
+// javaIsFilteringToListOrSet reports Collectors.filtering(pred, downstream) /
+// filtering(...) (static import) when downstream is a toList/toSet/
+// toUnmodifiableList/toUnmodifiableSet/toCollection collector. The predicate
+// does not change the stream element type. Other downstreams fail closed.
+func javaIsFilteringToListOrSet(n *grammar.Node, content []byte) bool {
+	if n == nil || n.Type() != "method_invocation" {
+		return false
+	}
+	nameN := ingest.ChildByField(n, "name")
+	if nameN == nil || ingest.NodeText(nameN, content) != "filtering" {
+		return false
+	}
+	if obj := ingest.ChildByField(n, "object"); obj != nil {
+		if obj.Type() != "identifier" && obj.Type() != "type_identifier" {
+			return false
+		}
+		if ingest.NodeText(obj, content) != "Collectors" {
+			return false
+		}
+	}
+	args := javaCallArgs(n)
+	if len(args) != 2 {
+		return false
+	}
+	// args[0] is the predicate — not inspected (does not change element type).
+	return javaIsToListOrSetCollectorExpr(args[1], content)
+}
+
+// javaIsMappingIdentityToListOrSet reports Collectors.mapping(mapper, downstream) /
+// mapping(...) (static import) when mapper is an identity lambda (a -> a) and
+// downstream is a toList/toSet/toUnmodifiableList/toUnmodifiableSet/toCollection
+// collector. Type-changing mappers and method-ref mappers fail closed.
+func javaIsMappingIdentityToListOrSet(n *grammar.Node, content []byte) bool {
+	if n == nil || n.Type() != "method_invocation" {
+		return false
+	}
+	nameN := ingest.ChildByField(n, "name")
+	if nameN == nil || ingest.NodeText(nameN, content) != "mapping" {
+		return false
+	}
+	if obj := ingest.ChildByField(n, "object"); obj != nil {
+		if obj.Type() != "identifier" && obj.Type() != "type_identifier" {
+			return false
+		}
+		if ingest.NodeText(obj, content) != "Collectors" {
+			return false
+		}
+	}
+	args := javaCallArgs(n)
+	if len(args) != 2 {
+		return false
+	}
+	if !javaIsIdentityLambda(args[0], content) {
+		return false
+	}
+	return javaIsToListOrSetCollectorExpr(args[1], content)
+}
+
+// javaIsIdentityLambda reports expression-bodied unary lambdas of the form a -> a
+// (optionally parenthesized body). Blocks and multi-param forms fail closed.
+func javaIsIdentityLambda(n *grammar.Node, content []byte) bool {
+	if n == nil || n.Type() != "lambda_expression" {
+		return false
+	}
+	params := javaInferredLambdaParamNames(n, content)
+	if len(params) != 1 {
+		return false
+	}
+	body := ingest.ChildByField(n, "body")
+	for body != nil && !body.IsNull() && body.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(body, "expression")
+		if inner == nil {
+			for i := uint32(0); i < body.ChildCount(); i++ {
+				ch := body.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		body = inner
+	}
+	if body == nil || body.IsNull() || body.Type() != "identifier" {
+		return false
+	}
+	return ingest.NodeText(body, content) == params[0]
 }
 
 // javaIsTeeingToListOrSet reports Collectors.teeing(d1, d2, merger) /
