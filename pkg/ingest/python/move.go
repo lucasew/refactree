@@ -1850,6 +1850,9 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	// Box().method / make().method — ctor name via maps.
 	// box.get("a").run() — TypedDict/record string-key value (fieldOf; same leaf as
 	// xa = box.get("a"); xa.run()).
+	// asdict(box).get("a").run() / vars(box).get("a").run() /
+	// box.__dict__.get("a").run() — dict-view field keys (same leaf as
+	// d = asdict(box); d.get("a").run() / asdict(box)["a"].run()).
 	// getattr(box, "a").run() — builtin field access (same leaf as box.a.run()).
 	// attrgetter("a")(box).run() — single-field getter (same leaf as box.a.run()).
 	// itemgetter("a")(box).run() — single string-key getter (same leaf as box["a"].run()).
@@ -1866,6 +1869,9 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 				return pythonRenameByTypeMaps(ingest.NodeText(fn, content), ourReceivers, foreignReceivers, nil)
 			}
 			if ft := pythonRecordKeyAccessType(obj, content, fieldOf); ft != "" {
+				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
+			}
+			if ft := pythonDictViewKeyAccessType(obj, content, fieldOf); ft != "" {
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 			}
 			if ft := pythonAttrgetterFieldType(obj, content, fieldOf); ft != "" {
@@ -2091,11 +2097,14 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `d = asdict(box)` / `dataclasses.asdict(box)` / walrus — field keys of the
 // first positional arg (fieldOf for `d["a"].run()` / `d.get("a").run()` under
 // foreign same-leaf methods; asdict yields a dict of field values),
-// plus direct chains `asdict(box)["a"].run()` / `xa = asdict(box)["a"]`,
+// plus direct chains `asdict(box)["a"].run()` / `asdict(box).get("a").run()` /
+// `xa = asdict(box)["a"]` / `xa = asdict(box).get("a")`,
 // `d = vars(box)` / walrus — same field-key binding (vars yields obj.__dict__),
-// plus direct `vars(box)["a"].run()` / `xa = vars(box)["a"]`,
+// plus direct `vars(box)["a"].run()` / `vars(box).get("a").run()` /
+// `xa = vars(box)["a"]`,
 // `d = box.__dict__` / walrus — same field-key binding (instance attribute dict),
-// plus direct `box.__dict__["a"].run()` / `xa = box.__dict__["a"]`,
+// plus direct `box.__dict__["a"].run()` / `box.__dict__.get("a").run()` /
+// `xa = box.__dict__["a"]`,
 // `t = astuple(box)` / `dataclasses.astuple(box)` / walrus — ordered index
 // slots of the first positional arg (fieldOf["t.#0"] for `t[0].run()`; astuple
 // yields a tuple of field values in declaration order, not named keys),
@@ -2323,6 +2332,16 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 									}
 								}
 								if ft := pythonRecordKeyAccessType(right, content, fieldOf); ft != "" {
+									typeOf[lname] = ft
+									bindFields(lname, ft)
+									if ourReceivers[ft] {
+										out[lname] = true
+									}
+									break
+								}
+								// a = asdict(box).get("a") / vars(box).get("a") /
+								// box.__dict__.get("a") — dict-view field keys.
+								if ft := pythonDictViewKeyAccessType(right, content, fieldOf); ft != "" {
 									typeOf[lname] = ft
 									bindFields(lname, ft)
 									if ourReceivers[ft] {
@@ -2689,6 +2708,16 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								}
 							}
 							if ft := pythonRecordKeyAccessType(valueN, content, fieldOf); ft != "" {
+								typeOf[lname] = ft
+								bindFields(lname, ft)
+								if ourReceivers[ft] {
+									out[lname] = true
+								}
+								break
+							}
+							// a := asdict(box).get("a") / vars(box).get("a") /
+							// box.__dict__.get("a") — dict-view field keys.
+							if ft := pythonDictViewKeyAccessType(valueN, content, fieldOf); ft != "" {
 								typeOf[lname] = ft
 								bindFields(lname, ft)
 								if ourReceivers[ft] {
@@ -3847,32 +3876,64 @@ func pythonAstupleObjectLocal(n *grammar.Node, content []byte) string {
 }
 
 // pythonDictViewKeyAccessType recovers T from asdict(box)["a"] / vars(box)["a"] /
-// box.__dict__["a"] when box is a typed local with annotated field a of type T
-// (fieldOf; same leaf as d = asdict(box); d["a"] / box.a). First positional arg
-// / object must be an identifier local; non-string keys and other callees fail
-// closed. dataclasses.asdict accepted (leaf name asdict); vars is bare builtin
-// only.
-func pythonDictViewKeyAccessType(sub *grammar.Node, content []byte, fieldOf map[string]string) string {
-	if sub == nil || sub.Type() != "subscript" || fieldOf == nil {
+// box.__dict__["a"] / asdict(box).get("a") / vars(box).get("a") /
+// box.__dict__.get("a") (also setdefault/pop) when box is a typed local with
+// annotated field a of type T (fieldOf; same leaf as d = asdict(box); d["a"] /
+// d.get("a") / box.a). First positional arg / object must be an identifier
+// local; non-string keys and other callees fail closed. dataclasses.asdict
+// accepted (leaf name asdict); vars is bare builtin only.
+func pythonDictViewKeyAccessType(n *grammar.Node, content []byte, fieldOf map[string]string) string {
+	if n == nil || fieldOf == nil {
 		return ""
 	}
-	val := ingest.ChildByField(sub, "value")
-	if val == nil {
-		val = ingest.ChildByField(sub, "object")
+	switch n.Type() {
+	case "subscript":
+		val := ingest.ChildByField(n, "value")
+		if val == nil {
+			val = ingest.ChildByField(n, "object")
+		}
+		keyN := ingest.ChildByField(n, "subscript")
+		if val == nil || keyN == nil || keyN.Type() != "string" {
+			return ""
+		}
+		_, key := pythonStringContent(keyN, content)
+		if key == "" {
+			return ""
+		}
+		objLocal := pythonDictViewObjectLocal(val, content)
+		if objLocal == "" {
+			return ""
+		}
+		return fieldOf[objLocal+"."+key]
+	case "call":
+		// asdict(box).get("a") / vars(box).pop("a") / box.__dict__.setdefault("a")
+		fn := ingest.ChildByField(n, "function")
+		if fn == nil || fn.Type() != "attribute" {
+			return ""
+		}
+		attr := ingest.ChildByField(fn, "attribute")
+		obj := ingest.ChildByField(fn, "object")
+		if attr == nil || obj == nil {
+			return ""
+		}
+		switch ingest.NodeText(attr, content) {
+		case "get", "setdefault", "pop":
+			args, ok := pythonCallPositionalArgNodes(n)
+			if !ok || len(args) == 0 || args[0].Type() != "string" {
+				return ""
+			}
+			_, key := pythonStringContent(args[0], content)
+			if key == "" {
+				return ""
+			}
+			objLocal := pythonDictViewObjectLocal(obj, content)
+			if objLocal == "" {
+				return ""
+			}
+			return fieldOf[objLocal+"."+key]
+		}
 	}
-	keyN := ingest.ChildByField(sub, "subscript")
-	if val == nil || keyN == nil || keyN.Type() != "string" {
-		return ""
-	}
-	_, key := pythonStringContent(keyN, content)
-	if key == "" {
-		return ""
-	}
-	objLocal := pythonDictViewObjectLocal(val, content)
-	if objLocal == "" {
-		return ""
-	}
-	return fieldOf[objLocal+"."+key]
+	return ""
 }
 
 // pythonDictViewObjectLocal recovers the identifier local whose field keys are
