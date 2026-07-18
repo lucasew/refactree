@@ -1715,8 +1715,9 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 			// CompletableFuture.whenComplete(BiConsumer<? super T,? super Throwable>) /
 			// handle(BiFunction<? super T,Throwable,? extends U>) —
 			// first param is CF result T (same leaf as thenAccept/thenApply unary).
-			// Second is Throwable — leave unbound. Return-type pipelines (handle
-			// identity + join) stay fail-closed.
+			// Second is Throwable — leave unbound. Identity handle return pipelines
+			// (handle((a,e)->a).join()) peel via javaStreamPipelineElemType /
+			// javaMapResultElemType (first-param identity only).
 			if method == "whenComplete" || method == "handle" {
 				et := javaStreamPipelineElemType(obj, content, elemOf, valOf)
 				if et != "" && ourReceivers[et] {
@@ -1836,12 +1837,13 @@ func javaStreamElementLambdaMethod(method string) bool {
 		// unary functional arg applied to CF result T (same leaf as join/getNow).
 		// Identity thenApply return pipelines (thenApply(a -> a).join()) peel via
 		// javaStreamPipelineElemType / javaMapResultElemType; type-changing mappers
-		// and thenCompose stay fail-closed on the return path.
+		// and thenCompose stay fail-closed on the return path. Identity handle
+		// ((a,e)->a).join() peels the same way (first-param bi-lambda identity).
 		"thenAccept", "thenApply", "thenCompose",
 		// CompletableFuture.whenComplete(BiConsumer<? super T,? super Throwable>) /
 		// handle(BiFunction<? super T,Throwable,? extends U>) —
 		// bi-lambda first param is CF result T (second is Throwable).
-		// Return-type pipelines (handle identity + join) stay fail-closed.
+		// Identity handle return pipelines peel via javaMapResultElemType.
 		"whenComplete", "handle",
 		// Map value bi-lambdas (see javaMapValueBiLambdaMethod).
 		"computeIfPresent", "compute", "replaceAll", "merge",
@@ -1968,8 +1970,10 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // when the mapper clearly yields T (see javaMapResultElemType).
 // CompletableFuture.thenApply(a -> a) / thenApply(a -> new A()) → same or known
 // element (identity/new only; enables thenApply(a -> a).join() / var f2 = thenApply…).
-// Type-changing stages (unknown map / flatMap / thenApply mappers) fail closed so later
-// lambdas are not mis-typed.
+// CompletableFuture.handle((a, e) -> a) / handle((a, e) -> new A()) → same or known
+// element (first-param identity/new only; enables handle((a,e)->a).join() /
+// var f2 = handle…). Type-changing stages (unknown map / flatMap / thenApply /
+// handle mappers) fail closed so later lambdas are not mis-typed.
 func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
 		inner := ingest.ChildByField(obj, "expression")
@@ -2111,6 +2115,14 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// Enables thenApply(a -> a).join() / var f2 = thenApply(a -> a); f2.join()
 			// under foreign same-leaf methods. Type-changing mappers fail closed.
 			return javaMapResultElemType(obj, content, elemOf, valOf)
+		case "handle":
+			// CompletableFuture.handle(BiFunction): recover U when bi-lambda is
+			// first-param identity ((a, e) -> a) or new T(...) — same shapes as
+			// thenApply identity, bi form. Enables handle((a,e)->a).join() /
+			// var f2 = handle((a,e)->a); f2.join() under foreign same-leaf methods.
+			// Type-changing mappers fail closed. whenComplete always returns T
+			// but is BiConsumer (void body) — not a U pipeline stage here.
+			return javaMapResultElemType(obj, content, elemOf, valOf)
 		case "collect":
 			// Stream.collect(Collectors.toList()/toSet()/toUnmodifiableList()/
 			// toUnmodifiableSet()/toCollection(…)) / collect(toList()/toSet()/
@@ -2225,15 +2237,18 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 	}
 }
 
-// javaMapResultElemType recovers U after Optional.map / Stream.map(mapper) when
-// the mapper clearly yields a known element type:
+// javaMapResultElemType recovers U after Optional.map / Stream.map / CF thenApply
+// / CF handle when the mapper clearly yields a known element type:
 //
 //	oa.map(a -> a) → elem(oa)                         // identity
 //	oa.map(a -> new A()) → A                          // object creation
 //	as.stream().map(a -> a).forEach(...) → elem(as)   // same for Stream
+//	fa.thenApply(a -> a) → elem(fa)                   // CF Function identity
+//	fa.handle((a, e) -> a) → elem(fa)                 // CF BiFunction first-param identity
 //
 // Expression-bodied lambdas only; blocks, method refs, and other mappers fail
-// closed so type-changing maps stay unbound.
+// closed so type-changing maps stay unbound. Bi-lambda form binds only when the
+// body is the first parameter ((a, e) -> a); second-param bodies fail closed.
 func javaMapResultElemType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	if call == nil || call.Type() != "method_invocation" {
 		return ""
@@ -2270,8 +2285,16 @@ func javaMapResultElemType(call *grammar.Node, content []byte, elemOf, valOf map
 	}
 	params := javaInferredLambdaParamNames(first, content)
 	param := ""
-	if len(params) == 1 {
+	switch len(params) {
+	case 1:
+		// Function: a -> a / a -> new T()
 		param = params[0]
+	case 2:
+		// BiFunction (CF handle): (a, e) -> a / (a, e) -> new T()
+		// First-param identity only; body matching params[1] fails closed below.
+		param = params[0]
+	default:
+		return ""
 	}
 	recv := ingest.ChildByField(call, "object")
 	return javaMapMapperBodyElemType(body, param, recv, content, elemOf, valOf)
@@ -4406,6 +4429,8 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	fa.getNow(d) → elemOf[fa] (CompletableFuture<A>; default does not change T)
 //	fa.thenApply(a -> a).join() / getNow(d) / resultNow() → T (identity mapper only;
 //	  type-changing thenApply mappers fail closed — same shapes as Optional.map)
+//	fa.handle((a, e) -> a).join() / getNow(d) / resultNow() → T (first-param identity
+//	  bi-lambda only; type-changing handle mappers fail closed)
 //	fn.apply(x) → valOf[fn] / elemOf[fn] (Function<T,R> R / UnaryOperator<T> T /
 //	  BiFunction<T,U,R> R; apply args do not change the result type leaf)
 //	Objects.requireNonNull(x[, msg]) / requireNonNullElse(x, d) /
@@ -4578,11 +4603,14 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		//   List.copyOf(as).removeFirst() / Arrays.asList(new A()).set(0, x)
 		//   fa.thenApply(a -> a).join() / getNow(d) / resultNow() — identity
 		//   thenApply preserves CF result T (same shapes as Optional.map).
+		//   fa.handle((a, e) -> a).join() / getNow(d) / resultNow() — first-param
+		//   identity bi-lambda preserves CF result T.
 		// Pipeline typing already treats findFirst/findAny/Optional.of/List.of/
-		// toList/reversed/copyOf/thenApply(identity) as T. Map factories (Map.of /
-		// ofEntries / singletonMap / copyOf / unmodifiableMap / collect(toMap)) are
-		// not element pipelines — fall through to javaMapPipelineValueType for
-		// value-returning accessors (Map.of(k, new A()).get(k)).
+		// toList/reversed/copyOf/thenApply(identity)/handle(first-param identity)
+		// as T. Map factories (Map.of / ofEntries / singletonMap / copyOf /
+		// unmodifiableMap / collect(toMap)) are not element pipelines — fall through
+		// to javaMapPipelineValueType for value-returning accessors
+		// (Map.of(k, new A()).get(k)).
 		switch method {
 		case "get", "getFirst", "getLast",
 			"remove", "removeFirst", "removeLast", "set",
@@ -4592,7 +4620,8 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 			"elementAt", "firstElement", "lastElement",
 			"first", "last", "ceiling", "floor", "higher", "lower",
 			// CompletableFuture.join / getNow / resultNow on pipeline receivers
-			// (thenApply(a -> a).join()) — peel CF type-preserving stages.
+			// (thenApply(a -> a).join() / handle((a,e)->a).join()) — peel CF
+			// type-preserving stages.
 			"join", "getNow", "resultNow":
 			if et := javaStreamPipelineElemType(obj, content, elemOf, valOf); et != "" {
 				return et
