@@ -2079,7 +2079,8 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // and `xa = replace(box).a` (field leaf of first positional arg),
 // `d = asdict(box)` / `dataclasses.asdict(box)` / walrus — field keys of the
 // first positional arg (fieldOf for `d["a"].run()` / `d.get("a").run()` under
-// foreign same-leaf methods; asdict yields a dict of field values).
+// foreign same-leaf methods; asdict yields a dict of field values),
+// `d = vars(box)` / walrus — same field-key binding (vars yields obj.__dict__).
 // fieldOf maps "local.field" → field type leaf for class field access.
 // elemOf maps collection locals → element type leaf (list[A] / deque[A] /
 // dict value / Queue[A] → "A") for direct access chains under foreign same-leaf.
@@ -2401,6 +2402,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					// (fieldOf for d["a"].run() under foreign same-leaf methods).
 					// Not an object of the dataclass type (no typeOf / out).
 					if tn := pythonAsdictCallObjectType(right, content, typeOf); tn != "" {
+						bindFields(lname, tn)
+					}
+					// d = vars(box) — same field keys as asdict (obj.__dict__).
+					if tn := pythonVarsCallObjectType(right, content, typeOf); tn != "" {
 						bindFields(lname, tn)
 					}
 				}
@@ -2728,6 +2733,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// d := asdict(box) / dataclasses.asdict(box) — dict of field values
 				// (fieldOf for d["a"].run()).
 				if tn := pythonAsdictCallObjectType(valueN, content, typeOf); tn != "" {
+					bindFields(lname, tn)
+				}
+				// d := vars(box) — same field keys as asdict (obj.__dict__).
+				if tn := pythonVarsCallObjectType(valueN, content, typeOf); tn != "" {
 					bindFields(lname, tn)
 				}
 			}
@@ -3651,6 +3660,25 @@ func pythonAsdictCallObjectType(call *grammar.Node, content []byte, typeOf map[s
 	}
 	fn := ingest.ChildByField(call, "function")
 	if fn == nil || pythonSimpleCalleeName(fn, content) != "asdict" {
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) == 0 {
+		return ""
+	}
+	return pythonObjectExprType(args[0], content, typeOf)
+}
+
+// pythonVarsCallObjectType recovers T from vars(x) when the first positional
+// arg is a typed object local or Class() ctor. vars returns x.__dict__ (field
+// keys via bindFields); bare builtin name only — other modules fail closed.
+func pythonVarsCallObjectType(call *grammar.Node, content []byte, typeOf map[string]string) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	// Bare vars only (builtin); attribute forms are not the builtin.
+	if fn == nil || fn.Type() != "identifier" || ingest.NodeText(fn, content) != "vars" {
 		return ""
 	}
 	args, ok := pythonCallPositionalArgNodes(call)
