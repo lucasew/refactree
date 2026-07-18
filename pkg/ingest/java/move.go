@@ -1716,6 +1716,9 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // as.stream().toArray() / toArray(generator) / as.toArray([generator]) → same
 // element (T[] for toArray()[i] / var arr = toArray(); arr[i]),
 // as.clone() → same element (T[] for clone()[i] / var arr = as.clone(); arr[i]),
+// (ArrayList<A>) as.clone() / (List<A>) x → "A" (single type-arg generic cast;
+// multi-arg Map casts fail closed so .get uses the value path, not key-as-elem),
+// (A[]) expr → "A" (array cast element), else peel cast value (as.clone() under cast),
 // m.values() → valOf[m],
 // m.keySet() / navigableKeySet() / descendingKeySet() → elemOf[m]
 // (Set of map keys K; Map stores K in elemOf — same key leaf as newSetFromMap),
@@ -1778,6 +1781,31 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 		// new A[]{...} / new A[n] — element type for Arrays.stream first arg.
 		if typeN := ingest.ChildByField(obj, "type"); typeN != nil {
 			return javaTypeName(typeN, content)
+		}
+		return ""
+	case "cast_expression":
+		// (ArrayList<A>) as.clone() / (List<A>) x / (A[]) arr.clone() —
+		// recover E from a single type-arg generic cast or array cast type.
+		// Multi-arg casts (Map<K,V>) fail closed here so .get(k) does not take
+		// K as the element type (value recovery stays on javaMapPipelineValueType).
+		// Otherwise peel the cast value so type-preserving pipelines under the
+		// cast (as.clone()) still bind.
+		if typeN := ingest.ChildByField(obj, "type"); typeN != nil {
+			switch typeN.Type() {
+			case "generic_type":
+				if args := javaTypeArgNames(typeN, content); len(args) == 1 {
+					return args[0]
+				}
+			case "array_type":
+				if elem := ingest.ChildByField(typeN, "element"); elem != nil {
+					if et := javaTypeName(elem, content); et != "" {
+						return et
+					}
+				}
+			}
+		}
+		if val := ingest.ChildByField(obj, "value"); val != nil {
+			return javaStreamPipelineElemType(val, content, elemOf, valOf)
 		}
 		return ""
 	case "method_invocation":
