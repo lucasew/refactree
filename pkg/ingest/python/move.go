@@ -2008,6 +2008,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 	fieldIndex := pythonClassFieldIndex(root, content)
 	// namedtuple factory fields have no annotations — recover from same-file ctors.
 	pythonMergeNamedtupleFields(root, content, fieldIndex)
+	// typing.NamedTuple("Box", [("a", A), ...]) / NamedTuple("Box", a=A, b=B).
+	pythonMergeFunctionalNamedTupleFields(root, content, fieldIndex)
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
 		if n == nil || n.IsNull() {
@@ -2916,6 +2918,131 @@ func pythonExprClassType(n *grammar.Node, content []byte) string {
 		return ""
 	}
 	return ingest.NodeText(fn, content)
+}
+
+// pythonMergeFunctionalNamedTupleFields indexes field types from functional
+// typing.NamedTuple factories (types live in the call, not a class body):
+//   Box = NamedTuple("Box", [("a", A), ("b", B)])
+//   Box = NamedTuple("Box", a=A, b=B)
+//   Box = typing.NamedTuple(...)
+// Enables box.a.run() / xa = box.a under foreign same-leaf methods.
+func pythonMergeFunctionalNamedTupleFields(root *grammar.Node, content []byte, fieldIndex map[string]map[string]string) {
+	if root == nil || fieldIndex == nil {
+		return
+	}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		if n.Type() == "assignment" {
+			left := ingest.ChildByField(n, "left")
+			right := ingest.ChildByField(n, "right")
+			if left != nil && left.Type() == "identifier" && right != nil && right.Type() == "call" {
+				if pythonIsTypingNamedTupleCall(right, content) {
+					typeName := ingest.NodeText(left, content)
+					if fields := pythonParseFunctionalNamedTupleFields(right, content); len(fields) > 0 {
+						if fieldIndex[typeName] == nil {
+							fieldIndex[typeName] = map[string]string{}
+						}
+						for f, t := range fields {
+							fieldIndex[typeName][f] = t
+						}
+					}
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+}
+
+// pythonIsTypingNamedTupleCall reports NamedTuple(...) / typing.NamedTuple(...).
+func pythonIsTypingNamedTupleCall(call *grammar.Node, content []byte) bool {
+	if call == nil || call.Type() != "call" {
+		return false
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil {
+		return false
+	}
+	if fn.Type() == "identifier" {
+		return ingest.NodeText(fn, content) == "NamedTuple"
+	}
+	if fn.Type() == "attribute" {
+		obj := ingest.ChildByField(fn, "object")
+		attr := ingest.ChildByField(fn, "attribute")
+		return obj != nil && attr != nil &&
+			obj.Type() == "identifier" &&
+			ingest.NodeText(obj, content) == "typing" &&
+			ingest.NodeText(attr, content) == "NamedTuple"
+	}
+	return false
+}
+
+// pythonParseFunctionalNamedTupleFields returns field→type from a functional
+// NamedTuple call: keyword types (a=A) and/or list/tuple of (name, type) pairs.
+// Type leaves are bare identifiers only; other forms fail closed.
+func pythonParseFunctionalNamedTupleFields(call *grammar.Node, content []byte) map[string]string {
+	out := map[string]string{}
+	if call == nil {
+		return out
+	}
+	argList := ingest.ChildByField(call, "arguments")
+	if argList == nil {
+		return out
+	}
+	// Keyword form: NamedTuple("Box", a=A, b=B)
+	for i := uint32(0); i < argList.ChildCount(); i++ {
+		ch := argList.Child(i)
+		if ch.Type() != "keyword_argument" {
+			continue
+		}
+		nameN := ingest.ChildByField(ch, "name")
+		valN := ingest.ChildByField(ch, "value")
+		if nameN == nil || valN == nil || valN.Type() != "identifier" {
+			continue
+		}
+		out[ingest.NodeText(nameN, content)] = ingest.NodeText(valN, content)
+	}
+	// List/tuple form: NamedTuple("Box", [("a", A), ("b", B)])
+	// Second positional arg is the fields sequence (first is typename string).
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) < 2 {
+		return out
+	}
+	seq := args[1]
+	if seq.Type() != "list" && seq.Type() != "tuple" {
+		return out
+	}
+	for i := uint32(0); i < seq.ChildCount(); i++ {
+		pair := seq.Child(i)
+		if pair.Type() != "tuple" {
+			continue
+		}
+		var parts []*grammar.Node
+		for j := uint32(0); j < pair.ChildCount(); j++ {
+			ch := pair.Child(j)
+			if ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," || ch.Type() == "comment" {
+				continue
+			}
+			parts = append(parts, ch)
+		}
+		if len(parts) != 2 {
+			continue
+		}
+		fname := ""
+		if parts[0].Type() == "string" {
+			_, fname = pythonStringContent(parts[0], content)
+		}
+		if !pythonIsIdentifier(fname) || parts[1].Type() != "identifier" {
+			continue
+		}
+		out[fname] = ingest.NodeText(parts[1], content)
+	}
+	return out
 }
 
 // pythonBindClassLocalFields records "local.field" → type for each annotated
