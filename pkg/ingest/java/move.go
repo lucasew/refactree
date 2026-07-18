@@ -1999,6 +1999,9 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // length/range bounds only; Class-typed overloads fail closed via first-arg peel only),
 // Stream.concat(s1, s2) → element type when both stream args agree,
 // Stream.generate(() -> new A()) → "A",
+// CompletableFuture.supplyAsync(() -> new A()) / supplyAsync(() -> new A(), ex) → "A"
+// (CF of T from supplier body; enables supplyAsync(() -> new A()).join() /
+// var f = supplyAsync(() -> new A()); f.join()),
 // Stream.iterate(new A(), …) / iterate(new A(), pred, …) → "A" (seed creation type),
 // Stream.ofNullable(new A()) → "A",
 // Arrays.stream(as) / Arrays.stream(new A[]{...}) → "A",
@@ -2325,6 +2328,15 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 		case "generate":
 			// Stream.generate(() -> new A()) — element type from supplier body.
 			return javaStreamGenerateElemType(obj, content)
+		case "supplyAsync":
+			// CompletableFuture.supplyAsync(() -> new A()) /
+			// supplyAsync(() -> new A(), executor) — result T from supplier body.
+			// Enables supplyAsync(() -> new A()).join().m() / get() / getNow(d) /
+			// resultNow() and var f = supplyAsync(() -> new A()); f.join().m() under
+			// foreign same-leaf methods (same supplier peel as Stream.generate).
+			// Executor arg ignored; blocks / method refs / non-creation bodies fail closed.
+			// runAsync (Void) is not wired.
+			return javaCompletableFutureSupplyAsyncElemType(obj, content)
 		case "iterate":
 			// Stream.iterate(new A(), a -> a) / iterate(new A(), pred, a -> a) —
 			// element type from seed creation.
@@ -2789,6 +2801,24 @@ func javaStreamConcatElemType(call *grammar.Node, content []byte, elemOf, valOf 
 // Supplier must be an expression-bodied lambda whose body is object creation.
 // Blocks, method refs, and non-creation bodies fail closed.
 func javaStreamGenerateElemType(call *grammar.Node, content []byte) string {
+	return javaStaticSupplierCreationElemType(call, content, "Stream", 1)
+}
+
+// javaCompletableFutureSupplyAsyncElemType recovers T from
+// CompletableFuture.supplyAsync(() -> new T(...)) /
+// supplyAsync(() -> new T(...), executor).
+// First arg must be an expression-bodied supplier lambda whose body is object
+// creation; optional Executor is ignored. Blocks, method refs, and non-creation
+// bodies fail closed (same shapes as Stream.generate).
+func javaCompletableFutureSupplyAsyncElemType(call *grammar.Node, content []byte) string {
+	return javaStaticSupplierCreationElemType(call, content, "CompletableFuture", 2)
+}
+
+// javaStaticSupplierCreationElemType recovers T from a static factory whose first
+// argument is () -> new T(...) (expression-bodied). recvWant is the simple
+// receiver leaf (Stream / CompletableFuture); maxArgs is 1 for generate and 2 for
+// supplyAsync (optional Executor). Other arities / receivers / bodies fail closed.
+func javaStaticSupplierCreationElemType(call *grammar.Node, content []byte, recvWant string, maxArgs int) string {
 	if call == nil || call.Type() != "method_invocation" {
 		return ""
 	}
@@ -2799,11 +2829,11 @@ func javaStreamGenerateElemType(call *grammar.Node, content []byte) string {
 	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
 		return ""
 	}
-	if ingest.NodeText(recvN, content) != "Stream" {
+	if ingest.NodeText(recvN, content) != recvWant {
 		return ""
 	}
 	args := javaCallArgs(call)
-	if len(args) != 1 || args[0].Type() != "lambda_expression" {
+	if len(args) < 1 || len(args) > maxArgs || args[0].Type() != "lambda_expression" {
 		return ""
 	}
 	body := ingest.ChildByField(args[0], "body")
@@ -4585,6 +4615,8 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	fa.getNow(d) → elemOf[fa] (CompletableFuture<A>; default does not change T)
 //	CompletableFuture.completedFuture(new A()).join() / get() / getNow(d) / resultNow() → A
 //	  (factory pipeline peel; same leaf as var f = completedFuture(new A()); f.join())
+//	CompletableFuture.supplyAsync(() -> new A()).join() / get() / getNow(d) / resultNow() → A
+//	  (supplier-body peel; same leaf as var f = supplyAsync(() -> new A()); f.join())
 //	fa.thenApply(a -> a).join() / getNow(d) / resultNow() → T (identity mapper only;
 //	  type-changing thenApply mappers fail closed — same shapes as Optional.map)
 //	fa.applyToEither(other, a -> a).join() / getNow(d) / resultNow() → T (identity
