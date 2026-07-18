@@ -1878,6 +1878,7 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `a = next(iter(items))` / `a = next(items)` / `a = next(x for x in items)`
 // (element type of the iterable arg / identity genexp),
 // `a = min(items)` / `a = max(items)` / `a = min(items, key=...)` (same element type),
+// `a = choice(items)` / `a = random.choice(items)` (same element type),
 // `a = heappop(items)` / `a = heapq.heappop(items)` (heap element type; same as next),
 // `a = items[0]` / `a = d[k]` / `a = items.copy()[0]` (element/value of a known collection),
 // `a = items.pop()` / `a = items.pop(0)` / `a = d.pop(k)` (same element/value type),
@@ -1894,7 +1895,8 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // (`match d: case {"k": a}:` / `case {"k": a as x}:` with `d: dict[K, A]` —
 // value slots are the dict value leaf; **rest fails closed),
 // walrus (`a := A()`, `a := next(items)`, `a := next(x for x in items)`,
-// `a := min(items)`, `a := heappop(items)`, `a := heapq.heappop(items)`,
+// `a := min(items)`, `a := choice(items)`, `a := random.choice(items)`,
+// `a := heappop(items)`, `a := heapq.heappop(items)`,
 // `a := items.pop()`, `a := items.popleft()`, `a := d.get(k)`,
 // `a := d.setdefault(k)`, `a := it.__next__()`, `a := items[0]` — same RHS typing as plain assignment),
 // for/comprehension targets over known collections
@@ -1914,6 +1916,8 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `for a in takewhile/dropwhile/filterfalse(pred, xs)` /
 // `for a in itertools.takewhile/dropwhile/filterfalse(pred, xs)`,
 // `for a in compress(xs, selectors)` / `for a in itertools.compress(xs, selectors)`,
+// `for a in choices(xs)` / `for a in random.choices(xs, k=n)` /
+// `for a in sample(xs, k)` / `for a in random.sample(xs, k)`,
 // `for a in Counter(items)` / `for a in collections.Counter(items)`,
 // `for a in Counter(items).elements()`,
 // `for a in dict.fromkeys(items)` / `d = dict.fromkeys(keys, A()); d.values()`),
@@ -2005,6 +2009,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								out[lname] = true
 							}
 						}
+						// a = choice(items) — from random import choice; element of seq.
+						if fname == "choice" {
+							if et := pythonRandomChoiceElemType(right, content, elemOf, egElems); ourReceivers[et] {
+								out[lname] = true
+							}
+						}
 						// a = heappop(items) — from heapq import heappop; element of heap.
 						if fname == "heappop" {
 							if et := pythonHeappopElemType(right, content, elemOf, egElems); ourReceivers[et] {
@@ -2042,6 +2052,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							case "heappop":
 								// a = heapq.heappop(items) — module-qualified; element of 1st arg.
 								if et := pythonHeappopElemType(right, content, elemOf, egElems); ourReceivers[et] {
+									out[lname] = true
+								}
+							case "choice":
+								// a = random.choice(items) — module-qualified; element of seq.
+								if et := pythonRandomChoiceElemType(right, content, elemOf, egElems); ourReceivers[et] {
 									out[lname] = true
 								}
 							case "reduce":
@@ -2161,6 +2176,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							out[lname] = true
 						}
 					}
+					// a := choice(items) — from random import choice
+					if fname == "choice" {
+						if et := pythonRandomChoiceElemType(valueN, content, elemOf, egElems); ourReceivers[et] {
+							out[lname] = true
+						}
+					}
 					// a := heappop(items)
 					if fname == "heappop" {
 						if et := pythonHeappopElemType(valueN, content, elemOf, egElems); ourReceivers[et] {
@@ -2193,6 +2214,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						case "heappop":
 							// a := heapq.heappop(items)
 							if et := pythonHeappopElemType(valueN, content, elemOf, egElems); ourReceivers[et] {
+								out[lname] = true
+							}
+						case "choice":
+							// a := random.choice(items)
+							if et := pythonRandomChoiceElemType(valueN, content, elemOf, egElems); ourReceivers[et] {
 								out[lname] = true
 							}
 						case "reduce":
@@ -2252,6 +2278,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// for a in takewhile/dropwhile/filterfalse / itertools.takewhile/dropwhile/filterfalse /
 			// for a in compress / itertools.compress /
 			// for a in nlargest/nsmallest / heapq.nlargest/nsmallest /
+			// for a in choices/sample / random.choices/random.sample /
 			// for a in dict.fromkeys(items) /
 			// [a.m() for a in xs] / for a in e.exceptions
 			left := ingest.ChildByField(n, "left")
@@ -2644,6 +2671,39 @@ func pythonMinMaxElemType(call *grammar.Node, content []byte, elemOf, egElems ma
 	return pythonIterableElemType(args[0], content, elemOf, egElems)
 }
 
+// pythonRandomChoiceElemType recovers the element type of choice(seq) /
+// random.choice(seq). The sequence is the first positional arg (same element
+// typing as next(iterable)). Bare choice (from random import choice) and
+// module-qualified random.choice are accepted; other receivers fail closed.
+// choices/sample yield lists — see pythonIterableElemType.
+func pythonRandomChoiceElemType(call *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil {
+		return ""
+	}
+	switch fn.Type() {
+	case "identifier":
+		if ingest.NodeText(fn, content) != "choice" {
+			return ""
+		}
+	case "attribute":
+		attr := ingest.ChildByField(fn, "attribute")
+		obj := ingest.ChildByField(fn, "object")
+		if attr == nil || ingest.NodeText(attr, content) != "choice" {
+			return ""
+		}
+		if obj == nil || obj.Type() != "identifier" || ingest.NodeText(obj, content) != "random" {
+			return ""
+		}
+	default:
+		return ""
+	}
+	return pythonNextElemType(call, content, elemOf, egElems)
+}
+
 // pythonHeappopElemType recovers the element type of heappop(heap) /
 // heapq.heappop(heap). The heap is the first positional arg (same element typing
 // as next(iterable)). Bare heappop (from heapq import heappop) and module-
@@ -2796,6 +2856,7 @@ func pythonSubscriptElemType(sub *grammar.Node, content []byte, elemOf, egElems 
 // takewhile / dropwhile / filterfalse / itertools.* (2nd arg iterable; pred ignored),
 // compress / itertools.compress (1st arg data; selectors ignored),
 // nlargest / nsmallest / heapq.nlargest / heapq.nsmallest (2nd arg iterable; n/key ignored),
+// choices / sample / random.choices / random.sample (1st arg population; k/weights ignored),
 // Counter / collections.Counter (keys = iterable elements; .elements() same),
 // dict.fromkeys(iterable[, value]) (keys = 1st-arg elements; value ignored here),
 // items.copy() (zero-arg; same element type as receiver),
@@ -2900,6 +2961,14 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 					return ""
 				}
 				return pythonIterableElemType(args[1], content, elemOf, egElems)
+			case "choices", "sample":
+				// choices(population, ...[, k=]) / sample(population, k) from random —
+				// yield elements of population (1st arg); weights/k ignored.
+				args, ok := pythonCallPositionalArgNodes(right)
+				if !ok || len(args) == 0 {
+					return ""
+				}
+				return pythonIterableElemType(args[0], content, elemOf, egElems)
 			}
 		}
 		// items.copy() / list(items).copy() — zero-arg shallow copy preserves
@@ -2912,6 +2981,7 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		// itertools.cycle(...) / itertools.compress(...) /
 		// itertools.takewhile/dropwhile/filterfalse(...) — same as bare helpers.
 		// heapq.nlargest / heapq.nsmallest — same as bare nlargest/nsmallest.
+		// random.choices / random.sample — same as bare choices/sample.
 		// collections.deque(xs) / collections.Counter(xs) — same as bare forms.
 		if fn := ingest.ChildByField(right, "function"); fn != nil && fn.Type() == "attribute" {
 			if attr := ingest.ChildByField(fn, "attribute"); attr != nil {
@@ -2992,6 +3062,21 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 						return ""
 					}
 					return pythonIterableElemType(args[1], content, elemOf, egElems)
+				case "choices", "sample":
+					// random.choices(population, ...[, k=]) / random.sample(population, k)
+					// — element type of 1st positional arg (weights/k ignored).
+					objN := ingest.ChildByField(fn, "object")
+					if objN == nil || objN.Type() != "identifier" {
+						return ""
+					}
+					if ingest.NodeText(objN, content) != "random" {
+						return ""
+					}
+					args, ok := pythonCallPositionalArgNodes(right)
+					if !ok || len(args) == 0 {
+						return ""
+					}
+					return pythonIterableElemType(args[0], content, elemOf, egElems)
 				case "deque", "Counter":
 					// collections.deque(iterable[, maxlen]) /
 					// collections.Counter(iterable) — element of 1st arg.
