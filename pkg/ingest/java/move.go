@@ -2297,17 +2297,20 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// Map view receivers (descendingMap/headMap/…) recover K via the key
 			// pipeline (dual of values → javaMapPipelineValueType).
 			return javaMapPipelineKeyType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
-		case "of", "asList", "ofNullable", "singletonList", "singleton", "completedFuture":
+		case "of", "asList", "ofNullable", "singletonList", "singleton", "completedFuture", "completedStage":
 			// List.of(new A()) / Stream.of(new A(), new A()) / Arrays.asList(new A())
 			// / Set.of(new A()) / Optional.of(new A()) / Optional.ofNullable(new A())
 			// / Stream.ofNullable(new A())
 			// / Collections.singletonList(new A()) / Collections.singleton(new A())
 			// / CompletableFuture.completedFuture(new A())
+			// / CompletableFuture.completedStage(new A())
 			// — element type from homogeneous new T(...) args.
 			// Enables completedFuture(new A()).join().m() / get() / getNow(d) /
 			// resultNow() and var f = completedFuture(new A()); f.join().m() under
 			// foreign same-leaf methods (javaStaticCollectionOfElemType already peels
-			// completedFuture; wire it into the pipeline switch).
+			// completedFuture/completedStage; wire it into the pipeline switch).
+			// completedStage returns CompletionStage; toCompletableFuture().join()
+			// peels as type-preserving stages on the same T leaf.
 			// Arrays.asList(as) / Arrays.asList(new A[]{...}) — when args are not
 			// homogeneous creations, peel first-arg array element type (same path as
 			// Arrays.stream / copyOf). List/Set.of stay creation-only.
@@ -4816,8 +4819,9 @@ func javaMapEntryDeclaredValueType(typeN *grammar.Node, content []byte) string {
 
 // javaStaticCollectionOfElemType recovers the element type of List/Stream/Set.of(...)
 // Arrays.asList(...), Optional.of/ofNullable(...), Stream.ofNullable(...),
-// CompletableFuture.completedFuture(...), Collections.singletonList(...), and
-// Collections.singleton(...) when every argument is `new T(...)` with the same T.
+// CompletableFuture.completedFuture(...)/completedStage(...),
+// Collections.singletonList(...), and Collections.singleton(...) when every
+// argument is `new T(...)` with the same T.
 // Non-creation args and mixed types fail closed.
 func javaStaticCollectionOfElemType(call *grammar.Node, content []byte, method string) string {
 	if call == nil || call.Type() != "method_invocation" {
@@ -4844,8 +4848,9 @@ func javaStaticCollectionOfElemType(call *grammar.Node, content []byte, method s
 		if recv != "Optional" && recv != "Stream" {
 			return ""
 		}
-	case "completedFuture":
-		// CompletableFuture.completedFuture(new T(...)).
+	case "completedFuture", "completedStage":
+		// CompletableFuture.completedFuture(new T(...)) /
+		// CompletableFuture.completedStage(new T(...)).
 		if recv != "CompletableFuture" {
 			return ""
 		}
