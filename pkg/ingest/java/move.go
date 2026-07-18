@@ -1016,8 +1016,14 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 		}
 		return javaRenameByTypeMaps(tn, ourReceivers, foreignReceivers, nil)
 	}
-	// xs[0].helper() — recurse into array root (handles (xs)[0] / matrix[i][j]).
+	// xs[0].helper() — recover element type when the array root is tracked in
+	// elemOf (A[] / var arr = stream.toArray()) or is a toArray/array-creation
+	// pipeline; otherwise peel into the array root (handles (xs)[0] / matrix[i][j]
+	// and A[] params collapsed into typedLocals).
 	if obj.Type() == "array_access" {
+		if et := javaArrayAccessElemType(obj, content, elemOf, valOf); et != "" {
+			return javaRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+		}
 		arr := ingest.ChildByField(obj, "array")
 		if arr == nil {
 			return len(foreignReceivers) == 0
@@ -1251,9 +1257,10 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					entryValOf[name] = vt
 				} else if et := javaStreamPipelineElemType(valN, content, elemOf, valOf); et != "" {
 					// var list = as.stream().toList() / collect(Collectors.toList()/toSet()) /
+					// var arr = as.stream().toArray() / toArray(new A[0]) /
 					// var s = as.stream() / var opt = as.stream().findFirst() —
-					// track collection/stream/Optional element type for later
-					// list.forEach / for (var a : list) / opt.ifPresent (not a scalar A).
+					// track collection/stream/Optional/array element type for later
+					// list.forEach / for (var a : list) / arr[i] / opt.ifPresent (not a scalar A).
 					elemOf[name] = et
 				} else if et := javaMapPipelineValueType(valN, content, elemOf, valOf); et != "" {
 					// var m = as.stream().collect(Collectors.toMap(k, a -> a[, …])) /
@@ -1699,6 +1706,8 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // collect(mapping(a -> a, toList()/…)) /
 // collect(flatMapping(a -> Stream.of(a), toList()/…)) / collect(teeing(toList()/…, …, (list, …) -> list)) → same
 // element (Collection<T> for forEach / enhanced-for),
+// as.stream().toArray() / toArray(generator) / as.toArray([generator]) → same
+// element (T[] for toArray()[i] / var arr = toArray(); arr[i]),
 // m.values() → valOf[m],
 // List.of(new A()) / Stream.of(new A()) / Arrays.asList(new A()) → "A",
 // Collections.singletonList(new A()) / Collections.singleton(new A()) → "A",
@@ -1773,13 +1782,15 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// not change the element type). Identity reduce returns T directly —
 			// handled in javaCollectionAccessElemType for bare var targets.
 			// toList() returns List<T> — element preserved for forEach / for-var.
+			// toArray() / toArray(generator) returns T[] (Object[] for zero-arg Stream)
+			// — element preserved for toArray()[i] / var arr = toArray(); arr[i].
 			// reversed() returns List/SequencedCollection of the same element type
 			// (Java 21 SequencedCollection; order only, element type unchanged).
 			// Map.reversed() (SequencedMap) is not an element pipeline — key-type
 			// elemOf would mis-type .get(k); value typing uses javaMapPipelineValueType.
 			// subList(from, to) returns List of the same element type
 			// (List view; bounds only, element type unchanged).
-			"findFirst", "findAny", "min", "max", "reduce", "toList", "reversed", "subList":
+			"findFirst", "findAny", "min", "max", "reduce", "toList", "toArray", "reversed", "subList":
 			recv := ingest.ChildByField(obj, "object")
 			// Arrays.stream(arr[, from, to]) — element type from first arg, not
 			// from receiver Arrays (unlike coll.stream() which uses elemOf[coll]).
@@ -3705,6 +3716,8 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	  (zero-arg Optional.get; also List.of(new A()).get(i) / toList().get(i) via pipeline)
 //	as[0] / (as)[0] / matrix[i][j] → elemOf[as] (array element; index does not change T)
 //	  (A[] as / A[][] matrix; new A[]{...}[i] via array creation type)
+//	as.stream().toArray()[i] / as.stream().toArray(new A[0])[i] / as.toArray(new A[0])[i]
+//	  → stream/collection element type (toArray preserves T for index access)
 //	aa.getAndSet(v) / aa.getAndUpdate(f) / aa.updateAndGet(f) /
 //	  aa.accumulateAndGet(x, f) / aa.compareAndExchange(e, u) /
 //	  aa.getPlain() / aa.getAcquire() / aa.getOpaque() → elemOf[aa]
@@ -3737,6 +3750,8 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 // (return V; updater/expected args do not change the type leaf).
 // Array index as[0] / (as)[0] recovers elemOf[as] (same leaf as List.get; index
 // does not change T). Nested matrix[i][j] peels to the root array local.
+// Stream/Collection.toArray()[i] recovers the pipeline element type (toArray is
+// type-preserving in javaStreamPipelineElemType).
 // Function.apply prefers valOf (R) then elemOf (UnaryOperator/BinaryOperator T);
 // BiFunction stores R in valOf at bind time (see javaRecordCollectionElem).
 // Fail closed on other methods / unknown receivers.
@@ -3763,8 +3778,9 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 	// as[0] / (as)[0] / matrix[i][j] — element of a typed array local.
 	// Direct as[0].m() already renames via typedLocals (javaTypeName collapses
 	// A[] → A on the array param); var xa = as[0] needs this elemOf path.
+	// as.stream().toArray()[i] / as.toArray(new A[0])[i] — pipeline element type.
 	if val.Type() == "array_access" {
-		return javaArrayAccessElemType(val, content, elemOf)
+		return javaArrayAccessElemType(val, content, elemOf, valOf)
 	}
 	if val.Type() != "method_invocation" {
 		return ""
@@ -3944,10 +3960,11 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 }
 
 // javaArrayAccessElemType recovers T from as[i] / (as)[i] / matrix[i][j] when the
-// root array is a local tracked in elemOf (A[] as → "A"), or from new A[]{...}[i]
-// via the creation type. Index expressions do not change the element type leaf.
+// root array is a local tracked in elemOf (A[] as → "A"), from new A[]{...}[i]
+// via the creation type, or from Stream/Collection.toArray()[i] via the pipeline
+// element type. Index expressions do not change the element type leaf.
 // Nested array_access peels to the root; unknown roots fail closed.
-func javaArrayAccessElemType(val *grammar.Node, content []byte, elemOf map[string]string) string {
+func javaArrayAccessElemType(val *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	for val != nil && !val.IsNull() {
 		for val != nil && !val.IsNull() && val.Type() == "parenthesized_expression" {
 			inner := ingest.ChildByField(val, "expression")
@@ -3989,6 +4006,12 @@ func javaArrayAccessElemType(val *grammar.Node, content []byte, elemOf map[strin
 		if typeN := ingest.ChildByField(val, "type"); typeN != nil {
 			return javaTypeName(typeN, content)
 		}
+	case "method_invocation":
+		// as.stream().toArray()[i] / as.stream().toArray(new A[0])[i] /
+		// as.toArray(new A[0])[i] / var arr = as.stream().toArray(); arr[i] when
+		// the root is still the call — element type from the stream/collection
+		// pipeline (toArray is type-preserving).
+		return javaStreamPipelineElemType(val, content, elemOf, valOf)
 	}
 	return ""
 }
