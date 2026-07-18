@@ -956,8 +956,9 @@ func javaRenameByTypeMaps(name string, ourReceivers, foreignReceivers, typedLoca
 // am.get(k).m()).
 // elemOf maps collection/Optional/Supplier locals → element type leaf
 // (for as.get(i).m() / oa.get().m() / sa.get().m() under foreign same-leaf methods).
-// compOf maps "local.component" → component type leaf for record accessors
-// (for ba.a().m() / var xa = ba.a() under foreign same-leaf methods).
+// compOf maps "local.member" → type leaf for record component accessors and
+// class/record field access (ba.a().m() / box.a.m() / var xa = ba.a() / var xa = box.a
+// under foreign same-leaf methods).
 func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, entryValOf, valOf, elemOf, compOf map[string]string, implementsEdges map[string]map[string]bool) bool {
 	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
 		var inner *grammar.Node
@@ -995,10 +996,15 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 		return javaRenameByTypeMaps(enclosingClass, ourReceivers, foreignReceivers, nil)
 	}
 	// Nested type / enum-constant: Outer.Nested.m(), Color.RED.m()
+	// Also box.a.run() / ba.a.run() when box/ba is a typed local with field or
+	// record component a of type T (compOf; under foreign same-leaf methods).
 	if obj.Type() == "field_access" {
 		text := ingest.NodeText(obj, content)
 		if ourReceivers[text] || foreignReceivers[text] {
 			return ourReceivers[text]
+		}
+		if ft := javaFieldAccessMemberType(obj, content, compOf); ft != "" {
+			return javaRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 		}
 		return javaRenameByTypeMaps(javaFieldAccessRoot(obj, content), ourReceivers, foreignReceivers, nil)
 	}
@@ -1110,20 +1116,21 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // am.get(k).m() under foreign same-leaf methods).
 // elemOf maps collection/Optional/Supplier locals → element type leaf (returned
 // for inline as.get(i).m() / oa.get().m() / sa.get().m() under foreign same-leaf methods).
-// compOf maps "local.component" → component type leaf for record accessors
-// (ba.a() when ba is a BoxA record with component A a).
+// compOf maps "local.member" → type leaf for record component accessors and
+// class/record fields (ba.a() / box.a / var xa = ba.a() / var xa = box.a).
 func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string, map[string]string, map[string]string, map[string]string) {
 	out := map[string]bool{}
 	entryValOf := map[string]string{}
 	valOf := map[string]string{}
 	// Collection/stream locals: name → element type leaf (List<A> as → "A").
 	elemOf := map[string]string{}
-	// Record locals: "ba.a" → "A" for ba.a() / var xa = ba.a().
+	// Record/class locals: "ba.a" / "box.a" → "A" for ba.a() / box.a / var xa = ….
 	compOf := map[string]string{}
 	if root == nil || len(ourReceivers) == 0 {
 		return out, entryValOf, valOf, elemOf, compOf
 	}
 	recordIndex := javaRecordComponentIndex(root, content)
+	fieldIndex := javaClassFieldIndex(root, content)
 	// groupingBy/partitioningBy maps: name → element type of each value list
 	// (Map<K,List<T>> / Map<Boolean,List<T>> → "T").
 	groupValOf := map[string]string{}
@@ -1144,6 +1151,7 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 				javaRecordCollectionElem(typeN, name, content, elemOf, valOf)
 				tn := javaTypeName(typeN, content)
 				javaBindRecordLocalComps(name, tn, recordIndex, compOf)
+				javaBindRecordLocalComps(name, tn, fieldIndex, compOf)
 				if ourReceivers[tn] {
 					out[name] = true
 				} else if vt := javaMapEntryDeclaredValueType(typeN, content); vt != "" {
@@ -1178,6 +1186,7 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 				javaRecordCollectionElem(typeN, name, content, elemOf, valOf)
 				if !inferFromInit {
 					javaBindRecordLocalComps(name, tn, recordIndex, compOf)
+					javaBindRecordLocalComps(name, tn, fieldIndex, compOf)
 				}
 				if explicitOurs {
 					out[name] = true
@@ -1192,15 +1201,20 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 				}
 				valN := ingest.ChildByField(c, "value")
 				// javaInferExprType treats ident.method() as type ident (A.make()).
-				// Only trust it when the leaf is ours or a known record type; else
-				// fall through so ba.a() binds via record component access.
+				// Only trust it when the leaf is ours or a known record/class type; else
+				// fall through so ba.a() / box.a bind via member access.
 				inferred := javaInferExprType(valN, content)
 				if ourReceivers[inferred] {
 					out[name] = true
-				} else if recordIndex[inferred] != nil {
-					// var ba = new BoxA(...) — track record components when the
-					// record type itself is not our receiver.
+				} else if recordIndex[inferred] != nil || fieldIndex[inferred] != nil {
+					// var ba = new BoxA(...) / var box = new Box() — track members when
+					// the outer type itself is not our receiver.
 					javaBindRecordLocalComps(name, inferred, recordIndex, compOf)
+					javaBindRecordLocalComps(name, inferred, fieldIndex, compOf)
+				} else if et := javaFieldAccessMemberType(valN, content, compOf); ourReceivers[et] {
+					// var xa = box.a / var xa = ba.a — class/record field access when
+					// box/ba is a typed local with member type A.
+					out[name] = true
 				} else if et := javaCollectionAccessElemType(valN, content, elemOf, valOf, entryValOf, compOf); ourReceivers[et] {
 					// var xa = as.get(0) / am.get("k") / as.iterator().next() / ia.next()
 					// / qa.poll() / qa.peek() / qa.take() / da.takeFirst()/takeLast()
@@ -1365,8 +1379,68 @@ func javaRecordComponentIndex(root *grammar.Node, content []byte) map[string]map
 	return out
 }
 
-// javaBindRecordLocalComps records "local.component" → type for each component of
-// a known same-file record type (enables ba.a() / var xa = ba.a() typing).
+// javaClassFieldIndex maps class type name → field name → field type leaf from
+// same-file class_declaration field_declaration (Box with A a → "Box" → {"a":"A"}).
+// Covers instance fields used as box.a.run() / var xa = box.a under foreign same-leaf methods.
+func javaClassFieldIndex(root *grammar.Node, content []byte) map[string]map[string]string {
+	out := map[string]map[string]string{}
+	if root == nil {
+		return out
+	}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		if n.Type() == "class_declaration" {
+			nameN := ingest.ChildByField(n, "name")
+			body := ingest.ChildByField(n, "body")
+			if nameN != nil && body != nil {
+				typeName := ingest.NodeText(nameN, content)
+				fields := map[string]string{}
+				for i := uint32(0); i < body.ChildCount(); i++ {
+					ch := body.Child(i)
+					if ch.Type() != "field_declaration" {
+						continue
+					}
+					typeN := ingest.ChildByField(ch, "type")
+					if typeN == nil {
+						continue
+					}
+					tn := javaTypeName(typeN, content)
+					if tn == "" {
+						continue
+					}
+					for j := uint32(0); j < ch.ChildCount(); j++ {
+						decl := ch.Child(j)
+						if decl.Type() != "variable_declarator" {
+							continue
+						}
+						fnameN := ingest.ChildByField(decl, "name")
+						if fnameN == nil {
+							fnameN = ingest.ChildByType(decl, "identifier")
+						}
+						if fnameN == nil {
+							continue
+						}
+						fields[ingest.NodeText(fnameN, content)] = tn
+					}
+				}
+				if len(fields) > 0 {
+					out[typeName] = fields
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	return out
+}
+
+// javaBindRecordLocalComps records "local.member" → type for each component/field of
+// a known same-file record or class type (enables ba.a() / box.a / var xa = … typing).
 func javaBindRecordLocalComps(local, typeName string, index map[string]map[string]string, compOf map[string]string) {
 	if local == "" || typeName == "" || index == nil || compOf == nil {
 		return
@@ -1378,6 +1452,23 @@ func javaBindRecordLocalComps(local, typeName string, index map[string]map[strin
 	for c, t := range comps {
 		compOf[local+"."+c] = t
 	}
+}
+
+// javaFieldAccessMemberType recovers T from box.a / ba.a when box/ba is a typed
+// local with field or record component a of type T (identifier object only).
+func javaFieldAccessMemberType(obj *grammar.Node, content []byte, compOf map[string]string) string {
+	if obj == nil || obj.Type() != "field_access" || compOf == nil {
+		return ""
+	}
+	base := ingest.ChildByField(obj, "object")
+	field := ingest.ChildByField(obj, "field")
+	if field == nil {
+		field = ingest.ChildByType(obj, "identifier")
+	}
+	if base == nil || field == nil || base.Type() != "identifier" {
+		return ""
+	}
+	return compOf[ingest.NodeText(base, content)+"."+ingest.NodeText(field, content)]
 }
 
 // javaRecordCollectionElem records name → element/value types for arrays and generics
