@@ -1710,13 +1710,26 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 			}
 		case 2:
 			// ConcurrentHashMap.reduceEntries(threshold, BiFunction on Entry,Entry) —
-			// 2-arg form only; bind entryValOf for e.getValue().m() on both params.
-			// 3-arg form's BiFunction is on U (not Entry) — fail closed here.
+			// 2-arg form: bind entryValOf for e.getValue().m() on both params.
+			// 3-arg form's BiFunction is on U; getValue transformer (e -> e.getValue())
+			// yields U=V so both reducer params are V. Non-getValue transformers fail closed.
 			if method == "reduceEntries" {
-				if entryValOf != nil && len(javaCallArgs(call)) == 2 {
-					if vt := javaMapPipelineValueType(obj, content, elemOf, valOf); vt != "" {
-						entryValOf[params[0]] = vt
-						entryValOf[params[1]] = vt
+				callArgs := javaCallArgs(call)
+				switch len(callArgs) {
+				case 2:
+					if entryValOf != nil {
+						if vt := javaMapPipelineValueType(obj, content, elemOf, valOf); vt != "" {
+							entryValOf[params[0]] = vt
+							entryValOf[params[1]] = vt
+						}
+					}
+				case 3:
+					// BiFunction reducer on U; getValue transformer → U=V.
+					if javaIsEntryGetValueLambda(callArgs[1], content) {
+						if vt := javaMapPipelineValueType(obj, content, elemOf, valOf); vt != "" && ourReceivers[vt] {
+							out[params[0]] = true
+							out[params[1]] = true
+						}
 					}
 				}
 				continue
