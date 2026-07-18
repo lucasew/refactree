@@ -2546,9 +2546,12 @@ func javaMapResultElemType(call *grammar.Node, content []byte, elemOf, valOf map
 //	s.gather(Gatherers.mapConcurrent(n, a -> a)) → elem(s)
 //	s.gather(Gatherers.mapConcurrent(n, a -> new A())) → A
 //	s.gather(java.util.stream.Gatherers.mapConcurrent(n, a -> a)) → elem(s)
+//	s.gather(Gatherers.fold(() -> new A(), (a, t) -> a)) → A
+//	s.gather(Gatherers.scan(() -> new A(), (a, t) -> a)) → A
 //
-// Only mapConcurrent with an expression-bodied identity/new mapper is recognized.
-// windowFixed/windowSliding/fold/scan/custom gatherers fail closed.
+// mapConcurrent with expression-bodied identity/new mapper, and fold/scan with
+// expression-bodied `() -> new T()` initializer plus identity integrator
+// `(r, t) -> r`, are recognized. windowFixed/windowSliding/custom fail closed.
 func javaGatherResultElemType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	if call == nil || call.Type() != "method_invocation" {
 		return ""
@@ -2576,17 +2579,16 @@ func javaGatherResultElemType(call *grammar.Node, content []byte, elemOf, valOf 
 	if first == nil || first.Type() != "method_invocation" {
 		return ""
 	}
-	// Gatherers.mapConcurrent(...) / java.util.stream.Gatherers.mapConcurrent(...)
+	// Gatherers.mapConcurrent/fold/scan / java.util.stream.Gatherers.*
 	nameN := ingest.ChildByField(first, "name")
-	if nameN == nil || ingest.NodeText(nameN, content) != "mapConcurrent" {
+	if nameN == nil {
 		return ""
 	}
+	gName := ingest.NodeText(nameN, content)
 	recv := ingest.ChildByField(first, "object")
 	if !javaIsGatherersReceiver(recv, content) {
 		return ""
 	}
-	// Mapper is the first lambda among mapConcurrent args (after concurrency int).
-	var mapper *grammar.Node
 	var gArgs *grammar.Node
 	for i := uint32(0); i < first.ChildCount(); i++ {
 		if first.Child(i).Type() == "argument_list" {
@@ -2597,6 +2599,21 @@ func javaGatherResultElemType(call *grammar.Node, content []byte, elemOf, valOf 
 	if gArgs == nil {
 		return ""
 	}
+	switch gName {
+	case "mapConcurrent":
+		return javaGatherMapConcurrentElemType(call, gArgs, content, elemOf, valOf)
+	case "fold", "scan":
+		return javaGatherFoldScanElemType(gArgs, content)
+	default:
+		return ""
+	}
+}
+
+// javaGatherMapConcurrentElemType recovers R from Gatherers.mapConcurrent(n, mapper)
+// when mapper is expression-bodied a -> a (stream elem) or a -> new T().
+func javaGatherMapConcurrentElemType(gatherCall, gArgs *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	// Mapper is the first lambda among mapConcurrent args (after concurrency int).
+	var mapper *grammar.Node
 	for i := uint32(0); i < gArgs.ChildCount(); i++ {
 		ch := gArgs.Child(i)
 		if ch.Type() == "lambda_expression" {
@@ -2611,25 +2628,11 @@ func javaGatherResultElemType(call *grammar.Node, content []byte, elemOf, valOf 
 	if len(params) != 1 {
 		return ""
 	}
-	body := ingest.ChildByField(mapper, "body")
-	for body != nil && !body.IsNull() && body.Type() == "parenthesized_expression" {
-		inner := ingest.ChildByField(body, "expression")
-		if inner == nil {
-			for i := uint32(0); i < body.ChildCount(); i++ {
-				ch := body.Child(i)
-				if ch.Type() == "(" || ch.Type() == ")" {
-					continue
-				}
-				inner = ch
-				break
-			}
-		}
-		body = inner
-	}
+	body := javaLambdaExprBody(mapper)
 	if body == nil || body.IsNull() {
 		return ""
 	}
-	streamRecv := ingest.ChildByField(call, "object")
+	streamRecv := ingest.ChildByField(gatherCall, "object")
 	switch body.Type() {
 	case "identifier":
 		// a -> a — identity preserves stream element type.
@@ -2646,6 +2649,83 @@ func javaGatherResultElemType(call *grammar.Node, content []byte, elemOf, valOf 
 	default:
 		return ""
 	}
+}
+
+// javaGatherFoldScanElemType recovers R from Gatherers.fold/scan when the
+// initializer is expression-bodied `() -> new T()` and the integrator is
+// expression-bodied identity on the accumulator `(r, t) -> r`. Other shapes
+// (blocks, type-changing integrators, non-new suppliers) fail closed.
+func javaGatherFoldScanElemType(gArgs *grammar.Node, content []byte) string {
+	if gArgs == nil {
+		return ""
+	}
+	var lambdas []*grammar.Node
+	for i := uint32(0); i < gArgs.ChildCount(); i++ {
+		ch := gArgs.Child(i)
+		if ch != nil && ch.Type() == "lambda_expression" {
+			lambdas = append(lambdas, ch)
+		}
+	}
+	if len(lambdas) != 2 {
+		return ""
+	}
+	init, integ := lambdas[0], lambdas[1]
+	// Initializer: () -> new T()
+	if len(javaInferredLambdaParamNames(init, content)) != 0 {
+		return ""
+	}
+	initBody := javaLambdaExprBody(init)
+	if initBody == nil || initBody.Type() != "object_creation_expression" {
+		return ""
+	}
+	typeN := ingest.ChildByField(initBody, "type")
+	if typeN == nil {
+		return ""
+	}
+	tn := javaTypeName(typeN, content)
+	if tn == "" {
+		return ""
+	}
+	// Integrator: (r, t) -> r — identity on first param.
+	params := javaInferredLambdaParamNames(integ, content)
+	if len(params) != 2 {
+		return ""
+	}
+	integBody := javaLambdaExprBody(integ)
+	if integBody == nil || integBody.Type() != "identifier" {
+		return ""
+	}
+	if ingest.NodeText(integBody, content) != params[0] {
+		return ""
+	}
+	return tn
+}
+
+// javaLambdaExprBody returns the expression body of a lambda after unwrapping
+// parenthesized_expression. Block bodies fail closed (nil).
+func javaLambdaExprBody(lambda *grammar.Node) *grammar.Node {
+	if lambda == nil {
+		return nil
+	}
+	body := ingest.ChildByField(lambda, "body")
+	for body != nil && !body.IsNull() && body.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(body, "expression")
+		if inner == nil {
+			for i := uint32(0); i < body.ChildCount(); i++ {
+				ch := body.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		body = inner
+	}
+	if body == nil || body.IsNull() || body.Type() == "block" {
+		return nil
+	}
+	return body
 }
 
 // javaIsGatherersReceiver reports whether n is Gatherers or a qualified
