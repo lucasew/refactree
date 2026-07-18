@@ -1455,21 +1455,24 @@ func jsCollectShorthandBindingUses(block, pattern *grammar.Node, content []byte,
 }
 
 // jsRenameByTypeMaps: our → rename; foreign → skip; typedLocals → rename; else unique-leaf only.
-func jsRenameByTypeMaps(name string, ourReceivers, foreignReceivers, typedLocals map[string]bool) bool {
+// typedLocals maps local name → concrete type leaf (only our-receiver locals).
+func jsRenameByTypeMaps(name string, ourReceivers, foreignReceivers map[string]bool, typedLocals map[string]string) bool {
 	if ourReceivers[name] {
 		return true
 	}
 	if foreignReceivers[name] {
 		return false
 	}
-	if typedLocals != nil && typedLocals[name] {
-		return true
+	if typedLocals != nil {
+		if t := typedLocals[name]; t != "" && ourReceivers[t] {
+			return true
+		}
 	}
 	return len(foreignReceivers) == 0
 }
 
 // jsShouldRenameMember decides whether obj.oldLeaf is a call on one of our receivers.
-func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool) bool {
+func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers map[string]bool, typedLocals map[string]string) bool {
 	if obj == nil {
 		return false
 	}
@@ -1502,10 +1505,10 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 	if obj.Type() == "identifier" {
 		return jsRenameByTypeMaps(ingest.NodeText(obj, content), ourReceivers, foreignReceivers, typedLocals)
 	}
-	// await Promise.resolve(new A()) / Promise.resolve(new A()) — identity peels
+	// await Promise.resolve(new A() / a) / Promise.resolve(...) — identity peels
 	// under foreign same-leaf methods (same leaf as const a = await …; a.run()).
 	if obj.Type() == "await_expression" || obj.Type() == "call_expression" {
-		if t := jsPromiseResolveArgType(obj, content); t != "" {
+		if t := jsPromiseResolveArgType(obj, content, typedLocals); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 	}
@@ -1520,10 +1523,11 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 	return false
 }
 
-// jsTypedLocals maps local names constructed as ourReceivers (const b = new Box()).
-// Also covers simple TS-style typed parameters when present as type annotations.
-func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]bool {
-	out := map[string]bool{}
+// jsTypedLocals maps local names → concrete type leaf for ourReceivers
+// (const b = new Box() → "Box"). Also covers simple TS-style typed parameters
+// and Promise.resolve then callback params.
+func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]string {
+	out := map[string]string{}
 	if root == nil || len(ourReceivers) == 0 {
 		return out
 	}
@@ -1536,6 +1540,7 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 		case "lexical_declaration", "variable_declaration":
 			// const box = new Box(); var box = new Box()
 			// const a = await Promise.resolve(new A())
+			// const a = await Promise.resolve(x) after const x = new A()
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
 				if child.Type() != "variable_declarator" {
@@ -1547,10 +1552,10 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 					continue
 				}
 				if ctor := jsNewExpressionType(valN, content); ourReceivers[ctor] {
-					out[ingest.NodeText(nameN, content)] = true
-				} else if t := jsPromiseResolveArgType(valN, content); ourReceivers[t] {
-					// await Promise.resolve(new A()) — resolved value is A.
-					out[ingest.NodeText(nameN, content)] = true
+					out[ingest.NodeText(nameN, content)] = ctor
+				} else if t := jsPromiseResolveArgType(valN, content, out); ourReceivers[t] {
+					// await Promise.resolve(new A() / a) — resolved value is A.
+					out[ingest.NodeText(nameN, content)] = t
 				}
 			}
 		case "required_parameter", "optional_parameter", "assignment_pattern":
@@ -1565,13 +1570,13 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 			typeN := ingest.ChildByField(n, "type")
 			if nameN != nil && nameN.Type() == "identifier" && typeN != nil {
 				if tn := jsTypeName(typeN, content); ourReceivers[tn] {
-					out[ingest.NodeText(nameN, content)] = true
+					out[ingest.NodeText(nameN, content)] = tn
 				}
 			}
 		case "formal_parameters":
 			// plain JS has no types; walk children for TS parameters
 		case "call_expression":
-			// Promise.resolve(new A()).then(a => a.run()) — bind then callback param.
+			// Promise.resolve(new A() / a).then(a => a.run()) — bind then callback param.
 			jsBindPromiseThenParams(n, content, ourReceivers, out)
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -1608,11 +1613,13 @@ func jsNewExpressionType(n *grammar.Node, content []byte) string {
 }
 
 // jsPromiseResolveArgType recovers T from Promise.resolve(new T()) /
-// await Promise.resolve(new T()) when the single arg is a new_expression.
-// Enables (await Promise.resolve(new A())).run() and
+// Promise.resolve(a) when a is a typed local / await Promise.resolve(...).
+// Enables (await Promise.resolve(new A())).run(),
+// const a = new A(); Promise.resolve(a).then(x => x.run()), and
 // const a = await Promise.resolve(new A()); a.run() under foreign same-leaf.
-// Non-Promise receivers / multi-arg / non-new args fail closed.
-func jsPromiseResolveArgType(n *grammar.Node, content []byte) string {
+// Non-Promise receivers / multi-arg / unknown args fail closed.
+// typedLocals maps local → type leaf (may be nil).
+func jsPromiseResolveArgType(n *grammar.Node, content []byte, typedLocals map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -1627,7 +1634,7 @@ func jsPromiseResolveArgType(n *grammar.Node, content []byte) string {
 			arg = ch
 			break
 		}
-		return jsPromiseResolveArgType(arg, content)
+		return jsPromiseResolveArgType(arg, content, typedLocals)
 	}
 	if n.Type() == "parenthesized_expression" {
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -1635,7 +1642,7 @@ func jsPromiseResolveArgType(n *grammar.Node, content []byte) string {
 			if ch.Type() == "(" || ch.Type() == ")" {
 				continue
 			}
-			return jsPromiseResolveArgType(ch, content)
+			return jsPromiseResolveArgType(ch, content, typedLocals)
 		}
 		return ""
 	}
@@ -1676,14 +1683,24 @@ func jsPromiseResolveArgType(n *grammar.Node, content []byte) string {
 	if count != 1 || first == nil {
 		return ""
 	}
-	return jsNewExpressionType(first, content)
+	if t := jsNewExpressionType(first, content); t != "" {
+		return t
+	}
+	// Promise.resolve(a) after const a = new A() — peel typed local.
+	if first.Type() == "identifier" && typedLocals != nil {
+		if t := typedLocals[ingest.NodeText(first, content)]; t != "" {
+			return t
+		}
+	}
+	return ""
 }
 
 // jsBindPromiseThenParams types the first parameter of
-// Promise.resolve(new A()).then(a => …) / .then(function(a) { … }) when the
-// call receiver is Promise.resolve(new A()). Under foreign same-leaf methods,
+// Promise.resolve(new A() / a).then(x => …) / .then(function(x) { … }) when the
+// call receiver is Promise.resolve(...). Under foreign same-leaf methods,
 // only our-receiver resolved values bind so B is preserved.
-func jsBindPromiseThenParams(call *grammar.Node, content []byte, ourReceivers, out map[string]bool) {
+// out maps param name → type leaf.
+func jsBindPromiseThenParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, out map[string]string) {
 	if call == nil || call.Type() != "call_expression" || out == nil {
 		return
 	}
@@ -1696,8 +1713,8 @@ func jsBindPromiseThenParams(call *grammar.Node, content []byte, ourReceivers, o
 		return
 	}
 	obj := ingest.ChildByField(fn, "object")
-	// Receiver must be Promise.resolve(new T()) (possibly parenthesized).
-	t := jsPromiseResolveArgType(obj, content)
+	// Receiver must be Promise.resolve(new T() / typed local) (possibly parenthesized).
+	t := jsPromiseResolveArgType(obj, content, out)
 	if !ourReceivers[t] {
 		return
 	}
@@ -1747,7 +1764,7 @@ func jsBindPromiseThenParams(call *grammar.Node, content []byte, ourReceivers, o
 		}
 	}
 	if paramName != "" && paramName != "_" {
-		out[paramName] = true
+		out[paramName] = t
 	}
 }
 
