@@ -1059,6 +1059,7 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // / Arrays.stream(as).forEach(a -> a.m()) / Arrays.stream(new A[]{...}).map(a -> a.m())
 // / as.stream().findFirst().ifPresent(a -> a.m()) / Optional.of(new A()).ifPresent(a -> a.m())
 // / Optional.flatMap(a -> Optional.of(a)).ifPresent(x -> x.m()) / flatMap(...).orElse(d) /
+// / Optional.map(a -> a).ifPresent(x -> x.m()) / map(...).orElse(d) /
 // / Optional<A>.ifPresent(a -> a.m()) / opt.ifPresentOrElse(a -> a.m(), () -> {}) /
 // / Map<K,A>.forEach((k,v) -> v.m()) /
 // Map.computeIfPresent/compute/replaceAll((k,v) -> v.m()) / Map.merge((v1,v2) -> v1.m()) /
@@ -1436,8 +1437,10 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // Arrays.stream(as) / Arrays.stream(new A[]{...}) → "A",
 // Optional.of(new A()) / Optional.ofNullable(new A()) → "A",
 // Optional.flatMap(a -> Optional.of(a)) / ofNullable(a) / Optional::of → same element
-// when the mapper clearly rewraps T (see javaFlatMapResultElemType).
-// Type-changing stages (map / unknown flatMap mappers) fail closed so later
+// when the mapper clearly rewraps T (see javaFlatMapResultElemType),
+// Optional.map(a -> a) / map(a -> new A()) → same or known element
+// when the mapper clearly yields T (see javaMapResultElemType).
+// Type-changing stages (unknown map / flatMap mappers) fail closed so later
 // lambdas are not mis-typed.
 func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
@@ -1497,6 +1500,10 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// recover U from mapper when clearly Optional.of/ofNullable rewrap
 			// or another tracked Optional/collection local. Unknown mappers fail closed.
 			return javaFlatMapResultElemType(obj, content, elemOf, valOf)
+		case "map":
+			// Optional.map / Stream.map: recover U from mapper when clearly
+			// identity (a -> a) or new T(...). Unknown/type-changing mappers fail closed.
+			return javaMapResultElemType(obj, content, elemOf, valOf)
 		case "collect":
 			// Stream.collect(Collectors.toList()/toSet()) / collect(toList()/toSet()) /
 			// collect(Collectors::toList / Collectors::toSet) /
@@ -1517,9 +1524,98 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// — element type from homogeneous new T(...) args.
 			return javaStaticCollectionOfElemType(obj, content, name)
 		default:
-			// map/flatMapTo*/… change the element type — fail closed.
+			// flatMapTo*/mapTo*/… change the element type — fail closed.
 			return ""
 		}
+	default:
+		return ""
+	}
+}
+
+// javaMapResultElemType recovers U after Optional.map / Stream.map(mapper) when
+// the mapper clearly yields a known element type:
+//
+//	oa.map(a -> a) → elem(oa)                         // identity
+//	oa.map(a -> new A()) → A                          // object creation
+//	as.stream().map(a -> a).forEach(...) → elem(as)   // same for Stream
+//
+// Expression-bodied lambdas only; blocks, method refs, and other mappers fail
+// closed so type-changing maps stay unbound.
+func javaMapResultElemType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	var args *grammar.Node
+	for i := uint32(0); i < call.ChildCount(); i++ {
+		if call.Child(i).Type() == "argument_list" {
+			args = call.Child(i)
+			break
+		}
+	}
+	if args == nil {
+		return ""
+	}
+	var first *grammar.Node
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		switch ch.Type() {
+		case "(", ")", ",", "comment":
+			continue
+		default:
+			first = ch
+		}
+		if first != nil {
+			break
+		}
+	}
+	if first == nil || first.Type() != "lambda_expression" {
+		return ""
+	}
+	body := ingest.ChildByField(first, "body")
+	if body == nil {
+		return ""
+	}
+	params := javaInferredLambdaParamNames(first, content)
+	param := ""
+	if len(params) == 1 {
+		param = params[0]
+	}
+	recv := ingest.ChildByField(call, "object")
+	return javaMapMapperBodyElemType(body, param, recv, content, elemOf, valOf)
+}
+
+// javaMapMapperBodyElemType recovers U from an expression-bodied map mapper.
+func javaMapMapperBodyElemType(body *grammar.Node, param string, recv *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	for body != nil && !body.IsNull() && body.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(body, "expression")
+		if inner == nil {
+			for i := uint32(0); i < body.ChildCount(); i++ {
+				ch := body.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		body = inner
+	}
+	if body == nil || body.IsNull() {
+		return ""
+	}
+	switch body.Type() {
+	case "identifier":
+		// a -> a — identity preserves receiver element type.
+		if param != "" && ingest.NodeText(body, content) == param {
+			return javaStreamPipelineElemType(recv, content, elemOf, valOf)
+		}
+		return ""
+	case "object_creation_expression":
+		// a -> new A() — element type from construction.
+		if typeN := ingest.ChildByField(body, "type"); typeN != nil {
+			return javaTypeName(typeN, content)
+		}
+		return ""
 	default:
 		return ""
 	}
