@@ -1097,6 +1097,7 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // / Optional<A>.ifPresent(a -> a.m()) / opt.ifPresentOrElse(a -> a.m(), () -> {}) /
 // / CompletableFuture<A>.thenAccept(a -> a.m()) / thenApply(a -> a.m()) /
 // / thenCompose(a -> …) — CF result T under foreign same-leaf methods /
+// / CompletableFuture.whenComplete((a,e) -> a.m()) / handle((a,e) -> a.m()) /
 // / Map<K,A>.forEach((k,v) -> v.m()) /
 // Map.computeIfPresent/compute/replaceAll((k,v) -> v.m()) / Map.merge((v1,v2) -> v1.m()) /
 // map.values().forEach(v -> v.m()) types a/v as A), for (var a : as) loop variables
@@ -1711,6 +1712,18 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 				}
 			}
 		case 2:
+			// CompletableFuture.whenComplete(BiConsumer<? super T,? super Throwable>) /
+			// handle(BiFunction<? super T,Throwable,? extends U>) —
+			// first param is CF result T (same leaf as thenAccept/thenApply unary).
+			// Second is Throwable — leave unbound. Return-type pipelines (handle
+			// identity + join) stay fail-closed.
+			if method == "whenComplete" || method == "handle" {
+				et := javaStreamPipelineElemType(obj, content, elemOf, valOf)
+				if et != "" && ourReceivers[et] {
+					out[params[0]] = true
+				}
+				continue
+			}
 			// ConcurrentHashMap.reduceEntries(threshold, BiFunction on Entry,Entry) —
 			// 2-arg form: bind entryValOf for e.getValue().m() on both params.
 			// 3-arg form's BiFunction is on U; getValue transformer (e -> e.getValue())
@@ -1823,6 +1836,11 @@ func javaStreamElementLambdaMethod(method string) bool {
 		// unary functional arg applied to CF result T (same leaf as join/getNow).
 		// Return-type pipelines (thenApply identity + join) stay fail-closed.
 		"thenAccept", "thenApply", "thenCompose",
+		// CompletableFuture.whenComplete(BiConsumer<? super T,? super Throwable>) /
+		// handle(BiFunction<? super T,Throwable,? extends U>) —
+		// bi-lambda first param is CF result T (second is Throwable).
+		// Return-type pipelines (handle identity + join) stay fail-closed.
+		"whenComplete", "handle",
 		// Map value bi-lambdas (see javaMapValueBiLambdaMethod).
 		"computeIfPresent", "compute", "replaceAll", "merge",
 		// ConcurrentHashMap.reduceValues — 2-arg BiFunction on V,V and 3-arg unary
