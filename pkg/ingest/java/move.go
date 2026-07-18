@@ -1559,6 +1559,8 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// toList() returns List<T> — element preserved for forEach / for-var.
 			// reversed() returns List/SequencedCollection of the same element type
 			// (Java 21 SequencedCollection; order only, element type unchanged).
+			// Map.reversed() (SequencedMap) is not an element pipeline — key-type
+			// elemOf would mis-type .get(k); value typing uses javaMapPipelineValueType.
 			// subList(from, to) returns List of the same element type
 			// (List view; bounds only, element type unchanged).
 			"findFirst", "findAny", "min", "max", "reduce", "toList", "reversed", "subList":
@@ -1575,6 +1577,11 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 				if vt := valOf[ingest.NodeText(recv, content)]; vt != "" {
 					return vt
 				}
+			}
+			// SequencedMap.reversed(): fail closed here so .get / values / forEach
+			// recover V via javaMapPipelineValueType (elemOf is the key type).
+			if name == "reversed" && javaMapPipelineValueType(recv, content, elemOf, valOf) != "" {
+				return ""
 			}
 			return javaStreamPipelineElemType(recv, content, elemOf, valOf)
 		case "flatMap":
@@ -2827,7 +2834,8 @@ func javaArraysStreamElemType(call *grammar.Node, content []byte, elemOf, valOf 
 // Collections.singletonMap(k, new T(...)) → T,
 // Map.of(k, new T(...), …) → T (homogeneous value creations),
 // Map.ofEntries(Map.entry(k, new T(...)), …) → T (homogeneous entry values),
-// Map.copyOf(m) → valOf[m].
+// Map.copyOf(m) → valOf[m],
+// m.reversed() → valOf[m] (SequencedMap view; order only).
 // Fail closed on other shapes (type-changing value mappers, groupingBy lists, …).
 func javaMapPipelineValueType(obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
@@ -2878,6 +2886,10 @@ func javaMapPipelineValueType(obj *grammar.Node, content []byte, elemOf, valOf m
 		case "copyOf":
 			// Map.copyOf(m) — value type of first-arg map (List/Set.copyOf stay in stream path).
 			return javaMapCopyOfValueType(obj, content, elemOf, valOf)
+		case "reversed":
+			// SequencedMap.reversed() — same value type (order only; Java 21).
+			// List/SequencedCollection.reversed stay on the element pipeline.
+			return javaMapPipelineValueType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
 		default:
 			return ""
 		}
