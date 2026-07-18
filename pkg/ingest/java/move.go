@@ -1257,7 +1257,8 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 				} else if vt := javaEntryExprValueType(valN, content, elemOf, valOf, entryValOf); vt != "" {
 					// var ea = Map.entry(k, new A()) / am.firstEntry() /
 					// am.pollLastEntry() / am.floorEntry(k) /
-					// as.entrySet().iterator().next() — Entry of V;
+					// as.entrySet().iterator().next() /
+					// as.entrySet().stream().findFirst().get() — Entry of V;
 					// track value T for later ea.getValue().m() / ea.setValue(v).m()
 					// (entry is not A itself).
 					entryValOf[name] = vt
@@ -3566,10 +3567,13 @@ func javaMapOfEntriesValueType(call *grammar.Node, content []byte) string {
 //	am.pollFirstEntry() / am.pollLastEntry() → valOf[am]
 //	am.ceilingEntry(k) / am.floorEntry(k) / am.higherEntry(k) / am.lowerEntry(k) → valOf[am]
 //	m.entrySet().iterator().next() / m.entrySet().listIterator().previous() → valOf[m]
+//	m.entrySet().stream().findFirst().get() / findAny().orElseThrow() → valOf[m]
+//	Optional.of(entry).get() / ofNullable(entry).orElseThrow() → V of entry
 //
 // Used for e.getValue() / ((Map.Entry<K,A>) e).getValue() / var ea = Map.entry(...) /
 // var ea = (Map.Entry<K,A>) e / var ea = am.firstEntry() /
-// var ea = m.entrySet().iterator().next() so method rename hits value
+// var ea = m.entrySet().iterator().next() /
+// var ea = m.entrySet().stream().findFirst().get() so method rename hits value
 // call sites under foreign same-leaf methods.
 // Unknown shapes fail closed.
 func javaEntryExprValueType(obj *grammar.Node, content []byte, elemOf, valOf, entryValOf map[string]string) string {
@@ -3628,9 +3632,76 @@ func javaEntryExprValueType(obj *grammar.Node, content []byte, elemOf, valOf, en
 			// m.entrySet().iterator().next() / m.entrySet().listIterator().previous()
 			// — Entry of V; recover V via the entrySet pipeline under the iterator.
 			return javaEntrySetPipelineValueType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
+		case "get", "orElse", "orElseGet", "orElseThrow":
+			// Optional unwrap of Map.Entry:
+			//   m.entrySet().stream().findFirst().get()
+			//   m.entrySet().stream().findAny().orElseThrow()
+			//   Optional.of(entry).get() / ofNullable(entry).orElseThrow()
+			// Zero-arg get only (Optional.get); List.get(i)/Map.get(k) fail closed.
+			if name == "get" && len(javaCallArgs(obj)) != 0 {
+				return ""
+			}
+			return javaOptionalEntryValueType(ingest.ChildByField(obj, "object"), content, elemOf, valOf, entryValOf)
 		default:
 			return ""
 		}
+	default:
+		return ""
+	}
+}
+
+// javaOptionalEntryValueType recovers V when opt is an Optional of Map.Entry:
+//
+//	m.entrySet().stream().findFirst() / findAny() / min() / max() → valOf[m]
+//	Optional.of(entry) / ofNullable(entry) → V of entry (creation / local / pipeline)
+//
+// Used under Optional.get/orElse/orElseGet/orElseThrow so
+// findFirst().get().getValue() / Optional.of(e).get().getValue() bind under
+// foreign same-leaf methods. Unknown Optional sources fail closed.
+func javaOptionalEntryValueType(opt *grammar.Node, content []byte, elemOf, valOf, entryValOf map[string]string) string {
+	for opt != nil && !opt.IsNull() && opt.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(opt, "expression")
+		if inner == nil {
+			for i := uint32(0); i < opt.ChildCount(); i++ {
+				ch := opt.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		opt = inner
+	}
+	if opt == nil || opt.IsNull() || opt.Type() != "method_invocation" {
+		return ""
+	}
+	nameN := ingest.ChildByField(opt, "name")
+	if nameN == nil {
+		return ""
+	}
+	switch name := ingest.NodeText(nameN, content); name {
+	case "findFirst", "findAny", "min", "max":
+		// Stream of Map.Entry → Optional<Entry>; V from the entrySet pipeline.
+		// One-arg reduce returns Optional too but is type-changing more often — fail closed.
+		return javaEntrySetPipelineValueType(ingest.ChildByField(opt, "object"), content, elemOf, valOf)
+	case "of", "ofNullable":
+		// Optional.of(entry) / ofNullable(entry) — Entry from the first arg.
+		recv := ingest.ChildByField(opt, "object")
+		if recv == nil {
+			return ""
+		}
+		if recv.Type() != "identifier" && recv.Type() != "type_identifier" {
+			return ""
+		}
+		if ingest.NodeText(recv, content) != "Optional" {
+			return ""
+		}
+		first := javaFirstCallArg(opt)
+		if first == nil {
+			return ""
+		}
+		return javaEntryExprValueType(first, content, elemOf, valOf, entryValOf)
 	default:
 		return ""
 	}
@@ -4046,6 +4117,9 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	am.firstEntry().setValue(v) / am.lastEntry().setValue(v) → valOf[am]
 //	am.pollFirstEntry()/pollLastEntry()/ceilingEntry(k)/… .getValue() → valOf[am]
 //	m.entrySet().iterator().next().getValue() / .setValue(v) → valOf[m]
+//	m.entrySet().stream().findFirst().get().getValue() /
+//	  findAny().orElseThrow().getValue() → valOf[m]
+//	Optional.of(entry).get().getValue() → V of entry
 //
 // Optional.get() works for Optional<A> locals (elemOf) and for Optional-yielding
 // pipelines (findFirst/findAny/min/max/Optional.of) via zero-arg get + pipeline.
