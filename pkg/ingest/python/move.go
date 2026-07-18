@@ -2024,6 +2024,9 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `a = next(iter(items))` / `a = next(items)` / `a = next(x for x in items)`
 // (element type of the iterable arg / identity genexp),
 // `a = min(items)` / `a = max(items)` / `a = min(items, key=...)` (same element type),
+// `a = min(asdict(pair).values(), key=...)` / `a = max(astuple(pair))` when all
+// declaration-order field types agree (homogeneous values; mixed fail closed —
+// same leaf as for x in asdict(...).values() / for x in astuple(...)),
 // `pair = min(pairs)` / `a, b = max(list(zip(...)))` when pairs is a pair-iter
 // (pairSlots + shared elemOf; same path as next(pairs) / pairs.pop()),
 // `a = choice(items)` / `a = random.choice(items)` (same element type),
@@ -2310,12 +2313,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// a = min(items) / max(items) / min(items, key=...) —
 						// single-iterable form yields an element of that iterable.
 						// Multi-arg min(a, b, ...) fails closed (not an iterable fold).
+						// a = min(asdict(pair).values(), key=...) / max(astuple(pair)) —
+						// homogeneous field values only (mixed fail closed).
 						// pair = min(pairs) when pairs is a pair-iter (list(zip(...)), …) —
 						// pair is a tuple (pairSlots + shared elemOf), not an element.
 						if fname == "min" || fname == "max" {
 							if types := pythonMinMaxPairSlots(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
 								pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
-							} else if et := pythonMinMaxElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
+							} else if et := pythonMinMaxElemType(right, content, elemOf, egElems, typeOf, fieldOf); ourReceivers[et] {
 								out[lname] = true
 							}
 						}
@@ -2775,11 +2780,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						}
 					}
 					// a := min(items) / max(items) / min(items, key=...) /
+					// a := min(asdict(pair).values(), key=...) / max(astuple(pair)) /
 					// pair := min(pairs) when pairs is a pair-iter (pairSlots + shared elemOf).
 					if fname == "min" || fname == "max" {
 						if types := pythonMinMaxPairSlots(valueN, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
 							pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
-						} else if et := pythonMinMaxElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
+						} else if et := pythonMinMaxElemType(valueN, content, elemOf, egElems, typeOf, fieldOf); ourReceivers[et] {
 							out[lname] = true
 						}
 					}
@@ -5187,12 +5193,27 @@ func pythonAstupleFirstFieldType(n *grammar.Node, content []byte, fieldOf map[st
 // pythonMinMaxElemType recovers the element type of min(iterable) / max(iterable)
 // (optional key=/default= kwargs ignored). Only the single-positional-arg form is
 // handled — min(a, b) / max(x, y, z) compare discrete values and fail closed.
-func pythonMinMaxElemType(call *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
+// Also covers min/max(asdict(box).values()) / min/max(astuple(box)) when all
+// declaration-order field types agree (homogeneous values; mixed fail closed —
+// same leaf as for x in asdict(...).values() / for x in astuple(...)).
+func pythonMinMaxElemType(call *grammar.Node, content []byte, elemOf, egElems, typeOf, fieldOf map[string]string) string {
 	args, ok := pythonCallPositionalArgNodes(call)
 	if !ok || len(args) != 1 {
 		return ""
 	}
-	return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
+	if et := pythonIterableElemType(args[0], content, elemOf, egElems, typeOf); et != "" {
+		return et
+	}
+	// min/max(asdict(box).values() / vars / __dict__ / d.values() after d=asdict) —
+	// only when all field types agree (homogeneous values view).
+	if et := pythonDictViewValuesHomogeneousType(args[0], content, fieldOf); et != "" {
+		return et
+	}
+	// min/max(astuple(box) / list(astuple(box)) / dataclasses.astuple) — same gate.
+	if et := pythonAstupleHomogeneousType(args[0], content, fieldOf); et != "" {
+		return et
+	}
+	return ""
 }
 
 // pythonRandomChoiceElemType recovers the element type of choice(seq) /
