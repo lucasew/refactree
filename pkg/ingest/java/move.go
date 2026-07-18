@@ -1181,6 +1181,8 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// / qa.poll() / qa.peek() / qa.take() / da.takeFirst()/takeLast()
 					// / as.remove(0) / as.getFirst()
 					// / as.removeFirst() / as.removeLast()
+					// / List.of(new A()).removeFirst() / as.stream().toList().remove(0) /
+					// / as.reversed().removeFirst() / List.copyOf(as).removeFirst()
 					// / e.getValue() / e.setValue(v) when e is a Map.Entry local
 					// / Map.entry(k, new A()).getValue() / am.firstEntry().getValue()
 					// / am.firstEntry().setValue(v) / am.lastEntry().setValue(v)
@@ -3565,18 +3567,28 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 				return elemOf[id]
 			}
 		}
-		// Optional.get() (zero-arg) and List element accessors on factory/pipeline
-		// receivers:
+		// Element accessors on factory/pipeline receivers (not just bare identifiers):
 		//   as.stream().findFirst().get() / as.findAny().get() /
 		//   Optional.of(new A()).get() / Optional.ofNullable(new A()).get()
 		//   List.of(new A()).get(0) / Arrays.asList(new A()).get(0) /
 		//   Collections.singletonList(new A()).get(0) / as.stream().toList().get(0)
 		//   List.of(new A()).getFirst() / getLast() (Java 21 SequencedCollection)
-		// Pipeline typing already treats findFirst/findAny/Optional.of/List.of as T.
-		// Map.get(k) on non-list pipelines fails closed (Map.of not in static-collection
-		// of; toMap collect fails closed for element pipeline).
+		//   List.of(new A()).removeFirst() / removeLast() /
+		//   as.stream().toList().remove(0) / as.reversed().removeFirst() /
+		//   List.copyOf(as).removeFirst() / Arrays.asList(new A()).set(0, x)
+		// Pipeline typing already treats findFirst/findAny/Optional.of/List.of/
+		// toList/reversed/copyOf as T. Map value mutators (put/compute/…) stay
+		// identifier-only above; non-id Map.of(...).get fails closed here
+		// (Map.of not in static-collection of; toMap collect fails closed for
+		// element pipeline).
 		switch method {
-		case "get", "getFirst", "getLast":
+		case "get", "getFirst", "getLast",
+			"remove", "removeFirst", "removeLast", "set",
+			"poll", "peek", "element", "take",
+			"pollFirst", "pollLast", "peekFirst", "peekLast", "pop",
+			"push", "takeFirst", "takeLast",
+			"elementAt", "firstElement", "lastElement",
+			"first", "last", "ceiling", "floor", "higher", "lower":
 			return javaStreamPipelineElemType(obj, content, elemOf, valOf)
 		}
 		return ""
