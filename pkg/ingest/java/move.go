@@ -1615,6 +1615,8 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 	// ConcurrentHashMap.reduce has two bi-lambdas (transformer then reducer);
 	// only the transformer sees V as its second param.
 	reduceBiSeen := 0
+	// ConcurrentHashMap.forEachEntry 3-arg has two unaries (transformer then consumer).
+	forEachEntryUnarySeen := 0
 	for i := uint32(0); i < args.ChildCount(); i++ {
 		ch := args.Child(i)
 		if ch.Type() != "lambda_expression" {
@@ -1640,6 +1642,32 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 					continue
 				}
 			}
+			// ConcurrentHashMap.forEachEntry(threshold, Function<? super Entry,? extends U>,
+			//                               Consumer<? super U>) — 3-arg form has two unaries:
+			// transformer on Entry then consumer on U. getValue transformer (e -> e.getValue())
+			// yields U=V so the consumer param is V. 2-arg is a single Entry Consumer (below).
+			if method == "forEachEntry" {
+				callArgs := javaCallArgs(call)
+				if len(callArgs) == 3 {
+					forEachEntryUnarySeen++
+					if forEachEntryUnarySeen == 1 {
+						// Transformer: Entry — bind entryValOf for e.getValue() in body.
+						if entryValOf != nil {
+							if vt := javaMapPipelineValueType(obj, content, elemOf, valOf); vt != "" {
+								entryValOf[params[0]] = vt
+							}
+						}
+					} else if forEachEntryUnarySeen == 2 {
+						// Consumer on U; getValue transformer → U=V.
+						if javaIsEntryGetValueLambda(callArgs[1], content) {
+							if vt := javaMapPipelineValueType(obj, content, elemOf, valOf); vt != "" && ourReceivers[vt] {
+								out[params[0]] = true
+							}
+						}
+					}
+					continue
+				}
+			}
 			// ConcurrentHashMap.searchValues(threshold, Function<? super V, ? extends U>) /
 			// forEachValue(threshold, Consumer<? super V>) /
 			// reduceValues(threshold, Function<? super V, ? extends U>, BiFunction) —
@@ -1654,6 +1682,7 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 			// ConcurrentHashMap.forEachEntry / searchEntries — unary Consumer/Function
 			// applies to Map.Entry<K,V>; bind entryValOf for e.getValue().m()
 			// (same Entry value path as entrySet().forEach, but receiver is the map).
+			// forEachEntry 3-arg handled above (two unaries: Entry then U).
 			if javaMapEntryUnaryLambdaMethod(method) {
 				if entryValOf != nil {
 					if vt := javaMapPipelineValueType(obj, content, elemOf, valOf); vt != "" {
@@ -1781,7 +1810,8 @@ func javaStreamElementLambdaMethod(method string) bool {
 
 // javaMapEntryUnaryLambdaMethod reports ConcurrentHashMap-style methods whose
 // unary functional arg is applied to Map.Entry<K,V> (not V / not stream elems):
-// forEachEntry(threshold, Consumer<? super Map.Entry<K,V>>),
+// forEachEntry(threshold, Consumer<? super Map.Entry<K,V>>) — 2-arg form;
+//   3-arg (Function+Consumer) is handled specially (consumer is on U, not Entry),
 // searchEntries(threshold, Function<? super Map.Entry<K,V>, ? extends U>),
 // reduceEntries(threshold, Function<? super Map.Entry<K,V>, ? extends U>, BiFunction)
 // — 3-arg transformer only (2-arg form is an Entry bi-lambda; see case 2).
