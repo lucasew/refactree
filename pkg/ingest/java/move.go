@@ -2010,8 +2010,12 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // first; enables applyToEither(other, a -> a).join() / var f2 = applyToEither…).
 // CompletableFuture.handle((a, e) -> a) / handle((a, e) -> new A()) → same or known
 // element (first-param identity/new only; enables handle((a,e)->a).join() /
-// var f2 = handle…). Type-changing stages (unknown map / flatMap / thenApply /
-// applyToEither / handle mappers) fail closed so later lambdas are not mis-typed.
+// var f2 = handle…).
+// CompletableFuture.thenCombine(other, (a, b) -> a) / thenCombine(other, (a, b) -> new A()) →
+// same or known element (first-param identity/new only; BiFunction after other stage —
+// enables thenCombine(other, (a,b)->a).join() / var f2 = thenCombine…).
+// Type-changing stages (unknown map / flatMap / thenApply / applyToEither / handle /
+// thenCombine mappers) fail closed so later lambdas are not mis-typed.
 func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
 		inner := ingest.ChildByField(obj, "expression")
@@ -2170,6 +2174,15 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// Type-changing mappers fail closed. whenComplete always returns T
 			// but is BiConsumer (void body) — not a U pipeline stage here.
 			return javaMapResultElemType(obj, content, elemOf, valOf)
+		case "thenCombine":
+			// CompletableFuture.thenCombine(other, BiFunction): recover V when the
+			// BiFunction (second arg) is first-param identity ((a, b) -> a) or new T(...)
+			// — same shapes as handle, with other stage first like applyToEither.
+			// javaMapResultElemType picks the first lambda among args. Enables
+			// thenCombine(other, (a,b)->a).join() / var f2 = thenCombine(...); f2.join()
+			// under foreign same-leaf methods. Type-changing mappers and thenAcceptBoth
+			// (Void) fail closed. Async variants stay out of scope.
+			return javaMapResultElemType(obj, content, elemOf, valOf)
 		case "collect":
 			// Stream.collect(Collectors.toList()/toSet()/toUnmodifiableList()/
 			// toUnmodifiableSet()/toCollection(…)) / collect(toList()/toSet()/
@@ -2288,7 +2301,8 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 }
 
 // javaMapResultElemType recovers U after Optional.map / Stream.map / CF thenApply
-// / CF applyToEither / CF handle when the mapper clearly yields a known element type:
+// / CF applyToEither / CF handle / CF thenCombine when the mapper clearly yields
+// a known element type:
 //
 //	oa.map(a -> a) → elem(oa)                         // identity
 //	oa.map(a -> new A()) → A                          // object creation
@@ -2296,12 +2310,13 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 //	fa.thenApply(a -> a) → elem(fa)                   // CF Function identity
 //	fa.applyToEither(other, a -> a) → elem(fa)        // CF Function identity (2nd arg)
 //	fa.handle((a, e) -> a) → elem(fa)                 // CF BiFunction first-param identity
+//	fa.thenCombine(other, (a, b) -> a) → elem(fa)     // CF BiFunction first-param identity (2nd arg)
 //
 // Expression-bodied lambdas only; blocks, method refs, and other mappers fail
 // closed so type-changing maps stay unbound. Bi-lambda form binds only when the
-// body is the first parameter ((a, e) -> a); second-param bodies fail closed.
-// The first lambda among call args is used (thenApply/map/handle: sole arg;
-// applyToEither: Function after the other stage).
+// body is the first parameter ((a, e) -> a / (a, b) -> a); second-param bodies
+// fail closed. The first lambda among call args is used (thenApply/map/handle:
+// sole arg; applyToEither/thenCombine: Function/BiFunction after the other stage).
 func javaMapResultElemType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	if call == nil || call.Type() != "method_invocation" {
 		return ""
@@ -2317,7 +2332,8 @@ func javaMapResultElemType(call *grammar.Node, content []byte, elemOf, valOf map
 		return ""
 	}
 	// First lambda among args: thenApply/map/handle take a sole functional arg;
-	// applyToEither(other, Function) places the Function after a non-lambda stage.
+	// applyToEither(other, Function) / thenCombine(other, BiFunction) place the
+	// functional arg after a non-lambda stage.
 	var first *grammar.Node
 	for i := uint32(0); i < args.ChildCount(); i++ {
 		ch := args.Child(i)
@@ -2340,7 +2356,8 @@ func javaMapResultElemType(call *grammar.Node, content []byte, elemOf, valOf map
 		// Function: a -> a / a -> new T()
 		param = params[0]
 	case 2:
-		// BiFunction (CF handle): (a, e) -> a / (a, e) -> new T()
+		// BiFunction (CF handle / thenCombine): (a, e) -> a / (a, b) -> a /
+		// (a, e) -> new T() / (a, b) -> new T()
 		// First-param identity only; body matching params[1] fails closed below.
 		param = params[0]
 	default:
@@ -4483,6 +4500,8 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	  Function only; other stage first arg; type-changing mappers fail closed)
 //	fa.handle((a, e) -> a).join() / getNow(d) / resultNow() → T (first-param identity
 //	  bi-lambda only; type-changing handle mappers fail closed)
+//	fa.thenCombine(other, (a, b) -> a).join() / getNow(d) / resultNow() → T
+//	  (first-param identity BiFunction only; other stage first arg; type-changing fail closed)
 //	fn.apply(x) → valOf[fn] / elemOf[fn] (Function<T,R> R / UnaryOperator<T> T /
 //	  BiFunction<T,U,R> R; apply args do not change the result type leaf)
 //	Objects.requireNonNull(x[, msg]) / requireNonNullElse(x, d) /
@@ -4659,12 +4678,15 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		//   identity Function preserves CF result T (other stage first arg).
 		//   fa.handle((a, e) -> a).join() / getNow(d) / resultNow() — first-param
 		//   identity bi-lambda preserves CF result T.
+		//   fa.thenCombine(other, (a, b) -> a).join() / getNow(d) / resultNow() —
+		//   first-param identity BiFunction preserves CF result T (other stage first).
 		// Pipeline typing already treats findFirst/findAny/Optional.of/List.of/
 		// toList/reversed/copyOf/thenApply(identity)/applyToEither(identity)/
-		// handle(first-param identity) as T. Map factories (Map.of / ofEntries /
-		// singletonMap / copyOf / unmodifiableMap / collect(toMap)) are not element
-		// pipelines — fall through to javaMapPipelineValueType for value-returning
-		// accessors (Map.of(k, new A()).get(k)).
+		// handle(first-param identity)/thenCombine(first-param identity) as T. Map
+		// factories (Map.of / ofEntries / singletonMap / copyOf / unmodifiableMap /
+		// collect(toMap)) are not element pipelines — fall through to
+		// javaMapPipelineValueType for value-returning accessors
+		// (Map.of(k, new A()).get(k)).
 		switch method {
 		case "get", "getFirst", "getLast",
 			"remove", "removeFirst", "removeLast", "set",
@@ -4675,7 +4697,8 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 			"first", "last", "ceiling", "floor", "higher", "lower",
 			// CompletableFuture.join / getNow / resultNow on pipeline receivers
 			// (thenApply(a -> a).join() / applyToEither(other, a -> a).join() /
-			// handle((a,e)->a).join()) — peel CF type-preserving stages.
+			// handle((a,e)->a).join() / thenCombine(other, (a,b)->a).join()) —
+			// peel CF type-preserving stages.
 			"join", "getNow", "resultNow":
 			if et := javaStreamPipelineElemType(obj, content, elemOf, valOf); et != "" {
 				return et
