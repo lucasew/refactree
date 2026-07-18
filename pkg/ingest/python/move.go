@@ -1871,6 +1871,10 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	// a = next(iter(items)); a.run()). Default arg ignored (same as assignment).
 	// next(iter(astuple(box))).run() — first declaration-order field of the
 	// heterogeneous field tuple (same leaf as astuple(box)[0].run()).
+	// min(items).run() / max(asdict(pair).values()).run() / min(astuple(pair)).run() —
+	// element of iterable / homogeneous values view (same leaf as a = min(...); a.run()).
+	// choice(items).run() / random.choice(items).run() — sequence element (same leaf
+	// as a = choice(items); a.run()).
 	// items.popleft().run() / d.get(k).run() / q.get().run() / items.pop().run() /
 	// list(items).pop().run() — collection/queue element accessors (same leaf as
 	// a = items.popleft(); a.run()). Unknown call receivers: unique-leaf only.
@@ -1901,6 +1905,21 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 						return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 					}
 				}
+				// min(...).run() / max(...).run() — before Class() ctor path.
+				// Covers min(items) / max(d.values()) / min(asdict(...).values()) /
+				// max(astuple(...)) when element type is known (assignment path
+				// already binds via pythonMinMaxElemType).
+				if name == "min" || name == "max" {
+					if et := pythonMinMaxElemType(obj, content, elemOf, nil, typeOf, fieldOf); et != "" {
+						return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+					}
+				}
+				// choice(seq).run() — before Class() ctor path (bare from random).
+				if name == "choice" {
+					if et := pythonRandomChoiceElemType(obj, content, elemOf, nil, typeOf); et != "" {
+						return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+					}
+				}
 				return pythonRenameByTypeMaps(name, ourReceivers, foreignReceivers, nil)
 			}
 			if ft := pythonRecordKeyAccessType(obj, content, fieldOf); ft != "" {
@@ -1914,6 +1933,10 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 			}
 			if ft := pythonItemgetterFieldType(obj, content, fieldOf); ft != "" {
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
+			}
+			// random.choice(seq).run() — module-qualified form (function is attribute).
+			if et := pythonRandomChoiceElemType(obj, content, elemOf, nil, typeOf); et != "" {
+				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 			}
 			if et := pythonCollectionAccessElemType(obj, content, elemOf); et != "" {
 				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
