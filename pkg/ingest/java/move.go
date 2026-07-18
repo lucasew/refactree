@@ -788,7 +788,7 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 		}
 	}
 
-	typedLocals, entryValOf, valOf := javaTypedLocals(pf.Root, content, ourSimple)
+	typedLocals, entryValOf, valOf, elemOf := javaTypedLocals(pf.Root, content, ourSimple)
 
 	var edits []ingest.Edit
 	var walk func(n *grammar.Node, enclosingClass string, switchMatchesOur bool)
@@ -811,7 +811,7 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			obj := ingest.ChildByField(n, "object")
 			name := ingest.ChildByField(n, "name")
 			if name != nil && ingest.NodeText(name, content) == oldLeaf {
-				if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, entryValOf, valOf, implementsEdges) {
+				if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, entryValOf, valOf, elemOf, implementsEdges) {
 					edits = append(edits, ingest.Edit{
 						File:      fileRel,
 						StartByte: name.StartByte(),
@@ -827,7 +827,7 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 				field = ingest.ChildByType(n, "identifier")
 			}
 			if field != nil && ingest.NodeText(field, content) == oldLeaf {
-				if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, entryValOf, valOf, implementsEdges) {
+				if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, entryValOf, valOf, elemOf, implementsEdges) {
 					edits = append(edits, ingest.Edit{
 						File:      fileRel,
 						StartByte: field.StartByte(),
@@ -851,7 +851,7 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			if len(parts) >= 2 {
 				obj, name := parts[0], parts[len(parts)-1]
 				if name.Type() == "identifier" && ingest.NodeText(name, content) == oldLeaf {
-					if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, entryValOf, valOf, implementsEdges) {
+					if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, entryValOf, valOf, elemOf, implementsEdges) {
 						edits = append(edits, ingest.Edit{
 							File:      fileRel,
 							StartByte: name.StartByte(),
@@ -952,8 +952,11 @@ func javaRenameByTypeMaps(name string, ourReceivers, foreignReceivers, typedLoca
 // javaShouldRenameMemberAccess decides whether obj.oldLeaf targets our receiver type.
 // obj may be nil for bare calls. implementsEdges maps type → parents (extends/implements).
 // entryValOf maps Map.Entry locals → value type leaf (for e.getValue().m()).
-// valOf maps Map locals → value type leaf (for am.firstEntry().getValue().m()).
-func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, entryValOf, valOf map[string]string, implementsEdges map[string]map[string]bool) bool {
+// valOf maps Map locals → value type leaf (for am.firstEntry().getValue().m() /
+// am.get(k).m()).
+// elemOf maps collection/Optional/Supplier locals → element type leaf
+// (for as.get(i).m() / oa.get().m() / sa.get().m() under foreign same-leaf methods).
+func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, entryValOf, valOf, elemOf map[string]string, implementsEdges map[string]map[string]bool) bool {
 	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
 		var inner *grammar.Node
 		for i := uint32(0); i < obj.ChildCount(); i++ {
@@ -1011,26 +1014,23 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 		if arr == nil {
 			return len(foreignReceivers) == 0
 		}
-		return javaShouldRenameMemberAccess(arr, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, entryValOf, valOf, implementsEdges)
+		return javaShouldRenameMemberAccess(arr, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, entryValOf, valOf, elemOf, implementsEdges)
 	}
 	if obj.Type() == "identifier" || obj.Type() == "type_identifier" {
 		return javaRenameByTypeMaps(ingest.NodeText(obj, content), ourReceivers, foreignReceivers, typedLocals)
 	}
-	// e.getValue().m() / e.setValue(v).m() — Map.Entry local value type
-	// (entrySet for-var / forEach). setValue returns the previous V.
-	// Map.entry(k, new A()).getValue().m() — creation value type (self-contained).
-	// am.firstEntry().getValue().m() / am.pollFirstEntry().getValue().m() /
-	// am.firstEntry().setValue(v).m() — map value type via valOf[am]
-	// (NavigableMap entry accessors).
+	// Method-invocation receivers under foreign same-leaf methods: recover T when
+	// the call is a typed element/value accessor (same leaf as var xa = <access>):
+	//   e.getValue().m() / e.setValue(v).m() — Map.Entry value
+	//   Map.entry(k, new A()).getValue().m() / am.firstEntry().getValue().m()
+	//   am.get(k).m() / Map.of(k, new A()).get(k).m() — map value
+	//   as.get(i).m() / List.of(new A()).get(i).m() — list element
+	//   oa.get().m() / oa.orElse(d).m() / findFirst().get().m() — Optional element
+	//   sa.get().m() — Supplier element (generic type arg)
+	//   qa.poll().m() / as.getFirst().m() / … — other collection accessors
 	if obj.Type() == "method_invocation" {
-		nameN := ingest.ChildByField(obj, "name")
-		if nameN != nil {
-			switch ingest.NodeText(nameN, content) {
-			case "getValue", "setValue":
-				if vt := javaEntryExprValueType(ingest.ChildByField(obj, "object"), content, nil, valOf, entryValOf); vt != "" {
-					return javaRenameByTypeMaps(vt, ourReceivers, foreignReceivers, nil)
-				}
-			}
+		if et := javaCollectionAccessElemType(obj, content, elemOf, valOf, entryValOf); et != "" {
+			return javaRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 		}
 		// Unknown method receivers: unique-leaf only.
 		return len(foreignReceivers) == 0
@@ -1101,17 +1101,19 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // e.setValue(v).m() (for (var e : m.entrySet()) / m.entrySet().forEach(e -> …) /
 // Map.Entry<K,A> e / var ea = Map.entry(...) / var ea = am.firstEntry()).
 // valOf maps Map locals → value type leaf (also returned for inline
-// am.firstEntry().getValue().m() / am.firstEntry().setValue(v).m() under
-// foreign same-leaf methods).
-func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string, map[string]string) {
+// am.firstEntry().getValue().m() / am.firstEntry().setValue(v).m() /
+// am.get(k).m() under foreign same-leaf methods).
+// elemOf maps collection/Optional/Supplier locals → element type leaf (returned
+// for inline as.get(i).m() / oa.get().m() / sa.get().m() under foreign same-leaf methods).
+func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string, map[string]string, map[string]string) {
 	out := map[string]bool{}
 	entryValOf := map[string]string{}
 	valOf := map[string]string{}
-	if root == nil || len(ourReceivers) == 0 {
-		return out, entryValOf, valOf
-	}
 	// Collection/stream locals: name → element type leaf (List<A> as → "A").
 	elemOf := map[string]string{}
+	if root == nil || len(ourReceivers) == 0 {
+		return out, entryValOf, valOf, elemOf
+	}
 	// groupingBy/partitioningBy maps: name → element type of each value list
 	// (Map<K,List<T>> / Map<Boolean,List<T>> → "T").
 	groupValOf := map[string]string{}
@@ -1288,7 +1290,7 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 		}
 	}
 	walk(root)
-	return out, entryValOf, valOf
+	return out, entryValOf, valOf, elemOf
 }
 
 // javaRecordCollectionElem records name → element/value types for arrays and generics
