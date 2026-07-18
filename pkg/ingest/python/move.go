@@ -1888,6 +1888,8 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `a = d.setdefault(k)` / `a = d.setdefault(k, default)` (same dict value type),
 // `k, a = d.popitem()` (dict value leaf on 2nd unpack slot; pair itself untyped),
 // `a = d.popitem()[1]` / `a = (d.popitem())[1]` (pair value slot; [0]/other fail closed),
+// `it1, it2 = tee(items)` / `it1, it2 = itertools.tee(items[, n])` —
+// each target is an iterator of items elements (elemOf; not an element itself),
 // `xs = items.copy()` / `xs = items or []` (elemOf preserved for later index/for),
 // `a = it.__next__()` when `it = iter(items)` (or other known iterable) has element type,
 // as-bindings (`case A() as a`, `with A() as a`, `except A as e`),
@@ -2135,6 +2137,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// a, b = A(), B() / (a, b) = A(), B() / a, b = (A(), B()) /
 			// [a, b] = [A(), B()] /
 			// k, a = d.popitem() (value leaf on 2nd slot; same as for k, a in d.items()) /
+			// it1, it2 = tee(items) / itertools.tee(items[, n]) (each → elemOf) /
 			// a, *rest = items / *rest, a = items / a, = items (items: list[A])
 			if left != nil && right != nil {
 				if targets := pythonPatternIdents(left, content); len(targets) > 0 {
@@ -2148,6 +2151,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// k, a = d.popitem() — value type is elemOf[d] (dict value leaf).
 						if len(targets) >= 2 && ourReceivers[vt] {
 							out[targets[1]] = true
+						}
+					} else if et := pythonTeeElemType(right, content, elemOf, egElems, typeOf); et != "" {
+						// it1, it2 = tee(items) / itertools.tee(items[, n]) —
+						// each target is an iterator of items elements (like groupby's g).
+						// Do not put targets into out (iterators, not elements).
+						// Foreign element types too — shadow prior same-name collections.
+						for _, name := range targets {
+							elemOf[name] = et
 						}
 					} else if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); et != "" {
 						// a, b = items / a, = items — homogeneous collection elements.
@@ -3517,6 +3528,48 @@ func pythonGroupbyGroupElemType(right *grammar.Node, content []byte, elemOf, egE
 			return ""
 		}
 		if ingest.NodeText(attrN, content) != "groupby" {
+			return ""
+		}
+	default:
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(right)
+	if !ok || len(args) == 0 {
+		return ""
+	}
+	return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
+}
+
+// pythonTeeElemType recovers the element type of each independent iterator
+// returned by tee(iterable[, n]) / itertools.tee(...).
+// tee yields a tuple of n iterators (default n=2); each iterator yields elements
+// of the 1st positional arg (n ignored). Bare or itertools-qualified only.
+// Not registered in pythonIterableElemType — bare `for x in tee(xs)` yields
+// iterators, not elements. Callers bind unpack targets into elemOf so nested
+// `for a in it1` / next(it1) / it1.__next__() type.
+func pythonTeeElemType(right *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
+	if right == nil || right.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(right, "function")
+	if fn == nil {
+		return ""
+	}
+	switch fn.Type() {
+	case "identifier":
+		if ingest.NodeText(fn, content) != "tee" {
+			return ""
+		}
+	case "attribute":
+		objN := ingest.ChildByField(fn, "object")
+		attrN := ingest.ChildByField(fn, "attribute")
+		if objN == nil || attrN == nil || objN.Type() != "identifier" {
+			return ""
+		}
+		if ingest.NodeText(objN, content) != "itertools" {
+			return ""
+		}
+		if ingest.NodeText(attrN, content) != "tee" {
 			return ""
 		}
 	default:
