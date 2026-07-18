@@ -2265,6 +2265,8 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `merge(xs, ys, key=lambda x: x.m())` / `heapq.merge(..., key=lambda x: x.m())` /
 // `bisect_left/bisect_right/bisect/insort_*(a, x, key=lambda e: e.m())` /
 // `bisect.bisect_left(...)` — untyped unary key=lambda from list element type /
+// `sorted/min/max(..., key=cmp_to_key(lambda a, b: a.m()-b.m()))` /
+// `functools.cmp_to_key(...)` — untyped bi-lambda params from element type /
 // `map/filter/takewhile/dropwhile/filterfalse(lambda x: x.m(), items)` /
 // `itertools.takewhile/groupby/...` — untyped unary lambda params from the iterable
 // element type (under foreign same-leaf).
@@ -3425,12 +3427,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 }
 
 // pythonBindIterableLambdaParams types untyped lambda parameters when the call
-// is sorted/min/max/groupby/nlargest/nsmallest/merge/bisect* with key=lambda
-// (keyword or nlargest/nsmallest positional 3rd arg), collection.sort(key=lambda),
-// map/filter/takewhile/dropwhile/filterfalse with a unary lambda, or
-// reduce/accumulate with a bi-lambda, over a known iterable element type of
-// ourReceivers. Bare and module-qualified forms
-// (itertools./heapq./functools./bisect.) use the leaf callee name.
+// is sorted/min/max/groupby/nlargest/nsmallest/merge/bisect* with key=lambda or
+// key=cmp_to_key(lambda a, b: ...) (keyword or nlargest/nsmallest positional
+// 3rd-arg lambda), collection.sort(key=...), map/filter/takewhile/dropwhile/
+// filterfalse with a unary lambda, or reduce/accumulate with a bi-lambda, over
+// a known iterable element type of ourReceivers. Bare and module-qualified
+// forms (itertools./heapq./functools./bisect.) use the leaf callee name.
 // Wrong-arity lambdas and non-lambda callables fail closed.
 // Foreign element types are not bound (same as for-loop targets).
 func pythonBindIterableLambdaParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, elemOf, egElems, typeOf map[string]string, out map[string]bool) {
@@ -3441,10 +3443,10 @@ func pythonBindIterableLambdaParams(call *grammar.Node, content []byte, ourRecei
 	if fn == nil {
 		return
 	}
-	// items.sort(key=lambda x: ...) — element type of the receiver collection.
-	// Method form only (not a free function); other attributes fall through to
-	// leaf-name matching (itertools.takewhile / heapq.nlargest / heapq.merge /
-	// bisect.bisect_left).
+	// items.sort(key=lambda x: ...) / items.sort(key=cmp_to_key(lambda a, b: ...))
+	// — element type of the receiver collection. Method form only (not a free
+	// function); other attributes fall through to leaf-name matching
+	// (itertools.takewhile / heapq.nlargest / heapq.merge / bisect.bisect_left).
 	if fn.Type() == "attribute" {
 		if attr := ingest.ChildByField(fn, "attribute"); attr != nil && ingest.NodeText(attr, content) == "sort" {
 			obj := ingest.ChildByField(fn, "object")
@@ -3452,17 +3454,16 @@ func pythonBindIterableLambdaParams(call *grammar.Node, content []byte, ourRecei
 			if !ourReceivers[et] {
 				return
 			}
-			if lam := pythonKeywordArgValue(call, content, "key"); lam != nil {
-				pythonBindUnaryLambdaParam(lam, content, out)
-			}
+			pythonBindKeyArgParams(call, content, out)
 			return
 		}
 	}
 	switch pythonSimpleCalleeName(fn, content) {
 	case "sorted", "min", "max", "groupby":
-		// sorted/min/max/groupby(iterable, key=lambda x: ...) — 1st positional is
-		// iterable; key= lambda param is that element type (kwargs like reverse=
-		// ignored). itertools.groupby same leaf via pythonSimpleCalleeName.
+		// sorted/min/max/groupby(iterable, key=lambda x: ...) /
+		// key=cmp_to_key(lambda a, b: ...) — 1st positional is iterable; key
+		// lambda param(s) are that element type (kwargs like reverse= ignored).
+		// itertools.groupby same leaf via pythonSimpleCalleeName.
 		args, ok := pythonCallPositionalArgNodes(call)
 		if !ok || len(args) == 0 {
 			return
@@ -3471,9 +3472,7 @@ func pythonBindIterableLambdaParams(call *grammar.Node, content []byte, ourRecei
 		if !ourReceivers[et] {
 			return
 		}
-		if lam := pythonKeywordArgValue(call, content, "key"); lam != nil {
-			pythonBindUnaryLambdaParam(lam, content, out)
-		}
+		pythonBindKeyArgParams(call, content, out)
 	case "merge":
 		// merge(*iterables, key=lambda x: ..., reverse=...) / heapq.merge(...) —
 		// shared element type across positional iterables (same as for-loop
@@ -3483,9 +3482,7 @@ func pythonBindIterableLambdaParams(call *grammar.Node, content []byte, ourRecei
 		if !ourReceivers[et] {
 			return
 		}
-		if lam := pythonKeywordArgValue(call, content, "key"); lam != nil {
-			pythonBindUnaryLambdaParam(lam, content, out)
-		}
+		pythonBindKeyArgParams(call, content, out)
 	case "bisect_left", "bisect_right", "bisect", "insort_left", "insort_right", "insort":
 		// bisect_left(a, x, *, key=lambda e: ...) / bisect.bisect_left(...) /
 		// insort_* — 1st positional is the sorted list; key= lambda param is
@@ -3498,13 +3495,12 @@ func pythonBindIterableLambdaParams(call *grammar.Node, content []byte, ourRecei
 		if !ourReceivers[et] {
 			return
 		}
-		if lam := pythonKeywordArgValue(call, content, "key"); lam != nil {
-			pythonBindUnaryLambdaParam(lam, content, out)
-		}
+		pythonBindKeyArgParams(call, content, out)
 	case "nlargest", "nsmallest":
 		// nlargest(n, iterable[, key]) / heapq.nlargest(...) — 2nd positional is
-		// iterable; key lambda (key= keyword or 3rd positional) param is that
-		// element type (n ignored). Non-lambda key callables fail closed.
+		// iterable; key lambda (key= keyword, key=cmp_to_key(...), or 3rd
+		// positional) param(s) are that element type (n ignored). Non-lambda
+		// key callables fail closed.
 		args, ok := pythonCallPositionalArgNodes(call)
 		if !ok || len(args) < 2 {
 			return
@@ -3513,14 +3509,10 @@ func pythonBindIterableLambdaParams(call *grammar.Node, content []byte, ourRecei
 		if !ourReceivers[et] {
 			return
 		}
-		var lam *grammar.Node
-		if kw := pythonKeywordArgValue(call, content, "key"); kw != nil && kw.Type() == "lambda" {
-			lam = kw
+		if kw := pythonKeywordArgValue(call, content, "key"); kw != nil {
+			pythonBindKeyValueParams(kw, content, out)
 		} else if len(args) >= 3 && args[2].Type() == "lambda" {
-			lam = args[2]
-		}
-		if lam != nil {
-			pythonBindUnaryLambdaParam(lam, content, out)
+			pythonBindUnaryLambdaParam(args[2], content, out)
 		}
 	case "map", "filter", "takewhile", "dropwhile", "filterfalse":
 		// map/filter/takewhile/dropwhile/filterfalse(lambda x: ..., iterable) —
@@ -3593,6 +3585,35 @@ func pythonBindBiLambdaParams(lam *grammar.Node, content []byte, out map[string]
 	}
 	out[names[0]] = true
 	out[names[1]] = true
+}
+
+// pythonBindKeyArgParams types key= on a call: bare key=lambda (unary) or
+// key=cmp_to_key(lambda a, b: ...) / functools.cmp_to_key(...) (bi). Other key
+// callables fail closed.
+func pythonBindKeyArgParams(call *grammar.Node, content []byte, out map[string]bool) {
+	pythonBindKeyValueParams(pythonKeywordArgValue(call, content, "key"), content, out)
+}
+
+// pythonBindKeyValueParams types a key= value node (see pythonBindKeyArgParams).
+func pythonBindKeyValueParams(val *grammar.Node, content []byte, out map[string]bool) {
+	if val == nil || out == nil {
+		return
+	}
+	switch val.Type() {
+	case "lambda":
+		pythonBindUnaryLambdaParam(val, content, out)
+	case "call":
+		// cmp_to_key(mycmp) / functools.cmp_to_key(mycmp) — peel bi-lambda.
+		fn := ingest.ChildByField(val, "function")
+		if pythonSimpleCalleeName(fn, content) != "cmp_to_key" {
+			return
+		}
+		args, ok := pythonCallPositionalArgNodes(val)
+		if !ok || len(args) == 0 || args[0].Type() != "lambda" {
+			return
+		}
+		pythonBindBiLambdaParams(args[0], content, out)
+	}
 }
 
 // pythonLambdaParamNames returns bare identifier parameters of a lambda.
