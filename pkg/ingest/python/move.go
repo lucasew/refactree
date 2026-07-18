@@ -1722,6 +1722,12 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			if kwEdits := pythonReplaceKeywordEdits(fileRel, n, content, oldLeaf, newLeaf, ourReceivers, foreignReceivers, typedLocals); len(kwEdits) > 0 {
 				edits = append(edits, kwEdits...)
 			}
+			// methodcaller("run")(A()) / operator.methodcaller("run")(A()) —
+			// method name string when the applied target is our receiver type.
+			// Foreign same-leaf applications keep the string (B.run preserved).
+			if mcEdits := pythonMethodcallerStringEdits(fileRel, n, content, oldLeaf, newLeaf, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf); len(mcEdits) > 0 {
+				edits = append(edits, mcEdits...)
+			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), classHere)
@@ -1743,6 +1749,70 @@ func pythonFirstStringArg(args *grammar.Node) *grammar.Node {
 		}
 	}
 	return nil
+}
+
+// pythonMethodcallerStringEdits rewrites the method name string on
+// methodcaller("old")(target) / operator.methodcaller("old")(target) when
+// target is one of our receivers (Class() / typed local / factory peel).
+// Under foreign same-leaf methods, only applications whose target types as our
+// leaf rename the string — methodcaller("run")(B()) keeps "run".
+// Multi-arg methodcaller (extra bound args) still renames the name string when
+// the applied target is ours. Stored getters (mc = methodcaller("run"); mc(a))
+// fail closed (no application site to type the target).
+func pythonMethodcallerStringEdits(fileRel string, call *grammar.Node, content []byte, oldLeaf, newLeaf, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, fieldOf, elemOf, typeOf map[string]string, pairSlots map[string][]string, factoryOf, futureOf map[string]string) []ingest.Edit {
+	if call == nil || call.Type() != "call" {
+		return nil
+	}
+	// Outer call's function is methodcaller(...) / operator.methodcaller(...).
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "call" {
+		return nil
+	}
+	mcFn := ingest.ChildByField(fn, "function")
+	if mcFn == nil {
+		return nil
+	}
+	switch mcFn.Type() {
+	case "identifier":
+		if ingest.NodeText(mcFn, content) != "methodcaller" {
+			return nil
+		}
+	case "attribute":
+		attr := ingest.ChildByField(mcFn, "attribute")
+		obj := ingest.ChildByField(mcFn, "object")
+		if attr == nil || ingest.NodeText(attr, content) != "methodcaller" {
+			return nil
+		}
+		if obj == nil || obj.Type() != "identifier" || ingest.NodeText(obj, content) != "operator" {
+			return nil
+		}
+	default:
+		return nil
+	}
+	// First positional of methodcaller is the method name string.
+	mcArgs := ingest.ChildByField(fn, "arguments")
+	nameStr := pythonFirstStringArg(mcArgs)
+	if nameStr == nil {
+		return nil
+	}
+	contentN, text := pythonStringContent(nameStr, content)
+	if contentN == nil || text != oldLeaf {
+		return nil
+	}
+	// Applied target (first positional of outer call) must type as our receiver.
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) < 1 {
+		return nil
+	}
+	if !pythonShouldRenameAttr(args[0], content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf) {
+		return nil
+	}
+	return []ingest.Edit{{
+		File:      fileRel,
+		StartByte: contentN.StartByte(),
+		EndByte:   contentN.EndByte(),
+		NewText:   newLeaf,
+	}}
 }
 
 // pythonReplaceKeywordEdits rewrites field keywords on replace(obj, oldLeaf=…).
