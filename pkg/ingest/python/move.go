@@ -2276,10 +2276,13 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// for a, b in zip(*[xs, ys]) / zip(*(xs, ys)) /
 			// for a, b in zip_longest / itertools.zip_longest /
 			// for a, b in pairwise / itertools.pairwise /
+			// for a, b in product / itertools.product /
+			// for a, b in combinations/permutations / itertools.* /
 			// for k, g in groupby / itertools.groupby (g → elemOf; key untyped) /
 			// for a in reversed/sorted/list/iter(items) /
 			// for a in filter(pred, items) / for a in map(A, names) /
 			// for a in chain/islice/accumulate/cycle / itertools.chain/islice/accumulate/cycle /
+			// for a in chain.from_iterable / itertools.chain.from_iterable /
 			// for a in takewhile/dropwhile/filterfalse / itertools.takewhile/dropwhile/filterfalse /
 			// for a in compress / itertools.compress /
 			// for a in nlargest/nsmallest / heapq.nlargest/nsmallest /
@@ -2311,10 +2314,22 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// for i, a in enumerate(xs) / for a, b in zip(xs, ys) /
 				// for a, b in zip(*[xs, ys]) / zip(*(xs, ys)) /
 				// for a, b in zip_longest(xs, ys) / itertools.zip_longest(...) /
+				// for a, b in product(xs, ys) / itertools.product(...) /
 				// for a, b in pairwise(xs) / itertools.pairwise(xs)
 				if types := pythonEnumerateZipTargetTypes(right, content, elemOf, egElems); len(types) > 0 {
 					for i, name := range targets {
 						if i < len(types) && ourReceivers[types[i]] {
+							out[name] = true
+						}
+					}
+					break
+				}
+				// for a, b in combinations(items, r) / permutations(items, r) /
+				// combinations_with_replacement(items, r) / itertools.* —
+				// every unpack slot is an element of the iterable (r ignored).
+				if et := pythonCombPermElemType(right, content, elemOf, egElems); et != "" {
+					for _, name := range targets {
+						if ourReceivers[et] {
 							out[name] = true
 						}
 					}
@@ -2867,6 +2882,8 @@ func pythonSubscriptElemType(sub *grammar.Node, content []byte, elemOf, egElems 
 // filter (2nd arg iterable; pred does not change element type),
 // map when the first arg is a Class identifier (map(A, xs) → A),
 // chain / itertools.chain (all args agree on element type),
+// chain.from_iterable / itertools.chain.from_iterable (flatten one level;
+// arg is a list/tuple of iterables that agree on element type),
 // islice / itertools.islice (1st arg iterable; start/stop/step ignored),
 // accumulate / itertools.accumulate (1st arg iterable; func/initial ignored),
 // cycle / itertools.cycle (1st arg iterable; repeats forever),
@@ -3109,6 +3126,19 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 						return ""
 					}
 					return pythonIterableElemType(args[0], content, elemOf, egElems)
+				case "from_iterable":
+					// chain.from_iterable(iterables) /
+					// itertools.chain.from_iterable(iterables) — flatten one level.
+					// Receiver must be bare chain or itertools.chain.
+					objN := ingest.ChildByField(fn, "object")
+					if !pythonIsChainReceiver(objN, content) {
+						return ""
+					}
+					args, ok := pythonCallPositionalArgNodes(right)
+					if !ok || len(args) != 1 {
+						return ""
+					}
+					return pythonChainFromIterableElemType(args[0], content, elemOf, egElems)
 				}
 			}
 		}
@@ -3150,7 +3180,8 @@ func pythonParenInner(n *grammar.Node) *grammar.Node {
 // pythonChainElemType recovers the shared element type of chain(*iterables)
 // (bare or itertools.chain). Every positional arg must resolve to the same
 // non-empty element leaf; any untyped arg or mismatched leaves fails closed.
-// chain.from_iterable and *splat args fail closed (via call-arg parsing).
+// chain.from_iterable is handled separately (pythonChainFromIterableElemType);
+// *splat args fail closed (via call-arg parsing).
 func pythonChainElemType(call *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
 	args, ok := pythonCallPositionalArgNodes(call)
 	if !ok || len(args) == 0 {
@@ -3169,6 +3200,77 @@ func pythonChainElemType(call *grammar.Node, content []byte, elemOf, egElems map
 		if et != t {
 			return ""
 		}
+	}
+	return et
+}
+
+// pythonIsChainReceiver reports whether n is bare `chain` or `itertools.chain`
+// (the receiver of chain.from_iterable).
+func pythonIsChainReceiver(n *grammar.Node, content []byte) bool {
+	if n == nil {
+		return false
+	}
+	switch n.Type() {
+	case "identifier":
+		return ingest.NodeText(n, content) == "chain"
+	case "attribute":
+		objN := ingest.ChildByField(n, "object")
+		attrN := ingest.ChildByField(n, "attribute")
+		if objN == nil || attrN == nil || objN.Type() != "identifier" {
+			return false
+		}
+		return ingest.NodeText(objN, content) == "itertools" &&
+			ingest.NodeText(attrN, content) == "chain"
+	default:
+		return false
+	}
+}
+
+// pythonChainFromIterableElemType recovers the element type yielded by
+// chain.from_iterable(iterables). The sole arg must be a list/tuple of
+// iterables that share a non-empty element leaf (e.g. [items, more] with
+// items: list[A], or [[A()], [A()]]). Bare identifiers fail closed (no
+// nested container map for list[list[A]] params).
+func pythonChainFromIterableElemType(arg *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
+	if arg == nil {
+		return ""
+	}
+	for arg != nil && arg.Type() == "parenthesized_expression" {
+		arg = pythonParenInner(arg)
+	}
+	if arg == nil {
+		return ""
+	}
+	switch arg.Type() {
+	case "list", "tuple":
+		// ok
+	default:
+		return ""
+	}
+	var et string
+	saw := false
+	for i := uint32(0); i < arg.ChildCount(); i++ {
+		ch := arg.Child(i)
+		switch ch.Type() {
+		case "[", "]", "(", ")", ",", "comment":
+			continue
+		default:
+			t := pythonIterableElemType(ch, content, elemOf, egElems)
+			if t == "" {
+				return ""
+			}
+			if !saw {
+				et = t
+				saw = true
+				continue
+			}
+			if et != t {
+				return ""
+			}
+		}
+	}
+	if !saw {
+		return ""
 	}
 	return et
 }
@@ -3292,15 +3394,15 @@ func pythonGroupbyGroupElemType(right *grammar.Node, content []byte, elemOf, egE
 
 // pythonEnumerateZipTargetTypes returns per-unpack-target element types for
 // enumerate(xs) → ["", elem(xs)] (index untyped; value is the iterable element)
-// and zip / zip_longest(a, b, ...) → [elem(a), elem(b), ...].
+// and zip / zip_longest / product(a, b, ...) → [elem(a), elem(b), ...].
 // Also zip(*[a, b]) / zip(*(a, b)) — single list/tuple-literal splat expands
 // to the same per-slot typing (kwargs like strict= still ignored).
-// zip_longest is accepted bare (from itertools import zip_longest) or as
-// itertools.zip_longest; fillvalue kwargs are ignored (same as zip strict=).
+// zip_longest / product are accepted bare (from itertools import …) or as
+// itertools.zip_longest / itertools.product; fillvalue/repeat kwargs ignored.
 // pairwise(xs) / itertools.pairwise(xs) → [elem(xs), elem(xs)] (successive
 // overlapping pairs; both slots share the iterable's element type).
 // Unknown args yield "" slots; fails closed when the call is not a resolvable
-// enumerate/zip/zip_longest/pairwise form.
+// enumerate/zip/zip_longest/product/pairwise form.
 func pythonEnumerateZipTargetTypes(right *grammar.Node, content []byte, elemOf, egElems map[string]string) []string {
 	if right == nil || right.Type() != "call" {
 		return nil
@@ -3314,7 +3416,7 @@ func pythonEnumerateZipTargetTypes(right *grammar.Node, content []byte, elemOf, 
 	case "identifier":
 		fname = ingest.NodeText(fn, content)
 	case "attribute":
-		// itertools.zip_longest(...) / itertools.pairwise(...) only —
+		// itertools.zip_longest/product/pairwise(...) only —
 		// other module attrs fail closed.
 		objN := ingest.ChildByField(fn, "object")
 		attrN := ingest.ChildByField(fn, "attribute")
@@ -3325,7 +3427,7 @@ func pythonEnumerateZipTargetTypes(right *grammar.Node, content []byte, elemOf, 
 			return nil
 		}
 		switch ingest.NodeText(attrN, content) {
-		case "zip_longest", "pairwise":
+		case "zip_longest", "pairwise", "product":
 			fname = ingest.NodeText(attrN, content)
 		default:
 			return nil
@@ -3355,7 +3457,10 @@ func pythonEnumerateZipTargetTypes(right *grammar.Node, content []byte, elemOf, 
 		}
 		// targets: index (untyped), element
 		return []string{"", et}
-	case "zip", "zip_longest":
+	case "zip", "zip_longest", "product":
+		// product(*iterables[, repeat]) — same per-slot typing as zip for
+		// positional iterables; repeat= kwargs are ignored (fail closed only
+		// when there are no positional iterables).
 		if len(args) == 0 {
 			return nil
 		}
@@ -3386,6 +3491,48 @@ func pythonEnumerateZipTargetTypes(right *grammar.Node, content []byte, elemOf, 
 	default:
 		return nil
 	}
+}
+
+// pythonCombPermElemType recovers the shared element type for
+// combinations/permutations/combinations_with_replacement unpack targets.
+// Bare (from itertools import …) or itertools.*; 1st positional arg is the
+// iterable; r and other args are ignored. Returns "" when not a resolvable form.
+func pythonCombPermElemType(right *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
+	if right == nil || right.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(right, "function")
+	if fn == nil {
+		return ""
+	}
+	var fname string
+	switch fn.Type() {
+	case "identifier":
+		fname = ingest.NodeText(fn, content)
+	case "attribute":
+		objN := ingest.ChildByField(fn, "object")
+		attrN := ingest.ChildByField(fn, "attribute")
+		if objN == nil || attrN == nil || objN.Type() != "identifier" {
+			return ""
+		}
+		if ingest.NodeText(objN, content) != "itertools" {
+			return ""
+		}
+		fname = ingest.NodeText(attrN, content)
+	default:
+		return ""
+	}
+	switch fname {
+	case "combinations", "permutations", "combinations_with_replacement":
+		// ok
+	default:
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(right)
+	if !ok || len(args) == 0 {
+		return ""
+	}
+	return pythonIterableElemType(args[0], content, elemOf, egElems)
 }
 
 // pythonExpandSingleListTupleSplat returns the elements of a sole *list/*tuple
