@@ -1720,6 +1720,8 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // m.keySet() / navigableKeySet() / descendingKeySet() → elemOf[m]
 // (Set of map keys K; Map stores K in elemOf — same key leaf as newSetFromMap),
 // List.of(new A()) / Stream.of(new A()) / Arrays.asList(new A()) → "A",
+// Arrays.asList(as) / Arrays.asList(new A[]{...}) → "A" (List of first-arg array
+// elements; same first-arg peel as Arrays.stream when not homogeneous new T(...)),
 // Collections.singletonList(new A()) / Collections.singleton(new A()) → "A",
 // Collections.nCopies(n, new A()) → "A",
 // Collections.unmodifiableList/Set/Collection(as) / synchronizedList/Set/Collection(as) /
@@ -1886,7 +1888,19 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// / Stream.ofNullable(new A())
 			// / Collections.singletonList(new A()) / Collections.singleton(new A())
 			// — element type from homogeneous new T(...) args.
-			return javaStaticCollectionOfElemType(obj, content, name)
+			// Arrays.asList(as) / Arrays.asList(new A[]{...}) — when args are not
+			// homogeneous creations, peel first-arg array element type (same path as
+			// Arrays.stream / copyOf). List/Set.of stay creation-only.
+			if et := javaStaticCollectionOfElemType(obj, content, name); et != "" {
+				return et
+			}
+			if name == "asList" {
+				recv := ingest.ChildByField(obj, "object")
+				if javaIsArraysReceiver(recv, content) {
+					return javaArraysStreamElemType(obj, content, elemOf, valOf)
+				}
+			}
+			return ""
 		case "nCopies":
 			// Collections.nCopies(n, new A()) — List of T from the second arg.
 			return javaCollectionsNCopiesElemType(obj, content)
@@ -3096,7 +3110,8 @@ func javaIsArraysReceiver(obj *grammar.Node, content []byte) bool {
 }
 
 // javaArraysStreamElemType recovers T from Arrays.stream(T[] arr[, from, to]),
-// Arrays.copyOf(T[] arr, n), and Arrays.copyOfRange(T[] arr, from, to).
+// Arrays.copyOf(T[] arr, n), Arrays.copyOfRange(T[] arr, from, to), and
+// Arrays.asList(T[] arr) (List of array elements when not homogeneous new T(...)).
 // First argument is the array (identifier with elemOf, or new T[]{...}).
 // Length / range bounds do not change the element type.
 func javaArraysStreamElemType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
