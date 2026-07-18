@@ -1721,6 +1721,9 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // Collections.nCopies(n, new A()) → "A",
 // Collections.unmodifiableList/Set/Collection(as) / synchronizedList/Set/Collection(as) /
 // checkedList/Set/Collection(as, …) → elemOf[as],
+// Collections.unmodifiableSortedSet/NavigableSet(as) / synchronizedSortedSet/NavigableSet(as) /
+// checkedSortedSet/NavigableSet(as, …) → elemOf[as] (SortedSet/NavigableSet wrappers;
+// same element type; Class args ignored — mirrors unmodifiableSortedMap/NavigableMap),
 // Collections.list(Enumeration) / Collections.enumeration(coll) → enumeration/coll element type,
 // List.copyOf(as) / Set.copyOf(as) → elemOf[as] (Collection of first-arg elements),
 // Stream.concat(s1, s2) → element type when both stream args agree,
@@ -1869,12 +1872,19 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			return javaCollectionsNCopiesElemType(obj, content)
 		case "unmodifiableList", "synchronizedList", "checkedList",
 			"unmodifiableSet", "synchronizedSet", "checkedSet",
+			"unmodifiableSortedSet", "synchronizedSortedSet", "checkedSortedSet",
+			"unmodifiableNavigableSet", "synchronizedNavigableSet", "checkedNavigableSet",
 			"unmodifiableCollection", "synchronizedCollection", "checkedCollection",
 			"list", "enumeration":
 			// Collections.unmodifiableList/Set/Collection(as) /
 			// synchronizedList/Set/Collection(as) /
 			// checkedList/Set/Collection(as, A.class) — Collection of first-arg
 			// element type (Class arg on checked* ignored).
+			// Collections.unmodifiableSortedSet/NavigableSet(as) /
+			// synchronizedSortedSet/NavigableSet(as) /
+			// checkedSortedSet/NavigableSet(as, A.class) — same E (SortedSet/
+			// NavigableSet wrappers; Class args ignored; mirrors *SortedMap/
+			// *NavigableMap on the value path).
 			// Collections.list(Enumeration) — ArrayList of enumeration elements.
 			// Collections.enumeration(coll) — Enumeration of coll elements.
 			return javaCollectionsListWrapperElemType(obj, content, elemOf, valOf)
@@ -2223,6 +2233,8 @@ func javaCollectionsNCopiesElemType(call *grammar.Node, content []byte) string {
 // javaCollectionsListWrapperElemType recovers the element type of
 // Collections.unmodifiableList/Set/Collection(coll) /
 // synchronizedList/Set/Collection(coll) / checkedList/Set/Collection(coll, type) /
+// Collections.unmodifiableSortedSet/NavigableSet(coll) /
+// synchronizedSortedSet/NavigableSet(coll) / checkedSortedSet/NavigableSet(coll, type) /
 // Collections.list(enumeration) / Collections.enumeration(coll).
 // First arg's element type; the Class arg on checked* is ignored.
 // Non-Collections receivers fail closed.
