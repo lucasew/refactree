@@ -2045,6 +2045,9 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `a = d.get(k)` / `a = d.get(k, default)` (dict value type; default ignored like next),
 // `a = d.setdefault(k)` / `a = d.setdefault(k, default)` (same dict value type),
 // `k, a = d.popitem()` (dict value leaf on 2nd unpack slot; pair itself untyped),
+// `k, a = next(d.items())` / `k, a = next(iter(d.items()))` (dict value on 2nd slot),
+// `k, x = next(asdict(pair).items())` / `next(iter(asdict(pair).items()))` when
+// all declaration-order field types agree (homogeneous values; mixed fail closed),
 // `a = d.popitem()[1]` / `a = (d.popitem())[1]` (pair value slot; [0]/other fail closed),
 // `it1, it2 = tee(items)` / `it1, it2 = itertools.tee(items[, n])` —
 // each target is an iterator of items elements (elemOf; not an element itself),
@@ -2630,6 +2633,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// d.values() after d = asdict(box) / vars / __dict__ (dict preserves
 			// declaration order — same per-slot leaves as astuple unpack) /
 			// k, a = d.popitem() (value leaf on 2nd slot; same as for k, a in d.items()) /
+			// k, a = next(d.items()) / next(iter(d.items())) (typed dict value on 2nd) /
+			// k, x = next(asdict(pair).items()) / next(iter(asdict(pair).items())) when
+			// homogeneous field values (same leaf as for k, x in asdict(...).items()) /
 			// it1, it2 = tee(items) / itertools.tee(items[, n]) (each → elemOf) /
 			// a, *rest = items / *rest, a = items / a, = items (items: list[A]) /
 			// xa, *rest = astuple(box) / asdict(box).values() (fixed slots by
@@ -2679,6 +2685,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						}
 					} else if vt := pythonDictPopitemValueType(right, content, elemOf); vt != "" {
 						// k, a = d.popitem() — value type is elemOf[d] (dict value leaf).
+						if len(targets) >= 2 && ourReceivers[vt] {
+							out[targets[1]] = true
+						}
+					} else if vt := pythonNextItemsValueType(right, content, elemOf, fieldOf); vt != "" {
+						// k, a = next(d.items()) / next(iter(d.items())) — typed dict value
+						// leaf on 2nd slot; k, x = next(asdict(pair).items()) /
+						// next(iter(asdict(pair).items())) when homogeneous field values
+						// (same leaf as for k, x in asdict(...).items()).
 						if len(targets) >= 2 && ourReceivers[vt] {
 							out[targets[1]] = true
 						}
@@ -4198,6 +4212,58 @@ func pythonAstupleHomogeneousType(n *grammar.Node, content []byte, fieldOf map[s
 		return ""
 	}
 	return pythonHomogeneousAstupleFieldType(local, fieldOf)
+}
+
+// pythonNextItemsValueType recovers the value leaf from next(...items()) unpack:
+//   - k, a = next(d.items()) / next(iter(d.items())) when d is a known dict
+//     (elemOf stores the value leaf from dict[K, V])
+//   - k, x = next(asdict(pair).items()) / next(iter(asdict(pair).items())) /
+//     vars(pair).items() / pair.__dict__.items() / d.items() after d = asdict(pair)
+//     when all declaration-order field types agree (fieldOf @astuple.*.#i)
+//
+// Peels identity wrappers iter/list/tuple on the items view. Default arg ignored.
+// Key slot stays untyped; mixed asdict fields and non-items forms fail closed ("").
+// Same leaf as for k, x in d.items() / for k, x in asdict(...).items() (homogeneous).
+func pythonNextItemsValueType(call *grammar.Node, content []byte, elemOf, fieldOf map[string]string) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "identifier" || ingest.NodeText(fn, content) != "next" {
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) == 0 {
+		return ""
+	}
+	n := args[0]
+	// Peel identity wrappers that preserve items() pair yields: iter / list / tuple.
+	for {
+		if n == nil {
+			return ""
+		}
+		if n.Type() == "parenthesized_expression" {
+			n = pythonParenInner(n)
+			continue
+		}
+		if n.Type() != "call" {
+			break
+		}
+		wfn := ingest.ChildByField(n, "function")
+		name := pythonSimpleCalleeName(wfn, content)
+		if name != "iter" && name != "list" && name != "tuple" {
+			break
+		}
+		wargs, ok := pythonCallPositionalArgNodes(n)
+		if !ok || len(wargs) == 0 {
+			return ""
+		}
+		n = wargs[0]
+	}
+	if vt := pythonDictItemsValueType(n, content, elemOf); vt != "" {
+		return vt
+	}
+	return pythonDictViewItemsHomogeneousValueType(n, content, fieldOf)
 }
 
 // pythonDictViewItemsHomogeneousValueType recovers the shared value type of
