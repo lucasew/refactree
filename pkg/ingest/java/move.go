@@ -1612,6 +1612,9 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 	if args == nil {
 		return
 	}
+	// ConcurrentHashMap.reduce has two bi-lambdas (transformer then reducer);
+	// only the transformer sees V as its second param.
+	reduceBiSeen := 0
 	for i := uint32(0); i < args.ChildCount(); i++ {
 		ch := args.Child(i)
 		if ch.Type() != "lambda_expression" {
@@ -1666,6 +1669,19 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 					if vt := javaMapPipelineValueType(obj, content, elemOf, valOf); vt != "" {
 						entryValOf[params[0]] = vt
 						entryValOf[params[1]] = vt
+					}
+				}
+				continue
+			}
+			// ConcurrentHashMap.reduce(threshold, BiFunction<K,V,U>, BiFunction<U,U,U>) —
+			// transformer (first bi-lambda) has V as second param; reducer is on U —
+			// fail closed (only bind the first bi-lambda when receiver is a map).
+			// Stream.reduce is not a map receiver — javaMapPipelineValueType fails closed.
+			if method == "reduce" {
+				reduceBiSeen++
+				if reduceBiSeen == 1 {
+					if vt := javaMapPipelineValueType(obj, content, elemOf, valOf); vt != "" && ourReceivers[vt] {
+						out[params[1]] = true
 					}
 				}
 				continue
@@ -1729,6 +1745,9 @@ func javaStreamElementLambdaMethod(method string) bool {
 		// ConcurrentHashMap.search(threshold, BiFunction<? super K,? super V,? extends U>)
 		// — (K,V) bi-lambda; value is second param (same as forEach).
 		"search",
+		// ConcurrentHashMap.reduce(threshold, BiFunction<K,V,U>, BiFunction<U,U,U>) —
+		// transformer (K,V) bi-lambda; value is second param (reducer is on U).
+		"reduce",
 		// ConcurrentHashMap searchValues / forEachValue — unary Function/Consumer on V
 		// (see javaMapValueUnaryLambdaMethod).
 		"searchValues", "forEachValue",
@@ -4506,6 +4525,13 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// are handled via javaObjectsRequireNonNullArgIdent + typedLocals.
 		return javaObjectsRequireNonNullElemType(val, obj, content, elemOf, valOf, entryValOf, compOf)
 	case "reduce":
+		// ConcurrentHashMap.reduce(threshold, BiFunction<K,V,U>, BiFunction<U,U,U>)
+		// returns U. Value-identity transformer ((k,v) -> v) yields V of the map
+		// (var xa = m.reduce(1L, (k,v) -> v, (a,b) -> a); xa.m() / chained .m()).
+		// Prefer CHM recovery when the receiver is a map; otherwise stream reduce.
+		if t := javaCHMReduceReturnType(val, obj, content, elemOf, valOf); t != "" {
+			return t
+		}
 		// Stream.reduce(identity, accumulator[, combiner]) returns the identity type
 		// (T for BinaryOperator; U for the 3-arg form when identity is U — we recover
 		// the stream element type, which matches the common T-identity product case).
@@ -4649,6 +4675,23 @@ func javaSearchReturnType(call, obj *grammar.Node, content []byte, elemOf, valOf
 	// BiFunction is the last arg (threshold is first).
 	fn := args[len(args)-1]
 	if !javaIsValueIdentityBiLambda(fn, content) {
+		return ""
+	}
+	return javaMapPipelineValueType(obj, content, elemOf, valOf)
+}
+
+// javaCHMReduceReturnType recovers U from ConcurrentHashMap.reduce when the
+// transformer BiFunction is a value-identity bi-lambda ((k,v) -> v), so U = V
+// of the map receiver. Form: reduce(threshold, transformer, reducer) — 3 args,
+// transformer is args[1]. Stream.reduce and non-identity transformers fail closed
+// (no map V / non-identity body).
+func javaCHMReduceReturnType(call, obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	args := javaCallArgs(call)
+	if len(args) != 3 {
+		return ""
+	}
+	// Transformer is the second arg (threshold first, reducer third).
+	if !javaIsValueIdentityBiLambda(args[1], content) {
 		return ""
 	}
 	return javaMapPipelineValueType(obj, content, elemOf, valOf)
