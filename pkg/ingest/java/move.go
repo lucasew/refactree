@@ -1043,6 +1043,8 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 	//   sa.get().m() — Supplier element (generic type arg)
 	//   aa.getAndSet(v).m() / aa.updateAndGet(f).m() / aa.getPlain().m() —
 	//     AtomicReference value (same V leaf as get)
+	//   new AtomicReference<>(new A()).get().m() / WeakReference / SoftReference —
+	//     holder construction peel (same V leaf as typed AtomicReference local)
 	//   ca.call().m() — Callable element (generic type arg)
 	//   fa.join().m() / fa.getNow(d).m() / fa.resultNow().m() — CompletableFuture
 	//   fn.apply(x).m() — Function/UnaryOperator/BiFunction result (R / T)
@@ -2002,6 +2004,9 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // CompletableFuture.supplyAsync(() -> new A()) / supplyAsync(() -> new A(), ex) → "A"
 // (CF of T from supplier body; enables supplyAsync(() -> new A()).join() /
 // var f = supplyAsync(() -> new A()); f.join()),
+// new AtomicReference<>(new A()) / WeakReference / SoftReference → "A"
+// (holder of V; enables new AtomicReference<>(new A()).get() /
+// var ar = new AtomicReference<>(new A()); ar.get()),
 // Stream.iterate(new A(), …) / iterate(new A(), pred, …) → "A" (seed creation type),
 // Stream.ofNullable(new A()) → "A",
 // Arrays.stream(as) / Arrays.stream(new A[]{...}) → "A",
@@ -2059,6 +2064,13 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			return javaTypeName(typeN, content)
 		}
 		return ""
+	case "object_creation_expression":
+		// new AtomicReference<>(new A()) / WeakReference / SoftReference → A
+		// (holder of V; enables new AtomicReference<>(new A()).get().m() and
+		// var ar = new AtomicReference<>(new A()); ar.get().m() under foreign
+		// same-leaf methods). Other constructions fail closed here so
+		// new A().m() stays on the direct object_creation rename path.
+		return javaReferenceHolderCreationElemType(obj, content)
 	case "cast_expression":
 		// (ArrayList<A>) as.clone() / (List<A>) x / (A[]) arr.clone() —
 		// recover E from a single type-arg generic cast or array cast type.
@@ -4204,6 +4216,56 @@ func javaMapEntryCreationValueType(call *grammar.Node, content []byte) string {
 	return javaTypeName(typeN, content)
 }
 
+// javaReferenceHolderCreationElemType recovers V from
+// new AtomicReference<>(new T(...)) / new AtomicReference<T>(…) /
+// new WeakReference<>(new T(...)) / new SoftReference<>(new T(...))
+// (and queue overloads: first ctor arg is the referent).
+// Prefers declared single type arg when present; diamond/raw recover V from the
+// first constructor arg when it is new T(...). Other types / empty ctor /
+// non-creation referents fail closed.
+// Enables new AtomicReference<>(new A()).get().m() and
+// var ar = new AtomicReference<>(new A()); ar.get().m() under foreign
+// same-leaf methods (pipeline peel + elemOf bind).
+func javaReferenceHolderCreationElemType(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "object_creation_expression" {
+		return ""
+	}
+	typeN := ingest.ChildByField(call, "type")
+	if typeN == nil {
+		return ""
+	}
+	// new AtomicReference<A>(…) / WeakReference<A> / SoftReference<A> —
+	// V from the single declared type arg.
+	if args := javaTypeArgNames(typeN, content); len(args) == 1 && args[0] != "" {
+		switch javaTypeName(typeN, content) {
+		case "AtomicReference", "WeakReference", "SoftReference":
+			return args[0]
+		}
+	}
+	// Diamond / raw: only known V holders.
+	switch javaTypeName(typeN, content) {
+	case "AtomicReference", "WeakReference", "SoftReference":
+		// ok
+	default:
+		return ""
+	}
+	// First constructor arg is the referent (AtomicReference(V) /
+	// WeakReference(T) / SoftReference(T) / *Reference(T, ReferenceQueue)).
+	args := javaCallArgs(call)
+	if len(args) < 1 || len(args) > 2 {
+		return ""
+	}
+	arg := args[0]
+	if arg.Type() != "object_creation_expression" {
+		return ""
+	}
+	argType := ingest.ChildByField(arg, "type")
+	if argType == nil {
+		return ""
+	}
+	return javaTypeName(argType, content)
+}
+
 // javaSimpleEntryCreationValueType recovers V from
 // new AbstractMap.SimpleEntry<>(k, new T(...)) /
 // new AbstractMap.SimpleImmutableEntry<>(k, new T(...)) /
@@ -4610,6 +4672,9 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	  aa.accumulateAndGet(x, f) / aa.compareAndExchange(e, u) /
 //	  aa.getPlain() / aa.getAcquire() / aa.getOpaque() → elemOf[aa]
 //	  (AtomicReference<V> and friends; return V like get; args do not change T)
+//	new AtomicReference<>(new A()).get() → A
+//	new WeakReference<>(new A()).get() / SoftReference → A
+//	  (holder construction peel; same leaf as var ar = new AtomicReference<>(new A()))
 //	ca.call() → elemOf[ca] (Callable<A>; zero-arg call returns V)
 //	fa.join() / fa.resultNow() → elemOf[fa] (CompletableFuture<A>; zero-arg)
 //	fa.getNow(d) → elemOf[fa] (CompletableFuture<A>; default does not change T)
@@ -4662,6 +4727,10 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 // AtomicReference getAndSet/getAndUpdate/updateAndGet/accumulateAndGet/
 // compareAndExchange/getPlain/getAcquire/getOpaque share get's elemOf path
 // (return V; updater/expected args do not change the type leaf).
+// new AtomicReference<>(new A()).get() / WeakReference / SoftReference peel V
+// from the holder construction (declared type arg or diamond first-arg creation)
+// so inline get and var ar = new AtomicReference<>(new A()) bind under foreign
+// same-leaf methods.
 // Array index as[0] / (as)[0] recovers elemOf[as] (same leaf as List.get; index
 // does not change T). Nested matrix[i][j] peels to the root array local.
 // Stream/Collection.toArray()[i] recovers the pipeline element type (toArray is
