@@ -1497,8 +1497,10 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			return javaFlatMapResultElemType(obj, content, elemOf, valOf)
 		case "collect":
 			// Stream.collect(Collectors.toList()/toSet()) / collect(toList()/toSet()) /
-			// collect(Collectors::toList / Collectors::toSet) — Collection of the
-			// stream element type. Other collectors (groupingBy, mapping, …) fail closed.
+			// collect(Collectors::toList / Collectors::toSet) /
+			// collect(Collectors.collectingAndThen(toList()/toSet(), finisher)) —
+			// Collection of the stream element type. Other collectors
+			// (groupingBy, mapping, …) fail closed.
 			if !javaIsToListOrSetCollector(obj, content) {
 				return ""
 			}
@@ -1694,8 +1696,10 @@ func javaFirstCallArg(call *grammar.Node) *grammar.Node {
 
 // javaIsToListOrSetCollector reports Stream.collect args that produce a
 // Collection of the stream element type: Collectors.toList()/toSet(),
-// toList()/toSet() (static import), Collectors::toList / Collectors::toSet.
-// Other collectors fail closed.
+// toList()/toSet() (static import), Collectors::toList / Collectors::toSet,
+// and Collectors.collectingAndThen(toList()/toSet(), finisher) (finisher is
+// treated as preserving Collection of the same element type — identity,
+// Collections::unmodifiableList, …). Other collectors fail closed.
 func javaIsToListOrSetCollector(collectCall *grammar.Node, content []byte) bool {
 	if collectCall == nil {
 		return false
@@ -1704,10 +1708,24 @@ func javaIsToListOrSetCollector(collectCall *grammar.Node, content []byte) bool 
 	if first == nil {
 		return false
 	}
-	switch first.Type() {
+	if javaIsToListOrSetCollectorExpr(first, content) {
+		return true
+	}
+	// collectingAndThen(downstream, finisher) when downstream is toList/toSet.
+	return javaIsCollectingAndThenToListOrSet(first, content)
+}
+
+// javaIsToListOrSetCollectorExpr reports a collector expression that yields a
+// Collection of the stream element type: toList()/toSet(), Collectors.toList()/
+// toSet(), Collectors::toList / Collectors::toSet.
+func javaIsToListOrSetCollectorExpr(n *grammar.Node, content []byte) bool {
+	if n == nil {
+		return false
+	}
+	switch n.Type() {
 	case "method_invocation":
 		// toList()/toSet() / Collectors.toList()/toSet() — zero-arg only.
-		nameN := ingest.ChildByField(first, "name")
+		nameN := ingest.ChildByField(n, "name")
 		if nameN == nil {
 			return false
 		}
@@ -1716,7 +1734,7 @@ func javaIsToListOrSetCollector(collectCall *grammar.Node, content []byte) bool 
 		default:
 			return false
 		}
-		if obj := ingest.ChildByField(first, "object"); obj != nil {
+		if obj := ingest.ChildByField(n, "object"); obj != nil {
 			if obj.Type() != "identifier" && obj.Type() != "type_identifier" {
 				return false
 			}
@@ -1724,11 +1742,11 @@ func javaIsToListOrSetCollector(collectCall *grammar.Node, content []byte) bool 
 				return false
 			}
 		}
-		for i := uint32(0); i < first.ChildCount(); i++ {
-			if first.Child(i).Type() != "argument_list" {
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			if n.Child(i).Type() != "argument_list" {
 				continue
 			}
-			al := first.Child(i)
+			al := n.Child(i)
 			for j := uint32(0); j < al.ChildCount(); j++ {
 				switch al.Child(j).Type() {
 				case "(", ")", "comment":
@@ -1742,8 +1760,8 @@ func javaIsToListOrSetCollector(collectCall *grammar.Node, content []byte) bool 
 	case "method_reference":
 		// Collectors::toList / Collectors::toSet — children are receiver, "::", name.
 		var parts []*grammar.Node
-		for i := uint32(0); i < first.ChildCount(); i++ {
-			child := first.Child(i)
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			child := n.Child(i)
 			if child.Type() == "::" {
 				continue
 			}
@@ -1768,6 +1786,30 @@ func javaIsToListOrSetCollector(collectCall *grammar.Node, content []byte) bool 
 	default:
 		return false
 	}
+}
+
+// javaIsCollectingAndThenToListOrSet reports
+// Collectors.collectingAndThen(toList()/toSet()/Collectors::toList/…, finisher)
+// / collectingAndThen(...) (static import). Downstream must itself be a
+// toList/toSet collector; finisher is not inspected (fail-open for element
+// preservation, matching common unmodifiableList / identity finishers).
+func javaIsCollectingAndThenToListOrSet(n *grammar.Node, content []byte) bool {
+	if n == nil || n.Type() != "method_invocation" {
+		return false
+	}
+	nameN := ingest.ChildByField(n, "name")
+	if nameN == nil || ingest.NodeText(nameN, content) != "collectingAndThen" {
+		return false
+	}
+	if obj := ingest.ChildByField(n, "object"); obj != nil {
+		if obj.Type() != "identifier" && obj.Type() != "type_identifier" {
+			return false
+		}
+		if ingest.NodeText(obj, content) != "Collectors" {
+			return false
+		}
+	}
+	return javaIsToListOrSetCollectorExpr(javaFirstCallArg(n), content)
 }
 
 // javaCollectFirstArg returns the first non-punctuation argument of a collect(...) call.
