@@ -1911,6 +1911,12 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// const [, a] = [new A()].entries().next().value /
 						// const [, a] = ra.value after entries next result
 						jsBindEntriesArrayPattern(nameN, content, t, out)
+					} else if t := jsArraySourceElemType(valN, content, arrayLocals, out, factories, extra); t != "" {
+						// const [a] = ma.get("k") / const [a] = [new A()] /
+						// const [a] = as / const [a] = Object.values(ga)[0] —
+						// group-array / array-source element T.
+						// Bind foreign too so dual-class B rebinds fail closed.
+						jsBindArrayPatternNames(nameN, content, t, out)
 					} else if valN.Type() == "identifier" && entryLocals != nil {
 						// const [, a] = e after const e = Object.entries({k: new A()})[0]
 						// / after const e = [new A()].entries().next().value
@@ -1946,6 +1952,12 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 					out[ingest.NodeText(left, content)] = t
 				} else if t := jsMapGroupByValuesElemType(right, content, arrayLocals, out, factories, extra); t != "" {
 					// for (const g of ma.values()) / Map.groupBy(...).values() —
+					// yields group arrays T[]; bind as array local of T.
+					// Bind foreign too so dual-class B rebinds fail closed.
+					arrayLocals[ingest.NodeText(left, content)] = t
+				} else if t := jsObjectValuesGroupByElemType(right, content, arrayLocals, out, factories, extra); t != "" {
+					// for (const g of Object.values(ga)) /
+					// for (const g of Object.values(Object.groupBy(...))) —
 					// yields group arrays T[]; bind as array local of T.
 					// Bind foreign too so dual-class B rebinds fail closed.
 					arrayLocals[ingest.NodeText(left, content)] = t
@@ -3146,6 +3158,11 @@ func jsArraySourceElemType(n *grammar.Node, content []byte, arrayLocals, typedLo
 		// Map.groupBy(arr, fn).get(k) / ma.get(k) — group is array of T.
 		return t
 	}
+	if t := jsMapGroupByValuesNextValueGroupElemType(n, content, arrayLocals, typedLocals, factories, extra); t != "" {
+		// ma.values().next().value / Map.groupBy(...).values().next().value —
+		// next group array of T (not scalar T).
+		return t
+	}
 	if t := jsGroupByEntriesPairGroupArrayType(n, content, arrayLocals, typedLocals, factories, extra); t != "" {
 		// Object.entries(groupBy)[i][1] / [...Map.groupBy.entries()][i][1] —
 		// pair value is group array of T (not scalar T).
@@ -3696,16 +3713,98 @@ func jsGroupByEntriesNextPairElemType(n *grammar.Node, content []byte, arrayLoca
 }
 
 // jsObjectFromEntriesGroupByElemType recovers T from Object.fromEntries(iterable)
-// when iterable peels to [key, T[]] pairs over a groupBy result (Object.entries
-// of groupBy / Map.groupBy.entries). Result is Record of T[] — same shape as
-// Object.groupBy — so property access peels via jsObjectGroupByGroupArrayType.
-// Scalar fromEntries (value T) stays on the objValue path. Unknown fail closed.
+// when iterable peels to [key, T[]] pairs over a groupBy result:
+//
+//	Object.entries(groupBy) / Map.groupBy.entries / spread of those
+//	bare Map.groupBy(...) / ma after const ma = Map.groupBy(...) — Map is
+//	iterable of [key, T[]] pairs (same shape as .entries())
+//
+// Result is Record of T[] — same shape as Object.groupBy — so property access
+// peels via jsObjectGroupByGroupArrayType. Scalar fromEntries (value T) stays
+// on the objValue path. Unknown fail closed.
 func jsObjectFromEntriesGroupByElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals) string {
 	first := jsObjectStaticCallSingleArg(n, content, "fromEntries")
 	if first == nil {
 		return ""
 	}
-	return jsGroupByEntriesSourceElemType(first, content, arrayLocals, typedLocals, factories, extra)
+	// Object.entries(ga) / ma.entries() / [...ma.entries()]
+	if t := jsGroupByEntriesSourceElemType(first, content, arrayLocals, typedLocals, factories, extra); t != "" {
+		return t
+	}
+	// Object.fromEntries(Map.groupBy(arr, fn)) — Map iterates [key, T[]] pairs.
+	if t := jsMapGroupByElemType(first, content, arrayLocals, typedLocals, factories, extra); t != "" {
+		return t
+	}
+	// Object.fromEntries(ma) after const ma = Map.groupBy(...)
+	if first.Type() == "identifier" && extra.groupMap != nil {
+		if t := extra.groupMap[ingest.NodeText(first, content)]; t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
+// jsMapGroupByValuesNextValueGroupElemType recovers T from a group-array
+// expression that is the .value of Map.groupBy values-iterator .next():
+//
+//	Map.groupBy(arr, fn).values().next().value
+//	ma.values().next().value after const ma = Map.groupBy(...)
+//
+// Yields group arrays T[] (not scalar T) so [0].run() peels via
+// jsArraySourceElemType. Zero-arg values/next only. Non-groupBy fail closed.
+func jsMapGroupByValuesNextValueGroupElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	// .value on a .next() result
+	if n == nil || (n.Type() != "member_expression" && n.Type() != "member_expression_optional" && n.Type() != "optional_chain") {
+		return ""
+	}
+	prop := ingest.ChildByField(n, "property")
+	if prop == nil || (prop.Type() != "property_identifier" && prop.Type() != "identifier") {
+		return ""
+	}
+	if ingest.NodeText(prop, content) != "value" {
+		return ""
+	}
+	obj := ingest.ChildByField(n, "object")
+	for obj != nil && obj.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < obj.ChildCount(); i++ {
+			ch := obj.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		obj = inner
+	}
+	// .next() zero-arg on values() iterator
+	if obj == nil || obj.Type() != "call_expression" || !jsCallIsZeroArg(obj) {
+		return ""
+	}
+	fn := ingest.ChildByField(obj, "function")
+	if fn == nil || (fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain") {
+		return ""
+	}
+	nprop := ingest.ChildByField(fn, "property")
+	if nprop == nil || ingest.NodeText(nprop, content) != "next" {
+		return ""
+	}
+	return jsMapGroupByValuesElemType(ingest.ChildByField(fn, "object"), content, arrayLocals, typedLocals, factories, extra)
 }
 
 // jsMapGroupByValuesElemType recovers T from Map.groupBy(...).values() /
@@ -3768,8 +3867,9 @@ func jsMapGroupByValuesElemType(n *grammar.Node, content []byte, arrayLocals, ty
 }
 
 // jsObjectValuesGroupByElemType recovers T from Object.values(Object.groupBy(…))
-// when the groupBy iterable peels to T. Object.values yields T[][] — callers
-// use [i] group access via jsObjectGroupByGroupArrayType.
+// / Object.values(ga) after const ga = Object.groupBy(...) when the groupBy
+// iterable peels to T. Object.values yields T[][] — callers use [i] group
+// access via jsObjectGroupByGroupArrayType, or for-of binding of group arrays.
 func jsObjectValuesGroupByElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals) string {
 	if n == nil || n.Type() != "call_expression" {
 		return ""
@@ -3804,7 +3904,18 @@ func jsObjectValuesGroupByElemType(n *grammar.Node, content []byte, arrayLocals,
 	if count != 1 || first == nil {
 		return ""
 	}
-	return jsObjectGroupByElemType(first, content, arrayLocals, typedLocals, factories, extra)
+	// Object.values(Object.groupBy(arr, fn))
+	if t := jsObjectGroupByElemType(first, content, arrayLocals, typedLocals, factories, extra); t != "" {
+		return t
+	}
+	// Object.values(ga) after const ga = Object.groupBy(...) /
+	// after const ga = Object.fromEntries(Object.entries(groupBy))
+	if first.Type() == "identifier" && extra.groupBy != nil {
+		if t := extra.groupBy[ingest.NodeText(first, content)]; t != "" {
+			return t
+		}
+	}
+	return ""
 }
 
 // jsArraySpreadElemType recovers T from an array literal that includes spread
