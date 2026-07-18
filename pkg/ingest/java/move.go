@@ -1624,8 +1624,10 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 		switch len(params) {
 		case 1:
 			// ConcurrentHashMap.searchValues(threshold, Function<? super V, ? extends U>) /
-			// forEachValue(threshold, Consumer<? super V>) — unary Function/Consumer
-			// applies to map values V (not keys / not stream elems).
+			// forEachValue(threshold, Consumer<? super V>) /
+			// reduceValues(threshold, Function<? super V, ? extends U>, BiFunction) —
+			// unary Function/Consumer applies to map values V (not keys / not stream elems).
+			// reduceValues 3-arg transformer is the only unary on that form; 2-arg is bi-lambda.
 			if javaMapValueUnaryLambdaMethod(method) {
 				if vt := javaMapPipelineValueType(obj, content, elemOf, valOf); vt != "" && ourReceivers[vt] {
 					out[params[0]] = true
@@ -1739,8 +1741,8 @@ func javaStreamElementLambdaMethod(method string) bool {
 		"removeIf", "ifPresent", "ifPresentOrElse",
 		// Map value bi-lambdas (see javaMapValueBiLambdaMethod).
 		"computeIfPresent", "compute", "replaceAll", "merge",
-		// ConcurrentHashMap reduceValues — BiFunction reducer on V,V
-		// (see javaMapValueBiLambdaMethod).
+		// ConcurrentHashMap.reduceValues — 2-arg BiFunction on V,V and 3-arg unary
+		// transformer on V (see javaMapValueBiLambdaMethod / javaMapValueUnaryLambdaMethod).
 		"reduceValues",
 		// ConcurrentHashMap.search(threshold, BiFunction<? super K,? super V,? extends U>)
 		// — (K,V) bi-lambda; value is second param (same as forEach).
@@ -1778,10 +1780,12 @@ func javaMapEntryUnaryLambdaMethod(method string) bool {
 // javaMapValueUnaryLambdaMethod reports ConcurrentHashMap-style methods whose
 // unary functional arg is applied to map values V (not keys / not stream elems):
 // searchValues(threshold, Function<? super V, ? extends U>),
-// forEachValue(threshold, Consumer<? super V>).
+// forEachValue(threshold, Consumer<? super V>),
+// reduceValues(threshold, Function<? super V, ? extends U>, BiFunction) — 3-arg
+// transformer only (2-arg form is a V,V bi-lambda; see case 2).
 func javaMapValueUnaryLambdaMethod(method string) bool {
 	switch method {
-	case "searchValues", "forEachValue":
+	case "searchValues", "forEachValue", "reduceValues":
 		return true
 	default:
 		return false
