@@ -2251,6 +2251,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// for a in chain/islice/accumulate/cycle / itertools.chain/islice/accumulate/cycle /
 			// for a in takewhile/dropwhile/filterfalse / itertools.takewhile/dropwhile/filterfalse /
 			// for a in compress / itertools.compress /
+			// for a in nlargest/nsmallest / heapq.nlargest/nsmallest /
 			// for a in dict.fromkeys(items) /
 			// [a.m() for a in xs] / for a in e.exceptions
 			left := ingest.ChildByField(n, "left")
@@ -2647,7 +2648,8 @@ func pythonMinMaxElemType(call *grammar.Node, content []byte, elemOf, egElems ma
 // heapq.heappop(heap). The heap is the first positional arg (same element typing
 // as next(iterable)). Bare heappop (from heapq import heappop) and module-
 // qualified heapq.heappop are accepted; other receivers fail closed.
-// heappushpop / heapreplace / nlargest are not handled.
+// heappushpop / heapreplace are not handled (nlargest/nsmallest yield lists —
+// see pythonIterableElemType).
 func pythonHeappopElemType(call *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
 	if call == nil || call.Type() != "call" {
 		return ""
@@ -2793,6 +2795,7 @@ func pythonSubscriptElemType(sub *grammar.Node, content []byte, elemOf, egElems 
 // cycle / itertools.cycle (1st arg iterable; repeats forever),
 // takewhile / dropwhile / filterfalse / itertools.* (2nd arg iterable; pred ignored),
 // compress / itertools.compress (1st arg data; selectors ignored),
+// nlargest / nsmallest / heapq.nlargest / heapq.nsmallest (2nd arg iterable; n/key ignored),
 // Counter / collections.Counter (keys = iterable elements; .elements() same),
 // dict.fromkeys(iterable[, value]) (keys = 1st-arg elements; value ignored here),
 // items.copy() (zero-arg; same element type as receiver),
@@ -2889,6 +2892,14 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 					return ""
 				}
 				return pythonIterableElemType(args[1], content, elemOf, egElems)
+			case "nlargest", "nsmallest":
+				// nlargest(n, iterable[, key]) / nsmallest(n, iterable[, key])
+				// from heapq — yields elements of iterable (2nd arg); n/key ignored.
+				args, ok := pythonCallPositionalArgNodes(right)
+				if !ok || len(args) < 2 {
+					return ""
+				}
+				return pythonIterableElemType(args[1], content, elemOf, egElems)
 			}
 		}
 		// items.copy() / list(items).copy() — zero-arg shallow copy preserves
@@ -2900,6 +2911,7 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		// itertools.chain(...) / itertools.islice(...) / itertools.accumulate(...) /
 		// itertools.cycle(...) / itertools.compress(...) /
 		// itertools.takewhile/dropwhile/filterfalse(...) — same as bare helpers.
+		// heapq.nlargest / heapq.nsmallest — same as bare nlargest/nsmallest.
 		// collections.deque(xs) / collections.Counter(xs) — same as bare forms.
 		if fn := ingest.ChildByField(right, "function"); fn != nil && fn.Type() == "attribute" {
 			if attr := ingest.ChildByField(fn, "attribute"); attr != nil {
@@ -2958,6 +2970,21 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 						return ""
 					}
 					if ingest.NodeText(objN, content) != "itertools" {
+						return ""
+					}
+					args, ok := pythonCallPositionalArgNodes(right)
+					if !ok || len(args) < 2 {
+						return ""
+					}
+					return pythonIterableElemType(args[1], content, elemOf, egElems)
+				case "nlargest", "nsmallest":
+					// heapq.nlargest(n, iterable[, key]) / heapq.nsmallest(...)
+					// — element type of 2nd positional arg (n/key ignored).
+					objN := ingest.ChildByField(fn, "object")
+					if objN == nil || objN.Type() != "identifier" {
+						return ""
+					}
+					if ingest.NodeText(objN, content) != "heapq" {
 						return ""
 					}
 					args, ok := pythonCallPositionalArgNodes(right)
