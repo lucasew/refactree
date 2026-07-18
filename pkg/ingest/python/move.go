@@ -1921,6 +1921,8 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `for combo in product(xs, ys): for a in combo` /
 // `for combo in itertools.product(...)` (combo → elemOf when all args share type),
 // `for pair in zip/zip_longest/pairwise(...): for a in pair` (pair → elemOf when shared),
+// `for a, b in list/tuple/iter/reversed/sorted/filter(...zip...)` (identity wrappers),
+// `for pair in list(zip(...)): for a in pair` (wrapper + nested shared elemOf),
 // `pairs = zip/zip_longest/product/pairwise(...); for a, b in pairs` /
 // `for pair in pairs: for a in pair` (assigned pair-iter; shared → elemOf),
 // `for item in enumerate(xs): a = item[1]` (pair-slot subscript; [0] fails closed),
@@ -2149,7 +2151,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// xs = list(items) / filter(...) — preserve element type via wrappers.
 				// d = dict.fromkeys(keys, A()) — value leaf is A (for .values/.get).
 				// pairs = zip/enumerate/product/pairwise(...) /
-				// pairs = list(zip(...)) / tuple/iter(zip(...)) — pair-iter slots.
+				// pairs = list/tuple/iter/reversed/sorted/filter(...zip...) — pair-iter slots.
 				if right != nil {
 					if types := pythonPairIterSlotsOf(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
 						// Foreign slots too — shadow prior same-name pair-iters.
@@ -2408,19 +2410,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					break
 				}
 				// for pair in pairs when pairs = zip/enumerate/product/... —
+				// for pair in zip/list(zip)/reversed(list(zip))/... —
 				// bind pairSlots (subscript) + elemOf when all slots share type.
-				if right.Type() == "identifier" {
-					if types := pairIterSlots[ingest.NodeText(right, content)]; len(types) > 0 {
-						pythonBindPairLoopTarget(ingest.NodeText(left, content), types, pairSlots, elemOf)
-						break
-					}
-				}
-				// for pair/combo/item in zip/zip_longest/product/pairwise/enumerate —
-				// pair is a tuple of slot elements; record pairSlots for item[i],
-				// and elemOf when all slots share type (nested for a in pair).
 				// enumerate has untyped index → pairSlots only (item[1] path).
-				// zip(*[xs, ys]) splat form included via pythonEnumerateZipTargetTypes.
-				if types := pythonEnumerateZipTargetTypes(right, content, elemOf, egElems, typeOf); len(types) > 0 {
+				// zip(*[xs, ys]) splat + identity wrappers via pythonPairIterSlotsOf.
+				if types := pythonPairIterSlotsOf(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
 					pythonBindPairLoopTarget(ingest.NodeText(left, content), types, pairSlots, elemOf)
 					break
 				}
@@ -2439,23 +2433,13 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					}
 					break
 				}
-				// for a, b in pairs when pairs = zip/enumerate/product/...
-				if right.Type() == "identifier" {
-					if types := pairIterSlots[ingest.NodeText(right, content)]; len(types) > 0 {
-						for i, name := range targets {
-							if i < len(types) && ourReceivers[types[i]] {
-								out[name] = true
-							}
-						}
-						break
-					}
-				}
+				// for a, b in pairs when pairs = zip/enumerate/product/... /
 				// for i, a in enumerate(xs) / for a, b in zip(xs, ys) /
 				// for a, b in zip(*[xs, ys]) / zip(*(xs, ys)) /
-				// for a, b in zip_longest(xs, ys) / itertools.zip_longest(...) /
-				// for a, b in product(xs, ys) / itertools.product(...) /
-				// for a, b in pairwise(xs) / itertools.pairwise(xs)
-				if types := pythonEnumerateZipTargetTypes(right, content, elemOf, egElems, typeOf); len(types) > 0 {
+				// for a, b in zip_longest/product/pairwise / itertools.* /
+				// for a, b in list/tuple/iter/reversed/sorted/filter(...zip...) —
+				// identity wrappers preserve pair slots (see pythonPairIterSlotsOf).
+				if types := pythonPairIterSlotsOf(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
 					for i, name := range targets {
 						if i < len(types) && ourReceivers[types[i]] {
 							out[name] = true
@@ -3097,7 +3081,8 @@ func pythonPairSlotSubscriptType(sub *grammar.Node, content []byte, pairSlots ma
 
 // pythonPairIterSlotsOf recovers per-slot types for a pair-iterator expression:
 // zip/enumerate/product/pairwise calls, assigned pair-iter locals, and identity
-// wrappers list/tuple/iter around those. Not an element type — each yield is a tuple.
+// wrappers list/tuple/iter/reversed/sorted/filter around those. Not an element
+// type — each yield is a tuple (pair slots preserved through the wrapper).
 func pythonPairIterSlotsOf(right *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string, pairIterSlots map[string][]string) []string {
 	if right == nil {
 		return nil
@@ -3118,18 +3103,29 @@ func pythonPairIterSlotsOf(right *grammar.Node, content []byte, elemOf, egElems,
 		if types := pythonEnumerateZipTargetTypes(right, content, elemOf, egElems, typeOf); len(types) > 0 {
 			return types
 		}
-		// list(zip(...)) / tuple(zip(...)) / iter(zip(...)) — unwrap identity wrappers.
+		// list/tuple/iter/reversed/sorted(zip(...)) / filter(pred, zip(...)) —
+		// unwrap identity wrappers that re-yield the same pairs.
 		fn := ingest.ChildByField(right, "function")
 		if fn == nil || fn.Type() != "identifier" {
 			return nil
 		}
+		args, ok := pythonCallPositionalArgNodes(right)
+		if !ok {
+			return nil
+		}
 		switch ingest.NodeText(fn, content) {
-		case "list", "tuple", "iter":
-			args, ok := pythonCallPositionalArgNodes(right)
-			if !ok || len(args) != 1 {
+		case "list", "tuple", "iter", "reversed", "sorted":
+			// 1st positional is the pair-iter (kwargs like key=/strict= ignored).
+			if len(args) == 0 {
 				return nil
 			}
 			return pythonPairIterSlotsOf(args[0], content, elemOf, egElems, typeOf, pairIterSlots)
+		case "filter":
+			// filter(function, iterable) — 2nd positional is the pair-iter.
+			if len(args) < 2 {
+				return nil
+			}
+			return pythonPairIterSlotsOf(args[1], content, elemOf, egElems, typeOf, pairIterSlots)
 		}
 		return nil
 	default:
