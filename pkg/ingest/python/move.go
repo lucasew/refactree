@@ -1821,7 +1821,7 @@ func pythonRenameByTypeMaps(name string, ourReceivers, foreignReceivers, typedLo
 // fieldOf maps "local.field" → field type leaf for dataclass/class field access
 // (box.a.run() under foreign same-leaf methods).
 // elemOf maps collection locals → element type leaf for direct access chains
-// (items.popleft().run() / d.get(k).run() / q.get().run() under foreign same-leaf methods).
+// (items.popleft().run() / d.get(k).run() / items[0].run() under foreign same-leaf methods).
 func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, fieldOf, elemOf map[string]string) bool {
 	if obj == nil {
 		return false
@@ -1876,9 +1876,17 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 		}
 		return len(foreignReceivers) == 0
 	}
+	// items[0].run() / d["k"].run() / list(items)[0].run() — collection subscript
+	// element (same leaf as a = items[0]; a.run()). Slices fail closed.
+	if obj.Type() == "subscript" {
+		if et := pythonSubscriptElemType(obj, content, elemOf, nil, nil, nil, nil); et != "" {
+			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+		}
+		return len(foreignReceivers) == 0
+	}
 	// Complex receivers without static type: unique-leaf only.
 	switch obj.Type() {
-	case "subscript", "conditional_expression",
+	case "conditional_expression",
 		"binary_operator", "boolean_operator", "await":
 		return len(foreignReceivers) == 0
 	}
