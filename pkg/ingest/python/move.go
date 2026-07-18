@@ -1854,8 +1854,10 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	// box.__dict__.get("a").run() — dict-view field keys (same leaf as
 	// d = asdict(box); d.get("a").run() / asdict(box)["a"].run()).
 	// getattr(box, "a").run() — builtin field access (same leaf as box.a.run()).
-	// attrgetter("a")(box).run() — single-field getter (same leaf as box.a.run()).
-	// itemgetter("a")(box).run() — single string-key getter (same leaf as box["a"].run()).
+	// attrgetter("a")(box).run() / attrgetter("a")(replace(box)).run() — single-field
+	// getter (same leaf as box.a / replace(box).a).
+	// itemgetter("a")(box).run() / itemgetter("a")(asdict(box)).run() — single
+	// string-key getter (same leaf as box["a"] / asdict(box)["a"]).
 	// items.popleft().run() / d.get(k).run() / q.get().run() / items.pop().run() /
 	// list(items).pop().run() — collection/queue element accessors (same leaf as
 	// a = items.popleft(); a.run()). Unknown call receivers: unique-leaf only.
@@ -2405,7 +2407,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					// (same as items[0]). Multi-index / other callables fail closed.
 					// pair = itemgetter(0)(pairs) when pairs is a pair-iter (pairSlots +
 					// shared elemOf), not an element; use pair[i] / unpack / nested for.
-					// xa = itemgetter("a")(box) — TypedDict/record string-key (fieldOf).
+					// xa = itemgetter("a")(box) / itemgetter("a")(asdict(box)) —
+					// TypedDict/record or dict-view string-key (fieldOf).
 					if ft := pythonItemgetterFieldType(right, content, fieldOf); ft != "" {
 						typeOf[lname] = ft
 						bindFields(lname, ft)
@@ -2417,9 +2420,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					} else if et := pythonItemgetterElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 						out[lname] = true
 					}
-					// xa = attrgetter("a")(box) / operator.attrgetter("a")(box) —
-					// single-field getter on a typed local yields the field type
-					// (same as box.a / box["a"]). Multi-field attrgetter fails closed.
+					// xa = attrgetter("a")(box) / attrgetter("a")(replace(box)) /
+					// operator.attrgetter("a")(box) — single-field getter on a typed
+					// local (or replace of it) yields the field type (same as box.a).
+					// Multi-field attrgetter fails closed.
 					if ft := pythonAttrgetterFieldType(right, content, fieldOf); ft != "" {
 						typeOf[lname] = ft
 						bindFields(lname, ft)
@@ -2801,7 +2805,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				}
 				// a := itemgetter(0)(items) / operator.itemgetter(0)(items) /
 				// pair := itemgetter(0)(pairs) when pairs is a pair-iter.
-				// xa := itemgetter("a")(box) — TypedDict/record string-key (fieldOf).
+				// xa := itemgetter("a")(box) / itemgetter("a")(asdict(box)).
 				if ft := pythonItemgetterFieldType(valueN, content, fieldOf); ft != "" {
 					typeOf[lname] = ft
 					bindFields(lname, ft)
@@ -2813,7 +2817,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				} else if et := pythonItemgetterElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 					out[lname] = true
 				}
-				// xa := attrgetter("a")(box) / operator.attrgetter("a")(box).
+				// xa := attrgetter("a")(box) / attrgetter("a")(replace(box)) /
+				// operator.attrgetter("a")(box).
 				if ft := pythonAttrgetterFieldType(valueN, content, fieldOf); ft != "" {
 					typeOf[lname] = ft
 					bindFields(lname, ft)
@@ -3621,10 +3626,11 @@ func pythonFieldAccessType(attr *grammar.Node, content []byte, fieldOf map[strin
 }
 
 // pythonAttrgetterFieldType recovers T from attrgetter("a")(box) /
-// operator.attrgetter("a")(box) when box is a typed local with annotated field a
-// of type T (fieldOf; same leaf as box.a / box["a"]). Single string field only —
-// multi-field attrgetter("a","b") returns a tuple and fails closed. Stored
-// getters (g = attrgetter("a"); g(box)) are not tracked.
+// operator.attrgetter("a")(box) / attrgetter("a")(replace(box)) when box is a
+// typed local with annotated field a of type T (fieldOf; same leaf as box.a /
+// replace(box).a). Single string field only — multi-field attrgetter("a","b")
+// returns a tuple and fails closed. Stored getters (g = attrgetter("a"); g(box))
+// are not tracked.
 func pythonAttrgetterFieldType(call *grammar.Node, content []byte, fieldOf map[string]string) string {
 	return pythonOperatorGetterFieldType(call, content, fieldOf, "attrgetter")
 }
@@ -3658,17 +3664,22 @@ func pythonGetattrFieldType(call *grammar.Node, content []byte, fieldOf map[stri
 }
 
 // pythonItemgetterFieldType recovers T from itemgetter("a")(box) /
-// operator.itemgetter("a")(box) when box is a typed local with annotated field a
-// of type T (fieldOf; same leaf as box["a"] / box.get("a")). Single string key
-// only — multi-key itemgetter("a","b") returns a tuple and fails closed. Numeric
-// itemgetter(i)(collection) uses pythonItemgetterElemType instead. Stored
-// getters (g = itemgetter("a"); g(box)) are not tracked.
+// operator.itemgetter("a")(box) / itemgetter("a")(asdict(box)) when box is a
+// typed local with annotated field a of type T (fieldOf; same leaf as box["a"] /
+// asdict(box)["a"]). Single string key only — multi-key itemgetter("a","b")
+// returns a tuple and fails closed. Numeric itemgetter(i)(collection) uses
+// pythonItemgetterElemType instead. Stored getters (g = itemgetter("a"); g(box))
+// are not tracked.
 func pythonItemgetterFieldType(call *grammar.Node, content []byte, fieldOf map[string]string) string {
 	return pythonOperatorGetterFieldType(call, content, fieldOf, "itemgetter")
 }
 
 // pythonOperatorGetterFieldType recovers T from name("field")(box) /
 // operator.name("field")(box) for name in {attrgetter, itemgetter} via fieldOf.
+// Object peels (same field leaf as the bare local):
+//
+//	attrgetter — box / replace(box) / dataclasses.replace(box)
+//	itemgetter — box / asdict(box) / vars(box) / box.__dict__
 func pythonOperatorGetterFieldType(call *grammar.Node, content []byte, fieldOf map[string]string, name string) string {
 	if call == nil || call.Type() != "call" || fieldOf == nil || name == "" {
 		return ""
@@ -3708,12 +3719,43 @@ func pythonOperatorGetterFieldType(call *grammar.Node, content []byte, fieldOf m
 	if field == "" {
 		return ""
 	}
-	// Outer call: getter(obj) — exactly one positional arg (identifier local).
+	// Outer call: getter(obj) — exactly one positional arg; peel wrappers that
+	// preserve the underlying typed local's field leaves.
 	objArgs, ok := pythonCallPositionalArgNodes(call)
-	if !ok || len(objArgs) != 1 || objArgs[0].Type() != "identifier" {
+	if !ok || len(objArgs) != 1 {
 		return ""
 	}
-	return fieldOf[ingest.NodeText(objArgs[0], content)+"."+field]
+	objLocal := pythonOperatorGetterObjectLocal(objArgs[0], content, name)
+	if objLocal == "" {
+		return ""
+	}
+	return fieldOf[objLocal+"."+field]
+}
+
+// pythonOperatorGetterObjectLocal recovers the identifier local whose fields are
+// accessed by attrgetter/itemgetter. attrgetter peels replace (same object type);
+// itemgetter peels asdict/vars/__dict__ (dict-view field keys) or bare identifier
+// (TypedDict/record). Cross peels fail closed (attrgetter on asdict, itemgetter
+// on replace). Parenthesized forms peel.
+func pythonOperatorGetterObjectLocal(n *grammar.Node, content []byte, name string) string {
+	if n == nil || name == "" {
+		return ""
+	}
+	if n.Type() == "parenthesized_expression" {
+		return pythonOperatorGetterObjectLocal(pythonParenInner(n), content, name)
+	}
+	switch name {
+	case "attrgetter":
+		// box / replace(box) — attribute access on the dataclass object.
+		return pythonReplacePeeledObjectLocal(n, content)
+	case "itemgetter":
+		// box (TypedDict/record) or asdict/vars/__dict__ view of box.
+		if n.Type() == "identifier" {
+			return ingest.NodeText(n, content)
+		}
+		return pythonDictViewObjectLocal(n, content)
+	}
+	return ""
 }
 
 // pythonCopyCallObjectType recovers T from copy.copy(x) / copy.deepcopy(x) /
