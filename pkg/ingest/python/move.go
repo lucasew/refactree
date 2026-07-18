@@ -1881,8 +1881,15 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `pair = min(pairs)` / `a, b = max(list(zip(...)))` when pairs is a pair-iter
 // (pairSlots + shared elemOf; same path as next(pairs) / pairs.pop()),
 // `a = choice(items)` / `a = random.choice(items)` (same element type),
+// `pair = choice(pairs)` / `a, b = random.choice(list(zip(...)))` when pairs is a
+// pair-iter (pairSlots + shared elemOf; same path as min(pairs)),
 // `a = heappop(items)` / `a = heapq.heappop(items)` (heap element type; same as next),
+// `pair = heappop(pairs)` / `a, b = heapq.heappop(list(zip(...)))` when pairs is a
+// pair-iter (pairSlots + shared elemOf; same path as min(pairs)),
 // `a = heappushpop(items, x)` / `a = heapreplace(items, x)` / heapq.* (same heap elem),
+// `pair = heappushpop(pairs, x)` / `pair = heapreplace(pairs, x)` (pair-iter same),
+// `a = itemgetter(0)(items)` / `a = operator.itemgetter(0)(items)` (collection element),
+// `pair = itemgetter(0)(pairs)` when pairs is a pair-iter (pairSlots + shared elemOf),
 // `a = items[0]` / `a = d[k]` / `a = items.copy()[0]` (element/value of a known collection),
 // `a = items.pop()` / `a = items.pop(0)` / `a = d.pop(k)` (same element/value type),
 // `a = items.popleft()` (collections.deque; same element type as pop),
@@ -2075,15 +2082,23 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							}
 						}
 						// a = choice(items) — from random import choice; element of seq.
+						// pair = choice(pairs) when pairs is a pair-iter (pairSlots + shared
+						// elemOf), not an element; use pair[i] / unpack / nested for.
 						if fname == "choice" {
-							if et := pythonRandomChoiceElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
+							if types := pythonChoicePairSlots(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+								pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+							} else if et := pythonRandomChoiceElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
 							}
 						}
 						// a = heappop(items) / heappushpop(items, x) / heapreplace(items, x)
 						// — from heapq import …; element of heap (1st arg).
+						// pair = heappop(pairs) when pairs is a pair-iter (pairSlots + shared
+						// elemOf), not an element; use pair[i] / unpack / nested for.
 						if fname == "heappop" || fname == "heappushpop" || fname == "heapreplace" {
-							if et := pythonHeappopElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
+							if types := pythonHeappopPairSlots(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+								pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+							} else if et := pythonHeappopElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
 							}
 						}
@@ -2130,12 +2145,18 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							case "heappop", "heappushpop", "heapreplace":
 								// a = heapq.heappop(items) / heapq.heappushpop(items, x) /
 								// heapq.heapreplace(items, x) — element of 1st arg (heap).
-								if et := pythonHeappopElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
+								// pair = heapq.heappop(pairs) when pairs is a pair-iter.
+								if types := pythonHeappopPairSlots(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+									pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+								} else if et := pythonHeappopElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 									out[lname] = true
 								}
 							case "choice":
 								// a = random.choice(items) — module-qualified; element of seq.
-								if et := pythonRandomChoiceElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
+								// pair = random.choice(pairs) when pairs is a pair-iter.
+								if types := pythonChoicePairSlots(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+									pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+								} else if et := pythonRandomChoiceElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 									out[lname] = true
 								}
 							case "reduce":
@@ -2157,7 +2178,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					// a = itemgetter(0)(items) / operator.itemgetter(0)(items) —
 					// single-index getter applied to a collection yields an element
 					// (same as items[0]). Multi-index / other callables fail closed.
-					if et := pythonItemgetterElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
+					// pair = itemgetter(0)(pairs) when pairs is a pair-iter (pairSlots +
+					// shared elemOf), not an element; use pair[i] / unpack / nested for.
+					if types := pythonItemgetterPairSlots(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+						pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+					} else if et := pythonItemgetterElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 						out[lname] = true
 					}
 				}
@@ -2304,15 +2329,21 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							out[lname] = true
 						}
 					}
-					// a := choice(items) — from random import choice
+					// a := choice(items) — from random import choice /
+					// pair := choice(pairs) when pairs is a pair-iter (pairSlots + shared elemOf).
 					if fname == "choice" {
-						if et := pythonRandomChoiceElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
+						if types := pythonChoicePairSlots(valueN, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+							pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+						} else if et := pythonRandomChoiceElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 							out[lname] = true
 						}
 					}
-					// a := heappop(items) / heappushpop(items, x) / heapreplace(items, x)
+					// a := heappop(items) / heappushpop(items, x) / heapreplace(items, x) /
+					// pair := heappop(pairs) when pairs is a pair-iter (pairSlots + shared elemOf).
 					if fname == "heappop" || fname == "heappushpop" || fname == "heapreplace" {
-						if et := pythonHeappopElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
+						if types := pythonHeappopPairSlots(valueN, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+							pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+						} else if et := pythonHeappopElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 							out[lname] = true
 						}
 					}
@@ -2349,12 +2380,18 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						case "heappop", "heappushpop", "heapreplace":
 							// a := heapq.heappop(items) / heapq.heappushpop /
 							// heapq.heapreplace — element of heap (1st arg).
-							if et := pythonHeappopElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
+							// pair := heapq.heappop(pairs) when pairs is a pair-iter.
+							if types := pythonHeappopPairSlots(valueN, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+								pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+							} else if et := pythonHeappopElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
 							}
 						case "choice":
-							// a := random.choice(items)
-							if et := pythonRandomChoiceElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
+							// a := random.choice(items) /
+							// pair := random.choice(pairs) when pairs is a pair-iter.
+							if types := pythonChoicePairSlots(valueN, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+								pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+							} else if et := pythonRandomChoiceElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
 							}
 						case "reduce":
@@ -2371,8 +2408,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						}
 					}
 				}
-				// a := itemgetter(0)(items) / operator.itemgetter(0)(items)
-				if et := pythonItemgetterElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
+				// a := itemgetter(0)(items) / operator.itemgetter(0)(items) /
+				// pair := itemgetter(0)(pairs) when pairs is a pair-iter.
+				if types := pythonItemgetterPairSlots(valueN, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+					pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+				} else if et := pythonItemgetterElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 					out[lname] = true
 				}
 			}
@@ -3107,6 +3147,7 @@ func pythonPairSlotSubscriptType(sub *grammar.Node, content []byte, pairSlots ma
 
 // pythonPairSlotsOf recovers per-slot types for a pair expression:
 // pair local (pairSlots), next(pair_iter), min/max(pair_iter),
+// choice/heappop/itemgetter(pair_iter),
 // pair_iter.pop() / list(zip(...)).pop(),
 // or pair_iter[i] / list(zip(...))[i] (index into a pair-yielding sequence yields
 // one pair with those slots). Parenthesized forms accepted. Slices fail closed.
@@ -3133,6 +3174,18 @@ func pythonPairSlotsOf(n *grammar.Node, content []byte, elemOf, egElems, typeOf 
 		}
 		// min(pairs) / max(pairs) / min(list(zip(...))) / max(list(zip(...)), key=...)
 		if types := pythonMinMaxPairSlots(n, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+			return types
+		}
+		// choice(pairs) / random.choice(list(zip(...)))
+		if types := pythonChoicePairSlots(n, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+			return types
+		}
+		// heappop(pairs) / heapq.heappop(list(zip(...))) / heappushpop / heapreplace
+		if types := pythonHeappopPairSlots(n, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+			return types
+		}
+		// itemgetter(0)(pairs) / operator.itemgetter(0)(list(zip(...)))
+		if types := pythonItemgetterPairSlots(n, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
 			return types
 		}
 		// pairs.pop() / pairs.pop(0) / list(zip(...)).pop()
@@ -3309,6 +3362,136 @@ func pythonMinMaxPairSlots(call *grammar.Node, content []byte, elemOf, egElems, 
 	return pythonPairIterSlotsOf(args[0], content, elemOf, egElems, typeOf, pairIterSlots)
 }
 
+// pythonChoicePairSlots recovers pair slot types for choice(pair_iter) /
+// random.choice(pair_iter). Same call shape as element typing (1st positional
+// is the sequence). Yields the tuple slots of one pair-iter item — not an
+// element leaf. Other receivers fail closed.
+func pythonChoicePairSlots(call *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string, pairIterSlots map[string][]string) []string {
+	if call == nil || call.Type() != "call" {
+		return nil
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil {
+		return nil
+	}
+	switch fn.Type() {
+	case "identifier":
+		if ingest.NodeText(fn, content) != "choice" {
+			return nil
+		}
+	case "attribute":
+		attr := ingest.ChildByField(fn, "attribute")
+		obj := ingest.ChildByField(fn, "object")
+		if attr == nil || ingest.NodeText(attr, content) != "choice" {
+			return nil
+		}
+		if obj == nil || obj.Type() != "identifier" || ingest.NodeText(obj, content) != "random" {
+			return nil
+		}
+	default:
+		return nil
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) == 0 {
+		return nil
+	}
+	return pythonPairIterSlotsOf(args[0], content, elemOf, egElems, typeOf, pairIterSlots)
+}
+
+// pythonHeappopPairSlots recovers pair slot types for heappop(pair_iter) /
+// heappushpop(pair_iter, x) / heapreplace(pair_iter, x) and heapq.* forms.
+// Same call shape as element typing (1st positional is the heap). Yields the
+// tuple slots of one pair-iter item — not an element leaf. Extra args (item on
+// pushpop/replace) ignored. Other receivers fail closed.
+func pythonHeappopPairSlots(call *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string, pairIterSlots map[string][]string) []string {
+	if call == nil || call.Type() != "call" {
+		return nil
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil {
+		return nil
+	}
+	switch fn.Type() {
+	case "identifier":
+		switch ingest.NodeText(fn, content) {
+		case "heappop", "heappushpop", "heapreplace":
+			// ok
+		default:
+			return nil
+		}
+	case "attribute":
+		attr := ingest.ChildByField(fn, "attribute")
+		obj := ingest.ChildByField(fn, "object")
+		if attr == nil {
+			return nil
+		}
+		switch ingest.NodeText(attr, content) {
+		case "heappop", "heappushpop", "heapreplace":
+			// ok
+		default:
+			return nil
+		}
+		if obj == nil || obj.Type() != "identifier" || ingest.NodeText(obj, content) != "heapq" {
+			return nil
+		}
+	default:
+		return nil
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) == 0 {
+		return nil
+	}
+	return pythonPairIterSlotsOf(args[0], content, elemOf, egElems, typeOf, pairIterSlots)
+}
+
+// pythonItemgetterPairSlots recovers pair slot types for
+// itemgetter(i)(pair_iter) / operator.itemgetter(i)(pair_iter). Single-index
+// itemgetter applied to a known pair-iter yields one pair (same as
+// pair_iter[i]). Multi-index itemgetter fails closed. Yields the tuple slots
+// of one pair-iter item — not an element leaf.
+func pythonItemgetterPairSlots(call *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string, pairIterSlots map[string][]string) []string {
+	if call == nil || call.Type() != "call" {
+		return nil
+	}
+	// Outer call: getter(collection) — function must itself be itemgetter(...).
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "call" {
+		return nil
+	}
+	innerFn := ingest.ChildByField(fn, "function")
+	if innerFn == nil {
+		return nil
+	}
+	switch innerFn.Type() {
+	case "identifier":
+		if ingest.NodeText(innerFn, content) != "itemgetter" {
+			return nil
+		}
+	case "attribute":
+		attr := ingest.ChildByField(innerFn, "attribute")
+		obj := ingest.ChildByField(innerFn, "object")
+		if attr == nil || ingest.NodeText(attr, content) != "itemgetter" {
+			return nil
+		}
+		if obj == nil || obj.Type() != "identifier" || ingest.NodeText(obj, content) != "operator" {
+			return nil
+		}
+	default:
+		return nil
+	}
+	// itemgetter must have exactly one positional arg (the index).
+	idxArgs, ok := pythonCallPositionalArgNodes(fn)
+	if !ok || len(idxArgs) != 1 {
+		return nil
+	}
+	// Outer call: getter(collection) — exactly one positional arg.
+	collArgs, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(collArgs) != 1 {
+		return nil
+	}
+	return pythonPairIterSlotsOf(collArgs[0], content, elemOf, egElems, typeOf, pairIterSlots)
+}
+
 // pythonPopPairSlots recovers pair slot types for pairs.pop() / pairs.pop(i) /
 // list(zip(...)).pop() when the receiver is a known pair-iter. Index args are
 // ignored (any pop removes one pair with the same slots). popitem and other
@@ -3334,6 +3517,9 @@ func pythonPopPairSlots(call *grammar.Node, content []byte, elemOf, egElems, typ
 // a, b = pair / a, b = pairs[0] / a, b = list(zip(...))[0] /
 // a, b = pairs.pop() / a, b = list(zip(...)).pop() /
 // a, b = min(pairs) / a, b = max(list(zip(...))) /
+// a, b = choice(pairs) / a, b = random.choice(list(zip(...))) /
+// a, b = heappop(pairs) / a, b = heapq.heappop(list(zip(...))) /
+// a, b = itemgetter(0)(pairs) / a, b = operator.itemgetter(0)(list(zip(...))) /
 // [a, b] = next(pairs) when pair/pair-iter slots are known.
 // Parenthesized forms accepted. Untyped slots stay "" (enumerate index).
 func pythonAssignPairUnpackTypes(right *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string, pairSlots map[string][]string, pairIterSlots map[string][]string) []string {
