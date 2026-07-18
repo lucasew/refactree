@@ -2019,6 +2019,9 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // CompletableFuture.thenCompose(a -> CompletableFuture.completedFuture(a)) → same element
 // when the mapper clearly rewraps T as a CompletionStage (see javaFlatMapResultElemType;
 // enables thenCompose(a -> completedFuture(a)).join() / var f2 = thenCompose…).
+// CompletableFuture.whenComplete / copy / toCompletableFuture / orTimeout /
+// completeOnTimeout / exceptionally / exceptionallyCompose / minimalCompletionStage →
+// same element (always preserve T by API signature).
 // Type-changing stages (unknown map / flatMap / thenApply / applyToEither / handle /
 // thenCombine / thenCompose mappers) fail closed so later lambdas are not mis-typed.
 func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
@@ -2125,8 +2128,18 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// (NavigableSet reverse-order view; order only).
 			// headSet/tailSet/subSet(...) return SortedSet/NavigableSet of the same
 			// element type (range views; bounds/inclusivity args do not change E).
+			// CompletableFuture.whenComplete / copy / toCompletableFuture /
+			// orTimeout / completeOnTimeout / exceptionally / exceptionallyCompose /
+			// minimalCompletionStage — always return the same result T by API
+			// signature (side-effect / timeout / recovery args do not change T).
+			// Enables whenComplete(...).join() / copy().join() under foreign
+			// same-leaf methods. Type-changing stages (thenApply/handle/…) stay
+			// on their own identity/rewrap peels.
 			"findFirst", "findAny", "min", "max", "reduce", "toList", "toArray", "clone", "reversed", "subList",
-			"descendingSet", "headSet", "tailSet", "subSet":
+			"descendingSet", "headSet", "tailSet", "subSet",
+			"whenComplete", "copy", "toCompletableFuture",
+			"orTimeout", "completeOnTimeout",
+			"exceptionally", "exceptionallyCompose", "minimalCompletionStage":
 			recv := ingest.ChildByField(obj, "object")
 			// Arrays.stream(arr[, from, to]) — element type from first arg, not
 			// from receiver Arrays (unlike coll.stream() which uses elemOf[coll]).
@@ -2185,7 +2198,7 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// thenApply identity, bi form. Enables handle((a,e)->a).join() /
 			// var f2 = handle((a,e)->a); f2.join() under foreign same-leaf methods.
 			// Type-changing mappers fail closed. whenComplete always returns T
-			// but is BiConsumer (void body) — not a U pipeline stage here.
+			// by signature and peels as a type-preserving stage (see peel list).
 			return javaMapResultElemType(obj, content, elemOf, valOf)
 		case "thenCombine":
 			// CompletableFuture.thenCombine(other, BiFunction): recover V when the
@@ -4569,6 +4582,10 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	fa.thenCompose(a -> CompletableFuture.completedFuture(a)).join() / getNow(d) / resultNow() → T
 //	  (completedFuture rewrap only; type-changing thenCompose mappers fail closed —
 //	  same shapes as Optional.flatMap)
+//	fa.whenComplete((a,e)->…).join() / fa.copy().join() / fa.toCompletableFuture().join() /
+//	  fa.orTimeout(…).join() / fa.completeOnTimeout(…).join() /
+//	  fa.exceptionally(…).join() / fa.exceptionallyCompose(…).join() → T
+//	  (always preserve CF result T by API signature)
 //	fn.apply(x) → valOf[fn] / elemOf[fn] (Function<T,R> R / UnaryOperator<T> T /
 //	  BiFunction<T,U,R> R; apply args do not change the result type leaf)
 //	Objects.requireNonNull(x[, msg]) / requireNonNullElse(x, d) /
@@ -4749,13 +4766,18 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		//   first-param identity BiFunction preserves CF result T (other stage first).
 		//   fa.thenCompose(a -> completedFuture(a)).join() / getNow(d) / resultNow() —
 		//   completedFuture rewrap preserves CF result T (flatMap-style).
+		//   fa.whenComplete(...).join() / copy().join() / toCompletableFuture().join() /
+		//   orTimeout(...).join() / completeOnTimeout(...).join() /
+		//   exceptionally(...).join() / exceptionallyCompose(...).join() —
+		//   always preserve CF result T by API signature.
 		// Pipeline typing already treats findFirst/findAny/Optional.of/List.of/
 		// toList/reversed/copyOf/thenApply(identity)/applyToEither(identity)/
 		// handle(first-param identity)/thenCombine(first-param identity)/
-		// thenCompose(completedFuture rewrap) as T. Map factories (Map.of /
-		// ofEntries / singletonMap / copyOf / unmodifiableMap / collect(toMap))
-		// are not element pipelines — fall through to javaMapPipelineValueType for
-		// value-returning accessors (Map.of(k, new A()).get(k)).
+		// thenCompose(completedFuture rewrap)/whenComplete/copy/… as T. Map
+		// factories (Map.of / ofEntries / singletonMap / copyOf / unmodifiableMap /
+		// collect(toMap)) are not element pipelines — fall through to
+		// javaMapPipelineValueType for value-returning accessors
+		// (Map.of(k, new A()).get(k)).
 		switch method {
 		case "get", "getFirst", "getLast",
 			"remove", "removeFirst", "removeLast", "set",
@@ -4767,7 +4789,8 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 			// CompletableFuture.join / getNow / resultNow on pipeline receivers
 			// (thenApply(a -> a).join() / applyToEither(other, a -> a).join() /
 			// handle((a,e)->a).join() / thenCombine(other, (a,b)->a).join() /
-			// thenCompose(a -> completedFuture(a)).join()) —
+			// thenCompose(a -> completedFuture(a)).join() /
+			// whenComplete(...).join() / copy().join() / …) —
 			// peel CF type-preserving stages.
 			"join", "getNow", "resultNow":
 			if et := javaStreamPipelineElemType(obj, content, elemOf, valOf); et != "" {
