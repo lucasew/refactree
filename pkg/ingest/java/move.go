@@ -2049,6 +2049,8 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // when the mapper clearly rewraps T (see javaFlatMapResultElemType),
 // Optional.map(a -> a) / map(a -> new A()) → same or known element
 // when the mapper clearly yields T (see javaMapResultElemType).
+// Stream.gather(Gatherers.mapConcurrent(n, a -> a)) / mapConcurrent(n, a -> new A())
+// → same or known element (identity/new only; see javaGatherResultElemType).
 // CompletableFuture.thenApply(a -> a) / thenApply(a -> new A()) → same or known
 // element (identity/new only; enables thenApply(a -> a).join() / var f2 = thenApply…).
 // CompletableFuture.applyToEither(other, a -> a) / applyToEither(other, a -> new A()) →
@@ -2280,6 +2282,15 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// Enables mapMulti((a,c)->c.accept(a)).forEach(x -> x.m()) /
 			// var s = mapMulti(...); s.forEach(...) under foreign same-leaf methods.
 			return javaMapMultiResultElemType(obj, content, elemOf, valOf)
+		case "gather":
+			// Stream.gather(Gatherer): recover R when the gatherer clearly preserves
+			// or constructs a known element type. Currently only
+			// Gatherers.mapConcurrent(n, a -> a) / mapConcurrent(n, a -> new T())
+			// (identity / new). Other gatherers (window*, fold, scan, custom) fail
+			// closed. Enables gather(Gatherers.mapConcurrent(1, a -> a)).findFirst()
+			// .get().m() / var s = gather(...); s.findFirst().get().m() under foreign
+			// same-leaf methods.
+			return javaGatherResultElemType(obj, content, elemOf, valOf)
 		case "thenApply", "thenApplyAsync":
 			// CompletableFuture.thenApply / thenApplyAsync(Function[, Executor]):
 			// recover U when mapper is identity (a -> a) or new T(...) — same shapes
@@ -2527,6 +2538,143 @@ func javaMapResultElemType(call *grammar.Node, content []byte, elemOf, valOf map
 	}
 	recv := ingest.ChildByField(call, "object")
 	return javaMapMapperBodyElemType(body, param, recv, content, elemOf, valOf)
+}
+
+// javaGatherResultElemType recovers R after Stream.gather(gatherer) when the
+// gatherer clearly preserves or constructs a known element type:
+//
+//	s.gather(Gatherers.mapConcurrent(n, a -> a)) → elem(s)
+//	s.gather(Gatherers.mapConcurrent(n, a -> new A())) → A
+//	s.gather(java.util.stream.Gatherers.mapConcurrent(n, a -> a)) → elem(s)
+//
+// Only mapConcurrent with an expression-bodied identity/new mapper is recognized.
+// windowFixed/windowSliding/fold/scan/custom gatherers fail closed.
+func javaGatherResultElemType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	var args *grammar.Node
+	for i := uint32(0); i < call.ChildCount(); i++ {
+		if call.Child(i).Type() == "argument_list" {
+			args = call.Child(i)
+			break
+		}
+	}
+	if args == nil {
+		return ""
+	}
+	// First non-punctuation arg is the Gatherer.
+	var first *grammar.Node
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		first = ch
+		break
+	}
+	if first == nil || first.Type() != "method_invocation" {
+		return ""
+	}
+	// Gatherers.mapConcurrent(...) / java.util.stream.Gatherers.mapConcurrent(...)
+	nameN := ingest.ChildByField(first, "name")
+	if nameN == nil || ingest.NodeText(nameN, content) != "mapConcurrent" {
+		return ""
+	}
+	recv := ingest.ChildByField(first, "object")
+	if !javaIsGatherersReceiver(recv, content) {
+		return ""
+	}
+	// Mapper is the first lambda among mapConcurrent args (after concurrency int).
+	var mapper *grammar.Node
+	var gArgs *grammar.Node
+	for i := uint32(0); i < first.ChildCount(); i++ {
+		if first.Child(i).Type() == "argument_list" {
+			gArgs = first.Child(i)
+			break
+		}
+	}
+	if gArgs == nil {
+		return ""
+	}
+	for i := uint32(0); i < gArgs.ChildCount(); i++ {
+		ch := gArgs.Child(i)
+		if ch.Type() == "lambda_expression" {
+			mapper = ch
+			break
+		}
+	}
+	if mapper == nil {
+		return ""
+	}
+	params := javaInferredLambdaParamNames(mapper, content)
+	if len(params) != 1 {
+		return ""
+	}
+	body := ingest.ChildByField(mapper, "body")
+	for body != nil && !body.IsNull() && body.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(body, "expression")
+		if inner == nil {
+			for i := uint32(0); i < body.ChildCount(); i++ {
+				ch := body.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		body = inner
+	}
+	if body == nil || body.IsNull() {
+		return ""
+	}
+	streamRecv := ingest.ChildByField(call, "object")
+	switch body.Type() {
+	case "identifier":
+		// a -> a — identity preserves stream element type.
+		if ingest.NodeText(body, content) == params[0] {
+			return javaStreamPipelineElemType(streamRecv, content, elemOf, valOf)
+		}
+		return ""
+	case "object_creation_expression":
+		// a -> new A() — element type from construction.
+		if typeN := ingest.ChildByField(body, "type"); typeN != nil {
+			return javaTypeName(typeN, content)
+		}
+		return ""
+	default:
+		return ""
+	}
+}
+
+// javaIsGatherersReceiver reports whether n is Gatherers or a qualified
+// java.util.stream.Gatherers (field_access / scoped identifier chain).
+func javaIsGatherersReceiver(n *grammar.Node, content []byte) bool {
+	if n == nil {
+		return false
+	}
+	switch n.Type() {
+	case "identifier":
+		return ingest.NodeText(n, content) == "Gatherers"
+	case "field_access":
+		// java.util.stream.Gatherers — outermost field is Gatherers.
+		if nameN := ingest.ChildByField(n, "field"); nameN != nil {
+			return ingest.NodeText(nameN, content) == "Gatherers"
+		}
+		// Some grammars use "name" for the leaf.
+		if nameN := ingest.ChildByField(n, "name"); nameN != nil {
+			return ingest.NodeText(nameN, content) == "Gatherers"
+		}
+		return false
+	case "scoped_type_identifier", "scoped_identifier":
+		if nameN := ingest.ChildByField(n, "name"); nameN != nil {
+			return ingest.NodeText(nameN, content) == "Gatherers"
+		}
+		return false
+	default:
+		return false
+	}
 }
 
 // javaMapMultiResultElemType recovers R after Stream.mapMulti(mapper) when the
@@ -4603,6 +4751,7 @@ func javaMapEntryCreationValueType(call *grammar.Node, content []byte) string {
 // Prefers declared single type arg when present; diamond recovers V from:
 //   - Callable ctor: expression-bodied zero-arg lambda whose body is new T(...)
 //   - Runnable+result ctor: second arg new T(...) (first is Runnable)
+//
 // Other types / arities / bodies fail closed.
 // Enables new FutureTask<>(() -> new A()).get().m() and
 // var ft = new FutureTask<>(() -> new A()); ft.get().m() under foreign
