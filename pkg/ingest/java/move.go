@@ -1237,6 +1237,7 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// / am.pollFirstEntry().getValue() / am.ceilingEntry(k).getValue()
 					// / ba.a() when ba is a record local with component type A
 					// / Objects.requireNonNull(new A()) / Objects.requireNonNull(as.get(0))
+					// / as[0] / (as)[0] when as is A[] (array element via elemOf)
 					out[name] = true
 				} else if id := javaObjectsRequireNonNullArgIdent(valN, content); id != "" && out[id] {
 					// var xa = Objects.requireNonNull(a) when a is already a typed local
@@ -3702,6 +3703,8 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	  (Optional<A>; also findFirst().orElse / findFirst().orElseThrow)
 //	oa.get() / as.stream().findFirst().get() / Optional.of(new A()).get() → T
 //	  (zero-arg Optional.get; also List.of(new A()).get(i) / toList().get(i) via pipeline)
+//	as[0] / (as)[0] / matrix[i][j] → elemOf[as] (array element; index does not change T)
+//	  (A[] as / A[][] matrix; new A[]{...}[i] via array creation type)
 //	aa.getAndSet(v) / aa.getAndUpdate(f) / aa.updateAndGet(f) /
 //	  aa.accumulateAndGet(x, f) / aa.compareAndExchange(e, u) /
 //	  aa.getPlain() / aa.getAcquire() / aa.getOpaque() → elemOf[aa]
@@ -3732,6 +3735,8 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 // AtomicReference getAndSet/getAndUpdate/updateAndGet/accumulateAndGet/
 // compareAndExchange/getPlain/getAcquire/getOpaque share get's elemOf path
 // (return V; updater/expected args do not change the type leaf).
+// Array index as[0] / (as)[0] recovers elemOf[as] (same leaf as List.get; index
+// does not change T). Nested matrix[i][j] peels to the root array local.
 // Function.apply prefers valOf (R) then elemOf (UnaryOperator/BinaryOperator T);
 // BiFunction stores R in valOf at bind time (see javaRecordCollectionElem).
 // Fail closed on other methods / unknown receivers.
@@ -3752,7 +3757,16 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		}
 		val = inner
 	}
-	if val == nil || val.IsNull() || val.Type() != "method_invocation" {
+	if val == nil || val.IsNull() {
+		return ""
+	}
+	// as[0] / (as)[0] / matrix[i][j] — element of a typed array local.
+	// Direct as[0].m() already renames via typedLocals (javaTypeName collapses
+	// A[] → A on the array param); var xa = as[0] needs this elemOf path.
+	if val.Type() == "array_access" {
+		return javaArrayAccessElemType(val, content, elemOf)
+	}
+	if val.Type() != "method_invocation" {
 		return ""
 	}
 	nameN := ingest.ChildByField(val, "name")
@@ -3927,6 +3941,56 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 	default:
 		return ""
 	}
+}
+
+// javaArrayAccessElemType recovers T from as[i] / (as)[i] / matrix[i][j] when the
+// root array is a local tracked in elemOf (A[] as → "A"), or from new A[]{...}[i]
+// via the creation type. Index expressions do not change the element type leaf.
+// Nested array_access peels to the root; unknown roots fail closed.
+func javaArrayAccessElemType(val *grammar.Node, content []byte, elemOf map[string]string) string {
+	for val != nil && !val.IsNull() {
+		for val != nil && !val.IsNull() && val.Type() == "parenthesized_expression" {
+			inner := ingest.ChildByField(val, "expression")
+			if inner == nil {
+				for i := uint32(0); i < val.ChildCount(); i++ {
+					ch := val.Child(i)
+					if ch.Type() == "(" || ch.Type() == ")" {
+						continue
+					}
+					inner = ch
+					break
+				}
+			}
+			val = inner
+		}
+		if val == nil || val.IsNull() {
+			return ""
+		}
+		if val.Type() != "array_access" {
+			break
+		}
+		arr := ingest.ChildByField(val, "array")
+		if arr == nil {
+			return ""
+		}
+		val = arr
+	}
+	if val == nil || val.IsNull() {
+		return ""
+	}
+	switch val.Type() {
+	case "identifier":
+		if elemOf == nil {
+			return ""
+		}
+		return elemOf[ingest.NodeText(val, content)]
+	case "array_creation_expression":
+		// new A[]{...}[i] / new A[n][i] — element type from creation type.
+		if typeN := ingest.ChildByField(val, "type"); typeN != nil {
+			return javaTypeName(typeN, content)
+		}
+	}
+	return ""
 }
 
 // javaObjectsRequireNonNullElemType recovers T from Objects.requireNonNull(x[, msg])
