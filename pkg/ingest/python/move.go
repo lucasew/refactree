@@ -1910,6 +1910,7 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `for a in chain(xs, ys)` / `for a in itertools.chain(xs, ys)`,
 // `for a in islice(xs, n)` / `for a in itertools.islice(xs, n)`,
 // `for a in accumulate(xs)` / `for a in itertools.accumulate(xs)`,
+// `for a in cycle(xs)` / `for a in itertools.cycle(xs)`,
 // `for a in Counter(items)` / `for a in collections.Counter(items)`,
 // `for a in Counter(items).elements()`,
 // `for a in dict.fromkeys(items)` / `d = dict.fromkeys(keys, A()); d.values()`),
@@ -2244,7 +2245,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// for a, b in zip_longest / itertools.zip_longest /
 			// for a in reversed/sorted/list/iter(items) /
 			// for a in filter(pred, items) / for a in map(A, names) /
-			// for a in chain/islice/accumulate / itertools.chain/islice/accumulate /
+			// for a in chain/islice/accumulate/cycle / itertools.chain/islice/accumulate/cycle /
 			// for a in dict.fromkeys(items) /
 			// [a.m() for a in xs] / for a in e.exceptions
 			left := ingest.ChildByField(n, "left")
@@ -2784,6 +2785,7 @@ func pythonSubscriptElemType(sub *grammar.Node, content []byte, elemOf, egElems 
 // chain / itertools.chain (all args agree on element type),
 // islice / itertools.islice (1st arg iterable; start/stop/step ignored),
 // accumulate / itertools.accumulate (1st arg iterable; func/initial ignored),
+// cycle / itertools.cycle (1st arg iterable; repeats forever),
 // Counter / collections.Counter (keys = iterable elements; .elements() same),
 // dict.fromkeys(iterable[, value]) (keys = 1st-arg elements; value ignored here),
 // items.copy() (zero-arg; same element type as receiver),
@@ -2856,9 +2858,10 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 				// chain(*iterables) from itertools — shared element type when
 				// all args agree; any untyped or mismatched arg fails closed.
 				return pythonChainElemType(right, content, elemOf, egElems)
-			case "islice", "accumulate":
+			case "islice", "accumulate", "cycle":
 				// islice(iterable, stop) / islice(iterable, start, stop[, step])
 				// accumulate(iterable[, func, *, initial])
+				// cycle(iterable)
 				// — element type equals the iterable (1st arg).
 				// func / initial kwargs or extra positional func are ignored
 				// (same-leaf product case; type-changing fold fails closed only
@@ -2876,8 +2879,8 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		// element type as iterating the Counter). Zero-arg only.
 		// d.values() — dict value type stored in elemOf[d].
 		// dict.fromkeys(iterable[, value]) — iteration yields keys (1st arg elements).
-		// itertools.chain(...) / itertools.islice(...) / itertools.accumulate(...)
-		// — same as bare helpers.
+		// itertools.chain(...) / itertools.islice(...) / itertools.accumulate(...) /
+		// itertools.cycle(...) — same as bare helpers.
 		// collections.deque(xs) / collections.Counter(xs) — same as bare forms.
 		if fn := ingest.ChildByField(right, "function"); fn != nil && fn.Type() == "attribute" {
 			if attr := ingest.ChildByField(fn, "attribute"); attr != nil {
@@ -2911,7 +2914,7 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 						return ""
 					}
 					return pythonIterableElemType(args[0], content, elemOf, egElems)
-				case "chain", "islice", "accumulate":
+				case "chain", "islice", "accumulate", "cycle":
 					objN := ingest.ChildByField(fn, "object")
 					if objN == nil || objN.Type() != "identifier" {
 						return ""
@@ -2922,7 +2925,7 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 					if ingest.NodeText(attr, content) == "chain" {
 						return pythonChainElemType(right, content, elemOf, egElems)
 					}
-					// islice / accumulate — element type of 1st positional arg.
+					// islice / accumulate / cycle — element type of 1st positional arg.
 					args, ok := pythonCallPositionalArgNodes(right)
 					if !ok || len(args) == 0 {
 						return ""
