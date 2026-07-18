@@ -1629,6 +1629,17 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 				}
 				continue
 			}
+			// ConcurrentHashMap.forEachEntry / searchEntries — unary Consumer/Function
+			// applies to Map.Entry<K,V>; bind entryValOf for e.getValue().m()
+			// (same Entry value path as entrySet().forEach, but receiver is the map).
+			if javaMapEntryUnaryLambdaMethod(method) {
+				if entryValOf != nil {
+					if vt := javaMapPipelineValueType(obj, content, elemOf, valOf); vt != "" {
+						entryValOf[params[0]] = vt
+					}
+				}
+				continue
+			}
 			// Unary: stream/collection element or map.values() element.
 			et := javaStreamPipelineElemType(obj, content, elemOf, valOf)
 			if et != "" && ourReceivers[et] {
@@ -1708,7 +1719,23 @@ func javaStreamElementLambdaMethod(method string) bool {
 		"search",
 		// ConcurrentHashMap searchValues / forEachValue — unary Function/Consumer on V
 		// (see javaMapValueUnaryLambdaMethod).
-		"searchValues", "forEachValue":
+		"searchValues", "forEachValue",
+		// ConcurrentHashMap forEachEntry / searchEntries — unary Consumer/Function on
+		// Map.Entry<K,V> (see javaMapEntryUnaryLambdaMethod).
+		"forEachEntry", "searchEntries":
+		return true
+	default:
+		return false
+	}
+}
+
+// javaMapEntryUnaryLambdaMethod reports ConcurrentHashMap-style methods whose
+// unary functional arg is applied to Map.Entry<K,V> (not V / not stream elems):
+// forEachEntry(threshold, Consumer<? super Map.Entry<K,V>>),
+// searchEntries(threshold, Function<? super Map.Entry<K,V>, ? extends U>).
+func javaMapEntryUnaryLambdaMethod(method string) bool {
+	switch method {
+	case "forEachEntry", "searchEntries":
 		return true
 	default:
 		return false
