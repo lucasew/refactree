@@ -1069,6 +1069,7 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // map.put(k,v) / map.replace(k,v) / map.merge(k,v,fn) /
 // it.next() / list.iterator().next() /
 // queue.poll()/peek() / list.remove(i) / list.getFirst()/getLast() /
+// list.removeFirst()/removeLast() /
 // opt.orElse(d) / opt.orElseGet(s) / opt.orElseThrow([s]) / findFirst().orElse(d) /
 // Collections.min(as) / Collections.max(as) / stream.min/max().orElse(d) /
 // stream.reduce(identity, op) / reduce(op).orElse(d) / reduce(op).ifPresent(...) /
@@ -1164,6 +1165,7 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 				} else if et := javaCollectionAccessElemType(valN, content, elemOf, valOf, entryValOf); ourReceivers[et] {
 					// var xa = as.get(0) / am.get("k") / as.iterator().next() / ia.next()
 					// / qa.poll() / qa.peek() / as.remove(0) / as.getFirst()
+					// / as.removeFirst() / as.removeLast()
 					// / e.getValue() when e is a Map.Entry local
 					// / Map.entry(k, new A()).getValue() / am.firstEntry().getValue()
 					out[name] = true
@@ -3404,6 +3406,7 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	qa.poll() / qa.peek() / qa.element() → elemOf[qa] (Queue)
 //	da.pollFirst()/pollLast()/peekFirst()/peekLast()/pop() → elemOf[da] (Deque)
 //	as.getFirst() / as.getLast() → elemOf[as] (SequencedCollection / List / Deque)
+//	as.removeFirst() / as.removeLast() → elemOf[as] (SequencedCollection / List / Deque)
 //	ia.next()                 → elemOf[ia]   (Iterator<A>)
 //	as.iterator().next()      → elemOf[as]   (via type-preserving iterator())
 //	oa.orElse(d) / oa.orElseGet(s) / oa.orElseThrow([s]) → elemOf[oa]
@@ -3459,7 +3462,10 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		"remove",
 		"poll", "peek", "element",
 		"pollFirst", "pollLast", "peekFirst", "peekLast", "pop",
-		"getFirst", "getLast":
+		"getFirst", "getLast",
+		// SequencedCollection / List / Deque removeFirst/removeLast return E
+		// (Java 21; same element type as getFirst/getLast).
+		"removeFirst", "removeLast":
 		// Map-like (2 type args recorded in valOf) → value type; else element type.
 		// Identifier receiver only — chained gets fail closed.
 		if obj != nil && obj.Type() == "identifier" {
