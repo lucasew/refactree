@@ -2527,73 +2527,159 @@ func pythonSimpleNamespaceFieldTypes(call *grammar.Node, content []byte) map[str
 	return out
 }
 
-// pythonMappingAppendNestedType recovers (mapLocal, T) from
-// da["k"].append(A()) / da.get("k").append(A()) / da.setdefault("k").append(A())
-// when the appended value is a Class() call. Enables defaultdict(list) mutation
-// peels: da["k"][0].run() via elemOf["@nested."+da] under foreign same-leaf.
-// Identifier receivers (ga.append) fail closed here (elemOf on the list local is
-// a separate path). Non-Class append args / non-mapping receivers fail closed.
-func pythonMappingAppendNestedType(call *grammar.Node, content []byte) (mapLocal, classType string) {
+// pythonCollectionMutationElemType recovers (local, T, nested) from list/deque/
+// mapping-bucket mutations that insert a Class() instance:
+//
+//	xs.append(A()) / xs.extend([A()]) / xs.insert(0, A()) → (xs, A, false)
+//	da["k"].append(A()) / da.get("k").extend([A()]) / da["k"].insert(0, A())
+//	  → (da, A, true)  // @nested leaf for mapping-of-list
+//
+// Enables bare list/deque mutation peels (xs=[]; xs.append(A()); xs[0].run()) and
+// defaultdict(list) extend/insert peels under foreign same-leaf. Non-Class args,
+// heterogeneous extend collections, and non-ident/non-mapping receivers fail closed.
+func pythonCollectionMutationElemType(call *grammar.Node, content []byte) (local, classType string, nested bool) {
 	if call == nil || call.Type() != "call" {
-		return "", ""
+		return "", "", false
 	}
 	fn := ingest.ChildByField(call, "function")
 	if fn == nil || fn.Type() != "attribute" {
-		return "", ""
+		return "", "", false
 	}
 	attr := ingest.ChildByField(fn, "attribute")
-	if attr == nil || ingest.NodeText(attr, content) != "append" {
-		return "", ""
+	if attr == nil {
+		return "", "", false
 	}
+	method := ingest.NodeText(attr, content)
 	args, ok := pythonCallPositionalArgNodes(call)
-	if !ok || len(args) != 1 {
-		return "", ""
+	if !ok {
+		return "", "", false
 	}
-	et := pythonClassCtorName(args[0], content)
+	var et string
+	switch method {
+	case "append", "appendleft":
+		// xs.append(A()) / deque.appendleft(A()) — single Class() positional.
+		if len(args) != 1 {
+			return "", "", false
+		}
+		et = pythonClassCtorName(args[0], content)
+	case "extend":
+		// xs.extend([A()]) / xs.extend((A(),)) — homogeneous Class() collection.
+		if len(args) != 1 {
+			return "", "", false
+		}
+		et = pythonHomogeneousCtorElem(args[0], content)
+	case "insert":
+		// xs.insert(i, A()) — second positional is Class(); index shape free.
+		if len(args) != 2 {
+			return "", "", false
+		}
+		et = pythonClassCtorName(args[1], content)
+	default:
+		return "", "", false
+	}
 	if et == "" {
-		return "", ""
+		return "", "", false
 	}
 	obj := ingest.ChildByField(fn, "object")
 	if obj == nil {
-		return "", ""
+		return "", "", false
 	}
 	switch obj.Type() {
+	case "identifier":
+		// xs.append(A()) / deque().append path after xs = deque().
+		return ingest.NodeText(obj, content), et, false
 	case "subscript":
 		// da["k"].append(A()) — non-slice key only.
 		for i := uint32(0); i < obj.ChildCount(); i++ {
 			if obj.Child(i).Type() == "slice" {
-				return "", ""
+				return "", "", false
 			}
 		}
 		val := ingest.ChildByField(obj, "value")
 		if val == nil || val.Type() != "identifier" {
-			return "", ""
+			return "", "", false
 		}
-		return ingest.NodeText(val, content), et
+		return ingest.NodeText(val, content), et, true
 	case "call":
-		// da.get("k").append(A()) / da.setdefault("k").append(A()).
+		// da.get("k").append(A()) / da.setdefault("k").extend([A()]).
 		objFn := ingest.ChildByField(obj, "function")
 		if objFn == nil || objFn.Type() != "attribute" {
-			return "", ""
+			return "", "", false
 		}
 		objAttr := ingest.ChildByField(objFn, "attribute")
 		if objAttr == nil {
-			return "", ""
+			return "", "", false
 		}
 		switch ingest.NodeText(objAttr, content) {
 		case "get", "setdefault":
 			// ok
 		default:
-			return "", ""
+			return "", "", false
 		}
 		recv := ingest.ChildByField(objFn, "object")
 		if recv == nil || recv.Type() != "identifier" {
-			return "", ""
+			return "", "", false
 		}
-		return ingest.NodeText(recv, content), et
+		return ingest.NodeText(recv, content), et, true
 	default:
-		return "", ""
+		return "", "", false
 	}
+}
+
+// pythonNamedtupleCtorInstanceFields recovers field→Class leaves from one
+// namedtuple constructor call: Box(A(), B()) / Box(a=A(), b=B()) when field
+// names are known from namedtuple(...). Used to bind instance-level fieldOf
+// (ba.a / ba.#0) under dual-class same-field names — type-level fieldIndex is
+// last-writer-wins across ba=Box(A()); bb=Box(B()) and would under-rename A.
+// Unknown field order (no fieldNames) accepts kwargs only. Non-Class / splat fail closed (nil).
+func pythonNamedtupleCtorInstanceFields(call *grammar.Node, content []byte, fieldNames []string) map[string]string {
+	if call == nil || call.Type() != "call" {
+		return nil
+	}
+	argList := ingest.ChildByField(call, "arguments")
+	if argList == nil {
+		return nil
+	}
+	out := map[string]string{}
+	// Keyword: Box(a=A(), b=B()).
+	for i := uint32(0); i < argList.ChildCount(); i++ {
+		ch := argList.Child(i)
+		if ch.Type() != "keyword_argument" {
+			continue
+		}
+		nameN := ingest.ChildByField(ch, "name")
+		valN := ingest.ChildByField(ch, "value")
+		if nameN == nil || nameN.Type() != "identifier" {
+			return nil
+		}
+		et := pythonExprClassType(valN, content)
+		if et == "" {
+			return nil
+		}
+		out[ingest.NodeText(nameN, content)] = et
+	}
+	// Positional: Box(A(), B()) — needs ordered field names.
+	if len(fieldNames) > 0 {
+		args, ok := pythonCallPositionalArgNodes(call)
+		if !ok {
+			return nil
+		}
+		for i, arg := range args {
+			if i >= len(fieldNames) {
+				break
+			}
+			et := pythonExprClassType(arg, content)
+			if et == "" {
+				// Non-Class positional — fail closed for whole call (mixed leaves).
+				return nil
+			}
+			out[fieldNames[i]] = et
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // pythonFutureSetResultType recovers T from fa.set_result(T()) / fa.set_result(T())
@@ -3667,11 +3753,29 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							out[lname] = true
 							typeOf[lname] = fname
 							bindFields(lname, fname)
-						} else if len(fieldIndex[fname]) > 0 {
+						} else if len(fieldIndex[fname]) > 0 || len(fieldNames[fname]) > 0 {
 							// x = Box(...) — namedtuple/class with known fields (not our
 							// receiver); bind fieldOf so box.a.run() / xa = box.a work.
 							typeOf[lname] = fname
 							bindFields(lname, fname)
+							// Instance-level override from this call's Class() args.
+							// Type-level fieldIndex is last-writer-wins across
+							// ba=Box(A()); bb=Box(B()) and would under-rename A.
+							// Foreign fields too for shadowing.
+							if fields := pythonNamedtupleCtorInstanceFields(right, content, fieldNames[fname]); len(fields) > 0 {
+								for f, t := range fields {
+									if f != "" && t != "" {
+										fieldOf[lname+"."+f] = t
+									}
+								}
+								if names := fieldNames[fname]; len(names) > 0 {
+									for i, fnameN := range names {
+										if t := fields[fnameN]; t != "" {
+											fieldOf[lname+".#"+fmt.Sprintf("%d", i)] = t
+										}
+									}
+								}
+							}
 						}
 						// a = make_a() after def make_a() -> A / @lru_cache def make_a() -> A /
 						// make_a = lambda: A(). Foreign returns too for shadowing.
@@ -4761,12 +4865,16 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			if fut, et := pythonFutureSetResultType(n, content); fut != "" && et != "" {
 				futureOf[fut] = et
 			}
-			// da["k"].append(A()) / da.get("k").append(A()) — mutation fills a
-			// mapping-of-list bucket (defaultdict(list) product path). Bind
-			// @nested leaf so da["k"][0].run() / for a in da["k"] peel under
-			// foreign same-leaf. Foreign appends too for shadowing.
-			if mapLocal, et := pythonMappingAppendNestedType(n, content); mapLocal != "" && et != "" {
-				elemOf["@nested."+mapLocal] = et
+			// xs.append(A()) / xs.extend([A()]) / xs.insert(0, A()) — bare list/
+			// deque mutation. da["k"].append/extend/insert — mapping-of-list
+			// bucket (defaultdict(list)). Bind elemOf / @nested so xs[0].run() /
+			// da["k"][0].run() peel under foreign same-leaf. Foreign too for shadowing.
+			if local, et, nest := pythonCollectionMutationElemType(n, content); local != "" && et != "" {
+				if nest {
+					elemOf["@nested."+local] = et
+				} else {
+					elemOf[local] = et
+				}
 			}
 		case "as_pattern":
 			// match `case A() as a`, with `with A() as a`, except `except A as e`.
@@ -4838,6 +4946,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								}
 								if subjLocal != "" {
 									pythonBindMatchRecordKeyPatterns(p, content, subjLocal, fieldOf, ourReceivers, out)
+									// case SimpleNamespace(k=xa) / case Box(a=xa) from
+									// instance fieldOf[subj.field] (SNS / dual-class
+									// namedtuple). Type-level fieldIndex alone under-renames
+									// dual-class same-field (ba=Box(A()); bb=Box(B())).
+									pythonBindClassPatternSubjectFields(p, content, subjLocal, fieldOf, ourReceivers, out)
 								}
 								if subjType != "" {
 									pythonBindMatchSubjectTypeCaptures(p, content, subjType, ourReceivers, out)
@@ -7117,6 +7230,8 @@ func pythonBindMatchSeqPatterns(n *grammar.Node, content []byte, et, nest string
 		// integer / dotted_name (capture keys) and are not value-typed.
 		// **rest (splat_pattern) is a mapping — fail closed.
 		// Nested list values: case {"k": [xa, *_]} when nest is leaf T.
+		// Nested map values: case {"outer": {"k": xa}} when nest is leaf T
+		// (dict-of-dict / OrderedDict(outer=OrderedDict(k=A()))).
 		// Whole list value captures: case {"k": row} / {"k": row as r} when nest
 		// is leaf T — row is list of nest (elemOf; same as case [row] on list[list[A]]).
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -7129,9 +7244,15 @@ func pythonBindMatchSeqPatterns(n *grammar.Node, content []byte, et, nest string
 				pythonBindMatchSeqPatterns(ch, content, nest, "", ourReceivers, out, elemOf)
 				continue
 			}
+			if nest != "" && pythonMatchPatternIsDict(ch) {
+				// Value is mapping of nest leaf — case {"outer": {"k": xa}}.
+				pythonBindMatchSeqPatterns(ch, content, nest, "", ourReceivers, out, elemOf)
+				continue
+			}
 			if nest != "" {
 				// case {"k": row} on dict[str, list[A]] / da={"k":[A()]} — row is
 				// list of nest (not nest leaf itself). Foreign too for shadowing.
+				// Also case {"outer": inner} on dict-of-dict — inner is mapping of nest.
 				pythonBindMatchNestedMapValueListCaptures(ch, content, nest, elemOf)
 				continue
 			}
@@ -7180,6 +7301,136 @@ func pythonMatchPatternIsSeq(n *grammar.Node) bool {
 		return false
 	}
 	return n.Type() == "list_pattern" || n.Type() == "tuple_pattern"
+}
+
+// pythonMatchPatternIsDict reports whether n (possibly wrapped) is a dict
+// pattern. Used for nested mapping-of-mapping peels: case {"outer": {"k": xa}}.
+func pythonMatchPatternIsDict(n *grammar.Node) bool {
+	if n == nil || n.IsNull() {
+		return false
+	}
+	for n != nil && (n.Type() == "case_pattern" || n.Type() == "pattern") {
+		inner := pythonMatchPatternInner(n)
+		if inner == nil {
+			return false
+		}
+		n = inner
+	}
+	if n == nil {
+		return false
+	}
+	return n.Type() == "dict_pattern"
+}
+
+// pythonBindClassPatternSubjectFields binds keyword (and ordered index) captures
+// from a class_pattern using instance fieldOf[subj.field] of the match subject:
+//
+//	da = SimpleNamespace(k=A()); match da: case SimpleNamespace(k=xa): xa.run()
+//	ba = Box(A()); match ba: case Box(a=xa): / case Box(xa):
+//
+// Type-level fieldIndex alone is last-writer-wins under dual-class same-field
+// names. Recurses into nested patterns. Unknown fields / missing fieldOf fail closed.
+func pythonBindClassPatternSubjectFields(n *grammar.Node, content []byte, subjLocal string, fieldOf map[string]string, ourReceivers, out map[string]bool) {
+	if n == nil || n.IsNull() || subjLocal == "" || fieldOf == nil {
+		return
+	}
+	if n.Type() == "class_pattern" {
+		pythonBindClassPatternSubjectFieldsOne(n, content, subjLocal, fieldOf, ourReceivers, out)
+		return
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		pythonBindClassPatternSubjectFields(n.Child(i), content, subjLocal, fieldOf, ourReceivers, out)
+	}
+}
+
+func pythonBindClassPatternSubjectFieldsOne(n *grammar.Node, content []byte, subjLocal string, fieldOf map[string]string, ourReceivers, out map[string]bool) {
+	if n == nil || n.Type() != "class_pattern" {
+		return
+	}
+	pos := 0
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		if ch.Type() != "case_pattern" {
+			continue
+		}
+		payload := pythonMatchPatternInner(ch)
+		if payload == nil {
+			continue
+		}
+		var outerAlias string
+		if payload.Type() == "as_pattern" {
+			var left *grammar.Node
+			seenAs := false
+			for j := uint32(0); j < payload.ChildCount(); j++ {
+				c := payload.Child(j)
+				if c.Type() == "as" {
+					seenAs = true
+					continue
+				}
+				if !seenAs {
+					left = c
+					continue
+				}
+				switch c.Type() {
+				case "identifier":
+					outerAlias = ingest.NodeText(c, content)
+				case "as_pattern_target":
+					if id := ingest.ChildByType(c, "identifier"); id != nil {
+						outerAlias = ingest.NodeText(id, content)
+					}
+				}
+			}
+			if left == nil {
+				continue
+			}
+			if left.Type() == "case_pattern" || left.Type() == "pattern" {
+				left = pythonMatchPatternInner(left)
+			}
+			if left == nil {
+				continue
+			}
+			payload = left
+		}
+		if payload.Type() != "keyword_pattern" {
+			// Positional: ith non-keyword → fieldOf[subj.#i] (namedtuple order).
+			ft := fieldOf[subjLocal+".#"+fmt.Sprintf("%d", pos)]
+			if ft != "" && ourReceivers[ft] {
+				pythonBindMatchMapValueCaptures(payload, content, ft, ourReceivers, out)
+				if outerAlias != "" {
+					out[outerAlias] = true
+				}
+			}
+			pos++
+			continue
+		}
+		// keyword_pattern: <field ident> = <value pattern>
+		var key string
+		var valuePat *grammar.Node
+		for j := uint32(0); j < payload.ChildCount(); j++ {
+			c := payload.Child(j)
+			if c.Type() == "=" {
+				continue
+			}
+			if key == "" && c.Type() == "identifier" {
+				key = ingest.NodeText(c, content)
+				continue
+			}
+			valuePat = c
+		}
+		if key == "" {
+			continue
+		}
+		ft := fieldOf[subjLocal+"."+key]
+		if ft == "" || !ourReceivers[ft] {
+			continue
+		}
+		if valuePat != nil {
+			pythonBindMatchMapValueCaptures(valuePat, content, ft, ourReceivers, out)
+		}
+		if outerAlias != "" {
+			out[outerAlias] = true
+		}
+	}
 }
 
 // pythonBindMatchNestedSeqSlots walks a list/tuple pattern whose flat capture
@@ -10016,8 +10267,9 @@ func pythonHomogeneousDictCompValueCtorElem(comp *grammar.Node, content []byte) 
 	return pythonClassCtorName(ingest.ChildByField(pair, "value"), content)
 }
 
-// pythonHomogeneousDictCallValueCtorElem recovers T from dict/OrderedDict/ChainMap
-// constructors whose values are Class() instances (scalar mapping values).
+// pythonHomogeneousDictCallValueCtorElem recovers T from dict/OrderedDict/
+// UserDict/ChainMap constructors whose values are Class() instances (scalar
+// mapping values).
 func pythonHomogeneousDictCallValueCtorElem(call *grammar.Node, content []byte) string {
 	if call == nil || call.Type() != "call" {
 		return ""
@@ -10025,7 +10277,7 @@ func pythonHomogeneousDictCallValueCtorElem(call *grammar.Node, content []byte) 
 	fn := ingest.ChildByField(call, "function")
 	name := pythonSimpleCalleeName(fn, content)
 	switch name {
-	case "dict", "OrderedDict":
+	case "dict", "OrderedDict", "UserDict":
 		// ok — kwargs / pairs / single dict (same shapes as nested path)
 	case "ChainMap":
 		// ChainMap(*maps) — each positional is a dict of Class() values.
@@ -10094,8 +10346,10 @@ func pythonHomogeneousDictCallValueCtorElem(call *grammar.Node, content []byte) 
 }
 
 // pythonHomogeneousChainMapValueCtorElem recovers T from
-// ChainMap({"k": A()}) / ChainMap({"k": A()}, {"m": A()}) when every
-// positional map has homogeneous Class() values of the same T.
+// ChainMap({"k": A()}) / ChainMap(OrderedDict(k=A())) /
+// ChainMap({"k": A()}, {"m": A()}) when every positional map has homogeneous
+// Class() values of the same T. Dict literals and dict/OrderedDict/UserDict
+// calls accepted; other shapes fail closed.
 func pythonHomogeneousChainMapValueCtorElem(call *grammar.Node, content []byte) string {
 	argList := ingest.ChildByField(call, "arguments")
 	if argList == nil {
@@ -10112,6 +10366,21 @@ func pythonHomogeneousChainMapValueCtorElem(call *grammar.Node, content []byte) 
 			return ""
 		case "dictionary":
 			et := pythonHomogeneousDictLiteralValueCtorElem(ch, content)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				elem = et
+				saw = true
+				continue
+			}
+			if et != elem {
+				return ""
+			}
+		case "call":
+			// ChainMap(OrderedDict(k=A())) / ChainMap(dict(k=A())) /
+			// ChainMap(UserDict(k=A())) / collections.OrderedDict(...).
+			et := pythonHomogeneousDictValueCtorElem(ch, content)
 			if et == "" {
 				return ""
 			}
@@ -10341,16 +10610,16 @@ func pythonNestedDictCompHomogeneousListCtorElem(comp *grammar.Node, content []b
 }
 
 // pythonNestedDictCallHomogeneousListCtorElem recovers T from dict/OrderedDict/
-// ChainMap forms:
+// UserDict/ChainMap forms:
 //
-//	dict(k=[A()]) / OrderedDict(k=[A()], m={A()}) — all-keyword values
+//	dict(k=[A()]) / OrderedDict(k=[A()], m={A()}) / UserDict(k=[A()]) — all-keyword
 //	dict([("k", [A()])]) / OrderedDict((("k", [A()]),)) — single list/tuple of pairs
 //	dict({"k": [A()]}) / OrderedDict({"k": [A()]}) — single dictionary arg
-//	ChainMap({"k": [A()]}) / ChainMap({"k": [A()]}, {"m": [A()]}) — one+ maps
+//	ChainMap({"k": [A()]}) / ChainMap(OrderedDict(k=[A()])) — one+ maps
 //
-// Mixed positional+kwargs (dict/OrderedDict), splat, empty, and non-collection
-// values fail closed. collections.OrderedDict / collections.ChainMap accepted
-// via attribute leaf (pythonSimpleCalleeName).
+// Mixed positional+kwargs (dict/OrderedDict/UserDict), splat, empty, and
+// non-collection values fail closed. collections.OrderedDict / UserDict /
+// ChainMap accepted via attribute leaf (pythonSimpleCalleeName).
 func pythonNestedDictCallHomogeneousListCtorElem(call *grammar.Node, content []byte) string {
 	if call == nil || call.Type() != "call" {
 		return ""
@@ -10358,7 +10627,7 @@ func pythonNestedDictCallHomogeneousListCtorElem(call *grammar.Node, content []b
 	fn := ingest.ChildByField(call, "function")
 	name := pythonSimpleCalleeName(fn, content)
 	switch name {
-	case "dict", "OrderedDict":
+	case "dict", "OrderedDict", "UserDict":
 		// kwargs / pairs / single dict
 	case "ChainMap":
 		return pythonNestedChainMapHomogeneousListCtorElem(call, content)
@@ -10427,8 +10696,10 @@ func pythonNestedDictCallHomogeneousListCtorElem(call *grammar.Node, content []b
 }
 
 // pythonNestedChainMapHomogeneousListCtorElem recovers T from
-// ChainMap({"k": [A()]}) / ChainMap({"k": [A()]}, {"m": deque([A()])}) when
-// every positional map has nested collection (or dict-of-Class) values of T.
+// ChainMap({"k": [A()]}) / ChainMap(OrderedDict(k=[A()])) /
+// ChainMap({"k": [A()]}, {"m": deque([A()])}) when every positional map has
+// nested collection (or dict-of-Class) values of T. Dict literals and
+// dict/OrderedDict/UserDict calls accepted.
 func pythonNestedChainMapHomogeneousListCtorElem(call *grammar.Node, content []byte) string {
 	argList := ingest.ChildByField(call, "arguments")
 	if argList == nil {
@@ -10445,6 +10716,21 @@ func pythonNestedChainMapHomogeneousListCtorElem(call *grammar.Node, content []b
 			return ""
 		case "dictionary":
 			et := pythonNestedDictLiteralHomogeneousListCtorElem(ch, content)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				nest = et
+				saw = true
+				continue
+			}
+			if et != nest {
+				return ""
+			}
+		case "call":
+			// ChainMap(OrderedDict(k=[A()])) / ChainMap(dict(k=[A()])) /
+			// ChainMap(UserDict({"k": [A()]})) / collections.OrderedDict(...).
+			et := pythonNestedDictHomogeneousListCtorElem(ch, content)
 			if et == "" {
 				return ""
 			}
