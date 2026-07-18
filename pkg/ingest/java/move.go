@@ -1256,7 +1256,8 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					out[name] = true
 				} else if vt := javaEntryExprValueType(valN, content, elemOf, valOf, entryValOf); vt != "" {
 					// var ea = Map.entry(k, new A()) / am.firstEntry() /
-					// am.pollLastEntry() / am.floorEntry(k) — Entry of V;
+					// am.pollLastEntry() / am.floorEntry(k) /
+					// as.entrySet().iterator().next() — Entry of V;
 					// track value T for later ea.getValue().m() / ea.setValue(v).m()
 					// (entry is not A itself).
 					entryValOf[name] = vt
@@ -3564,9 +3565,11 @@ func javaMapOfEntriesValueType(call *grammar.Node, content []byte) string {
 //	am.lastEntry()            → valOf[am]
 //	am.pollFirstEntry() / am.pollLastEntry() → valOf[am]
 //	am.ceilingEntry(k) / am.floorEntry(k) / am.higherEntry(k) / am.lowerEntry(k) → valOf[am]
+//	m.entrySet().iterator().next() / m.entrySet().listIterator().previous() → valOf[m]
 //
 // Used for e.getValue() / ((Map.Entry<K,A>) e).getValue() / var ea = Map.entry(...) /
-// var ea = (Map.Entry<K,A>) e / var ea = am.firstEntry() so method rename hits value
+// var ea = (Map.Entry<K,A>) e / var ea = am.firstEntry() /
+// var ea = m.entrySet().iterator().next() so method rename hits value
 // call sites under foreign same-leaf methods.
 // Unknown shapes fail closed.
 func javaEntryExprValueType(obj *grammar.Node, content []byte, elemOf, valOf, entryValOf map[string]string) string {
@@ -3621,6 +3624,10 @@ func javaEntryExprValueType(obj *grammar.Node, content []byte, elemOf, valOf, en
 			"ceilingEntry", "floorEntry", "higherEntry", "lowerEntry":
 			// NavigableMap.*Entry → Map.Entry<K,V>; V from map value type.
 			return javaMapPipelineValueType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
+		case "next", "previous":
+			// m.entrySet().iterator().next() / m.entrySet().listIterator().previous()
+			// — Entry of V; recover V via the entrySet pipeline under the iterator.
+			return javaEntrySetPipelineValueType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
 		default:
 			return ""
 		}
@@ -3800,6 +3807,7 @@ func javaToMapCollectValueType(val *grammar.Node, content []byte, elemOf, valOf 
 
 // javaEntrySetPipelineValueType recovers the map value type from an entrySet pipeline:
 // m.entrySet() / m.entrySet().stream() / m.entrySet().stream().filter(...) → valOf[m],
+// m.entrySet().iterator() / m.entrySet().listIterator() / m.entrySet().spliterator() → valOf[m],
 // collect(toMap(...)).entrySet() → stream element type.
 // Type-changing stages (map/flatMap) fail closed.
 func javaEntrySetPipelineValueType(obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
@@ -3828,6 +3836,9 @@ func javaEntrySetPipelineValueType(obj *grammar.Node, content []byte, elemOf, va
 	case "entrySet":
 		return javaMapPipelineValueType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
 	case "stream", "parallelStream",
+		// iterator/listIterator/spliterator yield Entry views of the same V
+		// (for next/previous/forEachRemaining under foreign same-leaf methods).
+		"iterator", "listIterator", "descendingIterator", "spliterator",
 		"filter", "peek", "sorted", "distinct", "limit", "skip",
 		"unordered", "sequential", "parallel", "onClose",
 		"takeWhile", "dropWhile":
@@ -4034,6 +4045,7 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	am.firstEntry().getValue() / am.lastEntry().getValue() → valOf[am]
 //	am.firstEntry().setValue(v) / am.lastEntry().setValue(v) → valOf[am]
 //	am.pollFirstEntry()/pollLastEntry()/ceilingEntry(k)/… .getValue() → valOf[am]
+//	m.entrySet().iterator().next().getValue() / .setValue(v) → valOf[m]
 //
 // Optional.get() works for Optional<A> locals (elemOf) and for Optional-yielding
 // pipelines (findFirst/findAny/min/max/Optional.of) via zero-arg get + pipeline.
