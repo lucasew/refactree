@@ -1859,6 +1859,9 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 			// Promise.resolve(new A() / a / makeA()).then(a => a.run()) — bind then callback param.
 			// Promise.allSettled([new A()]).then(([r]) => r.value.run()) — settled params.
 			jsBindPromiseThenParams(n, content, ourReceivers, out, settledOf, factories)
+			// new Map([[k, new A()]]).forEach((v) => v.run()) /
+			// [new A()].forEach((v) => v.run()) — bind forEach value/elem param.
+			jsBindForEachParams(n, content, ourReceivers, out, arrayLocals, factories, mapLocals, entryArrayLocals)
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
@@ -2115,6 +2118,92 @@ func jsPromiseResolveArgType(n *grammar.Node, content []byte, typedLocals, facto
 		}
 	}
 	return ""
+}
+
+// jsBindForEachParams types the first parameter of
+// map.forEach((v) => …) / arr.forEach((v) => …) / .forEach(function(v){…})
+// when the receiver peels to a Map of value T or array of element T (our
+// receivers only). Enables new Map([[k, new A()]]).forEach((v) => v.run()) and
+// [new A()].forEach((v) => v.run()) under foreign same-leaf methods; B preserved.
+// Only the value/element slot binds (key / index / thisArg ignored).
+func jsBindForEachParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, out, arrayLocals, factories, mapLocals, entryArrayLocals map[string]string) {
+	if call == nil || call.Type() != "call_expression" || out == nil {
+		return
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || (fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain") {
+		return
+	}
+	prop := ingest.ChildByField(fn, "property")
+	if prop == nil || ingest.NodeText(prop, content) != "forEach" {
+		return
+	}
+	obj := ingest.ChildByField(fn, "object")
+	// Map value type or array element type — our receivers only (B preserved).
+	valueT := ""
+	if t := jsMapSourceValueType(obj, content, out, factories, mapLocals, entryArrayLocals); ourReceivers[t] {
+		valueT = t
+	} else if t := jsArraySourceElemType(obj, content, arrayLocals, out, factories); ourReceivers[t] {
+		valueT = t
+	}
+	if valueT == "" {
+		return
+	}
+	args := ingest.ChildByField(call, "arguments")
+	if args == nil {
+		return
+	}
+	var cb *grammar.Node
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		c := args.Child(i)
+		if c == nil || c.Type() == "(" || c.Type() == ")" || c.Type() == "," {
+			continue
+		}
+		cb = c
+		break
+	}
+	if cb == nil {
+		return
+	}
+	param := jsCallbackFirstParam(cb)
+	if param == nil || param.Type() != "identifier" {
+		return
+	}
+	name := ingest.NodeText(param, content)
+	if name != "" && name != "_" {
+		out[name] = valueT
+	}
+}
+
+// jsCallbackFirstParam returns the first formal parameter of an arrow/function
+// callback (identifier, array_pattern, or TS-wrapped pattern).
+func jsCallbackFirstParam(cb *grammar.Node) *grammar.Node {
+	if cb == nil {
+		return nil
+	}
+	switch cb.Type() {
+	case "arrow_function":
+		if p := ingest.ChildByField(cb, "parameter"); p != nil {
+			return p
+		}
+		if p := ingest.ChildByField(cb, "parameters"); p != nil {
+			return jsFirstFormalParamNode(p)
+		}
+		for i := uint32(0); i < cb.ChildCount(); i++ {
+			ch := cb.Child(i)
+			if ch.Type() == "identifier" || ch.Type() == "array_pattern" {
+				return ch
+			}
+			if ch.Type() == "formal_parameters" {
+				return jsFirstFormalParamNode(ch)
+			}
+		}
+	case "function_expression", "function_declaration":
+		if p := ingest.ChildByField(cb, "parameters"); p != nil {
+			return jsFirstFormalParamNode(p)
+		}
+	}
+	return nil
 }
 
 // jsBindPromiseThenParams types the first parameter of
@@ -2816,7 +2905,8 @@ func jsUniformArrayElemType(n *grammar.Node, content []byte, typedLocals, factor
 
 // jsArraySourceElemType recovers T from an array-like expression whose elements
 // uniformly peel to T: array literal, array local, Array.from([…]) (no mapfn),
-// Array.of(…), or Object.values({…}) when all property values agree.
+// Array.of(…), Object.values({…}) when all property values agree, or identity
+// array methods (slice / concat / toSpliced / flat) when dual-class solid.
 // Object.entries is not an element source of T (yields [key, value] pairs).
 func jsArraySourceElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string) string {
 	if n == nil {
@@ -2854,7 +2944,191 @@ func jsArraySourceElemType(n *grammar.Node, content []byte, arrayLocals, typedLo
 	if t := jsObjectValuesElemType(n, content, typedLocals, factories); t != "" {
 		return t
 	}
+	if t := jsArrayIdentityElemType(n, content, arrayLocals, typedLocals, factories); t != "" {
+		return t
+	}
+	if t := jsArrayFlatElemType(n, content, arrayLocals, typedLocals, factories); t != "" {
+		return t
+	}
 	return ""
+}
+
+// jsArrayIdentityElemType recovers T from arr.slice(…) / arr.concat(…) /
+// arr.toSpliced(…) when the receiver peels to uniform element type T and any
+// inserted/concatenated values also peel to T. Enables
+// [new A()].slice()[0].run() / as.concat([new A()])[0].run() /
+// [new A()].toSpliced(0, 0)[0].run() under foreign same-leaf methods.
+// Mixed concat/toSpliced inserts fail closed.
+func jsArrayIdentityElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string) string {
+	if n == nil || n.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	args := ingest.ChildByField(n, "arguments")
+	if fn == nil {
+		return ""
+	}
+	if fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain" {
+		return ""
+	}
+	prop := ingest.ChildByField(fn, "property")
+	if prop == nil {
+		return ""
+	}
+	name := ingest.NodeText(prop, content)
+	obj := ingest.ChildByField(fn, "object")
+	switch name {
+	case "slice":
+		// slice always yields elements of the same type as the receiver.
+		return jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories)
+	case "concat":
+		t := jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories)
+		if t == "" {
+			return ""
+		}
+		// Each arg must be element T or array-source of T (zero args = identity).
+		if args != nil {
+			for i := uint32(0); i < args.ChildCount(); i++ {
+				ch := args.Child(i)
+				if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+					continue
+				}
+				if jsExprConcreteType(ch, content, typedLocals, factories) == t {
+					continue
+				}
+				if jsArraySourceElemType(ch, content, arrayLocals, typedLocals, factories) == t {
+					continue
+				}
+				return ""
+			}
+		}
+		return t
+	case "toSpliced":
+		t := jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories)
+		if t == "" {
+			return ""
+		}
+		// toSpliced(start, deleteCount, ...items) — items (after first two
+		// positional args) must each peel to T; zero items is identity.
+		if args != nil {
+			pos := 0
+			for i := uint32(0); i < args.ChildCount(); i++ {
+				ch := args.Child(i)
+				if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+					continue
+				}
+				pos++
+				if pos <= 2 {
+					continue
+				}
+				if jsExprConcreteType(ch, content, typedLocals, factories) != t {
+					return ""
+				}
+			}
+		}
+		return t
+	}
+	return ""
+}
+
+// jsArrayFlatElemType recovers T from arr.flat() / arr.flat(1) when:
+//  1. arr peels to uniform element type T (flat is a no-op for non-array elems), or
+//  2. arr is an array of array-sources of uniform element type T (one-level flat).
+//
+// Depth absent or literal 1 only; deeper / non-numeric depth fail closed.
+// Enables [[new A()]].flat()[0].run() / [new A()].flat()[0].run() under foreign
+// same-leaf methods.
+func jsArrayFlatElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string) string {
+	if n == nil || n.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	args := ingest.ChildByField(n, "arguments")
+	if fn == nil {
+		return ""
+	}
+	if fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain" {
+		return ""
+	}
+	prop := ingest.ChildByField(fn, "property")
+	if prop == nil || ingest.NodeText(prop, content) != "flat" {
+		return ""
+	}
+	// Zero args or single numeric literal depth 1.
+	var depthArg *grammar.Node
+	count := 0
+	if args != nil {
+		for i := uint32(0); i < args.ChildCount(); i++ {
+			ch := args.Child(i)
+			if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+				continue
+			}
+			count++
+			if depthArg == nil {
+				depthArg = ch
+			}
+		}
+	}
+	if count > 1 {
+		return ""
+	}
+	if count == 1 {
+		if depthArg == nil || depthArg.Type() != "number" || ingest.NodeText(depthArg, content) != "1" {
+			return ""
+		}
+	}
+	obj := ingest.ChildByField(fn, "object")
+	// Identity: arr of T (elements are not nested arrays of interest).
+	if t := jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories); t != "" {
+		return t
+	}
+	// One-level nest: [[new T()], …] / [as, …] when every element peels to array of T.
+	return jsNestedArrayFlatElemType(obj, content, arrayLocals, typedLocals, factories)
+}
+
+// jsNestedArrayFlatElemType recovers T from an array whose every element peels
+// to uniform array element type T (array-of-arrays flat one level).
+func jsNestedArrayFlatElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "array" {
+		return ""
+	}
+	found := ""
+	saw := false
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		el := n.Child(i)
+		if el == nil || el.Type() == "[" || el.Type() == "]" || el.Type() == "," {
+			continue
+		}
+		t := jsArraySourceElemType(el, content, arrayLocals, typedLocals, factories)
+		if t == "" {
+			return ""
+		}
+		if !saw {
+			found = t
+			saw = true
+		} else if found != t {
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return found
 }
 
 // jsArrayFromElemType recovers T from Array.from(arrLike) when the first arg
