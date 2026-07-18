@@ -2155,6 +2155,9 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // types agree (homogeneous values; mixed fields fail closed — not a shared elemOf),
 // `for k, x in asdict(box).items()` / `for k, x in d.items()` after d = asdict(box) /
 // vars / `__dict__` — same homogeneous-values gate (value slot only; key untyped),
+// `xa, xb = asdict(box).values()` / `list(asdict(box).values())` / `d.values()` after
+// d = asdict(box) / vars / `__dict__` — declaration-order field types (dict preserves
+// order; same leaf as `xa, xb = astuple(box)` / `list(asdict(box).values())[i]`),
 // `xa = astuple(box)[0]` (synthetic `@astuple.box.#i` slots — not `box.#i`, so
 // bare `box[0]` stays unbound for non-indexable dataclasses),
 // plus assignment `xs = list(astuple(box)); xs[0]` (index slots on xs),
@@ -2612,10 +2615,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// (pair-slot unpack; see pythonAssignPairUnpackTypes) /
 			// xa, xb = astuple(box) / dataclasses.astuple(box) (declaration-order
 			// field types; same leaf as t = astuple(box); xa = t[0]) /
+			// xa, xb = asdict(box).values() / list(asdict(box).values()) /
+			// d.values() after d = asdict(box) / vars / __dict__ (dict preserves
+			// declaration order — same per-slot leaves as astuple unpack) /
 			// k, a = d.popitem() (value leaf on 2nd slot; same as for k, a in d.items()) /
 			// it1, it2 = tee(items) / itertools.tee(items[, n]) (each → elemOf) /
 			// a, *rest = items / *rest, a = items / a, = items (items: list[A]) /
-			// xa, *rest = astuple(box) (fixed slots by declaration order; *rest fails closed)
+			// xa, *rest = astuple(box) / asdict(box).values() (fixed slots by
+			// declaration order; *rest of mixed fails closed)
 			if left != nil && right != nil {
 				if targets := pythonPatternIdents(left, content); len(targets) > 0 {
 					if types := pythonCtorListTypes(right, content); len(types) > 0 {
@@ -2636,6 +2643,20 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					} else if types := pythonAstupleFieldTypes(right, content, typeOf, fieldOrder, fieldIndex); len(types) > 0 {
 						// xa, xb = astuple(box) / dataclasses.astuple(box) —
 						// declaration-order field types (heterogeneous; not elemOf).
+						for i, name := range targets {
+							if i < len(types) && types[i] != "" {
+								typeOf[name] = types[i]
+								bindFields(name, types[i])
+								if ourReceivers[types[i]] {
+									out[name] = true
+								}
+							}
+						}
+					} else if types := pythonDictViewValuesFieldTypes(right, content, fieldOf); len(types) > 0 {
+						// xa, xb = asdict(box).values() / list(asdict(box).values()) /
+						// vars(box).values() / box.__dict__.values() /
+						// d.values() after d = asdict(box) / vars / __dict__ —
+						// declaration-order field types (same leaf as astuple unpack).
 						for i, name := range targets {
 							if i < len(types) && types[i] != "" {
 								typeOf[name] = types[i]
@@ -2669,8 +2690,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				} else if fixed, star, ok := pythonUnpackFixedAndStar(left, content); ok {
 					// a, *rest = items / *rest, a = items — fixed slots are elements;
 					// *rest is a sequence of the same element type (elemOf[rest]).
-					// xa, *rest = astuple(box) — fixed slots by declaration order;
-					// *rest of heterogeneous tuple fails closed (no elemOf).
+					// xa, *rest = astuple(box) / asdict(box).values() — fixed slots by
+					// declaration order; *rest of mixed fails closed (no elemOf).
 					if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); et != "" {
 						for _, name := range fixed {
 							if ourReceivers[et] {
@@ -2682,6 +2703,16 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							elemOf[star] = et
 						}
 					} else if types := pythonAstupleFieldTypes(right, content, typeOf, fieldOrder, fieldIndex); len(types) > 0 {
+						for i, name := range fixed {
+							if i < len(types) && types[i] != "" {
+								typeOf[name] = types[i]
+								bindFields(name, types[i])
+								if ourReceivers[types[i]] {
+									out[name] = true
+								}
+							}
+						}
+					} else if types := pythonDictViewValuesFieldTypes(right, content, fieldOf); len(types) > 0 {
 						for i, name := range fixed {
 							if i < len(types) && types[i] != "" {
 								typeOf[name] = types[i]
@@ -4207,6 +4238,38 @@ func pythonDictViewValuesHomogeneousType(n *grammar.Node, content []byte, fieldO
 		return pythonHomogeneousAstupleFieldType(local, fieldOf)
 	}
 	return ""
+}
+
+// pythonDictViewValuesFieldTypes recovers declaration-order field types from
+// asdict(box).values() / vars(box).values() / box.__dict__.values() /
+// list/tuple(...values()) / d.values() after d = asdict(box) / vars / __dict__
+// (fieldOf @astuple.*.#i). Dict preserves declaration order so values() unpack
+// slots match astuple unpack / list(...values())[i]. Empty / non-dict-view
+// forms fail closed (nil).
+func pythonDictViewValuesFieldTypes(n *grammar.Node, content []byte, fieldOf map[string]string) []string {
+	if n == nil || fieldOf == nil {
+		return nil
+	}
+	if n.Type() == "parenthesized_expression" {
+		return pythonDictViewValuesFieldTypes(pythonParenInner(n), content, fieldOf)
+	}
+	local := pythonDictViewValuesSeqLocal(n, content)
+	if local == "" {
+		return nil
+	}
+	prefix := "@astuple." + local + ".#"
+	var out []string
+	for i := 0; ; i++ {
+		t := fieldOf[prefix+fmt.Sprintf("%d", i)]
+		if t == "" {
+			break
+		}
+		out = append(out, t)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // pythonDictViewValuesSeqLocal recovers the identifier local whose
