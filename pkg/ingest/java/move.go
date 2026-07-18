@@ -3422,6 +3422,7 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	qa.poll() / qa.peek() / qa.element() → elemOf[qa] (Queue)
 //	qa.take() → elemOf[qa] (BlockingQueue)
 //	da.pollFirst()/pollLast()/peekFirst()/peekLast()/pop() → elemOf[da] (Deque)
+//	sa.push(e) → elemOf[sa] (Stack returns E; Deque.push is void)
 //	da.takeFirst() / da.takeLast() → elemOf[da] (BlockingDeque)
 //	as.getFirst() / as.getLast() → elemOf[as] (SequencedCollection / List / Deque)
 //	as.removeFirst() / as.removeLast() → elemOf[as] (SequencedCollection / List / Deque)
@@ -3494,6 +3495,9 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// BlockingQueue.take returns E (blocks until an element is available).
 		"take",
 		"pollFirst", "pollLast", "peekFirst", "peekLast", "pop",
+		// Stack.push(E) returns E (the item argument). Deque.push is void and
+		// cannot appear as a var initializer in valid Java.
+		"push",
 		// BlockingDeque.takeFirst/takeLast return E (same element type as pollFirst).
 		"takeFirst", "takeLast",
 		"getFirst", "getLast",
