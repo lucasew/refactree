@@ -1980,7 +1980,9 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `for a, b in [(A(), B())]`), and
 // `except* A as e` → `for a in e.exceptions` (ExceptionGroup element type),
 // `xa = box.a` / `box.a.run()` when box is a typed local of a class/dataclass
-// with annotated field a: A (fieldOf; under foreign same-leaf methods).
+// with annotated field a: A (fieldOf; under foreign same-leaf methods),
+// or a collections.namedtuple with field types recovered from same-file
+// constructors (`Box = namedtuple("Box", ["a","b"]); box = Box(A(), B())`).
 // fieldOf maps "local.field" → field type leaf for class field access.
 func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string) {
 	out := map[string]bool{}
@@ -2004,6 +2006,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 		return out, fieldOf
 	}
 	fieldIndex := pythonClassFieldIndex(root, content)
+	// namedtuple factory fields have no annotations — recover from same-file ctors.
+	pythonMergeNamedtupleFields(root, content, fieldIndex)
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
 		if n == nil || n.IsNull() {
@@ -2067,6 +2071,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						if ourReceivers[fname] {
 							// x = A() — Class() ctor of our receiver.
 							out[lname] = true
+							typeOf[lname] = fname
+							pythonBindClassLocalFields(lname, fname, fieldIndex, fieldOf)
+						} else if len(fieldIndex[fname]) > 0 {
+							// x = Box(...) — namedtuple/class with known fields (not our
+							// receiver); bind fieldOf so box.a.run() / xa = box.a work.
 							typeOf[lname] = fname
 							pythonBindClassLocalFields(lname, fname, fieldIndex, fieldOf)
 						}
@@ -2704,6 +2713,209 @@ func pythonClassFieldIndex(root *grammar.Node, content []byte) map[string]map[st
 	}
 	walk(root)
 	return out
+}
+
+// pythonMergeNamedtupleFields recovers field type leaves for factory namedtuples
+// (no annotations): Box = namedtuple("Box", ["a","b"]) / collections.namedtuple
+// plus same-file constructors Box(A(), B()) / Box(a=A(), b=B()) →
+// fieldIndex["Box"]["a"]="A". Enables box.a.run() / xa = box.a under foreign
+// same-leaf methods (same fieldOf path as annotated dataclass fields).
+func pythonMergeNamedtupleFields(root *grammar.Node, content []byte, fieldIndex map[string]map[string]string) {
+	if root == nil || fieldIndex == nil {
+		return
+	}
+	fieldNames := pythonNamedtupleFieldNames(root, content)
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		if n.Type() == "call" {
+			fn := ingest.ChildByField(n, "function")
+			if fn != nil && fn.Type() == "identifier" {
+				typeName := ingest.NodeText(fn, content)
+				pythonIndexNamedtupleCtorFields(n, typeName, content, fieldNames[typeName], fieldIndex)
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+}
+
+// pythonNamedtupleFieldNames maps local type name → ordered field names from
+// Box = namedtuple(...) / Box = collections.namedtuple(...) assignments.
+func pythonNamedtupleFieldNames(root *grammar.Node, content []byte) map[string][]string {
+	out := map[string][]string{}
+	if root == nil {
+		return out
+	}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		if n.Type() == "assignment" {
+			left := ingest.ChildByField(n, "left")
+			right := ingest.ChildByField(n, "right")
+			if left != nil && left.Type() == "identifier" && right != nil && right.Type() == "call" {
+				if pythonIsNamedtupleCall(right, content) {
+					if fields := pythonParseNamedtupleFieldList(right, content); len(fields) > 0 {
+						out[ingest.NodeText(left, content)] = fields
+					}
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	return out
+}
+
+// pythonIsNamedtupleCall reports namedtuple(...) / collections.namedtuple(...).
+func pythonIsNamedtupleCall(call *grammar.Node, content []byte) bool {
+	if call == nil || call.Type() != "call" {
+		return false
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil {
+		return false
+	}
+	if fn.Type() == "identifier" {
+		return ingest.NodeText(fn, content) == "namedtuple"
+	}
+	if fn.Type() == "attribute" {
+		obj := ingest.ChildByField(fn, "object")
+		attr := ingest.ChildByField(fn, "attribute")
+		return obj != nil && attr != nil &&
+			obj.Type() == "identifier" &&
+			ingest.NodeText(obj, content) == "collections" &&
+			ingest.NodeText(attr, content) == "namedtuple"
+	}
+	return false
+}
+
+// pythonParseNamedtupleFieldList returns field names from the 2nd positional
+// arg of namedtuple(typename, fields): list/tuple of strings, or a single
+// string ("a b" / "a, b"). Other forms fail closed.
+func pythonParseNamedtupleFieldList(call *grammar.Node, content []byte) []string {
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) < 2 {
+		return nil
+	}
+	fieldArg := args[1]
+	switch fieldArg.Type() {
+	case "list", "tuple":
+		var fields []string
+		for i := uint32(0); i < fieldArg.ChildCount(); i++ {
+			ch := fieldArg.Child(i)
+			if ch.Type() != "string" {
+				continue
+			}
+			_, text := pythonStringContent(ch, content)
+			if !pythonIsIdentifier(text) {
+				return nil
+			}
+			fields = append(fields, text)
+		}
+		return fields
+	case "string":
+		_, text := pythonStringContent(fieldArg, content)
+		return pythonSplitNamedtupleFieldString(text)
+	}
+	return nil
+}
+
+// pythonSplitNamedtupleFieldString splits "a b" / "a, b" into field names.
+func pythonSplitNamedtupleFieldString(s string) []string {
+	if s == "" {
+		return nil
+	}
+	// Normalize commas to spaces, then split on whitespace.
+	buf := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == ',' {
+			buf = append(buf, ' ')
+		} else {
+			buf = append(buf, s[i])
+		}
+	}
+	parts := strings.Fields(string(buf))
+	var fields []string
+	for _, p := range parts {
+		if !pythonIsIdentifier(p) {
+			return nil
+		}
+		fields = append(fields, p)
+	}
+	return fields
+}
+
+// pythonIndexNamedtupleCtorFields fills fieldIndex[typeName] from a constructor
+// call: keyword Class() args always; positional Class() args when fieldNames
+// are known from the namedtuple factory (order-sensitive).
+func pythonIndexNamedtupleCtorFields(call *grammar.Node, typeName string, content []byte, fieldNames []string, fieldIndex map[string]map[string]string) {
+	if call == nil || typeName == "" || fieldIndex == nil {
+		return
+	}
+	argList := ingest.ChildByField(call, "arguments")
+	if argList == nil {
+		return
+	}
+	// Keyword: Box(a=A(), b=B()) — no factory field list required.
+	for i := uint32(0); i < argList.ChildCount(); i++ {
+		ch := argList.Child(i)
+		if ch.Type() != "keyword_argument" {
+			continue
+		}
+		nameN := ingest.ChildByField(ch, "name")
+		valN := ingest.ChildByField(ch, "value")
+		if nameN == nil || valN == nil {
+			continue
+		}
+		if tn := pythonExprClassType(valN, content); tn != "" {
+			fname := ingest.NodeText(nameN, content)
+			if fieldIndex[typeName] == nil {
+				fieldIndex[typeName] = map[string]string{}
+			}
+			fieldIndex[typeName][fname] = tn
+		}
+	}
+	// Positional: Box(A(), B()) — needs ordered field names from factory.
+	if len(fieldNames) == 0 {
+		return
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok {
+		return
+	}
+	for i, arg := range args {
+		if i >= len(fieldNames) {
+			break
+		}
+		if tn := pythonExprClassType(arg, content); tn != "" {
+			if fieldIndex[typeName] == nil {
+				fieldIndex[typeName] = map[string]string{}
+			}
+			fieldIndex[typeName][fieldNames[i]] = tn
+		}
+	}
+}
+
+// pythonExprClassType returns T for a Class() call expression (A() → "A").
+// Other expressions fail closed (no typed-local lookup — pre-index pass).
+func pythonExprClassType(n *grammar.Node, content []byte) string {
+	if n == nil || n.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil || fn.Type() != "identifier" {
+		return ""
+	}
+	return ingest.NodeText(fn, content)
 }
 
 // pythonBindClassLocalFields records "local.field" → type for each annotated
