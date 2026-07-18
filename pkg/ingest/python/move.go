@@ -1881,6 +1881,10 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	// heapreplace(items, x).run() — heap element (same leaf as a = heappop(...); a.run()).
 	// reduce(fn, items).run() / functools.reduce(fn, items, init).run() — fold result
 	// typed as iterable element (same leaf as a = reduce(...); a.run()).
+	// partial(A)().run() / functools.partial(A)().run() — factory call result is A
+	// (same leaf as Class() ctor under foreign same-leaf methods).
+	// ex.submit(lambda: A()).result().run() — Future result is A (Callable lambda
+	// body Class(); same leaf as Java ExecutorService.submit(() -> new A()).get()).
 	// items.popleft().run() / d.get(k).run() / q.get().run() / items.pop().run() /
 	// list(items).pop().run() / items.__getitem__(i).run() — collection/queue
 	// element accessors (same leaf as a = items.popleft(); a.run()).
@@ -1898,6 +1902,14 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 			// object type of the single arg (typed local / field / dict-view key).
 			if ft := pythonCopyCallObjectType(obj, content, typeOf, fieldOf); ft != "" {
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
+			}
+			// partial(A)().run() / functools.partial(A)().run() — before Class() path.
+			if et := pythonPartialCallResultType(obj, content); et != "" {
+				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+			}
+			// ex.submit(lambda: A()).result().run() — Future.result peel.
+			if et := pythonFutureResultCallType(obj, content); et != "" {
+				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 			}
 			if fn.Type() == "identifier" {
 				name := ingest.NodeText(fn, content)
@@ -2087,6 +2099,121 @@ func pythonCollectionAccessElemType(call *grammar.Node, content []byte, elemOf m
 		// Element/value type of the receiver collection (default args ignored).
 		// __getitem__(i) is the same leaf as items[i] / d[k].
 		return pythonIterableElemType(ingest.ChildByField(fn, "object"), content, elemOf, nil, nil)
+	}
+	return ""
+}
+
+// pythonPartialCallResultType recovers T from partial(T)(...) / functools.partial(T)(...):
+// the outer call applies a partial factory whose first positional arg is a class
+// identifier. Enables partial(A)().run() under foreign same-leaf methods.
+// Extra partial args (bound constructor kwargs) are ignored; non-class first
+// args and non-partial factories fail closed.
+func pythonPartialCallResultType(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	// Outer call's function is the partial(...) factory call.
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "call" {
+		return ""
+	}
+	return pythonPartialFactoryClassType(fn, content)
+}
+
+// pythonPartialFactoryClassType recovers T from partial(T[, ...]) /
+// functools.partial(T[, ...]) when the first positional arg is an identifier
+// class leaf. Used by partial(A)().run() peels.
+func pythonPartialFactoryClassType(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil {
+		return ""
+	}
+	switch fn.Type() {
+	case "identifier":
+		if ingest.NodeText(fn, content) != "partial" {
+			return ""
+		}
+	case "attribute":
+		attr := ingest.ChildByField(fn, "attribute")
+		obj := ingest.ChildByField(fn, "object")
+		if attr == nil || ingest.NodeText(attr, content) != "partial" {
+			return ""
+		}
+		if obj == nil || obj.Type() != "identifier" || ingest.NodeText(obj, content) != "functools" {
+			return ""
+		}
+	default:
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) < 1 || args[0].Type() != "identifier" {
+		return ""
+	}
+	return ingest.NodeText(args[0], content)
+}
+
+// pythonFutureResultCallType recovers T from fut.result() when fut is
+// executor.submit(lambda: T()) / submit(lambda: T()) with an expression-bodied
+// zero-arg lambda whose body is a Class() call. Enables
+// ex.submit(lambda: A()).result().run() under foreign same-leaf methods.
+// Timeout args on result() are ignored; non-submit receivers / other bodies fail closed.
+func pythonFutureResultCallType(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "attribute" {
+		return ""
+	}
+	attr := ingest.ChildByField(fn, "attribute")
+	if attr == nil || ingest.NodeText(attr, content) != "result" {
+		return ""
+	}
+	return pythonSubmitCallableResultType(ingest.ChildByField(fn, "object"), content)
+}
+
+// pythonSubmitCallableResultType recovers T from executor.submit(lambda: T())
+// when the first positional arg is a zero-arg expression-bodied lambda whose body
+// is a Class() call. Other submit forms (fn, *args) / blocks fail closed.
+func pythonSubmitCallableResultType(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "attribute" {
+		return ""
+	}
+	attr := ingest.ChildByField(fn, "attribute")
+	if attr == nil || ingest.NodeText(attr, content) != "submit" {
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) < 1 || args[0].Type() != "lambda" {
+		return ""
+	}
+	// Zero-arg lambda only (Callable with no parameters).
+	if params := ingest.ChildByField(args[0], "parameters"); params != nil {
+		for i := uint32(0); i < params.ChildCount(); i++ {
+			ch := params.Child(i)
+			switch ch.Type() {
+			case ",", "(", ")", "comment":
+				continue
+			default:
+				// Any real parameter fails closed.
+				return ""
+			}
+		}
+	}
+	body := ingest.ChildByField(args[0], "body")
+	if body == nil {
+		return ""
+	}
+	// Expression-bodied: lambda: A()  (body is the expression, not a block).
+	if body.Type() == "call" {
+		return pythonExprClassType(body, content)
 	}
 	return ""
 }
