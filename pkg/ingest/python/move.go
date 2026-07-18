@@ -1645,7 +1645,8 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 	// (items.popleft().run() / d.get(k).run() under foreign same-leaf methods).
 	// typeOf maps object locals → type leaf (item: A → "A"; foreign too for shadowing)
 	// so direct copy.copy(item).run() can resolve without assignment form.
-	typedLocals, fieldOf, elemOf, typeOf := pythonTypedLocals(pf.Root, content, ourReceivers)
+	// pairSlots maps pair locals → per-slot types (p = next(...items()); p[1].run()).
+	typedLocals, fieldOf, elemOf, typeOf, pairSlots := pythonTypedLocals(pf.Root, content, ourReceivers)
 
 	var edits []ingest.Edit
 	var walk func(n *grammar.Node, enclosingClass string)
@@ -1664,7 +1665,7 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			obj := ingest.ChildByField(n, "object")
 			attr := ingest.ChildByField(n, "attribute")
 			if obj != nil && attr != nil && ingest.NodeText(attr, content) == oldLeaf {
-				if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf) {
+				if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots) {
 					edits = append(edits, ingest.Edit{
 						File:      fileRel,
 						StartByte: attr.StartByte(),
@@ -1682,7 +1683,7 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			sub := ingest.ChildByField(n, "subscript")
 			if obj != nil && sub != nil && sub.Type() == "string" {
 				if contentN, text := pythonStringContent(sub, content); contentN != nil && text == oldLeaf {
-					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf) {
+					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots) {
 						edits = append(edits, ingest.Edit{
 							File:      fileRel,
 							StartByte: contentN.StartByte(),
@@ -1700,7 +1701,7 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 				obj := ingest.ChildByField(fn, "object")
 				attr := ingest.ChildByField(fn, "attribute")
 				if obj != nil && attr != nil && ingest.NodeText(attr, content) == "get" {
-					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf) {
+					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots) {
 						if key := pythonFirstStringArg(args); key != nil {
 							if contentN, text := pythonStringContent(key, content); contentN != nil && text == oldLeaf {
 								edits = append(edits, ingest.Edit{
@@ -1826,7 +1827,7 @@ func pythonRenameByTypeMaps(name string, ourReceivers, foreignReceivers, typedLo
 // (items.popleft().run() / d.get(k).run() / items[0].run() under foreign same-leaf methods).
 // typeOf maps object locals → type leaf (item: A → "A") for direct copy.copy(item).run()
 // and similar identity wrappers that need the arg's class leaf under foreign same-leaf.
-func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, fieldOf, elemOf, typeOf map[string]string) bool {
+func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, fieldOf, elemOf, typeOf map[string]string, pairSlots map[string][]string) bool {
 	if obj == nil {
 		return false
 	}
@@ -1953,6 +1954,8 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	// list(asdict(box).items())[i][1].run() / list(d.items())[i][1].run() —
 	// items pair value at declaration-order index i (same leaf as values()[i];
 	// deep stack: asdict→items→list→[i]→[1]).
+	// p[1].run() after p = next(...items()) / next(pairs) / min(...items()) —
+	// pair local value slot (pairSlots; same leaf as a = p[1]; a.run()).
 	// items[0].run() / d["k"].run() / list(items)[0].run() — collection subscript
 	// element (same leaf as a = items[0]; a.run()). Slices fail closed.
 	if obj.Type() == "subscript" {
@@ -1969,7 +1972,10 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 		if ft := pythonNamedtupleIndexType(obj, content, fieldOf); ft != "" {
 			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 		}
-		if et := pythonSubscriptElemType(obj, content, elemOf, nil, nil, nil, nil, fieldOf); et != "" {
+		// pairSlots enables p[1].run() for assigned pair locals; typeOf for
+		// collection wrappers that need object typing. pairIterSlots stays nil
+		// (direct next(pairs)[i].run() still covered via assignment path).
+		if et := pythonSubscriptElemType(obj, content, elemOf, nil, typeOf, pairSlots, nil, fieldOf); et != "" {
 			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 		}
 		return len(foreignReceivers) == 0
@@ -2179,7 +2185,7 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // dict value / Queue[A] → "A") for direct access chains under foreign same-leaf.
 // typeOf maps object locals → type leaf (item: A / x = A() → "A"; foreign too)
 // for direct identity wrappers under foreign same-leaf (copy.copy(item).run()).
-func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string, map[string]string, map[string]string) {
+func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string, map[string]string, map[string]string, map[string][]string) {
 	out := map[string]bool{}
 	// Collection locals → element type leaf (list[A] / [A()] / dict value → "A").
 	elemOf := map[string]string{}
@@ -2190,6 +2196,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 	typeOf := map[string]string{}
 	// Pair/tuple locals → per-slot types (for item in enumerate/zip(...); item[i]).
 	// Empty slot ("") fails closed on subscript/unpack of that index.
+	// Returned so direct method chains p[1].run() resolve under foreign same-leaf.
 	pairSlots := map[string][]string{}
 	// Assigned pair-iterators → per-slot types of each yielded tuple
 	// (pairs = zip/enumerate/product/...; combos = combinations/batched(xs, n);
@@ -2198,7 +2205,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 	// Class field access: "box.a" → "A" when box is typed as a class with field a: A.
 	fieldOf := map[string]string{}
 	if root == nil || len(ourReceivers) == 0 {
-		return out, fieldOf, elemOf, typeOf
+		return out, fieldOf, elemOf, typeOf, pairSlots
 	}
 	fieldIndex := pythonClassFieldIndex(root, content)
 	// Declaration order for positional match class patterns (case Box(xa, xb)).
@@ -3283,7 +3290,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 		}
 	}
 	walk(root)
-	return out, fieldOf, elemOf, typeOf
+	return out, fieldOf, elemOf, typeOf, pairSlots
 }
 
 // pythonClassFieldIndex maps class type name → field name → field type leaf
