@@ -1074,6 +1074,7 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // queue.poll()/peek() / queue.take() / deque.takeFirst()/takeLast() /
 // list.remove(i) / list.getFirst()/getLast() /
 // list.removeFirst()/removeLast() /
+// vector.elementAt(i) / vector.firstElement()/lastElement() /
 // opt.orElse(d) / opt.orElseGet(s) / opt.orElseThrow([s]) / findFirst().orElse(d) /
 // Collections.min(as) / Collections.max(as) / stream.min/max().orElse(d) /
 // stream.reduce(identity, op) / reduce(op).orElse(d) / reduce(op).ifPresent(...) /
@@ -3424,6 +3425,7 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	da.takeFirst() / da.takeLast() → elemOf[da] (BlockingDeque)
 //	as.getFirst() / as.getLast() → elemOf[as] (SequencedCollection / List / Deque)
 //	as.removeFirst() / as.removeLast() → elemOf[as] (SequencedCollection / List / Deque)
+//	vs.elementAt(i) / vs.firstElement() / vs.lastElement() → elemOf[vs] (Vector)
 //	ss.first() / ss.last() → elemOf[ss] (SortedSet / NavigableSet)
 //	ia.next()                 → elemOf[ia]   (Iterator<A>)
 //	as.iterator().next()      → elemOf[as]   (via type-preserving iterator())
@@ -3498,6 +3500,9 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// SequencedCollection / List / Deque removeFirst/removeLast return E
 		// (Java 21; same element type as getFirst/getLast).
 		"removeFirst", "removeLast",
+		// Vector.elementAt / firstElement / lastElement return E
+		// (same element type as List.get / getFirst / getLast).
+		"elementAt", "firstElement", "lastElement",
 		// SortedSet / NavigableSet first/last return E (same element type as get).
 		"first", "last":
 		// Map-like (2 type args recorded in valOf) → value type; else element type.
