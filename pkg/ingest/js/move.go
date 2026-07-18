@@ -1244,7 +1244,7 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 	defer pf.Close()
 
 	factories := jsSameFileFactoryReturns(pf.Root, content)
-	typedLocals := jsTypedLocals(pf.Root, content, ourReceivers, factories)
+	typedLocals, settledOf := jsTypedLocals(pf.Root, content, ourReceivers, factories)
 	// Unique method leaf: ExtraRename already rewrites every simple obj.oldLeaf.
 	// Apply the same aggressiveness to object-pattern property keys.
 	uniqueLeaf := len(foreignReceivers) == 0
@@ -1286,7 +1286,7 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 			obj := ingest.ChildByField(n, "object")
 			prop := ingest.ChildByField(n, "property")
 			if obj != nil && prop != nil && ingest.NodeText(prop, content) == oldLeaf {
-				if jsShouldRenameMember(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, factories) {
+				if jsShouldRenameMember(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, settledOf, factories) {
 					addEdit(prop.StartByte(), prop.EndByte(), newLeaf)
 				}
 			}
@@ -1303,7 +1303,7 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 			nameN := ingest.ChildByField(n, "name")
 			valN := ingest.ChildByField(n, "value")
 			if nameN != nil && nameN.Type() == "object_pattern" && valN != nil {
-				if uniqueLeaf || jsShouldRenameMember(valN, content, classHere, ourReceivers, foreignReceivers, typedLocals, factories) {
+				if uniqueLeaf || jsShouldRenameMember(valN, content, classHere, ourReceivers, foreignReceivers, typedLocals, settledOf, factories) {
 					jsCollectObjectPatternMethodEdits(nameN, content, oldLeaf, newLeaf, addEdit)
 					// Shorthand `{ helper }` also renames the local binding — rewrite
 					// bare oldLeaf identifiers later in the same statement_block.
@@ -1475,7 +1475,9 @@ func jsRenameByTypeMaps(name string, ourReceivers, foreignReceivers map[string]b
 // jsShouldRenameMember decides whether obj.oldLeaf is a call on one of our receivers.
 // factories maps same-file factory names → class leaf (makeA → A) for
 // Promise.resolve(makeA()) peels under foreign same-leaf methods.
-func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers map[string]bool, typedLocals, factories map[string]string) bool {
+// settledOf maps Promise.allSettled result locals → fulfilled value type leaf
+// so r.value.run() peels under foreign same-leaf methods.
+func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers map[string]bool, typedLocals, settledOf, factories map[string]string) bool {
 	if obj == nil {
 		return false
 	}
@@ -1525,6 +1527,13 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 	}
+	// r.value.run() / (await Promise.allSettled([new A()]))[0].value.run() —
+	// fulfilled value peel under foreign same-leaf methods.
+	if obj.Type() == "member_expression" || obj.Type() == "member_expression_optional" || obj.Type() == "optional_chain" {
+		if t := jsPromiseAllSettledValueType(obj, content, typedLocals, settledOf, factories); t != "" {
+			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
+	}
 	// Complex receivers: only when the method leaf is unique project-wide.
 	switch obj.Type() {
 	case "call_expression", "await_expression", "ternary_expression",
@@ -1539,11 +1548,14 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 // jsTypedLocals maps local names → concrete type leaf for ourReceivers
 // (const b = new Box() → "Box"). Also covers simple TS-style typed parameters
 // and Promise.resolve then callback params.
+// settledOf maps Promise.allSettled result locals → fulfilled value type leaf
+// (const [r] = await Promise.allSettled([new A()]) → r:"A") so r.value peels.
 // factories maps same-file factory names → class leaf for Promise.resolve(makeA()).
-func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool, factories map[string]string) map[string]string {
+func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool, factories map[string]string) (map[string]string, map[string]string) {
 	out := map[string]string{}
+	settledOf := map[string]string{}
 	if root == nil || len(ourReceivers) == 0 {
-		return out
+		return out, settledOf
 	}
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
@@ -1557,6 +1569,9 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 			// const a = await Promise.resolve(x) after const x = new A()
 			// const a = await Promise.resolve(makeA()) after function makeA(){return new A()}
 			// const [a] = await Promise.all([new A()])
+			// const [r] = await Promise.allSettled([new A()]) — r is settled; r.value is A
+			// const [{value: a}] = await Promise.allSettled([new A()]) — a is A
+			// const r = (await Promise.allSettled([new A()]))[0] — r settled
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
 				if child.Type() != "variable_declarator" {
@@ -1576,11 +1591,18 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 					} else if t := jsPromiseRaceValueType(valN, content, out, factories); ourReceivers[t] {
 						// await Promise.race/any([new A()]) — value is A when elems agree.
 						out[ingest.NodeText(nameN, content)] = t
+					} else if t := jsPromiseAllSettledSubscriptType(valN, content, out, factories); ourReceivers[t] {
+						// const r = (await Promise.allSettled([new A()]))[0]
+						settledOf[ingest.NodeText(nameN, content)] = t
 					}
 				} else if nameN.Type() == "array_pattern" {
 					// const [a] = await Promise.all([new A()]) — bind pattern names to elem type.
 					if t := jsPromiseAllElemType(valN, content, out, factories); ourReceivers[t] {
 						jsBindArrayPatternNames(nameN, content, t, out)
+					} else if t := jsPromiseAllSettledElemType(valN, content, out, factories); ourReceivers[t] {
+						// const [r] = await Promise.allSettled([new A()])
+						// const [{value: a}] / [{value}] = await Promise.allSettled([new A()])
+						jsBindAllSettledArrayPattern(nameN, content, t, out, settledOf)
 					}
 				}
 			}
@@ -1603,14 +1625,15 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 			// plain JS has no types; walk children for TS parameters
 		case "call_expression":
 			// Promise.resolve(new A() / a / makeA()).then(a => a.run()) — bind then callback param.
-			jsBindPromiseThenParams(n, content, ourReceivers, out, factories)
+			// Promise.allSettled([new A()]).then(([r]) => r.value.run()) — settled params.
+			jsBindPromiseThenParams(n, content, ourReceivers, out, settledOf, factories)
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
 		}
 	}
 	walk(root)
-	return out
+	return out, settledOf
 }
 
 // jsNewExpressionType returns the constructor identifier for `new Box(...)`.
@@ -1865,10 +1888,12 @@ func jsPromiseResolveArgType(n *grammar.Node, content []byte, typedLocals, facto
 // jsBindPromiseThenParams types the first parameter of
 // Promise.resolve(new A() / a / makeA()).then(x => …) / .then(function(x) { … })
 // and Promise.all([new A()]).then(([a]) => …) array-destructure params when the
-// call receiver peels to a concrete our-receiver type. Under foreign same-leaf
+// call receiver peels to a concrete our-receiver type. Also
+// Promise.allSettled([new A()]).then(([r]) => r.value.run()) /
+// .then(([{value}]) => value.run()) settled peels. Under foreign same-leaf
 // methods, only our-receiver resolved values bind so B is preserved.
-// out maps param name → type leaf.
-func jsBindPromiseThenParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, out, factories map[string]string) {
+// out maps param name → type leaf; settledOf maps settled-result locals → value type.
+func jsBindPromiseThenParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, out, settledOf, factories map[string]string) {
 	if call == nil || call.Type() != "call_expression" || out == nil {
 		return
 	}
@@ -1887,7 +1912,9 @@ func jsBindPromiseThenParams(call *grammar.Node, content []byte, ourReceivers ma
 	raceT := jsPromiseRaceValueType(obj, content, out, factories)
 	// Promise.all([new T(), …]) → array element type for [a] destructure.
 	allT := jsPromiseAllElemType(obj, content, out, factories)
-	if !ourReceivers[resolveT] && !ourReceivers[raceT] && !ourReceivers[allT] {
+	// Promise.allSettled([new T(), …]) → fulfilled value type for [r] / [{value}].
+	settledT := jsPromiseAllSettledElemType(obj, content, out, factories)
+	if !ourReceivers[resolveT] && !ourReceivers[raceT] && !ourReceivers[allT] && !ourReceivers[settledT] {
 		return
 	}
 	args := ingest.ChildByField(call, "arguments")
@@ -1952,6 +1979,11 @@ func jsBindPromiseThenParams(call *grammar.Node, content []byte, ourReceivers ma
 	// Promise.all → array_pattern param ([a] / [a, b] when elems agree).
 	if ourReceivers[allT] && param.Type() == "array_pattern" {
 		jsBindArrayPatternNames(param, content, allT, out)
+		return
+	}
+	// Promise.allSettled → array_pattern ([r] settled / [{value}] typed).
+	if ourReceivers[settledT] && param.Type() == "array_pattern" {
+		jsBindAllSettledArrayPattern(param, content, settledT, out, settledOf)
 	}
 }
 
@@ -2016,6 +2048,17 @@ func jsBindArrayPatternNames(pattern *grammar.Node, content []byte, typeLeaf str
 // Non-Promise.all / non-array / mixed / empty args fail closed.
 func jsPromiseAllElemType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
 	return jsPromiseArrayElemType(n, content, typedLocals, factories, "all")
+}
+
+// jsPromiseAllSettledElemType recovers T from Promise.allSettled([new T(), …])
+// when every array element peels to the same concrete type T. The result array
+// holds settled objects {status, value}; T is the fulfilled value type (not the
+// settled wrapper). Enables Promise.allSettled([new A()]).then(([r]) => r.value.run()),
+// const [r] = await Promise.allSettled([new A()]); r.value.run(), and
+// (await Promise.allSettled([new A()]))[0].value.run() under foreign same-leaf.
+// Non-allSettled / non-array / mixed / empty args fail closed.
+func jsPromiseAllSettledElemType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	return jsPromiseArrayElemType(n, content, typedLocals, factories, "allSettled")
 }
 
 // jsPromiseRaceValueType recovers T from Promise.race([new T(), …]) /
@@ -2133,6 +2176,136 @@ func jsPromiseAllSubscriptType(n *grammar.Node, content []byte, typedLocals, fac
 	}
 	obj := ingest.ChildByField(n, "object")
 	return jsPromiseAllElemType(obj, content, typedLocals, factories)
+}
+
+// jsPromiseAllSettledSubscriptType recovers T from
+// (await Promise.allSettled([new T()]))[i] when the indexed object peels to a
+// uniform allSettled value type. Index must be a numeric literal.
+func jsPromiseAllSettledSubscriptType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	if n == nil || n.Type() != "subscript_expression" {
+		return ""
+	}
+	idx := ingest.ChildByField(n, "index")
+	if idx == nil || idx.Type() != "number" {
+		return ""
+	}
+	obj := ingest.ChildByField(n, "object")
+	return jsPromiseAllSettledElemType(obj, content, typedLocals, factories)
+}
+
+// jsPromiseAllSettledValueType recovers T from r.value /
+// (await Promise.allSettled([new T()]))[i].value when the object peels to a
+// settled result of fulfilled value type T. Property must be bare "value".
+func jsPromiseAllSettledValueType(n *grammar.Node, content []byte, typedLocals, settledOf, factories map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	if n.Type() != "member_expression" && n.Type() != "member_expression_optional" && n.Type() != "optional_chain" {
+		return ""
+	}
+	prop := ingest.ChildByField(n, "property")
+	if prop == nil || (prop.Type() != "property_identifier" && prop.Type() != "identifier") {
+		return ""
+	}
+	if ingest.NodeText(prop, content) != "value" {
+		return ""
+	}
+	obj := ingest.ChildByField(n, "object")
+	for obj != nil && obj.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < obj.ChildCount(); i++ {
+			ch := obj.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		obj = inner
+	}
+	if obj == nil {
+		return ""
+	}
+	// r.value after const [r] = await Promise.allSettled([new A()])
+	if obj.Type() == "identifier" && settledOf != nil {
+		if t := settledOf[ingest.NodeText(obj, content)]; t != "" {
+			return t
+		}
+	}
+	// (await Promise.allSettled([new A()]))[0].value
+	if t := jsPromiseAllSettledSubscriptType(obj, content, typedLocals, factories); t != "" {
+		return t
+	}
+	return ""
+}
+
+// jsBindAllSettledArrayPattern binds slots of an array_pattern from
+// Promise.allSettled results:
+//
+//	[r]           → settledOf[r] = valueType (r.value peels)
+//	[{value: a}]  → out[a] = valueType
+//	[{value}]     → out[value] = valueType (shorthand)
+//
+// Nested / rest / other object keys fail closed for that slot only.
+func jsBindAllSettledArrayPattern(pattern *grammar.Node, content []byte, valueType string, out, settledOf map[string]string) {
+	if pattern == nil || pattern.Type() != "array_pattern" || valueType == "" {
+		return
+	}
+	for i := uint32(0); i < pattern.ChildCount(); i++ {
+		ch := pattern.Child(i)
+		if ch == nil || ch.Type() == "[" || ch.Type() == "]" || ch.Type() == "," {
+			continue
+		}
+		switch ch.Type() {
+		case "identifier":
+			// [r] — settled result local; .value peels via settledOf.
+			name := ingest.NodeText(ch, content)
+			if name != "" && name != "_" && settledOf != nil {
+				settledOf[name] = valueType
+			}
+		case "object_pattern":
+			// [{value: a}] / [{value}] — bind the value property to T in out.
+			jsBindAllSettledValueObjectPattern(ch, content, valueType, out)
+		}
+		// Skip rest_pattern / nested array_pattern / assignment_pattern (fail closed).
+	}
+}
+
+// jsBindAllSettledValueObjectPattern binds value / value: name from a settled
+// result object pattern into out as the fulfilled value type.
+func jsBindAllSettledValueObjectPattern(pattern *grammar.Node, content []byte, valueType string, out map[string]string) {
+	if pattern == nil || pattern.Type() != "object_pattern" || valueType == "" || out == nil {
+		return
+	}
+	for i := uint32(0); i < pattern.ChildCount(); i++ {
+		ch := pattern.Child(i)
+		if ch == nil || ch.Type() == "{" || ch.Type() == "}" || ch.Type() == "," {
+			continue
+		}
+		switch ch.Type() {
+		case "shorthand_property_identifier_pattern":
+			// {value} — local name is "value".
+			if ingest.NodeText(ch, content) == "value" {
+				out["value"] = valueType
+			}
+		case "pair_pattern":
+			// {value: a}
+			key := ingest.ChildByField(ch, "key")
+			val := ingest.ChildByField(ch, "value")
+			if key == nil || val == nil {
+				continue
+			}
+			if ingest.NodeText(key, content) != "value" {
+				continue
+			}
+			if val.Type() == "identifier" {
+				name := ingest.NodeText(val, content)
+				if name != "" && name != "_" {
+					out[name] = valueType
+				}
+			}
+		}
+	}
 }
 
 // jsExprConcreteType peels new T() / typed local / factory call to a class leaf.
