@@ -1443,9 +1443,10 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // element (Collection<T> for forEach / enhanced-for),
 // m.values() → valOf[m],
 // List.of(new A()) / Stream.of(new A()) / Arrays.asList(new A()) → "A",
-// Collections.singletonList(new A()) → "A",
+// Collections.singletonList(new A()) / Collections.singleton(new A()) → "A",
 // Collections.nCopies(n, new A()) → "A",
-// Collections.unmodifiableList(as) / synchronizedList(as) / checkedList(as, …) → elemOf[as],
+// Collections.unmodifiableList/Set/Collection(as) / synchronizedList/Set/Collection(as) /
+// checkedList/Set/Collection(as, …) → elemOf[as],
 // List.copyOf(as) / Set.copyOf(as) → elemOf[as] (Collection of first-arg elements),
 // Stream.concat(s1, s2) → element type when both stream args agree,
 // Arrays.stream(as) / Arrays.stream(new A[]{...}) → "A",
@@ -1538,19 +1539,22 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 		case "values":
 			// m.values() / collect(toMap(...)).values() — Collection of map values.
 			return javaMapPipelineValueType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
-		case "of", "asList", "ofNullable", "singletonList":
+		case "of", "asList", "ofNullable", "singletonList", "singleton":
 			// List.of(new A()) / Stream.of(new A(), new A()) / Arrays.asList(new A())
 			// / Set.of(new A()) / Optional.of(new A()) / Optional.ofNullable(new A())
-			// / Collections.singletonList(new A())
+			// / Collections.singletonList(new A()) / Collections.singleton(new A())
 			// — element type from homogeneous new T(...) args.
 			return javaStaticCollectionOfElemType(obj, content, name)
 		case "nCopies":
 			// Collections.nCopies(n, new A()) — List of T from the second arg.
 			return javaCollectionsNCopiesElemType(obj, content)
-		case "unmodifiableList", "synchronizedList", "checkedList":
-			// Collections.unmodifiableList(as) / synchronizedList(as) /
-			// checkedList(as, A.class) — Collection of first-arg element type
-			// (Class arg on checkedList ignored).
+		case "unmodifiableList", "synchronizedList", "checkedList",
+			"unmodifiableSet", "synchronizedSet", "checkedSet",
+			"unmodifiableCollection", "synchronizedCollection", "checkedCollection":
+			// Collections.unmodifiableList/Set/Collection(as) /
+			// synchronizedList/Set/Collection(as) /
+			// checkedList/Set/Collection(as, A.class) — Collection of first-arg
+			// element type (Class arg on checked* ignored).
 			return javaCollectionsListWrapperElemType(obj, content, elemOf, valOf)
 		case "copyOf":
 			// List.copyOf(coll) / Set.copyOf(coll) — Collection of first-arg element type
@@ -1888,9 +1892,10 @@ func javaCollectionsNCopiesElemType(call *grammar.Node, content []byte) string {
 }
 
 // javaCollectionsListWrapperElemType recovers the element type of
-// Collections.unmodifiableList(coll) / synchronizedList(coll) /
-// checkedList(coll, type). First arg's element type; the Class arg on
-// checkedList is ignored. Non-Collections receivers fail closed.
+// Collections.unmodifiableList/Set/Collection(coll) /
+// synchronizedList/Set/Collection(coll) / checkedList/Set/Collection(coll, type).
+// First arg's element type; the Class arg on checked* is ignored.
+// Non-Collections receivers fail closed.
 func javaCollectionsListWrapperElemType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	if call == nil || call.Type() != "method_invocation" {
 		return ""
@@ -2683,9 +2688,9 @@ func javaMapEntryDeclaredValueType(typeN *grammar.Node, content []byte) string {
 }
 
 // javaStaticCollectionOfElemType recovers the element type of List/Stream/Set.of(...)
-// Arrays.asList(...), Optional.of/ofNullable(...), and Collections.singletonList(...)
-// when every argument is `new T(...)` with the same T. Non-creation args and mixed
-// types fail closed.
+// Arrays.asList(...), Optional.of/ofNullable(...), Collections.singletonList(...),
+// and Collections.singleton(...) when every argument is `new T(...)` with the same T.
+// Non-creation args and mixed types fail closed.
 func javaStaticCollectionOfElemType(call *grammar.Node, content []byte, method string) string {
 	if call == nil || call.Type() != "method_invocation" {
 		return ""
@@ -2714,7 +2719,7 @@ func javaStaticCollectionOfElemType(call *grammar.Node, content []byte, method s
 		if recv != "Arrays" {
 			return ""
 		}
-	case "singletonList":
+	case "singletonList", "singleton":
 		if recv != "Collections" {
 			return ""
 		}
