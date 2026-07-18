@@ -1438,6 +1438,7 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // List.of(new A()) / Stream.of(new A()) / Arrays.asList(new A()) → "A",
 // Collections.singletonList(new A()) → "A",
 // List.copyOf(as) / Set.copyOf(as) → elemOf[as] (Collection of first-arg elements),
+// Stream.concat(s1, s2) → element type when both stream args agree,
 // Arrays.stream(as) / Arrays.stream(new A[]{...}) → "A",
 // Optional.of(new A()) / Optional.ofNullable(new A()) → "A",
 // Optional.flatMap(a -> Optional.of(a)) / ofNullable(a) / Optional::of → same element
@@ -1535,6 +1536,9 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// List.copyOf(coll) / Set.copyOf(coll) — Collection of first-arg element type
 			// (unlike of/asList which take new T(...) args).
 			return javaListSetCopyOfElemType(obj, content, elemOf, valOf)
+		case "concat":
+			// Stream.concat(s1, s2) — Stream of both args' element type when they agree.
+			return javaStreamConcatElemType(obj, content, elemOf, valOf)
 		default:
 			// flatMapTo*/mapTo*/… change the element type — fail closed.
 			return ""
@@ -1829,6 +1833,39 @@ func javaListSetCopyOfElemType(call *grammar.Node, content []byte, elemOf, valOf
 		return ""
 	}
 	return javaStreamPipelineElemType(first, content, elemOf, valOf)
+}
+
+// javaStreamConcatElemType recovers T from Stream.concat(s1, s2) when both stream
+// arguments share the same recoverable element type (as.stream() / Stream.of(new A())
+// / tracked stream locals). Receiver must be Stream; wrong arity, unknown args, or
+// mismatched element types fail closed so A vs B same-leaf renames stay isolated.
+func javaStreamConcatElemType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	recvN := ingest.ChildByField(call, "object")
+	if recvN == nil {
+		return ""
+	}
+	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
+		return ""
+	}
+	if ingest.NodeText(recvN, content) != "Stream" {
+		return ""
+	}
+	args := javaCallArgs(call)
+	if len(args) != 2 {
+		return ""
+	}
+	et1 := javaStreamPipelineElemType(args[0], content, elemOf, valOf)
+	if et1 == "" {
+		return ""
+	}
+	et2 := javaStreamPipelineElemType(args[1], content, elemOf, valOf)
+	if et2 == "" || et1 != et2 {
+		return ""
+	}
+	return et1
 }
 
 // javaIsToListOrSetCollector reports Stream.collect args that produce a
