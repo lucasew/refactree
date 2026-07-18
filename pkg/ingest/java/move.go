@@ -4612,6 +4612,14 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// (var xa = m.searchEntries(1L, e -> e.getValue()); xa.m()).
 		// Non-getValue / block Functions fail closed (U is not statically V).
 		return javaSearchEntriesReturnType(val, obj, content, elemOf, valOf)
+	case "reduceEntries":
+		// ConcurrentHashMap.reduceEntries 3-arg (threshold, Function, BiFunction)
+		// returns U. Entry getValue transformer (e -> e.getValue()) yields U=V of the map
+		// (var xa = m.reduceEntries(1L, e -> e.getValue(), (a,b) -> a); xa.m() /
+		//  m.reduceEntries(1L, e -> e.getValue(), (a,b) -> a).m()).
+		// 2-arg form returns Entry — recovered via javaEntryExprValueType for .getValue().
+		// Non-getValue transformers fail closed (U is not statically V).
+		return javaReduceEntriesReturnType(val, obj, content, elemOf, valOf)
 	default:
 		return ""
 	}
@@ -4627,6 +4635,23 @@ func javaSearchEntriesReturnType(call, obj *grammar.Node, content []byte, elemOf
 	}
 	fn := args[len(args)-1]
 	if !javaIsEntryGetValueLambda(fn, content) {
+		return ""
+	}
+	return javaMapPipelineValueType(obj, content, elemOf, valOf)
+}
+
+// javaReduceEntriesReturnType recovers U from ConcurrentHashMap.reduceEntries 3-arg when
+// the Function transformer is an expression-bodied Entry getValue mapper (e -> e.getValue()),
+// so U = V of the map receiver. 2-arg form returns Entry (not V) — fail closed here
+// (Entry V is recovered via javaEntryExprValueType under .getValue()). Other
+// transformers fail closed.
+func javaReduceEntriesReturnType(call, obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	args := javaCallArgs(call)
+	if len(args) != 3 {
+		return ""
+	}
+	// threshold + Function<? super Entry,? extends U> + BiFunction → U
+	if !javaIsEntryGetValueLambda(args[1], content) {
 		return ""
 	}
 	return javaMapPipelineValueType(obj, content, elemOf, valOf)
