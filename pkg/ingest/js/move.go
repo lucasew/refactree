@@ -1244,7 +1244,8 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 	defer pf.Close()
 
 	factories := jsSameFileFactoryReturns(pf.Root, content)
-	typedLocals, settledOf := jsTypedLocals(pf.Root, content, ourReceivers, factories)
+	generators := jsSameFileGeneratorYields(pf.Root, content)
+	typedLocals, settledOf, genLocals := jsTypedLocals(pf.Root, content, ourReceivers, factories, generators)
 	// Unique method leaf: ExtraRename already rewrites every simple obj.oldLeaf.
 	// Apply the same aggressiveness to object-pattern property keys.
 	uniqueLeaf := len(foreignReceivers) == 0
@@ -1286,7 +1287,7 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 			obj := ingest.ChildByField(n, "object")
 			prop := ingest.ChildByField(n, "property")
 			if obj != nil && prop != nil && ingest.NodeText(prop, content) == oldLeaf {
-				if jsShouldRenameMember(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, settledOf, factories) {
+				if jsShouldRenameMember(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, settledOf, factories, generators, genLocals) {
 					addEdit(prop.StartByte(), prop.EndByte(), newLeaf)
 				}
 			}
@@ -1303,7 +1304,7 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 			nameN := ingest.ChildByField(n, "name")
 			valN := ingest.ChildByField(n, "value")
 			if nameN != nil && nameN.Type() == "object_pattern" && valN != nil {
-				if uniqueLeaf || jsShouldRenameMember(valN, content, classHere, ourReceivers, foreignReceivers, typedLocals, settledOf, factories) {
+				if uniqueLeaf || jsShouldRenameMember(valN, content, classHere, ourReceivers, foreignReceivers, typedLocals, settledOf, factories, generators, genLocals) {
 					jsCollectObjectPatternMethodEdits(nameN, content, oldLeaf, newLeaf, addEdit)
 					// Shorthand `{ helper }` also renames the local binding — rewrite
 					// bare oldLeaf identifiers later in the same statement_block.
@@ -1475,9 +1476,11 @@ func jsRenameByTypeMaps(name string, ourReceivers, foreignReceivers map[string]b
 // jsShouldRenameMember decides whether obj.oldLeaf is a call on one of our receivers.
 // factories maps same-file factory names → class leaf (makeA → A) for
 // Promise.resolve(makeA()) peels under foreign same-leaf methods.
-// settledOf maps Promise.allSettled result locals → fulfilled value type leaf
+// settledOf maps Promise.allSettled / generator .next() result locals → value type leaf
 // so r.value.run() peels under foreign same-leaf methods.
-func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers map[string]bool, typedLocals, settledOf, factories map[string]string) bool {
+// generators maps same-file generator names → yield type leaf (genA → A).
+// genLocals maps generator instance locals → yield type (const g = genA() → g:"A").
+func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers map[string]bool, typedLocals, settledOf, factories, generators, genLocals map[string]string) bool {
 	if obj == nil {
 		return false
 	}
@@ -1527,10 +1530,14 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 	}
-	// r.value.run() / (await Promise.allSettled([new A()]))[0].value.run() —
-	// fulfilled value peel under foreign same-leaf methods.
+	// r.value.run() / (await Promise.allSettled([new A()]))[0].value.run() /
+	// genA().next().value.run() / (await agenA().next()).value.run() —
+	// value peel under foreign same-leaf methods.
 	if obj.Type() == "member_expression" || obj.Type() == "member_expression_optional" || obj.Type() == "optional_chain" {
 		if t := jsPromiseAllSettledValueType(obj, content, typedLocals, settledOf, factories); t != "" {
+			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
+		if t := jsGeneratorNextValueType(obj, content, generators, genLocals); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 	}
@@ -1548,14 +1555,18 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 // jsTypedLocals maps local names → concrete type leaf for ourReceivers
 // (const b = new Box() → "Box"). Also covers simple TS-style typed parameters
 // and Promise.resolve then callback params.
-// settledOf maps Promise.allSettled result locals → fulfilled value type leaf
-// (const [r] = await Promise.allSettled([new A()]) → r:"A") so r.value peels.
+// settledOf maps Promise.allSettled result locals / generator .next() result locals
+// → value type leaf (const [r] = await Promise.allSettled([new A()]) → r:"A",
+// const ra = genA().next() → ra:"A") so r.value peels.
 // factories maps same-file factory names → class leaf for Promise.resolve(makeA()).
-func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool, factories map[string]string) (map[string]string, map[string]string) {
+// generators maps same-file generator names → yield type leaf (genA → A).
+// genLocals maps generator instance locals → yield type (const g = genA() → g:"A").
+func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool, factories, generators map[string]string) (map[string]string, map[string]string, map[string]string) {
 	out := map[string]string{}
 	settledOf := map[string]string{}
+	genLocals := map[string]string{}
 	if root == nil || len(ourReceivers) == 0 {
-		return out, settledOf
+		return out, settledOf, genLocals
 	}
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
@@ -1572,6 +1583,9 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 			// const [r] = await Promise.allSettled([new A()]) — r is settled; r.value is A
 			// const [{value: a}] = await Promise.allSettled([new A()]) — a is A
 			// const r = (await Promise.allSettled([new A()]))[0] — r settled
+			// const ga = genA() — generator local of yield type A
+			// const ra = genA().next() / await agenA().next() — next result; ra.value is A
+			// const a = genA().next().value — a is A
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
 				if child.Type() != "variable_declarator" {
@@ -1594,6 +1608,16 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 					} else if t := jsPromiseAllSettledSubscriptType(valN, content, out, factories); ourReceivers[t] {
 						// const r = (await Promise.allSettled([new A()]))[0]
 						settledOf[ingest.NodeText(nameN, content)] = t
+					} else if t := jsGeneratorCallYieldType(valN, content, generators, genLocals); ourReceivers[t] {
+						// const ga = genA() / const ga = agenA() — generator instance.
+						genLocals[ingest.NodeText(nameN, content)] = t
+					} else if t := jsGeneratorNextResultType(valN, content, generators, genLocals); ourReceivers[t] {
+						// const ra = genA().next() / await agenA().next() / ga.next()
+						// ra is IteratorResult; ra.value peels via settledOf.
+						settledOf[ingest.NodeText(nameN, content)] = t
+					} else if t := jsGeneratorNextValueType(valN, content, generators, genLocals); ourReceivers[t] {
+						// const a = genA().next().value / (await agenA().next()).value
+						out[ingest.NodeText(nameN, content)] = t
 					}
 				} else if nameN.Type() == "array_pattern" {
 					// const [a] = await Promise.all([new A()]) — bind pattern names to elem type.
@@ -1605,6 +1629,21 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						jsBindAllSettledArrayPattern(nameN, content, t, out, settledOf)
 					}
 				}
+			}
+		case "for_in_statement":
+			// for (const a of genA()) / for await (const a of agenA()) —
+			// bind left when right peels to a same-file generator yield type.
+			// Only `of` (not `in`); left must be a bare identifier.
+			if op := ingest.ChildByField(n, "operator"); op == nil || ingest.NodeText(op, content) != "of" {
+				break
+			}
+			left := ingest.ChildByField(n, "left")
+			right := ingest.ChildByField(n, "right")
+			if left == nil || left.Type() != "identifier" || right == nil {
+				break
+			}
+			if t := jsGeneratorCallYieldType(right, content, generators, genLocals); ourReceivers[t] {
+				out[ingest.NodeText(left, content)] = t
 			}
 		case "required_parameter", "optional_parameter", "assignment_pattern":
 			// TS: (b: Box) / (b: Box = ...)
@@ -1633,7 +1672,7 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 		}
 	}
 	walk(root)
-	return out, settledOf
+	return out, settledOf, genLocals
 }
 
 // jsNewExpressionType returns the constructor identifier for `new Box(...)`.
@@ -2363,4 +2402,261 @@ func jsTypeName(typeN *grammar.Node, content []byte) string {
 		}
 	}
 	return ""
+}
+
+// jsSameFileGeneratorYields maps same-file generator names → yield type leaf
+// recovered from body-only `yield new T()` / `yield x` after `x = new T()`.
+// function* genA(){ yield new A() } / async function* agenA(){ yield new A() } /
+// const genA = function*(){ yield new A() }. Mixed/non-new yields and yield*
+// fail closed. Same-file name → last wins.
+func jsSameFileGeneratorYields(root *grammar.Node, content []byte) map[string]string {
+	out := map[string]string{}
+	if root == nil {
+		return out
+	}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		switch n.Type() {
+		case "generator_function_declaration":
+			nameN := ingest.ChildByField(n, "name")
+			if nameN != nil && nameN.Type() == "identifier" {
+				name := ingest.NodeText(nameN, content)
+				if name != "" {
+					if t := jsFuncBodyYieldNew(n, content); t != "" {
+						out[name] = t
+					}
+				}
+			}
+		case "lexical_declaration", "variable_declaration":
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				child := n.Child(i)
+				if child == nil || child.Type() != "variable_declarator" {
+					continue
+				}
+				nameN := ingest.ChildByField(child, "name")
+				valN := ingest.ChildByField(child, "value")
+				if nameN == nil || nameN.Type() != "identifier" || valN == nil {
+					continue
+				}
+				if valN.Type() == "generator_function" {
+					if t := jsFuncBodyYieldNew(valN, content); t != "" {
+						out[ingest.NodeText(nameN, content)] = t
+					}
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	return out
+}
+
+// jsFuncBodyYieldNew recovers T when every yield in fn is `yield new T()`
+// or `yield x` after a local `x = new T()` assignment. Nested function/class
+// bodies are skipped. yield* / zero / mixed / non-new yields fail closed.
+func jsFuncBodyYieldNew(fn *grammar.Node, content []byte) string {
+	if fn == nil {
+		return ""
+	}
+	body := ingest.ChildByField(fn, "body")
+	if body == nil || body.Type() != "statement_block" {
+		return ""
+	}
+	localCtor := map[string]string{}
+	const fail = "-"
+	found := ""
+	saw := false
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() || found == fail {
+			return
+		}
+		switch n.Type() {
+		case "function_declaration", "generator_function_declaration",
+			"function_expression", "generator_function", "arrow_function",
+			"method_definition", "class_declaration", "class":
+			// Nested scopes: do not harvest their yields for the outer generator.
+			return
+		case "variable_declarator":
+			nameN := ingest.ChildByField(n, "name")
+			valN := ingest.ChildByField(n, "value")
+			if nameN != nil && nameN.Type() == "identifier" && valN != nil {
+				if t := jsNewExpressionType(valN, content); t != "" {
+					localCtor[ingest.NodeText(nameN, content)] = t
+				}
+			}
+		case "yield_expression":
+			// yield new T() / yield x — reject yield*.
+			var expr *grammar.Node
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch == nil {
+					continue
+				}
+				switch ch.Type() {
+				case "yield":
+					continue
+				case "*":
+					found = fail
+					return
+				default:
+					if expr == nil {
+						expr = ch
+					}
+				}
+			}
+			t := ""
+			if expr != nil {
+				if ctor := jsNewExpressionType(expr, content); ctor != "" {
+					t = ctor
+				} else if expr.Type() == "identifier" {
+					t = localCtor[ingest.NodeText(expr, content)]
+				}
+			}
+			if t == "" {
+				found = fail
+				return
+			}
+			if !saw {
+				found = t
+				saw = true
+			} else if found != t {
+				found = fail
+			}
+			return
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(body)
+	if !saw || found == fail {
+		return ""
+	}
+	return found
+}
+
+// jsGeneratorCallYieldType recovers T from genA() / agenA() when the callee is
+// a same-file generator yielding T, or from a typed generator local (ga after
+// const ga = genA()). Non-generator calls fail closed.
+func jsGeneratorCallYieldType(n *grammar.Node, content []byte, generators, genLocals map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil {
+		return ""
+	}
+	if n.Type() == "identifier" && genLocals != nil {
+		return genLocals[ingest.NodeText(n, content)]
+	}
+	if n.Type() != "call_expression" || generators == nil {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil || fn.Type() != "identifier" {
+		return ""
+	}
+	return generators[ingest.NodeText(fn, content)]
+}
+
+// jsGeneratorNextResultType recovers T from genA().next() / ga.next() /
+// await agenA().next() when the receiver is a same-file generator (or gen local)
+// yielding T. Only zero-arg .next() peels (fail closed on arguments).
+func jsGeneratorNextResultType(n *grammar.Node, content []byte, generators, genLocals map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	// Unwrap (await gen().next()) / await gen().next() / (gen().next()).
+	for n != nil {
+		switch n.Type() {
+		case "parenthesized_expression":
+			var inner *grammar.Node
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+			n = inner
+			continue
+		case "await_expression":
+			// await gen().next() — peel through await for async generators.
+			var arg *grammar.Node
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch == nil || ch.Type() == "await" {
+					continue
+				}
+				arg = ch
+				break
+			}
+			n = arg
+			continue
+		}
+		break
+	}
+	if n == nil || n.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	args := ingest.ChildByField(n, "arguments")
+	if fn == nil || (fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain") {
+		return ""
+	}
+	// Zero-arg next() only.
+	if args != nil {
+		for i := uint32(0); i < args.ChildCount(); i++ {
+			ch := args.Child(i)
+			if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+				continue
+			}
+			return ""
+		}
+	}
+	prop := ingest.ChildByField(fn, "property")
+	if prop == nil || ingest.NodeText(prop, content) != "next" {
+		return ""
+	}
+	obj := ingest.ChildByField(fn, "object")
+	return jsGeneratorCallYieldType(obj, content, generators, genLocals)
+}
+
+// jsGeneratorNextValueType recovers T from genA().next().value /
+// ga.next().value / (await agenA().next()).value / ra.value is handled via
+// settledOf in jsPromiseAllSettledValueType. Property must be bare "value".
+func jsGeneratorNextValueType(n *grammar.Node, content []byte, generators, genLocals map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	if n.Type() != "member_expression" && n.Type() != "member_expression_optional" && n.Type() != "optional_chain" {
+		return ""
+	}
+	prop := ingest.ChildByField(n, "property")
+	if prop == nil || (prop.Type() != "property_identifier" && prop.Type() != "identifier") {
+		return ""
+	}
+	if ingest.NodeText(prop, content) != "value" {
+		return ""
+	}
+	obj := ingest.ChildByField(n, "object")
+	return jsGeneratorNextResultType(obj, content, generators, genLocals)
 }
