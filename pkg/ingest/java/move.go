@@ -1620,6 +1620,14 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 		params := javaInferredLambdaParamNames(ch, content)
 		switch len(params) {
 		case 1:
+			// ConcurrentHashMap.searchValues(threshold, Function<? super V, ? extends U>)
+			// — unary Function applies to map values V (not keys / not stream elems).
+			if javaMapValueUnaryLambdaMethod(method) {
+				if vt := javaMapPipelineValueType(obj, content, elemOf, valOf); vt != "" && ourReceivers[vt] {
+					out[params[0]] = true
+				}
+				continue
+			}
 			// Unary: stream/collection element or map.values() element.
 			et := javaStreamPipelineElemType(obj, content, elemOf, valOf)
 			if et != "" && ourReceivers[et] {
@@ -1681,7 +1689,21 @@ func javaStreamElementLambdaMethod(method string) bool {
 		"anyMatch", "allMatch", "noneMatch",
 		"removeIf", "ifPresent", "ifPresentOrElse",
 		// Map value bi-lambdas (see javaMapValueBiLambdaMethod).
-		"computeIfPresent", "compute", "replaceAll", "merge":
+		"computeIfPresent", "compute", "replaceAll", "merge",
+		// ConcurrentHashMap searchValues — unary Function on V (see javaMapValueUnaryLambdaMethod).
+		"searchValues":
+		return true
+	default:
+		return false
+	}
+}
+
+// javaMapValueUnaryLambdaMethod reports ConcurrentHashMap-style methods whose
+// unary functional arg is applied to map values V (not keys / not stream elems):
+// searchValues(threshold, Function<? super V, ? extends U>).
+func javaMapValueUnaryLambdaMethod(method string) bool {
+	switch method {
+	case "searchValues":
 		return true
 	default:
 		return false
@@ -4193,6 +4215,8 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 // type-preserving in javaStreamPipelineElemType).
 // Function.apply prefers valOf (R) then elemOf (UnaryOperator/BinaryOperator T);
 // BiFunction stores R in valOf at bind time (see javaRecordCollectionElem).
+// ConcurrentHashMap.searchValues(threshold, Function) returns U; identity
+// Function (a -> a) recovers V of the map (var/chain under foreign same-leaf).
 // Fail closed on other methods / unknown receivers.
 // One-arg stream.reduce(BinaryOperator) returns Optional — use orElse/ifPresent
 // (pipeline typing), not bare var of the element type.
@@ -4396,9 +4420,31 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// the stream element type, which matches the common T-identity product case).
 		// One-arg reduce(BinaryOperator) returns Optional<T> — fail closed here.
 		return javaStreamReduceIdentityElemType(val, obj, content, elemOf, valOf)
+	case "searchValues":
+		// ConcurrentHashMap.searchValues(threshold, Function<? super V,? extends U>)
+		// returns U. Identity Function (a -> a) yields V of the map receiver
+		// (var xa = m.searchValues(1L, a -> a); xa.m() / m.searchValues(1L, a -> a).m()).
+		// Non-identity / block Functions fail closed (U is not statically V).
+		return javaSearchValuesReturnType(val, obj, content, elemOf, valOf)
 	default:
 		return ""
 	}
+}
+
+// javaSearchValuesReturnType recovers U from ConcurrentHashMap.searchValues when
+// the Function is an identity lambda (a -> a), so U = V of the map receiver.
+// Threshold arg is ignored. Non-identity Functions fail closed.
+func javaSearchValuesReturnType(call, obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	args := javaCallArgs(call)
+	if len(args) < 2 {
+		return ""
+	}
+	// Function is the last arg (threshold is first).
+	fn := args[len(args)-1]
+	if !javaIsIdentityLambda(fn, content) {
+		return ""
+	}
+	return javaMapPipelineValueType(obj, content, elemOf, valOf)
 }
 
 // javaArrayAccessElemType recovers T from as[i] / (as)[i] / matrix[i][j] when the
