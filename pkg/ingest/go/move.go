@@ -1786,6 +1786,7 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 	// a, b := makeAB() with makeAB() (*A, *B) binds a→A, b→B so foreign same-leaf
 	// methods on b are not fail-open rewritten.
 	funcResults := sameFileFuncResultTypes(pf.Root, content)
+	identityFuncs := sameFileGenericIdentityFuncs(pf.Root, content)
 
 	// Collect method/function scopes and local typed bindings.
 	var walk func(n *grammar.Node)
@@ -1807,7 +1808,7 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 			// Named results: func (r *T) M() (a *A, b *B) — a/b used in body.
 			collectResultParameterBindings(n, content, &bindings, rangeSrc)
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, identityFuncs)
 			}
 		case "function_declaration":
 			rangeSrc := map[string]rangeSourceInfo{}
@@ -1818,7 +1819,7 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 			// Without this, same-leaf foreign methods are fail-open rewritten.
 			collectResultParameterBindings(n, content, &bindings, rangeSrc)
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, identityFuncs)
 			}
 		case "func_literal":
 			// Nested / package-level func literals: func(a *A, b *B) { a.Run(); b.Run() }.
@@ -1829,7 +1830,7 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 			}
 			collectResultParameterBindings(n, content, &bindings, rangeSrc)
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, identityFuncs)
 			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -2166,7 +2167,7 @@ func methodDeclReceiverType(method *grammar.Node, content []byte) string {
 // (params/vars) to their range element/value/key types and channel payloads.
 // funcResults maps same-file function names to positional concrete result types
 // for multi-return call binding (a, b := makeAB()).
-func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo, funcResults map[string][]string) {
+func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo, funcResults map[string][]string, identityFuncs map[string]bool) {
 	if node == nil {
 		return
 	}
@@ -2202,7 +2203,7 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, types[i]})
 					}
 				}
-			} else if types := typeNamesFromCallResults(right, content, funcResults); len(types) > 0 {
+			} else if types := typeNamesFromCallResults(right, content, funcResults, identityFuncs); len(types) > 0 {
 				for i, name := range names {
 					if name == "" || name == "_" {
 						continue
@@ -2236,7 +2237,7 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 					// var a, b = makeAB() / var a, b = &A{}, &B{} — bind positionally.
 					types := typeNamesFromMultiRHS(valueN, content)
 					if len(types) == 0 {
-						types = typeNamesFromCallResults(valueN, content, funcResults)
+						types = typeNamesFromCallResults(valueN, content, funcResults, identityFuncs)
 					}
 					if len(types) == 0 {
 						types = typeNamesFromFuncLiteralResults(valueN, content)
@@ -2563,6 +2564,177 @@ func sameFileFuncResultTypes(root *grammar.Node, content []byte) map[string][]st
 	return out
 }
 
+// sameFileGenericIdentityFuncs returns names of same-file generic identity
+// functions: func Id[T any](v T) T — exactly one type parameter T used as both
+// the sole parameter type and the result type. Call result is the arg type
+// (Id(A{}).Run / a := Id(A{}); a.Run under foreign same-leaf methods).
+func sameFileGenericIdentityFuncs(root *grammar.Node, content []byte) map[string]bool {
+	if root == nil {
+		return nil
+	}
+	out := map[string]bool{}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type() == "function_declaration" {
+			if name := goGenericIdentityFuncName(n, content); name != "" {
+				out[name] = true
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// goGenericIdentityFuncName returns the function name when decl is
+// func Name[T …](v T) T (single type param, single value param of that param,
+// result is that param). Other shapes fail closed.
+func goGenericIdentityFuncName(decl *grammar.Node, content []byte) string {
+	if decl == nil || decl.Type() != "function_declaration" {
+		return ""
+	}
+	nameN := ingest.ChildByField(decl, "name")
+	if nameN == nil || nameN.Type() != "identifier" {
+		return ""
+	}
+	name := ingest.NodeText(nameN, content)
+	if name == "" {
+		return ""
+	}
+	// Exactly one type parameter T.
+	tpList := ingest.ChildByField(decl, "type_parameters")
+	if tpList == nil {
+		// Some grammars expose type_parameter_list as a child without field name.
+		for i := uint32(0); i < decl.ChildCount(); i++ {
+			ch := decl.Child(i)
+			if ch != nil && ch.Type() == "type_parameter_list" {
+				tpList = ch
+				break
+			}
+		}
+	}
+	if tpList == nil || tpList.Type() != "type_parameter_list" {
+		return ""
+	}
+	var typeParams []string
+	for i := uint32(0); i < tpList.ChildCount(); i++ {
+		ch := tpList.Child(i)
+		if ch == nil || ch.Type() != "type_parameter_declaration" {
+			continue
+		}
+		// First identifier in the declaration is the type param name.
+		var pname string
+		for j := uint32(0); j < ch.ChildCount(); j++ {
+			c := ch.Child(j)
+			if c != nil && c.Type() == "identifier" {
+				pname = ingest.NodeText(c, content)
+				break
+			}
+		}
+		if pname == "" {
+			return ""
+		}
+		typeParams = append(typeParams, pname)
+	}
+	if len(typeParams) != 1 {
+		return ""
+	}
+	tParam := typeParams[0]
+
+	// Exactly one value parameter of type T (bare type_identifier).
+	params := ingest.ChildByField(decl, "parameters")
+	if params == nil || params.Type() != "parameter_list" {
+		return ""
+	}
+	var paramTypes []string
+	for i := uint32(0); i < params.ChildCount(); i++ {
+		p := params.Child(i)
+		if p == nil || p.Type() != "parameter_declaration" {
+			continue
+		}
+		// Skip if multi-name without shared type handling — one slot per decl.
+		typeN := ingest.ChildByField(p, "type")
+		if typeN == nil || typeN.Type() != "type_identifier" {
+			return ""
+		}
+		paramTypes = append(paramTypes, ingest.NodeText(typeN, content))
+		// Multi-name param (a, b T) — still one type; count names.
+		names := parameterDeclNames(p, content)
+		if len(names) > 1 {
+			return ""
+		}
+	}
+	if len(paramTypes) != 1 || paramTypes[0] != tParam {
+		return ""
+	}
+
+	// Result is bare T (field "result" or sibling type_identifier before block).
+	result := ingest.ChildByField(decl, "result")
+	if result == nil {
+		for i := uint32(0); i < decl.ChildCount(); i++ {
+			ch := decl.Child(i)
+			if ch != nil && ch.Type() == "type_identifier" {
+				// Prefer the result slot: not inside type_parameter_list/parameters.
+				result = ch
+			}
+		}
+		// Last type_identifier before block is typically the result; verify text.
+		if result == nil {
+			return ""
+		}
+	}
+	if result.Type() != "type_identifier" || ingest.NodeText(result, content) != tParam {
+		return ""
+	}
+	return name
+}
+
+// goCallFirstArgType recovers the concrete named type of the first positional
+// argument of a call_expression (A{} / &A{} / new(A) / nested peels). Used by
+// generic identity Id(arg) peels. Missing / multi-arg still peels the first arg
+// only when present (extra args fail closed — identity has one param).
+func goCallFirstArgType(call *grammar.Node, content []byte, indexElemType, valueType func(name string, at uint32) (string, bool), funcColl map[string][]rangeSourceInfo, funcResults map[string][]string, identityFuncs map[string]bool) string {
+	if call == nil || call.Type() != "call_expression" {
+		return ""
+	}
+	args := ingest.ChildByField(call, "arguments")
+	if args == nil {
+		return ""
+	}
+	var first *grammar.Node
+	count := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		c := args.Child(i)
+		if c == nil || c.Type() == "(" || c.Type() == ")" || c.Type() == "," {
+			continue
+		}
+		count++
+		if first == nil {
+			first = c
+		}
+	}
+	if count != 1 || first == nil {
+		return ""
+	}
+	// Prefer composite / unary peels (A{} / &A{}) before full complex (avoids
+	// re-entering identity on the same shape awkwardly).
+	if t := compositeLiteralTypeName(first, content); t != "" {
+		return t
+	}
+	if t := typeNameFromRHS(first, content); t != "" {
+		return strings.TrimPrefix(t, "*")
+	}
+	return goComplexOperandType(first, content, indexElemType, valueType, funcColl, funcResults, identityFuncs)
+}
+
 // sameFileFuncCollectionResults maps same-file function names to positional
 // collection element/value info for each result slot
 // (func getA() []*A / func getA() ([]*A, error) / func getM() map[K]*A /
@@ -2781,8 +2953,8 @@ func typeNamesFromFuncLiteralResults(n *grammar.Node, content []byte) []string {
 // typeNamesFromCallResults returns positional result types when n is a call to
 // a same-file function known in funcResults (or expression_list of one such call).
 // Used for a, b := makeAB() / var a, b = makeAB().
-func typeNamesFromCallResults(n *grammar.Node, content []byte, funcResults map[string][]string) []string {
-	if n == nil || len(funcResults) == 0 {
+func typeNamesFromCallResults(n *grammar.Node, content []byte, funcResults map[string][]string, identityFuncs map[string]bool) []string {
+	if n == nil {
 		return nil
 	}
 	// expression_list → single call only (multi-return, not multi-expr).
@@ -2809,6 +2981,29 @@ func typeNamesFromCallResults(n *grammar.Node, content []byte, funcResults map[s
 	}
 	name := ingest.NodeText(fn, content)
 	if name == "" {
+		return nil
+	}
+	// Id(A{}) — generic identity peels arg type (before funcResults type-param "T").
+	if identityFuncs[name] {
+		args := ingest.ChildByField(n, "arguments")
+		if args != nil {
+			for i := uint32(0); i < args.ChildCount(); i++ {
+				c := args.Child(i)
+				if c == nil || c.Type() == "(" || c.Type() == ")" || c.Type() == "," {
+					continue
+				}
+				if t := compositeLiteralTypeName(c, content); t != "" {
+					return []string{t}
+				}
+				if t := typeNameFromRHS(c, content); t != "" {
+					return []string{strings.TrimPrefix(t, "*")}
+				}
+				break
+			}
+		}
+		return nil
+	}
+	if len(funcResults) == 0 {
 		return nil
 	}
 	types := funcResults[name]
@@ -3237,6 +3432,7 @@ func findComplexOperandSelectorEdits(file string, content []byte, oldLeaf, newLe
 	indexElemType := collectionIndexElemTypeFunc(pf.Root, content, funcColl)
 	// new(T).M / getA().M / (*pa).M under foreign same-leaf methods.
 	funcResults := sameFileFuncResultTypes(pf.Root, content)
+	identityFuncs := sameFileGenericIdentityFuncs(pf.Root, content)
 	valueType := goIdentTypeAtFunc(pf.Root, content, funcResults)
 
 	uniqueLeaf := len(foreignReceivers) == 0
@@ -3251,7 +3447,7 @@ func findComplexOperandSelectorEdits(file string, content []byte, oldLeaf, newLe
 			field := ingest.ChildByField(n, "field")
 			if field != nil && ingest.NodeText(field, content) == oldLeaf && operand != nil && !goOperandIsBareIdent(operand) {
 				ok := false
-				if typ := goComplexOperandType(operand, content, indexElemType, valueType, funcColl, funcResults); typ != "" {
+				if typ := goComplexOperandType(operand, content, indexElemType, valueType, funcColl, funcResults, identityFuncs); typ != "" {
 					typ = strings.TrimPrefix(typ, "*")
 					if ourReceivers[typ] {
 						ok = true
@@ -3287,6 +3483,7 @@ func goIdentTypeAtFunc(root *grammar.Node, content []byte, funcResults map[strin
 	if root == nil {
 		return func(string, uint32) (string, bool) { return "", false }
 	}
+	identityFuncs := sameFileGenericIdentityFuncs(root, content)
 	var bindings []identTypeBinding
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
@@ -3306,7 +3503,7 @@ func goIdentTypeAtFunc(root *grammar.Node, content []byte, funcResults map[strin
 			}
 			collectResultParameterBindings(n, content, &bindings, rangeSrc)
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, identityFuncs)
 			}
 		case "function_declaration", "func_literal":
 			rangeSrc := map[string]rangeSourceInfo{}
@@ -3315,7 +3512,7 @@ func goIdentTypeAtFunc(root *grammar.Node, content []byte, funcResults map[strin
 			}
 			collectResultParameterBindings(n, content, &bindings, rangeSrc)
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, identityFuncs)
 			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -3781,7 +3978,7 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 // new(T), same-file getA(), (*pa) via valueType, and index expressions
 // (as[0] / m[k]) when indexElemType knows the collection.
 // indexElemType / valueType / funcColl / funcResults may be nil when unavailable.
-func goComplexOperandType(n *grammar.Node, content []byte, indexElemType, valueType func(name string, at uint32) (string, bool), funcColl map[string][]rangeSourceInfo, funcResults map[string][]string) string {
+func goComplexOperandType(n *grammar.Node, content []byte, indexElemType, valueType func(name string, at uint32) (string, bool), funcColl map[string][]rangeSourceInfo, funcResults map[string][]string, identityFuncs map[string]bool) string {
 	if n == nil {
 		return ""
 	}
@@ -3800,7 +3997,7 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType, valueT
 			if ch.Type() == "(" || ch.Type() == ")" {
 				continue
 			}
-			return goComplexOperandType(ch, content, indexElemType, valueType, funcColl, funcResults)
+			return goComplexOperandType(ch, content, indexElemType, valueType, funcColl, funcResults, identityFuncs)
 		}
 	case "type_assertion_expression", "type_conversion_expression":
 		if t := ingest.ChildByField(n, "type"); t != nil {
@@ -3835,6 +4032,14 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType, valueT
 		// appear as a lone value (compile error).
 		if fn != nil && fn.Type() == "identifier" {
 			name := ingest.NodeText(fn, content)
+			// Id(A{}).M — generic identity func[T](v T) T peels arg type.
+			// Checked before funcResults so result type-param "T" is not used as a leaf.
+			if identityFuncs[name] {
+				if t := goCallFirstArgType(n, content, indexElemType, valueType, funcColl, funcResults, identityFuncs); t != "" {
+					return t
+				}
+				return ""
+			}
 			if len(funcResults) > 0 {
 				if types := funcResults[name]; len(types) == 1 && types[0] != "" {
 					return types[0]
@@ -3864,7 +4069,7 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType, valueT
 		// tree-sitter-go parses these as call_expression too; peel the type from
 		// the parenthesized operand (unary *A / type_identifier A).
 		if fn != nil && fn.Type() == "parenthesized_expression" {
-			if t := goComplexOperandType(fn, content, indexElemType, valueType, funcColl, funcResults); t != "" {
+			if t := goComplexOperandType(fn, content, indexElemType, valueType, funcColl, funcResults, identityFuncs); t != "" {
 				return t
 			}
 		}
@@ -3901,7 +4106,7 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType, valueT
 				starIdent = ingest.NodeText(ch, content)
 				continue
 			}
-			if t := goComplexOperandType(ch, content, indexElemType, valueType, funcColl, funcResults); t != "" {
+			if t := goComplexOperandType(ch, content, indexElemType, valueType, funcColl, funcResults, identityFuncs); t != "" {
 				return t
 			}
 		}
