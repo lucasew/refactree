@@ -3900,6 +3900,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// xs = [A()] / (A(),) / [B()] — track element type for later for-loops.
 				// aa = [[A()]] / ((A(),),) — nested list/tuple local of leaf A (@nested)
 				// so aa[0][0].run() / match aa: case [[xa]]: peel under foreign same-leaf.
+				// da = {"k": [A()]} / {"k": (A(),)} — mapping of list/tuple of leaf A
+				// (@nested) so da["k"][0].run() / match da: case {"k": [xa]}: peel.
 				// xs = list(items) / filter(...) — preserve element type via wrappers.
 				// d = dict.fromkeys(keys, A()) — value leaf is A (for .values/.get).
 				// pairs = zip/enumerate/product/pairwise(...) /
@@ -3916,6 +3918,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					} else if nest := pythonNestedHomogeneousCtorElem(right, content); nest != "" {
 						// aa = [[A()]] — not a scalar list of A; store nested leaf.
 						// Foreign too for shadowing (bb = [[B()]] after aa = [[A()]]).
+						elemOf["@nested."+lname] = nest
+					} else if nest := pythonNestedDictHomogeneousListCtorElem(right, content); nest != "" {
+						// da = {"k": [A()]} — not scalar dict values of A; store nested leaf.
+						// Foreign too for shadowing (db = {"k": [B()]} after da).
 						elemOf["@nested."+lname] = nest
 					} else if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); et != "" {
 						elemOf[lname] = et
@@ -6940,6 +6946,8 @@ func pythonBindMatchSeqPatterns(n *grammar.Node, content []byte, et, nest string
 		// integer / dotted_name (capture keys) and are not value-typed.
 		// **rest (splat_pattern) is a mapping — fail closed.
 		// Nested list values: case {"k": [xa, *_]} when nest is leaf T.
+		// Whole list value captures: case {"k": row} / {"k": row as r} when nest
+		// is leaf T — row is list of nest (elemOf; same as case [row] on list[list[A]]).
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			ch := n.Child(i)
 			if ch.Type() != "case_pattern" && ch.Type() != "pattern" {
@@ -6948,6 +6956,12 @@ func pythonBindMatchSeqPatterns(n *grammar.Node, content []byte, et, nest string
 			if nest != "" && pythonMatchPatternIsSeq(ch) {
 				// Value is list/tuple of nest — bind inner captures as nest leaf.
 				pythonBindMatchSeqPatterns(ch, content, nest, "", ourReceivers, out, elemOf)
+				continue
+			}
+			if nest != "" {
+				// case {"k": row} on dict[str, list[A]] / da={"k":[A()]} — row is
+				// list of nest (not nest leaf itself). Foreign too for shadowing.
+				pythonBindMatchNestedMapValueListCaptures(ch, content, nest, elemOf)
 				continue
 			}
 			if et != "" {
@@ -7111,6 +7125,86 @@ func pythonBindMatchNestedSeqSlots(n *grammar.Node, content []byte, nest string,
 		default:
 			// Unknown slot shape — fail closed for this slot only.
 		}
+	}
+}
+
+// pythonBindMatchNestedMapValueListCaptures binds simple captures (and capture-as
+// aliases) from a mapping value pattern when the subject is a mapping of list/set
+// of nest leaf T (elemOf["@nested."+subj] = nest). Captures are list-of-nest
+// (elemOf[row]=nest), not nest leaf — enables case {"k": row}: row[0].run() /
+// case {"k": row as r}: r[0].run() under foreign same-leaf (same leaf as
+// case [row] on list[list[A]]). Nested class/list/or patterns fail closed here
+// (list values use pythonBindMatchSeqPatterns; class patterns stay on as_pattern).
+func pythonBindMatchNestedMapValueListCaptures(n *grammar.Node, content []byte, nest string, elemOf map[string]string) {
+	if n == nil || n.IsNull() || nest == "" || elemOf == nil {
+		return
+	}
+	// Unwrap case_pattern/pattern wrappers to the payload.
+	for n != nil && (n.Type() == "case_pattern" || n.Type() == "pattern") {
+		inner := pythonMatchPatternInner(n)
+		if inner == nil {
+			return
+		}
+		n = inner
+	}
+	if n == nil || n.IsNull() {
+		return
+	}
+	switch n.Type() {
+	case "identifier", "dotted_name":
+		name := pythonMatchCaptureName(n, content)
+		if name != "" {
+			elemOf[name] = nest
+		}
+	case "as_pattern":
+		// `row as r` inside a mapping value: both bind as list-of-nest (PEP 634).
+		var left *grammar.Node
+		var alias string
+		seenAs := false
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "as" {
+				seenAs = true
+				continue
+			}
+			if !seenAs {
+				left = ch
+				continue
+			}
+			switch ch.Type() {
+			case "identifier":
+				alias = ingest.NodeText(ch, content)
+			case "as_pattern_target":
+				if id := ingest.ChildByType(ch, "identifier"); id != nil {
+					alias = ingest.NodeText(id, content)
+				}
+			}
+		}
+		if alias != "" {
+			elemOf[alias] = nest
+		}
+		if left != nil {
+			for left != nil && (left.Type() == "case_pattern" || left.Type() == "pattern") {
+				inner := pythonMatchPatternInner(left)
+				if inner == nil {
+					break
+				}
+				left = inner
+			}
+		}
+		if left != nil {
+			switch left.Type() {
+			case "identifier", "dotted_name":
+				name := pythonMatchCaptureName(left, content)
+				if name != "" {
+					elemOf[name] = nest
+				}
+			default:
+				// Nested class/list/or left of `as` — fail closed for left only.
+			}
+		}
+	default:
+		// Nested class/list/or/value — fail closed (list handled above).
 	}
 }
 
@@ -9632,6 +9726,63 @@ func pythonNestedHomogeneousCtorElem(collection *grammar.Node, content []byte) s
 			}
 		default:
 			// Nested non-list / Class() at outer level → not a nest of rows.
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return nest
+}
+
+// pythonNestedDictHomogeneousListCtorElem recovers T from dict literals whose
+// values are homogeneous Class() list/tuple collections of the same T:
+//
+//	{"k": [A()]} / {"k": [A()], "m": [A()]} / {"k": (A(),)} → "A"
+//
+// Stored as elemOf["@nested."+name] so da = {"k": [A()]}; da["k"][0].run() /
+// match da: case {"k": [xa]}: / ga = da["k"]; ga[0].run() / for a in da["k"] /
+// for ga in da.values(); ga[0].run() peel under foreign same-leaf (same leaf as
+// annotated dict[str, list[A]]). Scalar {"k": A()} stays on other paths; mixed
+// value leaves / non-list values / empty dict / dict-comprehension fail closed.
+func pythonNestedDictHomogeneousListCtorElem(collection *grammar.Node, content []byte) string {
+	if collection == nil || collection.Type() != "dictionary" {
+		return ""
+	}
+	var nest string
+	saw := false
+	for i := uint32(0); i < collection.ChildCount(); i++ {
+		ch := collection.Child(i)
+		switch ch.Type() {
+		case "{", "}", ",", "comment":
+			continue
+		case "pair":
+			val := ingest.ChildByField(ch, "value")
+			if val == nil {
+				return ""
+			}
+			// Value must be a homogeneous Class() list/tuple of T (not set —
+			// match/sub peels for set values are not product-solid here).
+			switch val.Type() {
+			case "list", "tuple":
+				// ok
+			default:
+				return ""
+			}
+			et := pythonHomogeneousCtorElem(val, content)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				nest = et
+				saw = true
+				continue
+			}
+			if et != nest {
+				return ""
+			}
+		default:
+			// Splat / comprehension / unknown — fail closed.
 			return ""
 		}
 	}

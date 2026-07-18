@@ -58,6 +58,26 @@ def use_match_nested_map_as(da: dict[str, list[A]], db: dict[str, list[B]]) -> i
     return r
 
 
+def use_match_nested_map_row(da: dict[str, list[A]], db: dict[str, list[B]]) -> int:
+    match da:
+        case {"k": row}:
+            r = row[0].run()
+    match db:
+        case {"k": rowb}:
+            r += rowb[0].run()
+    return r
+
+
+def use_match_nested_map_row_as(da: dict[str, list[A]], db: dict[str, list[B]]) -> int:
+    match da:
+        case {"k": row as r}:
+            x = r[0].run()
+    match db:
+        case {"k": rowb as s}:
+            x += s[0].run()
+    return x
+
+
 def use_preserves_b(bb: list[list[B]], db: dict[str, list[B]]) -> int:
     match bb:
         case [[xb, *_], *_]:

@@ -1807,11 +1807,15 @@ func javaNestedCollectionGetElemType(val *grammar.Node, content []byte, elemOf, 
 
 // javaOptionalOfCollectionFactoryElemType recovers T when opt is
 // Optional.of(List.of(new A())) / Optional.ofNullable(Arrays.asList(new A())) /
-// Optional.of(Collections.singletonList(new A())) — Optional wrapping a
+// Optional.of(Collections.singletonList(new A())) /
+// Optional.of(Set.copyOf(List.of(new A()))) /
+// Optional.of(List.copyOf(List.of(new A()))) — Optional wrapping a
 // collection factory of T. Enables
 // Optional.of(List.of(new A())).get().get(0).m() /
-// Optional.of(List.of(new A())).orElseThrow().get(0).m() under foreign same-leaf.
-// Scalar Optional.of(new A()) / unknown args fail closed (no nested list).
+// Optional.of(List.of(new A())).orElseThrow().get(0).m() /
+// Optional.of(Set.copyOf(List.of(new A()))).get().iterator().next().m() under
+// foreign same-leaf. Scalar Optional.of(new A()) / unknown args fail closed
+// (no nested list).
 func javaOptionalOfCollectionFactoryElemType(opt *grammar.Node, content []byte) string {
 	if opt == nil || opt.IsNull() || opt.Type() != "method_invocation" {
 		return ""
@@ -1860,11 +1864,16 @@ func javaOptionalOfCollectionFactoryElemType(opt *grammar.Node, content []byte) 
 	}
 	argName := ingest.NodeText(argNameN, content)
 	switch argName {
-	case "of", "asList", "ofNullable", "singletonList", "singleton", "copyOf":
+	case "of", "asList", "ofNullable", "singletonList", "singleton":
 		// List.of(new A()) / Arrays.asList(new A()) / Set.of(new A()) /
-		// Collections.singletonList(new A()) / List.copyOf(…) — element T is
-		// the nested list leaf (Optional holds List of T).
+		// Collections.singletonList(new A()) / Collections.singleton(new A()) —
+		// element T is the nested list leaf (Optional holds Collection of T).
 		return javaStaticCollectionOfElemType(first, content, argName)
+	case "copyOf":
+		// Set.copyOf(List.of(new A())) / List.copyOf(List.of(new A())) —
+		// Collection of first-arg element type (pipeline peels List.of/…;
+		// nil maps are fine for pure factory args).
+		return javaListSetCopyOfElemType(first, content, nil, nil)
 	case "nCopies":
 		// Collections.nCopies(n, new A()) — List of T.
 		return javaCollectionsNCopiesElemType(first, content)
