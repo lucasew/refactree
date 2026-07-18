@@ -8009,6 +8009,15 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		return elemOf[ingest.NodeText(right, content)]
 	case "list", "tuple", "set":
 		return pythonHomogeneousCtorElem(right, content)
+	case "subscript":
+		// xs[:n] / xs[i:j] / xs[:] / xs[::step] — slice of a collection preserves
+		// element type (as_[:1][0].run() / sa = as_[:1]; sa[0].run()).
+		// Integer / non-slice subscripts are elements, not collections — fail closed.
+		idx := ingest.ChildByField(right, "subscript")
+		if idx == nil || idx.Type() != "slice" {
+			return ""
+		}
+		return pythonIterableElemType(ingest.ChildByField(right, "value"), content, elemOf, egElems, typeOf)
 	case "parenthesized_expression":
 		// (items or []) / (xs.copy()) — unwrap and re-type the inner expression.
 		return pythonIterableElemType(pythonParenInner(right), content, elemOf, egElems, typeOf)
@@ -9305,8 +9314,10 @@ func pythonContainerElemType(typeN *grammar.Node, content []byte) string {
 		return ""
 	}
 	switch contName {
-	case "dict", "Dict", "Mapping", "MutableMapping", "OrderedDict", "defaultdict", "DefaultDict":
+	case "dict", "Dict", "Mapping", "MutableMapping", "OrderedDict", "defaultdict", "DefaultDict",
+		"ChainMap":
 		// value type is last type arg when there are two.
+		// ChainMap[K, V] is a mapping of V (same value leaf as dict[K, V]).
 		if len(args) == 2 {
 			return args[1]
 		}
@@ -9369,7 +9380,8 @@ func pythonParseContainerElemString(s string) string {
 		return ""
 	}
 	switch contName {
-	case "dict", "Dict", "Mapping", "MutableMapping", "OrderedDict", "defaultdict", "DefaultDict":
+	case "dict", "Dict", "Mapping", "MutableMapping", "OrderedDict", "defaultdict", "DefaultDict",
+		"ChainMap":
 		if len(args) == 2 {
 			return args[1]
 		}
