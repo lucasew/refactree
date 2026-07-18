@@ -2004,9 +2004,9 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // (`match box: case {"a": xa}:` / `case {"a": xa as x}:` with `box: Box`
 // and annotated field a: A — key-specific fieldOf leaf; non-string keys
 // and **rest fail closed),
-// match class-pattern keyword captures
-// (`match box: case Box(a=xa, b=xb):` / `case Box(a=xa as x):` — field types
-// of Box via fieldIndex; positional Box(xa, xb) fails closed),
+// match class-pattern keyword and positional captures
+// (`match box: case Box(a=xa, b=xb):` / `case Box(xa, xb):` / `case Box(a=xa as x):`
+// — field types of Box via fieldIndex; positionals use declaration order),
 // walrus (`a := A()`, `a := next(items)`, `a := next(x for x in items)`,
 // `a := min(items)`, `a := choice(items)`, `a := random.choice(items)`,
 // `a := heappop(items)`, `a := heapq.heappop(items)`,
@@ -2102,9 +2102,16 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 		return out, fieldOf, elemOf
 	}
 	fieldIndex := pythonClassFieldIndex(root, content)
+	// Declaration order for positional match class patterns (case Box(xa, xb)).
+	fieldOrder := pythonClassFieldOrder(root, content)
 	// namedtuple factory fields have no annotations — recover from same-file ctors.
 	// fieldNames keeps factory order so box[i] can resolve via fieldOf["box.#i"].
 	fieldNames := pythonNamedtupleFieldNames(root, content)
+	for tn, names := range fieldNames {
+		if len(fieldOrder[tn]) == 0 && len(names) > 0 {
+			fieldOrder[tn] = names
+		}
+	}
 	pythonMergeNamedtupleFields(root, content, fieldIndex)
 	// typing.NamedTuple("Box", [("a", A), ...]) / NamedTuple("Box", a=A, b=B).
 	pythonMergeFunctionalNamedTupleFields(root, content, fieldIndex)
@@ -2906,10 +2913,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				out[name] = true
 			}
 		case "class_pattern":
-			// match case Box(a=xa, b=xb): keyword value captures get field types
-			// of Box (dataclass / annotated class via fieldIndex). Positional
-			// Box(xa, xb) fails closed (declaration order not required here).
-			pythonBindClassPatternKeywordCaptures(n, content, fieldIndex, ourReceivers, out)
+			// match case Box(a=xa, b=xb) / Box(xa, xb): keyword and positional
+			// value captures get field types of Box (dataclass / annotated class
+			// via fieldIndex; positionals use fieldOrder / namedtuple order).
+			pythonBindClassPatternKeywordCaptures(n, content, fieldIndex, fieldOrder, ourReceivers, out)
 		case "match_statement":
 			// match items: case [a]: / case [a, *rest]: — bind sequence captures
 			// from the subject's element type (items: list[A] / xs = [A()] / …).
@@ -2997,6 +3004,52 @@ func pythonClassFieldIndex(root *grammar.Node, content []byte) map[string]map[st
 				}
 				if len(fields) > 0 {
 					out[typeName] = fields
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	return out
+}
+
+// pythonClassFieldOrder maps class type name → annotated field names in
+// declaration order (Box with a: A; b: B → ["a","b"]). Used for positional
+// match class patterns (`case Box(xa, xb):` → xa is a, xb is b).
+func pythonClassFieldOrder(root *grammar.Node, content []byte) map[string][]string {
+	out := map[string][]string{}
+	if root == nil {
+		return out
+	}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		if n.Type() == "class_definition" {
+			nameN := ingest.ChildByField(n, "name")
+			body := ingest.ChildByField(n, "body")
+			if nameN != nil && body != nil {
+				typeName := ingest.NodeText(nameN, content)
+				var names []string
+				for i := uint32(0); i < body.ChildCount(); i++ {
+					ch := body.Child(i)
+					if ch.Type() != "assignment" {
+						continue
+					}
+					left := ingest.ChildByField(ch, "left")
+					typeN := ingest.ChildByField(ch, "type")
+					if left == nil || typeN == nil || left.Type() != "identifier" {
+						continue
+					}
+					if tn := pythonTypeName(typeN, content); tn != "" {
+						names = append(names, ingest.NodeText(left, content))
+					}
+				}
+				if len(names) > 0 {
+					out[typeName] = names
 				}
 			}
 		}
@@ -3650,11 +3703,13 @@ func pythonRecordKeyAccessType(n *grammar.Node, content []byte, fieldOf map[stri
 }
 
 // pythonBindClassPatternKeywordCaptures binds value captures from
-// `case Box(a=xa, b=xb):` keyword_patterns using annotated fields of Box
-// (fieldIndex). Unknown fields and positional-only patterns fail closed.
+// `case Box(a=xa, b=xb):` keyword_patterns and `case Box(xa, xb):` positional
+// patterns using annotated fields of Box (fieldIndex). Positionals map by
+// declaration order (fieldOrder / namedtuple field names). Unknown fields and
+// excess positionals fail closed.
 // Grammar often wraps `a=xa as x` as as_pattern(keyword_pattern(a=xa), x)
 // rather than keyword_pattern(a=(xa as x)); both alias and inner capture bind.
-func pythonBindClassPatternKeywordCaptures(n *grammar.Node, content []byte, fieldIndex map[string]map[string]string, ourReceivers, out map[string]bool) {
+func pythonBindClassPatternKeywordCaptures(n *grammar.Node, content []byte, fieldIndex map[string]map[string]string, fieldOrder map[string][]string, ourReceivers, out map[string]bool) {
 	if n == nil || n.IsNull() || n.Type() != "class_pattern" || fieldIndex == nil {
 		return
 	}
@@ -3666,6 +3721,11 @@ func pythonBindClassPatternKeywordCaptures(n *grammar.Node, content []byte, fiel
 	if len(fields) == 0 {
 		return
 	}
+	var order []string
+	if fieldOrder != nil {
+		order = fieldOrder[typeName]
+	}
+	pos := 0
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		ch := n.Child(i)
 		if ch.Type() != "case_pattern" {
@@ -3675,7 +3735,7 @@ func pythonBindClassPatternKeywordCaptures(n *grammar.Node, content []byte, fiel
 		if payload == nil {
 			continue
 		}
-		// Optional outer as: case Box(a=xa as x) → as_pattern(keyword_pattern, x).
+		// Optional outer as: case Box(a=xa as x) / Box(xa as x) → as_pattern(..., x).
 		var outerAlias string
 		if payload.Type() == "as_pattern" {
 			var left *grammar.Node
@@ -3712,7 +3772,18 @@ func pythonBindClassPatternKeywordCaptures(n *grammar.Node, content []byte, fiel
 			payload = left
 		}
 		if payload.Type() != "keyword_pattern" {
-			// Positional capture — fail closed (no field key).
+			// Positional capture: ith non-keyword pattern → order[i] field type.
+			if pos < len(order) {
+				key := order[pos]
+				ft := fields[key]
+				if ft != "" && ourReceivers[ft] {
+					pythonBindMatchMapValueCaptures(payload, content, ft, ourReceivers, out)
+					if outerAlias != "" {
+						out[outerAlias] = true
+					}
+				}
+			}
+			pos++
 			continue
 		}
 		// keyword_pattern: <field ident> = <value pattern>
