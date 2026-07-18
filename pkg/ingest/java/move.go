@@ -1735,14 +1735,23 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 				continue
 			}
 			// ConcurrentHashMap.reduce(threshold, BiFunction<K,V,U>, BiFunction<U,U,U>) —
-			// transformer (first bi-lambda) has V as second param; reducer is on U —
-			// fail closed (only bind the first bi-lambda when receiver is a map).
+			// transformer (first bi-lambda) has V as second param; reducer is on U.
+			// Value-identity transformer ((k,v) -> v) yields U=V so both reducer params are V.
 			// Stream.reduce is not a map receiver — javaMapPipelineValueType fails closed.
 			if method == "reduce" {
 				reduceBiSeen++
 				if reduceBiSeen == 1 {
 					if vt := javaMapPipelineValueType(obj, content, elemOf, valOf); vt != "" && ourReceivers[vt] {
 						out[params[1]] = true
+					}
+				} else if reduceBiSeen == 2 {
+					// BiFunction reducer on U; value-identity transformer → U=V.
+					callArgs := javaCallArgs(call)
+					if len(callArgs) >= 2 && javaIsValueIdentityBiLambda(callArgs[1], content) {
+						if vt := javaMapPipelineValueType(obj, content, elemOf, valOf); vt != "" && ourReceivers[vt] {
+							out[params[0]] = true
+							out[params[1]] = true
+						}
 					}
 				}
 				continue
