@@ -1071,6 +1071,7 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // map.put(k,v) / map.replace(k,v) / map.merge(k,v,fn) /
 // map.putFirst(k,v) / map.putLast(k,v) /
 // it.next() / list.iterator().next() /
+// listIterator.previous() / list.listIterator().next()/previous() /
 // queue.poll()/peek() / queue.take() / deque.takeFirst()/takeLast() /
 // list.remove(i) / list.getFirst()/getLast() /
 // list.removeFirst()/removeLast() /
@@ -1524,6 +1525,9 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 		}
 		switch name := ingest.NodeText(nameN, content); name {
 		case "stream", "parallelStream", "iterator",
+			// listIterator() returns ListIterator<E> of the same element type
+			// (List; previous/next yield E like Iterator.next).
+			"listIterator",
 			"filter", "peek", "sorted", "distinct", "limit", "skip",
 			"unordered", "sequential", "parallel", "onClose",
 			"takeWhile", "dropWhile",
@@ -3430,6 +3434,8 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	ss.first() / ss.last() → elemOf[ss] (SortedSet / NavigableSet)
 //	ia.next()                 → elemOf[ia]   (Iterator<A>)
 //	as.iterator().next()      → elemOf[as]   (via type-preserving iterator())
+//	lia.previous()            → elemOf[lia]  (ListIterator<A>)
+//	as.listIterator().next()/previous() → elemOf[as] (type-preserving listIterator())
 //	oa.orElse(d) / oa.orElseGet(s) / oa.orElseThrow([s]) → elemOf[oa]
 //	  (Optional<A>; also findFirst().orElse / findFirst().orElseThrow)
 //	Collections.min(as) / Collections.max(as[, cmp]) → elemOf[as]
@@ -3527,8 +3533,10 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// e.getValue() — Map.Entry local (entrySet for-var / forEach / var ea = …).
 		// Map.entry(k, new T(...)).getValue() / am.firstEntry().getValue() — same V.
 		return javaEntryExprValueType(obj, content, elemOf, valOf, entryValOf)
-	case "next":
+	case "next", "previous":
 		// it.next() / as.iterator().next() — element of iterator or pipeline.
+		// lia.previous() / as.listIterator().previous() — same E (ListIterator).
+		// listIterator() is type-preserving in javaStreamPipelineElemType.
 		return javaStreamPipelineElemType(obj, content, elemOf, valOf)
 	case "orElse", "orElseGet", "orElseThrow":
 		// Optional.orElse / orElseGet / orElseThrow return T; receiver may be
