@@ -2150,6 +2150,9 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `list(astuple(box))[0].run()` / `tuple(astuple(box))[0].run()` /
 // `list(asdict(box).values())[0].run()` / `list(d.values())[0].run()` after
 // `d = asdict(box)` / vars / `__dict__` (dict preserves declaration order),
+// `for x in asdict(box).values()` / `for x in d.values()` after d = asdict(box) /
+// vars / `__dict__` / list(...values()) — only when all declaration-order field
+// types agree (homogeneous values; mixed fields fail closed — not a shared elemOf),
 // `xa = astuple(box)[0]` (synthetic `@astuple.box.#i` slots — not `box.#i`, so
 // bare `box[0]` stays unbound for non-indexable dataclasses),
 // plus assignment `xs = list(astuple(box)); xs[0]` (index slots on xs),
@@ -2592,6 +2595,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					} else if et := pythonHomogeneousCtorElem(right, content); et != "" {
 						elemOf[lname] = et
 					} else if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); et != "" {
+						elemOf[lname] = et
+					} else if et := pythonDictViewValuesHomogeneousType(right, content, fieldOf); et != "" {
+						// xs = asdict(box).values() / list(asdict(box).values()) —
+						// homogeneous field values only (mixed fail closed).
 						elemOf[lname] = et
 					}
 				}
@@ -3047,6 +3054,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					break
 				}
 				if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
+					out[ingest.NodeText(left, content)] = true
+				} else if et := pythonDictViewValuesHomogeneousType(right, content, fieldOf); ourReceivers[et] {
+					// for x in asdict(box).values() / vars / __dict__ / d.values()
+					// after d = asdict(box) — only when all field types agree.
 					out[ingest.NodeText(left, content)] = true
 				}
 			case "pattern_list", "tuple_pattern":
@@ -4055,6 +4066,98 @@ func pythonAstupleIndexAccessType(sub *grammar.Node, content []byte, fieldOf map
 	return fieldOf["@astuple."+objLocal+".#"+idxText]
 }
 
+// pythonHomogeneousAstupleFieldType returns the shared field type when every
+// declaration-order slot fieldOf["@astuple.local.#i"] agrees. Empty or mixed
+// slots fail closed (""). Used for for-x-in asdict(...).values() when values
+// are homogeneous (mixed dataclass fields correctly stay unbound).
+func pythonHomogeneousAstupleFieldType(local string, fieldOf map[string]string) string {
+	if local == "" || fieldOf == nil {
+		return ""
+	}
+	prefix := "@astuple." + local + ".#"
+	var shared string
+	count := 0
+	for i := 0; ; i++ {
+		t := fieldOf[prefix+fmt.Sprintf("%d", i)]
+		if t == "" {
+			break
+		}
+		count++
+		if shared == "" {
+			shared = t
+		} else if t != shared {
+			return ""
+		}
+	}
+	if count == 0 {
+		return ""
+	}
+	return shared
+}
+
+// pythonDictViewValuesHomogeneousType recovers the shared element type of
+// asdict(box).values() / vars(box).values() / box.__dict__.values() /
+// d.values() after d = asdict(box) / vars / __dict__ when all declaration-order
+// field types agree (fieldOf @astuple.*.#i). Peels identity wrappers
+// list/tuple/iter/reversed/sorted/set/frozenset/filter that preserve the
+// values view. Mixed field types and non-dict-view forms fail closed ("").
+// Same leaf as for x in d.values() with d: dict[K, A] when values are uniform.
+func pythonDictViewValuesHomogeneousType(n *grammar.Node, content []byte, fieldOf map[string]string) string {
+	if n == nil || fieldOf == nil {
+		return ""
+	}
+	if n.Type() == "parenthesized_expression" {
+		return pythonDictViewValuesHomogeneousType(pythonParenInner(n), content, fieldOf)
+	}
+	if n.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil {
+		return ""
+	}
+	name := pythonSimpleCalleeName(fn, content)
+	// Peel element-preserving wrappers around a values() view.
+	switch name {
+	case "list", "tuple", "iter", "reversed", "sorted", "set", "frozenset":
+		args, ok := pythonCallPositionalArgNodes(n)
+		if !ok || len(args) == 0 {
+			return ""
+		}
+		return pythonDictViewValuesHomogeneousType(args[0], content, fieldOf)
+	case "filter":
+		// filter(pred, iterable) — pred only selects; keep values element type.
+		args, ok := pythonCallPositionalArgNodes(n)
+		if !ok || len(args) < 2 {
+			return ""
+		}
+		return pythonDictViewValuesHomogeneousType(args[1], content, fieldOf)
+	case "values":
+		// asdict(box).values() / vars(box).values() / box.__dict__.values() /
+		// d.values() after d = asdict(box) / vars / __dict__.
+		if fn.Type() != "attribute" {
+			return ""
+		}
+		args, ok := pythonCallPositionalArgNodes(n)
+		if !ok || len(args) != 0 {
+			return ""
+		}
+		obj := ingest.ChildByField(fn, "object")
+		if obj == nil {
+			return ""
+		}
+		var local string
+		if obj.Type() == "identifier" {
+			// Assigned dict-view local: bindFields recorded @astuple.d.#i.
+			local = ingest.NodeText(obj, content)
+		} else {
+			local = pythonDictViewObjectLocal(obj, content)
+		}
+		return pythonHomogeneousAstupleFieldType(local, fieldOf)
+	}
+	return ""
+}
+
 // pythonDictViewValuesSeqLocal recovers the identifier local whose
 // declaration-order field slots are exposed by list/tuple of a dict-view
 // values() chain: list(asdict(box).values()) / tuple(vars(box).values()) /
@@ -4842,6 +4945,7 @@ func pythonAstupleNextFirstField(call *grammar.Node, content []byte, fieldOf map
 //   - d.values() when d = asdict(box) / vars(box) / box.__dict__ (or walrus)
 //     → fieldOf["@astuple.d.#0"] (bindFields on the assigned dict-view local)
 //   - order-preserving wrappers of those (iter/list/tuple)
+//
 // Same leaf as astuple(local)[0] / t[0] / box.a for first field.
 func pythonAstupleFirstFieldType(n *grammar.Node, content []byte, fieldOf map[string]string) string {
 	if n == nil || fieldOf == nil {
