@@ -3079,6 +3079,54 @@ func pythonFuncBodyReturnCtor(fn *grammar.Node, content []byte) string {
 	return found
 }
 
+// pythonSameFileGeneratorYields maps same-file bare generator function names
+// to the concrete yield type leaf:
+//
+//	def gen_a():
+//	    yield A()
+//
+//	async def agen_a():
+//	    a = A()
+//	    yield a
+//
+// Enables next(gen_a()).run() / for a in gen_a(): a.run() under foreign
+// same-leaf methods. @contextmanager / @asynccontextmanager factories are
+// skipped (with-as uses pythonSameFileContextManagerYields). Mixed/non-ctor
+// yields and yield-from fail closed (pythonFuncBodyYieldCtor).
+func pythonSameFileGeneratorYields(root *grammar.Node, content []byte) map[string]string {
+	out := map[string]string{}
+	if root == nil {
+		return out
+	}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		// Skip CM-decorated defs: with-as peels separately; iterating a
+		// contextmanager factory is not the generator-yield product case.
+		if n.Type() == "decorated_definition" && pythonIsContextManagerDecorated(n, content) {
+			return
+		}
+		if n.Type() == "function_definition" || n.Type() == "async_function_definition" {
+			nameN := ingest.ChildByField(n, "name")
+			if nameN != nil && nameN.Type() == "identifier" {
+				name := ingest.NodeText(nameN, content)
+				if name != "" {
+					if tn := pythonFuncBodyYieldCtor(n, content); tn != "" {
+						out[name] = tn
+					}
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	return out
+}
+
 // pythonSameFileContextManagerYields maps same-file @contextmanager /
 // @asynccontextmanager factory names to the concrete yield type leaf:
 //
@@ -3339,6 +3387,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 	}
 	funcReturns = pythonSameFileFuncReturnTypes(root, content)
 	cmYieldOf = pythonSameFileContextManagerYields(root, content)
+	// Same-file bare generators (function* yield A()) → elemOf["@yield.name"]
+	// so next(gen_a()) / for a in gen_a() / g = gen_a(); next(g) peel under
+	// foreign same-leaf methods. @contextmanager factories stay out (with-as).
+	for name, t := range pythonSameFileGeneratorYields(root, content) {
+		if name != "" && t != "" {
+			elemOf["@yield."+name] = t
+		}
+	}
 	fieldIndex := pythonClassFieldIndex(root, content)
 	// Declaration order for positional match class patterns (case Box(xa, xb)).
 	fieldOrder := pythonClassFieldOrder(root, content)
@@ -7974,7 +8030,14 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		// map(A, xs) — element type is A when first arg is a Class identifier;
 		// other map callables fail closed (unknown result type).
 		// chain(xs, ys) / islice(xs, n) — itertools helpers (bare or imported).
+		// gen_a() after same-file def gen_a(): yield A() — yield type via
+		// elemOf["@yield.gen_a"] (see pythonSameFileGeneratorYields).
 		if fn := ingest.ChildByField(right, "function"); fn != nil && fn.Type() == "identifier" {
+			if elemOf != nil {
+				if et := elemOf["@yield."+ingest.NodeText(fn, content)]; et != "" {
+					return et
+				}
+			}
 			switch ingest.NodeText(fn, content) {
 			case "reversed", "sorted", "list", "tuple", "set", "frozenset", "iter", "deque", "Counter", "copy", "deepcopy":
 				// Counter(iterable) keys are the iterable elements (product case).
