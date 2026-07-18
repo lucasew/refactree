@@ -1018,7 +1018,8 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 	}
 	// e.getValue().m() — Map.Entry local value type (entrySet for-var / forEach).
 	// Map.entry(k, new A()).getValue().m() — creation value type (self-contained).
-	// am.firstEntry().getValue().m() — map value type via valOf[am].
+	// am.firstEntry().getValue().m() / am.pollFirstEntry().getValue().m() —
+	// map value type via valOf[am] (NavigableMap entry accessors).
 	if obj.Type() == "method_invocation" {
 		nameN := ingest.ChildByField(obj, "name")
 		if nameN != nil && ingest.NodeText(nameN, content) == "getValue" {
@@ -1169,9 +1170,11 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// / as.removeFirst() / as.removeLast()
 					// / e.getValue() when e is a Map.Entry local
 					// / Map.entry(k, new A()).getValue() / am.firstEntry().getValue()
+					// / am.pollFirstEntry().getValue() / am.ceilingEntry(k).getValue()
 					out[name] = true
 				} else if vt := javaEntryExprValueType(valN, content, elemOf, valOf, entryValOf); vt != "" {
-					// var ea = Map.entry(k, new A()) / am.firstEntry() — Entry of V;
+					// var ea = Map.entry(k, new A()) / am.firstEntry() /
+					// am.pollLastEntry() / am.floorEntry(k) — Entry of V;
 					// track value T for later ea.getValue().m() (entry is not A itself).
 					entryValOf[name] = vt
 				} else if et := javaStreamPipelineElemType(valN, content, elemOf, valOf); et != "" {
@@ -3003,6 +3006,8 @@ func javaMapOfEntriesValueType(call *grammar.Node, content []byte) string {
 //	Map.entry(k, new T(...))  → T (creation value; key ignored)
 //	am.firstEntry()           → valOf[am] (NavigableMap entry endpoints)
 //	am.lastEntry()            → valOf[am]
+//	am.pollFirstEntry() / am.pollLastEntry() → valOf[am]
+//	am.ceilingEntry(k) / am.floorEntry(k) / am.higherEntry(k) / am.lowerEntry(k) → valOf[am]
 //
 // Used for e.getValue() / var ea = Map.entry(...) / var ea = am.firstEntry() so
 // method rename hits value call sites under foreign same-leaf methods.
@@ -3040,9 +3045,12 @@ func javaEntryExprValueType(obj *grammar.Node, content []byte, elemOf, valOf, en
 		case "entry":
 			// Map.entry(k, new T(...)) — value type from second arg creation.
 			return javaMapEntryCreationValueType(obj, content)
-		case "firstEntry", "lastEntry":
-			// NavigableMap.firstEntry/lastEntry → Map.Entry<K,V>; V from map value type.
-			// pollFirstEntry/ceilingEntry/… intentionally omitted (narrow product edge).
+		case "firstEntry", "lastEntry",
+			// NavigableMap poll/search entry accessors also return Map.Entry<K,V>;
+			// V from map value type (same path as firstEntry/lastEntry).
+			"pollFirstEntry", "pollLastEntry",
+			"ceilingEntry", "floorEntry", "higherEntry", "lowerEntry":
+			// NavigableMap.*Entry → Map.Entry<K,V>; V from map value type.
 			return javaMapPipelineValueType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
 		default:
 			return ""
@@ -3420,6 +3428,7 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	e.getValue()              → entryValOf[e] (Map.Entry local from entrySet)
 //	Map.entry(k, new T()).getValue() → T
 //	am.firstEntry().getValue() / am.lastEntry().getValue() → valOf[am]
+//	am.pollFirstEntry()/pollLastEntry()/ceilingEntry(k)/… .getValue() → valOf[am]
 //
 // Optional.get() also works when Optional<A> is tracked in elemOf (single type arg).
 // Fail closed on other methods / unknown receivers.
