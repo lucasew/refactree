@@ -1905,6 +1905,7 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `for a, b in zip(*[xs, ys])` / `for a, b in zip(*(xs, ys))`,
 // `for a, b in zip_longest(xs, ys)` / `for a, b in itertools.zip_longest(xs, ys)`,
 // `for a in reversed/sorted/list/iter(items)`,
+// `for a in set(items)` / `for a in frozenset(items)`,
 // `for a in filter(pred, items)` / `for a in map(A, names)`,
 // `for a in chain(xs, ys)` / `for a in itertools.chain(xs, ys)`,
 // `for a in islice(xs, n)` / `for a in itertools.islice(xs, n)`,
@@ -2816,17 +2817,19 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		// next(x for x in items) / for a in [x for x in items] — identity body only.
 		return pythonComprehensionElemType(right, content, elemOf, egElems)
 	case "call":
-		// reversed(xs) / sorted(xs) / list(xs) / tuple(xs) / set(xs) / iter(xs) /
-		// deque(xs) / Counter(xs) — element type equals the wrapped iterable.
-		// Nested wrappers recurse. filter(pred, xs) — element type equals xs
-		// (pred only selects). map(A, xs) — element type is A when first arg is
-		// a Class identifier; other map callables fail closed (unknown result type).
+		// reversed(xs) / sorted(xs) / list(xs) / tuple(xs) / set(xs) /
+		// frozenset(xs) / iter(xs) / deque(xs) / Counter(xs) — element type
+		// equals the wrapped iterable. Nested wrappers recurse.
+		// filter(pred, xs) — element type equals xs (pred only selects).
+		// map(A, xs) — element type is A when first arg is a Class identifier;
+		// other map callables fail closed (unknown result type).
 		// chain(xs, ys) / islice(xs, n) — itertools helpers (bare or imported).
 		if fn := ingest.ChildByField(right, "function"); fn != nil && fn.Type() == "identifier" {
 			switch ingest.NodeText(fn, content) {
-			case "reversed", "sorted", "list", "tuple", "set", "iter", "deque", "Counter":
+			case "reversed", "sorted", "list", "tuple", "set", "frozenset", "iter", "deque", "Counter":
 				// Counter(iterable) keys are the iterable elements (product case).
-				// Mapping/kwargs constructors fail closed when untyped / non-iterable.
+				// frozenset(iterable) same as set (immutable). Mapping/kwargs
+				// constructors fail closed when untyped / non-iterable.
 				args, ok := pythonCallPositionalArgNodes(right)
 				if !ok || len(args) == 0 {
 					return ""
