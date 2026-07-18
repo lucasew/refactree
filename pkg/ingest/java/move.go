@@ -1443,6 +1443,8 @@ func javaStreamElementLambdaMethod(method string) bool {
 	case "map", "mapToInt", "mapToLong", "mapToDouble",
 		"flatMap", "flatMapToInt", "flatMapToLong", "flatMapToDouble",
 		"filter", "peek", "forEach", "forEachOrdered", "forEachRemaining",
+		// Spliterator.tryAdvance(Consumer) — same element Consumer as forEachRemaining.
+		"tryAdvance",
 		"takeWhile", "dropWhile",
 		"anyMatch", "allMatch", "noneMatch",
 		"removeIf", "ifPresent", "ifPresentOrElse",
@@ -1466,7 +1468,7 @@ func javaMapValueBiLambdaMethod(method string) bool {
 }
 
 // javaStreamPipelineElemType recovers the element type of a stream pipeline object:
-// as / as.stream() / as.iterator() / as.stream().filter(...) → elemOf[as],
+// as / as.stream() / as.iterator() / as.spliterator() / as.stream().filter(...) → elemOf[as],
 // as.reversed() / as.reversed().stream() → elemOf[as] (SequencedCollection/List view),
 // as.stream().findFirst() / findAny() / min() / max() / reduce(op) → same element
 // (Optional wraps T; ifPresent / orElse use T),
@@ -1538,6 +1540,9 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// listIterator() returns ListIterator<E> of the same element type
 			// (List; previous/next yield E like Iterator.next).
 			"listIterator",
+			// spliterator() returns Spliterator<E> of the same element type
+			// (Collection/Stream; tryAdvance/forEachRemaining yield E).
+			"spliterator",
 			// elements() returns Enumeration of the collection elements
 			// (Vector; Hashtable/Dictionary use value type via special case below).
 			"elements",
@@ -3464,7 +3469,7 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	oa.orElse(d) / oa.orElseGet(s) / oa.orElseThrow([s]) → elemOf[oa]
 //	  (Optional<A>; also findFirst().orElse / findFirst().orElseThrow)
 //	oa.get() / as.stream().findFirst().get() / Optional.of(new A()).get() → T
-//	  (zero-arg Optional.get; List.get(i)/Map.get(k) stay identifier-only)
+//	  (zero-arg Optional.get; also List.of(new A()).get(i) / toList().get(i) via pipeline)
 //	Collections.min(as) / Collections.max(as[, cmp]) → elemOf[as]
 //	stream.reduce(identity, op[, combiner]) → stream element type (returns T/U)
 //	e.getValue() / e.setValue(v) → entryValOf[e] (Map.Entry; setValue returns previous V)
@@ -3560,12 +3565,15 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 				return elemOf[id]
 			}
 		}
-		// Optional.get() on a pipeline — zero-arg only so List.get(i) / Map.get(k)
-		// chained forms stay fail-closed:
+		// Optional.get() (zero-arg) and List.get(i) on factory/pipeline receivers:
 		//   as.stream().findFirst().get() / as.findAny().get() /
 		//   Optional.of(new A()).get() / Optional.ofNullable(new A()).get()
-		// Pipeline typing already treats findFirst/findAny/Optional.of as T.
-		if method == "get" && javaMethodCallArgCount(val) == 0 {
+		//   List.of(new A()).get(0) / Arrays.asList(new A()).get(0) /
+		//   Collections.singletonList(new A()).get(0) / as.stream().toList().get(0)
+		// Pipeline typing already treats findFirst/findAny/Optional.of/List.of as T.
+		// Map.get(k) on non-list pipelines fails closed (Map.of not in static-collection
+		// of; toMap collect fails closed for element pipeline).
+		if method == "get" {
 			return javaStreamPipelineElemType(obj, content, elemOf, valOf)
 		}
 		return ""
