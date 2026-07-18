@@ -1890,8 +1890,13 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 		return pythonRenameByTypeMaps(name, ourReceivers, foreignReceivers, typedLocals)
 	}
 	// box.a.run() — dataclass/class field access when box is a typed local.
+	// replace(box).a.run() / dataclasses.replace(box).a.run() — same field leaf
+	// as box.a (return type of replace is the dataclass of its first arg).
 	if obj.Type() == "attribute" {
 		if ft := pythonFieldAccessType(obj, content, fieldOf); ft != "" {
+			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
+		}
+		if ft := pythonReplaceFieldAccessType(obj, content, fieldOf); ft != "" {
 			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 		}
 		return len(foreignReceivers) == 0
@@ -2061,7 +2066,10 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // constructors (`Box = namedtuple("Box", ["a","b"]); box = Box(A(), B())`),
 // including positional index `box[0].run()` / `xa = box[0]` (fieldOf["box.#0"]),
 // `xa = box["a"]` / `box["a"].run()` / `xa = box.get("a")` for TypedDict-style
-// string keys of the same annotated fields (fieldOf).
+// string keys of the same annotated fields (fieldOf),
+// `new = replace(box)` / `dataclasses.replace(box)` / walrus — same object type
+// as box (fieldOf for `new.a.run()`), plus direct chains `replace(box).a.run()`
+// and `xa = replace(box).a` (field leaf of first positional arg).
 // fieldOf maps "local.field" → field type leaf for class field access.
 // elemOf maps collection locals → element type leaf (list[A] / deque[A] /
 // dict value / Queue[A] → "A") for direct access chains under foreign same-leaf.
@@ -2362,6 +2370,16 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							out[lname] = true
 						}
 					}
+					// new = replace(box) / dataclasses.replace(box) — same object type
+					// as first positional arg (fieldOf for new.a.run() under foreign
+					// same-leaf methods). Keyword field rewrites stay in ExtraRename.
+					if tn := pythonReplaceCallObjectType(right, content, typeOf); tn != "" {
+						typeOf[lname] = tn
+						bindFields(lname, tn)
+						if ourReceivers[tn] {
+							out[lname] = true
+						}
+					}
 				}
 				// a = items[0] / a = d[k] / a = list(items)[0] — element/value of collection.
 				// a = item[1] when item from enumerate/zip pair (pairSlots).
@@ -2393,8 +2411,15 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				}
 				// xa = box.a — dataclass/class field access when box is a typed local
 				// with annotated field a: A (under foreign same-leaf methods).
+				// xa = replace(box).a / dataclasses.replace(box).a — field of first arg.
 				if right != nil && right.Type() == "attribute" {
 					if ft := pythonFieldAccessType(right, content, fieldOf); ft != "" {
+						typeOf[lname] = ft
+						bindFields(lname, ft)
+						if ourReceivers[ft] {
+							out[lname] = true
+						}
+					} else if ft := pythonReplaceFieldAccessType(right, content, fieldOf); ft != "" {
 						typeOf[lname] = ft
 						bindFields(lname, ft)
 						if ourReceivers[ft] {
@@ -2668,6 +2693,15 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						out[lname] = true
 					}
 				}
+				// new := replace(box) / dataclasses.replace(box) — same object type as
+				// first positional arg (fieldOf for new.a.run()).
+				if tn := pythonReplaceCallObjectType(valueN, content, typeOf); tn != "" {
+					typeOf[lname] = tn
+					bindFields(lname, tn)
+					if ourReceivers[tn] {
+						out[lname] = true
+					}
+				}
 			}
 			// a := items[0] / a := d[k] — element/value of known collection.
 			// pair := pairs[0] / pair := list(zip(...))[0] — pairSlots (+ shared elemOf).
@@ -2695,8 +2729,15 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				}
 			}
 			// xa := box.a — dataclass/class field access (same as plain assignment).
+			// xa := replace(box).a / dataclasses.replace(box).a — field of first arg.
 			if valueN.Type() == "attribute" {
 				if ft := pythonFieldAccessType(valueN, content, fieldOf); ft != "" {
+					typeOf[lname] = ft
+					bindFields(lname, ft)
+					if ourReceivers[ft] {
+						out[lname] = true
+					}
+				} else if ft := pythonReplaceFieldAccessType(valueN, content, fieldOf); ft != "" {
 					typeOf[lname] = ft
 					bindFields(lname, ft)
 					if ourReceivers[ft] {
@@ -3485,6 +3526,50 @@ func pythonCopyCallObjectType(call *grammar.Node, content []byte, typeOf map[str
 		return ""
 	}
 	return pythonObjectExprType(args[0], content, typeOf)
+}
+
+// pythonReplaceCallObjectType recovers T from replace(x) / dataclasses.replace(x)
+// (leaf name "replace", same as pythonReplaceKeywordEdits) when the first
+// positional arg is a typed object local or Class() ctor. Return type is the
+// same as that arg (dataclasses.replace). Keywords after the object are ignored
+// for typing. Non-identifier/non-ctor first args and other callees fail closed.
+func pythonReplaceCallObjectType(call *grammar.Node, content []byte, typeOf map[string]string) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || pythonSimpleCalleeName(fn, content) != "replace" {
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) == 0 {
+		return ""
+	}
+	return pythonObjectExprType(args[0], content, typeOf)
+}
+
+// pythonReplaceFieldAccessType recovers T from replace(box).a /
+// dataclasses.replace(box).a when box is a typed local with annotated field a of
+// type T (fieldOf; same leaf as box.a). First positional arg must be an
+// identifier local; keyword-only object / non-replace callees fail closed.
+func pythonReplaceFieldAccessType(attr *grammar.Node, content []byte, fieldOf map[string]string) string {
+	if attr == nil || attr.Type() != "attribute" || fieldOf == nil {
+		return ""
+	}
+	obj := ingest.ChildByField(attr, "object")
+	field := ingest.ChildByField(attr, "attribute")
+	if obj == nil || field == nil || obj.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(obj, "function")
+	if fn == nil || pythonSimpleCalleeName(fn, content) != "replace" {
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(obj)
+	if !ok || len(args) == 0 || args[0].Type() != "identifier" {
+		return ""
+	}
+	return fieldOf[ingest.NodeText(args[0], content)+"."+ingest.NodeText(field, content)]
 }
 
 // pythonRecordKeyAccessType recovers T from box["a"] / box.get("a") /
