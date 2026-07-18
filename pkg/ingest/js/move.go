@@ -1516,11 +1516,15 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 	// await Promise.resolve(new A() / a / makeA()) / Promise.resolve(...) — identity peels
 	// under foreign same-leaf methods (same leaf as const a = await …; a.run()).
 	// Also Promise.race/any([new A()]) value peels (uniform array element type).
+	// structuredClone(new A()) / Object.assign(new A()) — identity first-arg peels.
 	if obj.Type() == "await_expression" || obj.Type() == "call_expression" {
 		if t := jsPromiseResolveArgType(obj, content, typedLocals, factories); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 		if t := jsPromiseRaceValueType(obj, content, typedLocals, factories); t != "" {
+			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
+		if t := jsIdentityCloneType(obj, content, typedLocals, factories); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 	}
@@ -1608,6 +1612,9 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 					} else if t := jsPromiseAllSettledSubscriptType(valN, content, out, factories); ourReceivers[t] {
 						// const r = (await Promise.allSettled([new A()]))[0]
 						settledOf[ingest.NodeText(nameN, content)] = t
+					} else if t := jsIdentityCloneType(valN, content, out, factories); ourReceivers[t] {
+						// const a = structuredClone(new A()) / Object.assign(new A()[, …])
+						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsGeneratorCallYieldType(valN, content, generators, genLocals); ourReceivers[t] {
 						// const ga = genA() / const ga = agenA() — generator instance.
 						genLocals[ingest.NodeText(nameN, content)] = t
@@ -2659,4 +2666,82 @@ func jsGeneratorNextValueType(n *grammar.Node, content []byte, generators, genLo
 	}
 	obj := ingest.ChildByField(n, "object")
 	return jsGeneratorNextResultType(obj, content, generators, genLocals)
+}
+
+// jsIdentityCloneType recovers T from structuredClone(x) / Object.assign(x[, …])
+// when the first positional arg peels to T (new T() / typed local / factory).
+// structuredClone returns a structured copy of its argument; Object.assign
+// returns its first argument (target). Extra assign sources ignored.
+// Non-matching callees / missing first arg fail closed.
+func jsIdentityCloneType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	// await structuredClone(...) — peel through await.
+	if n.Type() == "await_expression" {
+		var arg *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch == nil || ch.Type() == "await" {
+				continue
+			}
+			arg = ch
+			break
+		}
+		return jsIdentityCloneType(arg, content, typedLocals, factories)
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	args := ingest.ChildByField(n, "arguments")
+	if fn == nil || args == nil {
+		return ""
+	}
+	ok := false
+	switch fn.Type() {
+	case "identifier":
+		// structuredClone(x)
+		if ingest.NodeText(fn, content) == "structuredClone" {
+			ok = true
+		}
+	case "member_expression", "member_expression_optional", "optional_chain":
+		// Object.assign(x[, …])
+		prop := ingest.ChildByField(fn, "property")
+		obj := ingest.ChildByField(fn, "object")
+		if prop != nil && obj != nil &&
+			ingest.NodeText(prop, content) == "assign" &&
+			obj.Type() == "identifier" && ingest.NodeText(obj, content) == "Object" {
+			ok = true
+		}
+	}
+	if !ok {
+		return ""
+	}
+	// First positional argument.
+	var first *grammar.Node
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		first = ch
+		break
+	}
+	if first == nil {
+		return ""
+	}
+	return jsExprConcreteType(first, content, typedLocals, factories)
 }
