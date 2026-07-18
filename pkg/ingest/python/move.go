@@ -2259,10 +2259,10 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // plus assignment `xs = list(astuple(box)); xs[0]` (index slots on xs),
 // plus unpack `xa, xb = astuple(box)` / `xa, xb = list(astuple(box))` /
 // `xa, *rest = astuple(box)` (per-slot field types; *rest of mixed tuple fails closed),
-// `sorted/min/max(items, key=lambda x: x.m())` / `items.sort(key=lambda x: x.m())` /
+// `sorted/min/max/groupby(items, key=lambda x: x.m())` / `items.sort(key=lambda x: x.m())` /
 // `nlargest/nsmallest(n, items, key=lambda x: x.m())` / `heapq.nlargest(...)` /
 // `map/filter/takewhile/dropwhile/filterfalse(lambda x: x.m(), items)` /
-// `itertools.takewhile/...` — untyped unary lambda params from the iterable
+// `itertools.takewhile/groupby/...` — untyped unary lambda params from the iterable
 // element type (under foreign same-leaf).
 // fieldOf maps "local.field" → field type leaf for class field access.
 // elemOf maps collection locals → element type leaf (list[A] / deque[A] /
@@ -3347,7 +3347,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				}
 			}
 		case "call":
-			// sorted/min/max/nlargest/nsmallest(..., key=lambda x: x.m()) /
+			// sorted/min/max/groupby/nlargest/nsmallest(..., key=lambda x: x.m()) /
 			// items.sort(key=lambda x: x.m()) /
 			// map/filter/takewhile/dropwhile/filterfalse(lambda x: x.m(), items) —
 			// untyped unary lambda params from the iterable element type.
@@ -3417,10 +3417,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 }
 
 // pythonBindIterableLambdaParams types untyped unary lambda parameters when the
-// call is sorted/min/max/nlargest/nsmallest with key=lambda, collection.sort(key=lambda),
-// or map/filter/takewhile/dropwhile/filterfalse with a lambda over a known iterable
-// element type of ourReceivers. Bare and module-qualified forms (itertools./heapq.)
-// use the leaf callee name. Multi-param lambdas and non-lambda callables fail closed.
+// call is sorted/min/max/groupby/nlargest/nsmallest with key=lambda,
+// collection.sort(key=lambda), or map/filter/takewhile/dropwhile/filterfalse with
+// a lambda over a known iterable element type of ourReceivers. Bare and
+// module-qualified forms (itertools./heapq.) use the leaf callee name.
+// Multi-param lambdas and non-lambda callables fail closed.
 // Foreign element types are not bound (same as for-loop targets).
 func pythonBindIterableLambdaParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, elemOf, egElems, typeOf map[string]string, out map[string]bool) {
 	if call == nil || call.Type() != "call" || out == nil {
@@ -3447,9 +3448,10 @@ func pythonBindIterableLambdaParams(call *grammar.Node, content []byte, ourRecei
 		}
 	}
 	switch pythonSimpleCalleeName(fn, content) {
-	case "sorted", "min", "max":
-		// sorted/min/max(iterable, key=lambda x: ...) — 1st positional is iterable;
-		// key= lambda param is that element type (kwargs like reverse= ignored).
+	case "sorted", "min", "max", "groupby":
+		// sorted/min/max/groupby(iterable, key=lambda x: ...) — 1st positional is
+		// iterable; key= lambda param is that element type (kwargs like reverse=
+		// ignored). itertools.groupby same leaf via pythonSimpleCalleeName.
 		args, ok := pythonCallPositionalArgNodes(call)
 		if !ok || len(args) == 0 {
 			return
