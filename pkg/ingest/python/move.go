@@ -1866,6 +1866,8 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	// object copy of a dict-view field key (same leaf as asdict(box)["a"].run()).
 	// copy.copy(box.a).run() / copy.copy(item).run() — field / typed-local arg
 	// (same leaf as box.a.run() / a = copy.copy(item); a.run()).
+	// next(iter(items)).run() / next(items).run() — iterable element (same leaf as
+	// a = next(iter(items)); a.run()). Default arg ignored (same as assignment).
 	// items.popleft().run() / d.get(k).run() / q.get().run() / items.pop().run() /
 	// list(items).pop().run() — collection/queue element accessors (same leaf as
 	// a = items.popleft(); a.run()). Unknown call receivers: unique-leaf only.
@@ -1882,7 +1884,16 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 			}
 			if fn.Type() == "identifier" {
-				return pythonRenameByTypeMaps(ingest.NodeText(fn, content), ourReceivers, foreignReceivers, nil)
+				name := ingest.NodeText(fn, content)
+				// next(iter(items)).run() / next(items).run() / next(reversed(items)).run()
+				// — before Class() ctor path (function is bare "next", not a class).
+				// Element type of the iterable arg (same path as assignment binding).
+				if name == "next" {
+					if et := pythonNextElemType(obj, content, elemOf, nil, typeOf); et != "" {
+						return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+					}
+				}
+				return pythonRenameByTypeMaps(name, ourReceivers, foreignReceivers, nil)
 			}
 			if ft := pythonRecordKeyAccessType(obj, content, fieldOf); ft != "" {
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
@@ -4706,9 +4717,10 @@ func pythonExceptClauseIsStar(n *grammar.Node) bool {
 
 // pythonNextElemType recovers the element type yielded by next(iterable[, default]).
 // Uses the first positional arg's iterable element type (next(iter(items)) → A when
-// items: list[A]; next(x for x in items) → A for identity genexps). Fails closed on
-// splat args or empty call. Default arg is ignored (result may be union with default
-// at runtime; we still bind the element type).
+// items: list[A]; next(x for x in items) → A for identity genexps). Used for both
+// assignment (`a = next(...)`) and direct chains (`next(...).run()`). Fails closed
+// on splat args or empty call. Default arg is ignored (result may be union with
+// default at runtime; we still bind the element type).
 func pythonNextElemType(call *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
 	args, ok := pythonCallPositionalArgNodes(call)
 	if !ok || len(args) == 0 {
