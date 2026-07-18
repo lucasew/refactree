@@ -1914,6 +1914,8 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `for a, b in zip(*[xs, ys])` / `for a, b in zip(*(xs, ys))`,
 // `for a, b in zip_longest(xs, ys)` / `for a, b in itertools.zip_longest(xs, ys)`,
 // `for a, b in pairwise(xs)` / `for a, b in itertools.pairwise(xs)`,
+// `for a, b in batched(xs, n)` / `for a, b in itertools.batched(xs, n)` /
+// `for batch in batched(xs, n): for a in batch` (batch → elemOf; n/strict ignored),
 // `for k, g in groupby(xs)` / `for k, g in itertools.groupby(xs)` —
 // group g is an iterable of xs elements (key untyped; key= ignored),
 // `for a in reversed/sorted/list/iter(items)`,
@@ -2326,6 +2328,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// for a, b in pairwise / itertools.pairwise /
 			// for a, b in product / itertools.product /
 			// for a, b in combinations/permutations / itertools.* /
+			// for a, b in batched / itertools.batched (each slot → elem; n ignored) /
+			// for batch in batched / itertools.batched (batch → elemOf) /
 			// for k, g in groupby / itertools.groupby (g → elemOf; key untyped) /
 			// for a in reversed/sorted/list/iter(items) /
 			// for a in filter(pred, items) / for a in map(A, names) /
@@ -2347,6 +2351,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			}
 			switch left.Type() {
 			case "identifier":
+				// for batch in batched(xs, n) / itertools.batched(...) —
+				// batch is a tuple of xs elements (elemOf), not an element itself.
+				// Bind into elemOf so nested `for a in batch` / next(batch) type.
+				if et := pythonBatchedElemType(right, content, elemOf, egElems, typeOf); et != "" {
+					// Foreign element types too — shadow prior same-name collections.
+					elemOf[ingest.NodeText(left, content)] = et
+					break
+				}
 				if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 					out[ingest.NodeText(left, content)] = true
 				}
@@ -2379,6 +2391,16 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// combinations_with_replacement(items, r) / itertools.* —
 				// every unpack slot is an element of the iterable (r ignored).
 				if et := pythonCombPermElemType(right, content, elemOf, egElems, typeOf); et != "" {
+					for _, name := range targets {
+						if ourReceivers[et] {
+							out[name] = true
+						}
+					}
+					break
+				}
+				// for a, b in batched(items, n) / itertools.batched(...) —
+				// every unpack slot is an element of the iterable (n/strict ignored).
+				if et := pythonBatchedElemType(right, content, elemOf, egElems, typeOf); et != "" {
 					for _, name := range targets {
 						if ourReceivers[et] {
 							out[name] = true
@@ -3497,6 +3519,48 @@ func pythonDictPopitemSubscriptValueType(sub *grammar.Node, content []byte, elem
 		val = pythonParenInner(val)
 	}
 	return pythonDictPopitemValueType(val, content, elemOf)
+}
+
+// pythonBatchedElemType recovers the element type of batches from
+// batched(iterable, n[, *]) / itertools.batched(...).
+// Each batch is a tuple of n consecutive elements of the 1st positional arg
+// (n and strict= ignored). Bare or itertools-qualified only; other forms fail closed.
+// Not registered in pythonIterableElemType — bare `for x in batched(xs, n)` yields
+// tuples, not elements. Callers bind the batch into elemOf for nested
+// `for a in batch` / next(batch), or type every unpack slot as the element.
+func pythonBatchedElemType(right *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
+	if right == nil || right.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(right, "function")
+	if fn == nil {
+		return ""
+	}
+	switch fn.Type() {
+	case "identifier":
+		if ingest.NodeText(fn, content) != "batched" {
+			return ""
+		}
+	case "attribute":
+		objN := ingest.ChildByField(fn, "object")
+		attrN := ingest.ChildByField(fn, "attribute")
+		if objN == nil || attrN == nil || objN.Type() != "identifier" {
+			return ""
+		}
+		if ingest.NodeText(objN, content) != "itertools" {
+			return ""
+		}
+		if ingest.NodeText(attrN, content) != "batched" {
+			return ""
+		}
+	default:
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(right)
+	if !ok || len(args) == 0 {
+		return ""
+	}
+	return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
 }
 
 // pythonGroupbyGroupElemType recovers the element type of the group iterator
