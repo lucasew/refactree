@@ -1571,6 +1571,11 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 			// identity then peels to resolved value T under foreign same-leaf.
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
+		if t := jsPromiseFinallyType(obj, content, typedLocals, factories); t != "" {
+			// Promise.resolve(new A()).finally(() => {}) / await …finally —
+			// finally is identity for the resolved value under foreign same-leaf.
+			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
 	}
 	// (await Promise.all([new A()]))[0].run() / [new A()][0].run() /
 	// Array.from([new A()])[0].run() / Array.of(new A())[0].run() /
@@ -1805,6 +1810,9 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsPromiseThenIdentityType(valN, content, out, factories); ourReceivers[t] {
 						// const a = await Promise.resolve(new A()).then(x => x)
+						out[ingest.NodeText(nameN, content)] = t
+					} else if t := jsPromiseFinallyType(valN, content, out, factories); ourReceivers[t] {
+						// const a = await Promise.resolve(new A()).finally(() => {})
 						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsIteratorSourceYieldType(valN, content, generators, genLocals, arrayLocals, out, factories, mapLocals, entryArrayLocals, setLocals); ourReceivers[t] {
 						// const ga = genA() / const ia = [new A()].values() /
@@ -2170,12 +2178,15 @@ func jsPromiseResolveArgType(n *grammar.Node, content []byte, typedLocals, facto
 	return ""
 }
 
-// jsBindForEachParams types the first parameter of
-// map.forEach((v) => …) / arr.forEach((v) => …) / set.forEach((v) => …) /
-// .forEach(function(v){…}) when the receiver peels to a Map of value T, array
-// of element T, or Set of element T (our receivers only). Enables
-// new Map([[k, new A()]]).forEach((v) => v.run()), [new A()].forEach((v) => v.run()),
-// and new Set([new A()]).forEach((v) => v.run()) under foreign same-leaf methods;
+// jsBindForEachParams types the first parameter of array/Map/Set element
+// callbacks when the receiver peels to value/element T (our receivers only):
+//   - forEach: Map value / array element / Set element
+//   - some / every / filter / map / find / findLast / flatMap: array element only
+//
+// Enables new Map([[k, new A()]]).forEach((v) => v.run()),
+// [new A()].forEach((v) => v.run()), new Set([new A()]).forEach((v) => v.run()),
+// [new A()].some/every/filter/map/find((v) => v.run()), and
+// [new A()].flatMap((v) => … v.run() …) under foreign same-leaf methods;
 // B preserved. Only the value/element slot binds (key / index / thisArg ignored).
 func jsBindForEachParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, out, arrayLocals, factories, mapLocals, entryArrayLocals, setLocals map[string]string) {
 	if call == nil || call.Type() != "call_expression" || out == nil {
@@ -2186,18 +2197,34 @@ func jsBindForEachParams(call *grammar.Node, content []byte, ourReceivers map[st
 		return
 	}
 	prop := ingest.ChildByField(fn, "property")
-	if prop == nil || ingest.NodeText(prop, content) != "forEach" {
+	if prop == nil {
+		return
+	}
+	method := ingest.NodeText(prop, content)
+	// Methods whose first callback param is the element/value.
+	arrayOnly := false
+	switch method {
+	case "forEach":
+		// Map / array / Set
+	case "some", "every", "filter", "map", "find", "findLast", "flatMap":
+		arrayOnly = true
+	default:
 		return
 	}
 	obj := ingest.ChildByField(fn, "object")
 	// Map value type, array element type, or Set element type — our receivers only.
 	valueT := ""
-	if t := jsMapSourceValueType(obj, content, out, factories, mapLocals, entryArrayLocals); ourReceivers[t] {
-		valueT = t
-	} else if t := jsArraySourceElemType(obj, content, arrayLocals, out, factories); ourReceivers[t] {
-		valueT = t
-	} else if t := jsSetSourceValueType(obj, content, arrayLocals, out, factories, setLocals); ourReceivers[t] {
-		valueT = t
+	if !arrayOnly {
+		if t := jsMapSourceValueType(obj, content, out, factories, mapLocals, entryArrayLocals); ourReceivers[t] {
+			valueT = t
+		} else if t := jsSetSourceValueType(obj, content, arrayLocals, out, factories, setLocals); ourReceivers[t] {
+			valueT = t
+		}
+	}
+	if valueT == "" {
+		if t := jsArraySourceElemType(obj, content, arrayLocals, out, factories); ourReceivers[t] {
+			valueT = t
+		}
 	}
 	if valueT == "" {
 		return
@@ -3086,16 +3113,16 @@ func jsArraySpreadElemType(n *grammar.Node, content []byte, arrayLocals, typedLo
 
 // jsArrayIdentityElemType recovers T from arr.slice(…) / arr.concat(…) /
 // arr.toSpliced(…) / arr.toReversed() / arr.toSorted(…) / arr.copyWithin(…) /
-// arr.fill(val) / arr.with(i, val) / arr.filter(pred) / arr.map(x => x)
-// when the receiver peels to uniform element type T and any
-// inserted/concatenated/replaced/filled values also peel to T.
+// arr.fill(val) / arr.with(i, val) / arr.filter(pred) / arr.map(x => x) /
+// arr.flatMap(x => [x]) when the receiver peels to uniform element type T and
+// any inserted/concatenated/replaced/filled values also peel to T.
 // Enables [new A()].slice()[0].run() / as.concat([new A()])[0].run() /
 // [new A()].toSpliced(0, 0)[0].run() / [new A()].toReversed()[0].run() /
 // [new A()].toSorted()[0].run() / [new A()].copyWithin(0)[0].run() /
 // [new A()].fill(new A())[0].run() / [new A()].with(0, new A())[0].run() /
-// [new A()].filter(pred)[0].run() / [new A()].map(x => x)[0].run()
-// under foreign same-leaf methods.
-// Mixed concat/toSpliced/with/fill inserts and non-identity map fail closed.
+// [new A()].filter(pred)[0].run() / [new A()].map(x => x)[0].run() /
+// [new A()].flatMap(x => [x])[0].run() under foreign same-leaf methods.
+// Mixed concat/toSpliced/with/fill inserts and non-identity map/flatMap fail closed.
 // filter predicate body ignored (not type-changing for uniform arrays).
 func jsArrayIdentityElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string) string {
 	if n == nil || n.Type() != "call_expression" {
@@ -3158,6 +3185,28 @@ func jsArrayIdentityElemType(n *grammar.Node, content []byte, arrayLocals, typed
 			}
 		}
 		if count < 1 || cb == nil || !jsIsIdentityCallback(cb, content) {
+			return ""
+		}
+		return jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories)
+	case "flatMap":
+		// arr.flatMap(fn) only when fn is identity-array of its first param
+		// (x => [x]). One-level flatten of [T] yields T. Non-identity fail closed.
+		if args == nil {
+			return ""
+		}
+		var cb *grammar.Node
+		count := 0
+		for i := uint32(0); i < args.ChildCount(); i++ {
+			ch := args.Child(i)
+			if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+				continue
+			}
+			count++
+			if cb == nil {
+				cb = ch
+			}
+		}
+		if count < 1 || cb == nil || !jsIsIdentityArrayCallback(cb, content) {
 			return ""
 		}
 		return jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories)
@@ -5057,6 +5106,51 @@ func jsIsIdentityCallback(cb *grammar.Node, content []byte) bool {
 	return jsCallbackReturnedParamIndex(cb, content) == 0
 }
 
+// jsIsIdentityArrayCallback reports whether cb is an identity-array of its first
+// formal parameter: x => [x] / (x) => [x] / (x) => { return [x] } /
+// function(x){ return [x] }. Sole return must be a one-element array whose only
+// element is the first formal param. Multi-element / non-ident / nested fail closed.
+func jsIsIdentityArrayCallback(cb *grammar.Node, content []byte) bool {
+	params := jsCallbackParamNames(cb, content)
+	if len(params) == 0 {
+		return false
+	}
+	first := params[0]
+	ret := jsCallbackSoleReturnExpr(cb, content)
+	if ret == nil {
+		return false
+	}
+	for ret != nil && ret.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < ret.ChildCount(); i++ {
+			ch := ret.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		ret = inner
+	}
+	if ret == nil || ret.Type() != "array" {
+		return false
+	}
+	var only *grammar.Node
+	count := 0
+	for i := uint32(0); i < ret.ChildCount(); i++ {
+		ch := ret.Child(i)
+		if ch == nil || ch.Type() == "[" || ch.Type() == "]" || ch.Type() == "," {
+			continue
+		}
+		count++
+		only = ch
+	}
+	if count != 1 || only == nil || only.Type() != "identifier" {
+		return false
+	}
+	return ingest.NodeText(only, content) == first
+}
+
 // jsCallbackReturnedParamIndex returns the 0-based index of the formal param
 // that is the sole return of cb, or -1 if cb is not a pure param-return
 // identity (x => x / (a,b)=>a / (a,b)=>{return b}). Nested functions ignored.
@@ -5164,19 +5258,19 @@ func jsCallbackParamNames(cb *grammar.Node, content []byte) []string {
 	return nil
 }
 
-// jsCallbackSoleReturnIdent recovers the identifier name returned by cb when
-// the body is a pure identity return: expression body `x` / `(x)`, or a
-// statement block with a single `return x` (no other statements). Nested
-// functions fail closed. Empty / multi-statement / non-ident returns fail closed.
-func jsCallbackSoleReturnIdent(cb *grammar.Node, content []byte) string {
+// jsCallbackSoleReturnExpr recovers the sole return expression of cb when the
+// body is a pure expression body or a single `return <expr>` statement block.
+// Nested functions / multi-statement / empty fail closed. Parentheses peeled
+// once around expression bodies only (callers may peel further).
+func jsCallbackSoleReturnExpr(cb *grammar.Node, content []byte) *grammar.Node {
 	if cb == nil {
-		return ""
+		return nil
 	}
 	body := ingest.ChildByField(cb, "body")
 	if body == nil {
-		return ""
+		return nil
 	}
-	// Peel outer parentheses: (x)
+	// Peel outer parentheses: (x) / ([x])
 	for body != nil && body.Type() == "parenthesized_expression" {
 		var inner *grammar.Node
 		for i := uint32(0); i < body.ChildCount(); i++ {
@@ -5190,16 +5284,13 @@ func jsCallbackSoleReturnIdent(cb *grammar.Node, content []byte) string {
 		body = inner
 	}
 	if body == nil {
-		return ""
+		return nil
 	}
-	// Expression body: x => x
-	if body.Type() == "identifier" {
-		return ingest.NodeText(body, content)
-	}
-	// Statement block: (x) => { return x; } / function(x){ return x }
+	// Expression body: x => x / x => [x]
 	if body.Type() != "statement_block" {
-		return ""
+		return body
 	}
+	// Statement block: (x) => { return x; } / function(x){ return [x] }
 	var retExpr *grammar.Node
 	stmts := 0
 	for i := uint32(0); i < body.ChildCount(); i++ {
@@ -5213,7 +5304,7 @@ func jsCallbackSoleReturnIdent(cb *grammar.Node, content []byte) string {
 		}
 		stmts++
 		if ch.Type() != "return_statement" {
-			return ""
+			return nil
 		}
 		var expr *grammar.Node
 		for j := uint32(0); j < ch.ChildCount(); j++ {
@@ -5227,7 +5318,7 @@ func jsCallbackSoleReturnIdent(cb *grammar.Node, content []byte) string {
 		retExpr = expr
 	}
 	if stmts != 1 || retExpr == nil {
-		return ""
+		return nil
 	}
 	// Peel parentheses around return expr.
 	for retExpr != nil && retExpr.Type() == "parenthesized_expression" {
@@ -5242,6 +5333,15 @@ func jsCallbackSoleReturnIdent(cb *grammar.Node, content []byte) string {
 		}
 		retExpr = inner
 	}
+	return retExpr
+}
+
+// jsCallbackSoleReturnIdent recovers the identifier name returned by cb when
+// the body is a pure identity return: expression body `x` / `(x)`, or a
+// statement block with a single `return x` (no other statements). Nested
+// functions fail closed. Empty / multi-statement / non-ident returns fail closed.
+func jsCallbackSoleReturnIdent(cb *grammar.Node, content []byte) string {
+	retExpr := jsCallbackSoleReturnExpr(cb, content)
 	if retExpr == nil || retExpr.Type() != "identifier" {
 		return ""
 	}
@@ -5317,12 +5417,96 @@ func jsArrayReduceElemType(n *grammar.Node, content []byte, arrayLocals, typedLo
 	}
 	t := jsArraySourceElemType(ingest.ChildByField(fn, "object"), content, arrayLocals, typedLocals, factories)
 	if t == "" {
+		// Empty/unknown array: peel from init when callback returns accumulator
+		// (param 0). Enables [].reduce((a,b)=>a, new A()).run() under dual-class.
+		if init != nil && idx == 0 {
+			if it := jsExprConcreteType(init, content, typedLocals, factories); it != "" {
+				return it
+			}
+		}
 		return ""
 	}
 	if init != nil && jsExprConcreteType(init, content, typedLocals, factories) != t {
 		return ""
 	}
 	return t
+}
+
+// jsPromiseFinallyType recovers T from p.finally(fn) / await p.finally(fn) when
+// p peels to a Promise of value T. finally is identity for the resolved value
+// (callback ignored). Enables (await Promise.resolve(new A()).finally(()=>{})).run()
+// under foreign same-leaf methods. Unknown receivers fail closed.
+func jsPromiseFinallyType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	if n.Type() == "await_expression" {
+		var arg *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch == nil || ch.Type() == "await" {
+				continue
+			}
+			arg = ch
+			break
+		}
+		return jsPromiseFinallyType(arg, content, typedLocals, factories)
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	args := ingest.ChildByField(n, "arguments")
+	if fn == nil {
+		return ""
+	}
+	if fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain" {
+		return ""
+	}
+	prop := ingest.ChildByField(fn, "property")
+	if prop == nil || ingest.NodeText(prop, content) != "finally" {
+		return ""
+	}
+	// Require ≥1 arg (callback present); body ignored (not type-changing).
+	count := 0
+	if args != nil {
+		for i := uint32(0); i < args.ChildCount(); i++ {
+			ch := args.Child(i)
+			if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+				continue
+			}
+			count++
+		}
+	}
+	if count < 1 {
+		return ""
+	}
+	obj := ingest.ChildByField(fn, "object")
+	if t := jsPromiseResolveArgType(obj, content, typedLocals, factories); t != "" {
+		return t
+	}
+	if t := jsPromiseRaceValueType(obj, content, typedLocals, factories); t != "" {
+		return t
+	}
+	if t := jsPromiseThenIdentityType(obj, content, typedLocals, factories); t != "" {
+		return t
+	}
+	if t := jsPromiseFinallyType(obj, content, typedLocals, factories); t != "" {
+		return t
+	}
+	return ""
 }
 
 // jsPromiseThenIdentityType recovers T from p.then(x => x) / await p.then(x => x)
@@ -5393,11 +5577,14 @@ func jsPromiseThenIdentityType(n *grammar.Node, content []byte, typedLocals, fac
 		return ""
 	}
 	obj := ingest.ChildByField(fn, "object")
-	// Peel Promise.resolve / race / any / further identity then.
+	// Peel Promise.resolve / race / any / further identity then / finally.
 	if t := jsPromiseResolveArgType(obj, content, typedLocals, factories); t != "" {
 		return t
 	}
 	if t := jsPromiseRaceValueType(obj, content, typedLocals, factories); t != "" {
+		return t
+	}
+	if t := jsPromiseFinallyType(obj, content, typedLocals, factories); t != "" {
 		return t
 	}
 	if t := jsPromiseThenIdentityType(obj, content, typedLocals, factories); t != "" {
