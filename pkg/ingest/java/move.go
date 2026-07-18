@@ -788,7 +788,7 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 		}
 	}
 
-	typedLocals, entryValOf, valOf, elemOf, compOf := javaTypedLocals(pf.Root, content, ourSimple)
+	typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf := javaTypedLocals(pf.Root, content, ourSimple)
 
 	var edits []ingest.Edit
 	var walk func(n *grammar.Node, enclosingClass string, switchMatchesOur bool)
@@ -811,7 +811,7 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			obj := ingest.ChildByField(n, "object")
 			name := ingest.ChildByField(n, "name")
 			if name != nil && ingest.NodeText(name, content) == oldLeaf {
-				if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, entryValOf, valOf, elemOf, compOf, implementsEdges) {
+				if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, implementsEdges) {
 					edits = append(edits, ingest.Edit{
 						File:      fileRel,
 						StartByte: name.StartByte(),
@@ -827,7 +827,7 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 				field = ingest.ChildByType(n, "identifier")
 			}
 			if field != nil && ingest.NodeText(field, content) == oldLeaf {
-				if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, entryValOf, valOf, elemOf, compOf, implementsEdges) {
+				if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, implementsEdges) {
 					edits = append(edits, ingest.Edit{
 						File:      fileRel,
 						StartByte: field.StartByte(),
@@ -851,7 +851,7 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			if len(parts) >= 2 {
 				obj, name := parts[0], parts[len(parts)-1]
 				if name.Type() == "identifier" && ingest.NodeText(name, content) == oldLeaf {
-					if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, entryValOf, valOf, elemOf, compOf, implementsEdges) {
+					if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, implementsEdges) {
 						edits = append(edits, ingest.Edit{
 							File:      fileRel,
 							StartByte: name.StartByte(),
@@ -959,7 +959,7 @@ func javaRenameByTypeMaps(name string, ourReceivers, foreignReceivers, typedLoca
 // compOf maps "local.member" → type leaf for record component accessors and
 // class/record field access (ba.a().m() / box.a.m() / var xa = ba.a() / var xa = box.a
 // under foreign same-leaf methods).
-func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, entryValOf, valOf, elemOf, compOf map[string]string, implementsEdges map[string]map[string]bool) bool {
+func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, entryValOf, valOf, elemOf, compOf, windowStreamOf map[string]string, implementsEdges map[string]map[string]bool) bool {
 	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
 		var inner *grammar.Node
 		for i := uint32(0); i < obj.ChildCount(); i++ {
@@ -1028,7 +1028,7 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 		if arr == nil {
 			return len(foreignReceivers) == 0
 		}
-		return javaShouldRenameMemberAccess(arr, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, entryValOf, valOf, elemOf, compOf, implementsEdges)
+		return javaShouldRenameMemberAccess(arr, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, implementsEdges)
 	}
 	if obj.Type() == "identifier" || obj.Type() == "type_identifier" {
 		return javaRenameByTypeMaps(ingest.NodeText(obj, content), ourReceivers, foreignReceivers, typedLocals)
@@ -1052,8 +1052,9 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 	//     requireNonNullElseGet(x, s).m() — identity wrappers (type of x)
 	//   qa.poll().m() / as.getFirst().m() / … — other collection accessors
 	//   ba.a().m() — record component accessor (compOf from record header)
+	//   s.findFirst().get().get(0).m() after var s = gather(window*) — window list
 	if obj.Type() == "method_invocation" {
-		if et := javaCollectionAccessElemType(obj, content, elemOf, valOf, entryValOf, compOf); et != "" {
+		if et := javaCollectionAccessElemType(obj, content, elemOf, valOf, entryValOf, compOf, windowStreamOf); et != "" {
 			return javaRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 		}
 		// Objects.requireNonNull(a) / requireNonNullElse(a, d) /
@@ -1142,7 +1143,10 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // for inline as.get(i).m() / oa.get().m() / sa.get().m() under foreign same-leaf methods).
 // compOf maps "local.member" → type leaf for record component accessors and
 // class/record fields (ba.a() / box.a / var xa = ba.a() / var xa = box.a).
-func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string, map[string]string, map[string]string, map[string]string) {
+// windowStreamOf maps stream locals from gather(windowFixed|windowSliding) →
+// upstream element T (Stream of List<T> windows; not scalar T — see
+// javaWindowGatherStreamElemType / javaWindowListExprElemType).
+func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string) {
 	out := map[string]bool{}
 	entryValOf := map[string]string{}
 	valOf := map[string]string{}
@@ -1150,8 +1154,11 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 	elemOf := map[string]string{}
 	// Record/class locals: "ba.a" / "box.a" → "A" for ba.a() / box.a / var xa = ….
 	compOf := map[string]string{}
+	// Window-gather stream locals: name → upstream element T
+	// (var s = stream.gather(windowFixed(n)) → s:"A" meaning Stream of List<A>).
+	windowStreamOf := map[string]string{}
 	if root == nil || len(ourReceivers) == 0 {
-		return out, entryValOf, valOf, elemOf, compOf
+		return out, entryValOf, valOf, elemOf, compOf, windowStreamOf
 	}
 	recordIndex := javaRecordComponentIndex(root, content)
 	fieldIndex := javaClassFieldIndex(root, content)
@@ -1239,11 +1246,12 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// var xa = box.a / var xa = ba.a — class/record field access when
 					// box/ba is a typed local with member type A.
 					out[name] = true
-				} else if et := javaWindowListExprElemType(valN, content, elemOf, valOf); et != "" {
-					// var w = stream.gather(Gatherers.windowFixed(n)).findFirst().get() —
+				} else if et := javaWindowListExprElemType(valN, content, elemOf, valOf, windowStreamOf); et != "" {
+					// var w = stream.gather(Gatherers.windowFixed(n)).findFirst().get() /
+					// var w = s.findFirst().get() after var s = gather(window*) —
 					// List of stream element T (not scalar T); track for w.get(0).m().
 					elemOf[name] = et
-				} else if et := javaCollectionAccessElemType(valN, content, elemOf, valOf, entryValOf, compOf); ourReceivers[et] {
+				} else if et := javaCollectionAccessElemType(valN, content, elemOf, valOf, entryValOf, compOf, windowStreamOf); ourReceivers[et] {
 					// var xa = as.get(0) / am.get("k") / as.iterator().next() / ia.next()
 					// / qa.poll() / qa.peek() / qa.take() / da.takeFirst()/takeLast()
 					// / as.remove(0) / as.getFirst()
@@ -1259,6 +1267,7 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// / Objects.requireNonNullElse(new A(), d) / requireNonNullElseGet(...)
 					// / as[0] / (as)[0] when as is A[] (array element via elemOf)
 					// / stream.gather(windowFixed).findFirst().get().get(0) — window list elem
+					// / s.findFirst().get().get(0) after var s = gather(window*)
 					out[name] = true
 				} else if id := javaObjectsRequireNonNullArgIdent(valN, content); id != "" && out[id] {
 					// var xa = Objects.requireNonNull(a) / requireNonNullElse(a, d) /
@@ -1273,6 +1282,12 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// track value T for later ea.getValue().m() / ea.setValue(v).m()
 					// (entry is not A itself).
 					entryValOf[name] = vt
+				} else if et := javaWindowGatherStreamElemType(valN, content, elemOf, valOf, windowStreamOf); et != "" {
+					// var s = stream.gather(Gatherers.windowFixed(n)) /
+					// var s = stream.gather(Gatherers.windowSliding(n)) —
+					// Stream of List<T> windows (not scalar T); track for
+					// s.findFirst().get().get(0).m() / s.forEach(w -> w.get(0).m()).
+					windowStreamOf[name] = et
 				} else if et := javaStreamPipelineElemType(valN, content, elemOf, valOf); et != "" {
 					// var list = as.stream().toList() / collect(Collectors.toList()/toSet()) /
 					// var arr = as.stream().toArray() / toArray(new A[0]) /
@@ -1361,14 +1376,14 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 			// m.merge((v1,v2) -> v1.m()) / m.entrySet().forEach(e -> e.getValue().m()) /
 			// collect(groupingBy|partitioningBy).values().forEach(g -> g.forEach(a -> a.m())) —
 			// untyped lambda params (and entryValOf for entrySet / elemOf for groups).
-			javaBindStreamLambdaParams(n, content, ourReceivers, elemOf, valOf, entryValOf, groupValOf, out)
+			javaBindStreamLambdaParams(n, content, ourReceivers, elemOf, valOf, entryValOf, groupValOf, windowStreamOf, out)
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
 		}
 	}
 	walk(root)
-	return out, entryValOf, valOf, elemOf, compOf
+	return out, entryValOf, valOf, elemOf, compOf, windowStreamOf
 }
 
 // javaRecordComponentIndex maps record type name → component name → component type leaf
@@ -1600,7 +1615,7 @@ func javaTypeArgNames(typeN *grammar.Node, content []byte) []string {
 // value type is ours. entrySet pipelines bind entryValOf for e.getValue().m().
 // groupingBy/partitioningBy maps bind elemOf for value-list params (List<T> groups).
 // Typed (A a) -> params are already handled via formal_parameter.
-func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, elemOf, valOf, entryValOf, groupValOf map[string]string, out map[string]bool) {
+func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, elemOf, valOf, entryValOf, groupValOf, windowStreamOf map[string]string, out map[string]bool) {
 	if call == nil || call.Type() != "method_invocation" || out == nil {
 		return
 	}
@@ -1713,8 +1728,9 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 			et := javaStreamPipelineElemType(obj, content, elemOf, valOf)
 			if et != "" && ourReceivers[et] {
 				out[params[0]] = true
-			} else if et := javaWindowGatherStreamElemType(obj, content, elemOf, valOf); et != "" {
-				// stream.gather(windowFixed|windowSliding).forEach(w -> …) —
+			} else if et := javaWindowGatherStreamElemType(obj, content, elemOf, valOf, windowStreamOf); et != "" {
+				// stream.gather(windowFixed|windowSliding).forEach(w -> …) /
+				// s.forEach(w -> …) after var s = gather(window*) —
 				// param is List<T>, not T; track for w.get(0).m().
 				if elemOf != nil {
 					elemOf[params[0]] = et
@@ -2634,11 +2650,13 @@ func javaGathererCallParts(gatherCall *grammar.Node, content []byte) (*grammar.N
 }
 
 // javaWindowGatherStreamElemType recovers T from stream.gather(Gatherers.windowFixed(n))
-// / windowSliding(n) (and FQ Gatherers). The gather stream yields List<T> windows;
-// T is the upstream stream element type. Custom / non-window gatherers fail closed.
-// Enables gather(windowFixed(1)).forEach(w -> w.get(0).m()) under foreign same-leaf
-// (param tracked as List of T via elemOf).
-func javaWindowGatherStreamElemType(obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+// / windowSliding(n) (and FQ Gatherers), or from a window-stream local
+// (var s = gather(window*)). The gather stream yields List<T> windows; T is the
+// upstream stream element type. Custom / non-window gatherers fail closed.
+// Enables gather(windowFixed(1)).forEach(w -> w.get(0).m()) /
+// s.forEach(w -> w.get(0).m()) under foreign same-leaf (param tracked as List of T
+// via elemOf).
+func javaWindowGatherStreamElemType(obj *grammar.Node, content []byte, elemOf, valOf, windowStreamOf map[string]string) string {
 	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
 		inner := ingest.ChildByField(obj, "expression")
 		if inner == nil {
@@ -2653,7 +2671,17 @@ func javaWindowGatherStreamElemType(obj *grammar.Node, content []byte, elemOf, v
 		}
 		obj = inner
 	}
-	if obj == nil || obj.IsNull() || obj.Type() != "method_invocation" {
+	if obj == nil || obj.IsNull() {
+		return ""
+	}
+	// var s = stream.gather(window*); s.findFirst()… / s.forEach(…)
+	if obj.Type() == "identifier" {
+		if windowStreamOf == nil {
+			return ""
+		}
+		return windowStreamOf[ingest.NodeText(obj, content)]
+	}
+	if obj.Type() != "method_invocation" {
 		return ""
 	}
 	nameN := ingest.ChildByField(obj, "name")
@@ -2674,9 +2702,10 @@ func javaWindowGatherStreamElemType(obj *grammar.Node, content []byte, elemOf, v
 
 // javaWindowListExprElemType recovers T from an Optional unwrap of a window-gather
 // stream: gather(window*).findFirst().get() / findAny().get() /
-// findFirst().orElseThrow([…]) → List of T's element type T for subsequent
-// .get(0).m() / var w = …; w.get(0).m(). Other unwraps fail closed.
-func javaWindowListExprElemType(obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+// findFirst().orElseThrow([…]) / s.findFirst().get() after var s = gather(window*)
+// → List of T's element type T for subsequent .get(0).m() / var w = …; w.get(0).m().
+// Other unwraps fail closed.
+func javaWindowListExprElemType(obj *grammar.Node, content []byte, elemOf, valOf, windowStreamOf map[string]string) string {
 	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
 		inner := ingest.ChildByField(obj, "expression")
 		if inner == nil {
@@ -2734,7 +2763,7 @@ func javaWindowListExprElemType(obj *grammar.Node, content []byte, elemOf, valOf
 	default:
 		return ""
 	}
-	return javaWindowGatherStreamElemType(ingest.ChildByField(recv, "object"), content, elemOf, valOf)
+	return javaWindowGatherStreamElemType(ingest.ChildByField(recv, "object"), content, elemOf, valOf, windowStreamOf)
 }
 
 // javaCallIsZeroArg reports whether a method_invocation has no positional args.
@@ -5589,7 +5618,7 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 // Fail closed on other methods / unknown receivers.
 // One-arg stream.reduce(BinaryOperator) returns Optional — use orElse/ifPresent
 // (pipeline typing), not bare var of the element type.
-func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, valOf, entryValOf, compOf map[string]string) string {
+func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, valOf, entryValOf, compOf, windowStreamOf map[string]string) string {
 	for val != nil && !val.IsNull() && val.Type() == "parenthesized_expression" {
 		inner := ingest.ChildByField(val, "expression")
 		if inner == nil {
@@ -5757,11 +5786,12 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 				return et
 			}
 			// stream.gather(windowFixed|windowSliding).findFirst().get().get(0) /
+			// s.findFirst().get().get(0) after var s = gather(window*) /
 			// .getFirst() / .getLast() — window list element T (List-window + get).
 			if method == "get" || method == "getFirst" || method == "getLast" ||
 				method == "remove" || method == "removeFirst" || method == "removeLast" ||
 				method == "set" {
-				if et := javaWindowListExprElemType(obj, content, elemOf, valOf); et != "" {
+				if et := javaWindowListExprElemType(obj, content, elemOf, valOf, windowStreamOf); et != "" {
 					return et
 				}
 			}
@@ -5815,7 +5845,7 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// requireNonNullElseGet(x, s) return T of x (first arg). Message, default,
 		// and supplier do not change the type leaf. Bare typed-local identifiers
 		// are handled via javaObjectsRequireNonNullArgIdent + typedLocals.
-		return javaObjectsRequireNonNullElemType(val, obj, content, elemOf, valOf, entryValOf, compOf)
+		return javaObjectsRequireNonNullElemType(val, obj, content, elemOf, valOf, entryValOf, compOf, windowStreamOf)
 	case "reduce":
 		// ConcurrentHashMap.reduce(threshold, BiFunction<K,V,U>, BiFunction<U,U,U>)
 		// returns U. Value-identity transformer ((k,v) -> v) yields V of the map
@@ -6085,7 +6115,7 @@ func javaArrayAccessElemType(val *grammar.Node, content []byte, elemOf, valOf ma
 // statically recoverable without a scalar local type map: new T(...) / T.make() /
 // cast / collection-accessor / field access. Bare typed locals use
 // javaObjectsRequireNonNullArgIdent instead.
-func javaObjectsRequireNonNullElemType(call, obj *grammar.Node, content []byte, elemOf, valOf, entryValOf, compOf map[string]string) string {
+func javaObjectsRequireNonNullElemType(call, obj *grammar.Node, content []byte, elemOf, valOf, entryValOf, compOf, windowStreamOf map[string]string) string {
 	if call == nil || obj == nil {
 		return ""
 	}
@@ -6102,7 +6132,7 @@ func javaObjectsRequireNonNullElemType(call, obj *grammar.Node, content []byte, 
 	// Prefer collection/field accessors before javaInferExprType: the latter treats
 	// any ident.method() as type ident (A.make factory convention), which would
 	// mis-type as.get(0) as "as" instead of elemOf[as].
-	if t := javaCollectionAccessElemType(first, content, elemOf, valOf, entryValOf, compOf); t != "" {
+	if t := javaCollectionAccessElemType(first, content, elemOf, valOf, entryValOf, compOf, windowStreamOf); t != "" {
 		return t
 	}
 	if t := javaFieldAccessMemberType(first, content, compOf); t != "" {
