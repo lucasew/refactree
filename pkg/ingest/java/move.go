@@ -2199,15 +2199,16 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// headSet/tailSet/subSet(...) return SortedSet/NavigableSet of the same
 			// element type (range views; bounds/inclusivity args do not change E).
 			// CompletableFuture.whenComplete / whenCompleteAsync / copy /
-			// toCompletableFuture / orTimeout / completeOnTimeout / completeAsync /
+			// toCompletableFuture / orTimeout / completeOnTimeout /
 			// exceptionally / exceptionallyAsync / exceptionallyCompose /
 			// exceptionallyComposeAsync / minimalCompletionStage — always return
 			// the same result T by API signature (side-effect / timeout / recovery /
-			// Executor / supplier args do not change T; completeAsync fills this CF).
+			// Executor args do not change T). completeAsync is handled below
+			// (typed CF peels receiver; diamond/raw falls back to supplier body).
 			// Enables whenComplete(...).join() / whenCompleteAsync(...).join() /
-			// exceptionallyAsync(...).join() / completeAsync(() -> new A()).join() /
-			// copy().join() under foreign same-leaf methods. Type-changing stages
-			// (thenApply/handle/…) stay on their own identity/rewrap peels.
+			// exceptionallyAsync(...).join() / copy().join() under foreign
+			// same-leaf methods. Type-changing stages (thenApply/handle/…) stay
+			// on their own identity/rewrap peels.
 			// Optional.or(Supplier) always returns Optional of the same T by API
 			// signature (alternative Optional supplier does not change T).
 			// Enables or(...).ifPresent / or(...).orElse / var o2 = or(...);
@@ -2215,7 +2216,7 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			"findFirst", "findAny", "min", "max", "reduce", "toList", "toArray", "clone", "reversed", "subList",
 			"descendingSet", "headSet", "tailSet", "subSet",
 			"whenComplete", "whenCompleteAsync", "copy", "toCompletableFuture",
-			"orTimeout", "completeOnTimeout", "completeAsync",
+			"orTimeout", "completeOnTimeout",
 			"exceptionally", "exceptionallyAsync",
 			"exceptionallyCompose", "exceptionallyComposeAsync",
 			"minimalCompletionStage",
@@ -2240,6 +2241,20 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 				return ""
 			}
 			return javaStreamPipelineElemType(recv, content, elemOf, valOf)
+		case "completeAsync":
+			// CompletableFuture.completeAsync(() -> new A()) /
+			// completeAsync(() -> new A(), executor) — returns this CF.
+			// Typed new CompletableFuture<A>().completeAsync(...) peels T from
+			// the receiver; diamond/raw new CompletableFuture<>().completeAsync(
+			// () -> new A()) recovers T from the supplier body (same shapes as
+			// supplyAsync). Enables .join().m() / var f = …completeAsync…;
+			// f.join().m() under foreign same-leaf methods. Blocks / method refs
+			// / non-creation bodies fail closed when the receiver has no T.
+			recv := ingest.ChildByField(obj, "object")
+			if et := javaStreamPipelineElemType(recv, content, elemOf, valOf); et != "" {
+				return et
+			}
+			return javaCompleteAsyncSupplierElemType(obj, content)
 		case "flatMap":
 			// Optional.flatMap (and Stream.flatMap with the same rewrap shapes):
 			// recover U from mapper when clearly Optional.of/ofNullable rewrap
@@ -2997,6 +3012,50 @@ func javaStreamGenerateElemType(call *grammar.Node, content []byte) string {
 // bodies fail closed (same shapes as Stream.generate).
 func javaCompletableFutureSupplyAsyncElemType(call *grammar.Node, content []byte) string {
 	return javaStaticSupplierCreationElemType(call, content, "CompletableFuture", 2)
+}
+
+// javaCompleteAsyncSupplierElemType recovers T from instance
+// completeAsync(() -> new T(...)) / completeAsync(() -> new T(...), executor)
+// when the CF receiver has no recoverable type arg (diamond/raw
+// new CompletableFuture<>()). First arg must be an expression-bodied zero-arg
+// supplier lambda whose body is object creation; optional Executor is ignored.
+// Blocks, method refs, and non-creation bodies fail closed (same shapes as
+// supplyAsync / Stream.generate).
+func javaCompleteAsyncSupplierElemType(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	args := javaCallArgs(call)
+	if len(args) < 1 || len(args) > 2 || args[0].Type() != "lambda_expression" {
+		return ""
+	}
+	// Zero-arg Supplier only.
+	if n := javaInferredLambdaParamNames(args[0], content); len(n) != 0 {
+		return ""
+	}
+	body := ingest.ChildByField(args[0], "body")
+	for body != nil && !body.IsNull() && body.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(body, "expression")
+		if inner == nil {
+			for i := uint32(0); i < body.ChildCount(); i++ {
+				ch := body.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		body = inner
+	}
+	if body == nil || body.Type() != "object_creation_expression" {
+		return ""
+	}
+	typeN := ingest.ChildByField(body, "type")
+	if typeN == nil {
+		return ""
+	}
+	return javaTypeName(typeN, content)
 }
 
 // javaThreadLocalWithInitialElemType recovers T from
