@@ -1865,9 +1865,11 @@ func javaStreamElementLambdaMethod(method string) bool {
 		// applyToEither/acceptEither take other stage first; the Function/Consumer
 		// is the second arg and still binds as the sole unary lambda (other is not
 		// a lambda). Identity thenApply return pipelines (thenApply(a -> a).join())
-		// peel via javaStreamPipelineElemType / javaMapResultElemType; type-changing
-		// mappers and thenCompose stay fail-closed on the return path. Identity
-		// handle ((a,e)->a).join() peels the same way (first-param bi-lambda identity).
+		// peel via javaStreamPipelineElemType / javaMapResultElemType; thenCompose
+		// rewrap pipelines (thenCompose(a -> completedFuture(a)).join()) peel via
+		// javaFlatMapResultElemType. Type-changing mappers fail closed on the
+		// return path. Identity handle ((a,e)->a).join() peels the same way
+		// (first-param bi-lambda identity).
 		"thenAccept", "thenApply", "thenCompose",
 		"applyToEither", "acceptEither",
 		// CompletableFuture.whenComplete(BiConsumer<? super T,? super Throwable>) /
@@ -2014,8 +2016,11 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // CompletableFuture.thenCombine(other, (a, b) -> a) / thenCombine(other, (a, b) -> new A()) →
 // same or known element (first-param identity/new only; BiFunction after other stage —
 // enables thenCombine(other, (a,b)->a).join() / var f2 = thenCombine…).
+// CompletableFuture.thenCompose(a -> CompletableFuture.completedFuture(a)) → same element
+// when the mapper clearly rewraps T as a CompletionStage (see javaFlatMapResultElemType;
+// enables thenCompose(a -> completedFuture(a)).join() / var f2 = thenCompose…).
 // Type-changing stages (unknown map / flatMap / thenApply / applyToEither / handle /
-// thenCombine mappers) fail closed so later lambdas are not mis-typed.
+// thenCombine / thenCompose mappers) fail closed so later lambdas are not mis-typed.
 func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
 		inner := ingest.ChildByField(obj, "expression")
@@ -2146,6 +2151,14 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// Optional.flatMap (and Stream.flatMap with the same rewrap shapes):
 			// recover U from mapper when clearly Optional.of/ofNullable rewrap
 			// or another tracked Optional/collection local. Unknown mappers fail closed.
+			return javaFlatMapResultElemType(obj, content, elemOf, valOf)
+		case "thenCompose":
+			// CompletableFuture.thenCompose(Function): recover U when mapper clearly
+			// rewraps T as CompletionStage — CompletableFuture.completedFuture(a) /
+			// completedFuture(new A()) / tracked CF local — same rewrap shapes as
+			// Optional.flatMap. Enables thenCompose(a -> completedFuture(a)).join()
+			// / var f2 = thenCompose(...); f2.join() under foreign same-leaf methods.
+			// Type-changing mappers fail closed. Async variants stay out of scope.
 			return javaFlatMapResultElemType(obj, content, elemOf, valOf)
 		case "map":
 			// Optional.map / Stream.map: recover U from mapper when clearly
@@ -2404,16 +2417,22 @@ func javaMapMapperBodyElemType(body *grammar.Node, param string, recv *grammar.N
 	}
 }
 
-// javaFlatMapResultElemType recovers T after Optional.flatMap(mapper) when the
-// mapper clearly yields Optional<T> of the same (or known) element:
+// javaFlatMapResultElemType recovers T after Optional.flatMap(mapper) or
+// CompletableFuture.thenCompose(mapper) when the mapper clearly yields
+// Optional/CompletionStage of the same (or known) element:
 //
 //	oa.flatMap(a -> Optional.of(a)) / Optional.ofNullable(a) → elem(oa)
 //	oa.flatMap(Optional::of) / Optional::ofNullable → elem(oa)
 //	oa.flatMap(a -> other) when other is tracked in elemOf → elemOf[other]
 //	oa.flatMap(a -> Optional.of(new A())) → A
+//	fa.thenCompose(a -> CompletableFuture.completedFuture(a)) → elem(fa)
+//	fa.thenCompose(CompletableFuture::completedFuture) → elem(fa)
+//	fa.thenCompose(a -> other) when other is tracked in elemOf → elemOf[other]
+//	fa.thenCompose(a -> CompletableFuture.completedFuture(new A())) → A
 //
-// Expression-bodied lambdas and Optional::of / ofNullable only; blocks and
-// other mappers fail closed so Stream.flatMap type changes stay unbound.
+// Expression-bodied lambdas and Optional::of / ofNullable /
+// CompletableFuture::completedFuture only; blocks and other mappers fail closed
+// so Stream.flatMap / type-changing thenCompose stay unbound.
 func javaFlatMapResultElemType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	if call == nil || call.Type() != "method_invocation" {
 		return ""
@@ -2447,7 +2466,7 @@ func javaFlatMapResultElemType(call *grammar.Node, content []byte, elemOf, valOf
 	recv := ingest.ChildByField(call, "object")
 	switch first.Type() {
 	case "method_reference":
-		if javaIsOptionalOfMethodRef(first, content) {
+		if javaIsOptionalOfMethodRef(first, content) || javaIsCompletedFutureMethodRef(first, content) {
 			return javaStreamPipelineElemType(recv, content, elemOf, valOf)
 		}
 		return ""
@@ -2498,6 +2517,30 @@ func javaIsOptionalOfMethodRef(ref *grammar.Node, content []byte) bool {
 	}
 }
 
+// javaIsCompletedFutureMethodRef reports CompletableFuture::completedFuture.
+func javaIsCompletedFutureMethodRef(ref *grammar.Node, content []byte) bool {
+	if ref == nil || ref.Type() != "method_reference" {
+		return false
+	}
+	var parts []*grammar.Node
+	for i := uint32(0); i < ref.ChildCount(); i++ {
+		ch := ref.Child(i)
+		if ch.Type() == "::" {
+			continue
+		}
+		parts = append(parts, ch)
+	}
+	if len(parts) < 2 {
+		return false
+	}
+	obj, name := parts[0], parts[len(parts)-1]
+	if (obj.Type() != "identifier" && obj.Type() != "type_identifier") || name.Type() != "identifier" {
+		return false
+	}
+	return ingest.NodeText(obj, content) == "CompletableFuture" &&
+		ingest.NodeText(name, content) == "completedFuture"
+}
+
 // javaFlatMapMapperBodyElemType recovers U from an expression-bodied flatMap mapper.
 func javaFlatMapMapperBodyElemType(body *grammar.Node, param string, recv *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	for body != nil && !body.IsNull() && body.Type() == "parenthesized_expression" {
@@ -2544,6 +2587,22 @@ func javaFlatMapMapperBodyElemType(body *grammar.Node, param string, recv *gramm
 				return javaStreamPipelineElemType(recv, content, elemOf, valOf)
 			}
 			// a -> Optional.of(new A()) — element from creation args.
+			return javaStaticCollectionOfElemType(body, content, name)
+		case "completedFuture":
+			// CompletableFuture.thenCompose rewrap:
+			// a -> CompletableFuture.completedFuture(a) / completedFuture(new A()).
+			obj := ingest.ChildByField(body, "object")
+			if obj == nil || (obj.Type() != "identifier" && obj.Type() != "type_identifier") {
+				return ""
+			}
+			if ingest.NodeText(obj, content) != "CompletableFuture" {
+				return ""
+			}
+			// a -> CompletableFuture.completedFuture(a) — same element as receiver.
+			if arg := javaFirstCallArg(body); arg != nil && arg.Type() == "identifier" && param != "" && ingest.NodeText(arg, content) == param {
+				return javaStreamPipelineElemType(recv, content, elemOf, valOf)
+			}
+			// a -> CompletableFuture.completedFuture(new A()) — element from creation.
 			return javaStaticCollectionOfElemType(body, content, name)
 		default:
 			return ""
@@ -4331,9 +4390,9 @@ func javaMapEntryDeclaredValueType(typeN *grammar.Node, content []byte) string {
 
 // javaStaticCollectionOfElemType recovers the element type of List/Stream/Set.of(...)
 // Arrays.asList(...), Optional.of/ofNullable(...), Stream.ofNullable(...),
-// Collections.singletonList(...), and Collections.singleton(...) when every
-// argument is `new T(...)` with the same T. Non-creation args and mixed types
-// fail closed.
+// CompletableFuture.completedFuture(...), Collections.singletonList(...), and
+// Collections.singleton(...) when every argument is `new T(...)` with the same T.
+// Non-creation args and mixed types fail closed.
 func javaStaticCollectionOfElemType(call *grammar.Node, content []byte, method string) string {
 	if call == nil || call.Type() != "method_invocation" {
 		return ""
@@ -4357,6 +4416,11 @@ func javaStaticCollectionOfElemType(call *grammar.Node, content []byte, method s
 	case "ofNullable":
 		// Optional.ofNullable(new T(...)) / Stream.ofNullable(new T(...)).
 		if recv != "Optional" && recv != "Stream" {
+			return ""
+		}
+	case "completedFuture":
+		// CompletableFuture.completedFuture(new T(...)).
+		if recv != "CompletableFuture" {
 			return ""
 		}
 	case "asList":
@@ -4502,6 +4566,9 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	  bi-lambda only; type-changing handle mappers fail closed)
 //	fa.thenCombine(other, (a, b) -> a).join() / getNow(d) / resultNow() → T
 //	  (first-param identity BiFunction only; other stage first arg; type-changing fail closed)
+//	fa.thenCompose(a -> CompletableFuture.completedFuture(a)).join() / getNow(d) / resultNow() → T
+//	  (completedFuture rewrap only; type-changing thenCompose mappers fail closed —
+//	  same shapes as Optional.flatMap)
 //	fn.apply(x) → valOf[fn] / elemOf[fn] (Function<T,R> R / UnaryOperator<T> T /
 //	  BiFunction<T,U,R> R; apply args do not change the result type leaf)
 //	Objects.requireNonNull(x[, msg]) / requireNonNullElse(x, d) /
@@ -4680,13 +4747,15 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		//   identity bi-lambda preserves CF result T.
 		//   fa.thenCombine(other, (a, b) -> a).join() / getNow(d) / resultNow() —
 		//   first-param identity BiFunction preserves CF result T (other stage first).
+		//   fa.thenCompose(a -> completedFuture(a)).join() / getNow(d) / resultNow() —
+		//   completedFuture rewrap preserves CF result T (flatMap-style).
 		// Pipeline typing already treats findFirst/findAny/Optional.of/List.of/
 		// toList/reversed/copyOf/thenApply(identity)/applyToEither(identity)/
-		// handle(first-param identity)/thenCombine(first-param identity) as T. Map
-		// factories (Map.of / ofEntries / singletonMap / copyOf / unmodifiableMap /
-		// collect(toMap)) are not element pipelines — fall through to
-		// javaMapPipelineValueType for value-returning accessors
-		// (Map.of(k, new A()).get(k)).
+		// handle(first-param identity)/thenCombine(first-param identity)/
+		// thenCompose(completedFuture rewrap) as T. Map factories (Map.of /
+		// ofEntries / singletonMap / copyOf / unmodifiableMap / collect(toMap))
+		// are not element pipelines — fall through to javaMapPipelineValueType for
+		// value-returning accessors (Map.of(k, new A()).get(k)).
 		switch method {
 		case "get", "getFirst", "getLast",
 			"remove", "removeFirst", "removeLast", "set",
@@ -4697,7 +4766,8 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 			"first", "last", "ceiling", "floor", "higher", "lower",
 			// CompletableFuture.join / getNow / resultNow on pipeline receivers
 			// (thenApply(a -> a).join() / applyToEither(other, a -> a).join() /
-			// handle((a,e)->a).join() / thenCombine(other, (a,b)->a).join()) —
+			// handle((a,e)->a).join() / thenCombine(other, (a,b)->a).join() /
+			// thenCompose(a -> completedFuture(a)).join()) —
 			// peel CF type-preserving stages.
 			"join", "getNow", "resultNow":
 			if et := javaStreamPipelineElemType(obj, content, elemOf, valOf); et != "" {
