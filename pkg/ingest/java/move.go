@@ -1076,6 +1076,8 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // collect(groupingBy/partitioningBy) → Map of List<T> groups:
 // var m = stream.collect(groupingBy/partitioningBy);
 // m.values() / m.forEach / m.get → group lists with element T for nested forEach / for-var.
+// collect(toMap(key, a -> a[, merge[, mapFactory]])) → Map of T values:
+// var m = stream.collect(toMap(...)); m.values() / m.forEach / m.get → T.
 // entryValOf maps Map.Entry locals → value type leaf for e.getValue().m()
 // (for (var e : m.entrySet()) / m.entrySet().forEach(e -> …) / Map.Entry<K,A> e).
 func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string) {
@@ -1163,6 +1165,10 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// track collection/stream/Optional element type for later
 					// list.forEach / for (var a : list) / opt.ifPresent (not a scalar A).
 					elemOf[name] = et
+				} else if et := javaToMapCollectValueType(valN, content, elemOf, valOf); et != "" {
+					// var m = as.stream().collect(Collectors.toMap(k, a -> a[, …])) —
+					// Map of T values; track value T for values/forEach/get.
+					valOf[name] = et
 				} else if et := javaGroupingByCollectElemType(valN, content, elemOf, valOf); et != "" {
 					// var m = as.stream().collect(Collectors.groupingBy/partitioningBy(...)) —
 					// Map of List<T>; track group element T for values/forEach/get.
@@ -1190,7 +1196,7 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					if et := javaStreamPipelineElemType(valN, content, elemOf, valOf); ourReceivers[et] {
 						out[name] = true
 					}
-					if vt := javaEntrySetPipelineValueType(valN, content, valOf); vt != "" {
+					if vt := javaEntrySetPipelineValueType(valN, content, elemOf, valOf); vt != "" {
 						entryValOf[name] = vt
 					}
 					if et := javaGroupingByValuesGroupElemType(valN, content, elemOf, valOf, groupValOf); et != "" {
@@ -1360,19 +1366,19 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 			}
 			// m.entrySet().forEach(e -> e.getValue().m()) — param is Entry, not V.
 			if entryValOf != nil {
-				if vt := javaEntrySetPipelineValueType(obj, content, valOf); vt != "" {
+				if vt := javaEntrySetPipelineValueType(obj, content, elemOf, valOf); vt != "" {
 					entryValOf[params[0]] = vt
 				}
 			}
 		case 2:
-			// Map bi-lambdas — value type from valOf[map].
+			// Map bi-lambdas — value type from valOf[map] / collect(toMap(...)).
 			// forEach/computeIfPresent/compute/replaceAll: (K,V) → second is V.
 			// merge: (V,V) → both params are V (BiFunction remapping).
 			// groupingBy/partitioningBy maps: value is List<T> — bind elemOf on the value param.
 			if !javaMapValueBiLambdaMethod(method) {
 				continue
 			}
-			vt := javaMapPipelineValueType(obj, content, valOf)
+			vt := javaMapPipelineValueType(obj, content, elemOf, valOf)
 			if vt != "" && ourReceivers[vt] {
 				if method == "merge" {
 					out[params[0]] = true
@@ -1521,14 +1527,15 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// collect(Collectors.mapping(a -> a, toList()/…)) (identity mapper only) /
 			// collect(Collectors.teeing(toList()/…, …, (list, …) -> list)) —
 			// Collection of the stream element type. Other collectors
-			// (groupingBy, type-changing mapping, toMap, …) fail closed.
+			// (groupingBy, type-changing mapping, toMap, …) fail closed here
+			// (toMap values recovered via javaMapPipelineValueType / javaToMapCollectValueType).
 			if !javaIsToListOrSetCollector(obj, content) {
 				return ""
 			}
 			return javaStreamPipelineElemType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
 		case "values":
-			// m.values() — Collection of map values (valOf[m]).
-			return javaMapPipelineValueType(ingest.ChildByField(obj, "object"), content, valOf)
+			// m.values() / collect(toMap(...)).values() — Collection of map values.
+			return javaMapPipelineValueType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
 		case "of", "asList", "ofNullable", "singletonList":
 			// List.of(new A()) / Stream.of(new A(), new A()) / Arrays.asList(new A())
 			// / Set.of(new A()) / Optional.of(new A()) / Optional.ofNullable(new A())
@@ -2450,8 +2457,9 @@ func javaArraysStreamElemType(call *grammar.Node, content []byte, elemOf, valOf 
 }
 
 // javaMapPipelineValueType recovers the value type of a Map-typed expression:
-// m → valOf[m]. Fail closed on other shapes.
-func javaMapPipelineValueType(obj *grammar.Node, content []byte, valOf map[string]string) string {
+// m → valOf[m], stream.collect(toMap(key, a -> a[, …])) → stream element type.
+// Fail closed on other shapes (type-changing value mappers, groupingBy lists, …).
+func javaMapPipelineValueType(obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
 		inner := ingest.ChildByField(obj, "expression")
 		if inner == nil {
@@ -2466,16 +2474,87 @@ func javaMapPipelineValueType(obj *grammar.Node, content []byte, valOf map[strin
 		}
 		obj = inner
 	}
-	if obj == nil || obj.IsNull() || obj.Type() != "identifier" || valOf == nil {
+	if obj == nil || obj.IsNull() {
 		return ""
 	}
-	return valOf[ingest.NodeText(obj, content)]
+	switch obj.Type() {
+	case "identifier":
+		if valOf == nil {
+			return ""
+		}
+		return valOf[ingest.NodeText(obj, content)]
+	case "method_invocation":
+		return javaToMapCollectValueType(obj, content, elemOf, valOf)
+	default:
+		return ""
+	}
+}
+
+// javaIsToMapIdentityValueCollector reports
+// Stream.collect(Collectors.toMap(keyMapper, valueMapper[, merge[, mapFactory]])) /
+// collect(toMap(...)) (static import) when the value mapper is an identity lambda
+// (a -> a). Result is Map<?, T> with T the stream element type. Type-changing value
+// mappers and method-ref value mappers fail closed.
+func javaIsToMapIdentityValueCollector(collectCall *grammar.Node, content []byte) bool {
+	first := javaCollectFirstArg(collectCall)
+	if first == nil || first.Type() != "method_invocation" {
+		return false
+	}
+	nameN := ingest.ChildByField(first, "name")
+	if nameN == nil || ingest.NodeText(nameN, content) != "toMap" {
+		return false
+	}
+	if obj := ingest.ChildByField(first, "object"); obj != nil {
+		if obj.Type() != "identifier" && obj.Type() != "type_identifier" {
+			return false
+		}
+		if ingest.NodeText(obj, content) != "Collectors" {
+			return false
+		}
+	}
+	args := javaCallArgs(first)
+	// keyMapper + valueMapper required; mergeFunction and mapFactory optional.
+	if len(args) < 2 || len(args) > 4 {
+		return false
+	}
+	return javaIsIdentityLambda(args[1], content)
+}
+
+// javaToMapCollectValueType recovers T from stream.collect(toMap(key, a -> a[, …])).
+// Result is Map of T values (not List groups like groupingBy).
+func javaToMapCollectValueType(val *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	for val != nil && !val.IsNull() && val.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(val, "expression")
+		if inner == nil {
+			for i := uint32(0); i < val.ChildCount(); i++ {
+				ch := val.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		val = inner
+	}
+	if val == nil || val.IsNull() || val.Type() != "method_invocation" {
+		return ""
+	}
+	nameN := ingest.ChildByField(val, "name")
+	if nameN == nil || ingest.NodeText(nameN, content) != "collect" {
+		return ""
+	}
+	if !javaIsToMapIdentityValueCollector(val, content) {
+		return ""
+	}
+	return javaStreamPipelineElemType(ingest.ChildByField(val, "object"), content, elemOf, valOf)
 }
 
 // javaEntrySetPipelineValueType recovers the map value type from an entrySet pipeline:
-// m.entrySet() / m.entrySet().stream() / m.entrySet().stream().filter(...) → valOf[m].
+// m.entrySet() / m.entrySet().stream() / m.entrySet().stream().filter(...) → valOf[m],
+// collect(toMap(...)).entrySet() → stream element type.
 // Type-changing stages (map/flatMap) fail closed.
-func javaEntrySetPipelineValueType(obj *grammar.Node, content []byte, valOf map[string]string) string {
+func javaEntrySetPipelineValueType(obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
 		inner := ingest.ChildByField(obj, "expression")
 		if inner == nil {
@@ -2499,12 +2578,12 @@ func javaEntrySetPipelineValueType(obj *grammar.Node, content []byte, valOf map[
 	}
 	switch name := ingest.NodeText(nameN, content); name {
 	case "entrySet":
-		return javaMapPipelineValueType(ingest.ChildByField(obj, "object"), content, valOf)
+		return javaMapPipelineValueType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
 	case "stream", "parallelStream",
 		"filter", "peek", "sorted", "distinct", "limit", "skip",
 		"unordered", "sequential", "parallel", "onClose",
 		"takeWhile", "dropWhile":
-		return javaEntrySetPipelineValueType(ingest.ChildByField(obj, "object"), content, valOf)
+		return javaEntrySetPipelineValueType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
 	default:
 		return ""
 	}
