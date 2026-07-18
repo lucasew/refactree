@@ -1069,6 +1069,7 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // (list.get(i) / map.get(k) / map.computeIfAbsent(k,f) / map.putIfAbsent(k,v) /
 // map.compute(k,f) / map.computeIfPresent(k,f) /
 // map.put(k,v) / map.replace(k,v) / map.merge(k,v,fn) /
+// map.putFirst(k,v) / map.putLast(k,v) /
 // it.next() / list.iterator().next() /
 // queue.poll()/peek() / queue.take() / deque.takeFirst()/takeLast() /
 // list.remove(i) / list.getFirst()/getLast() /
@@ -3414,6 +3415,7 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	am.computeIfAbsent(k, f) / am.putIfAbsent(k, v) → valOf[am] (Map returns V)
 //	am.compute(k, f) / am.computeIfPresent(k, f) → valOf[am] (Map returns V)
 //	am.put(k, v) / am.replace(k, v) / am.merge(k, v, remapping) → valOf[am] (Map returns V)
+//	am.putFirst(k, v) / am.putLast(k, v) → valOf[am] (SequencedMap returns V)
 //	as.remove(i) / am.remove(k) → same element/value type (index/key remove returns E/V)
 //	as.set(i, e) → elemOf[as] (List returns previous E)
 //	qa.poll() / qa.peek() / qa.element() → elemOf[qa] (Queue)
@@ -3473,6 +3475,9 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// replace(K,V,V) returns boolean at runtime — fail open like remove(Object);
 		// product case is replace(K,V) / put / merge under foreign same-leaf methods.
 		"put", "replace", "merge",
+		// SequencedMap.putFirst/putLast return V (previous mapping for key; Java 21).
+		// Same value type leaf as put for typed-local inference.
+		"putFirst", "putLast",
 		// Element/value-returning mutators and endpoints (same type as get).
 		// Map.remove(k) → V via valOf; List.remove(i) → E via elemOf.
 		// remove(Object) also returns boolean at runtime for List — we still bind
