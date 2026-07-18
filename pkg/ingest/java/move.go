@@ -1649,7 +1649,8 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 		case 2:
 			// Map bi-lambdas — value type from valOf[map] / collect(toMap(...)).
 			// forEach/computeIfPresent/compute/replaceAll: (K,V) → second is V.
-			// merge: (V,V) → both params are V (BiFunction remapping).
+			// merge / ConcurrentHashMap.reduceValues: (V,V) → both params are V
+			// (BiFunction remapping / reducer).
 			// groupingBy/partitioningBy maps: value is List<T> — bind elemOf on the value param.
 			if !javaMapValueBiLambdaMethod(method) {
 				continue
@@ -1659,6 +1660,13 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 				if method == "merge" {
 					out[params[0]] = true
 					out[params[1]] = true
+				} else if method == "reduceValues" {
+					// 2-arg form only (threshold, BiFunction on V,V).
+					// 3-arg transformer form has BiFunction on U — fail closed.
+					if len(javaCallArgs(call)) == 2 {
+						out[params[0]] = true
+						out[params[1]] = true
+					}
 				} else {
 					out[params[1]] = true
 				}
@@ -1667,8 +1675,8 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 			if et := javaGroupingByMapGroupElemType(obj, content, elemOf, valOf, groupValOf); et != "" && elemOf != nil {
 				// m.forEach((k,g) -> g.forEach(...)) / collect(groupingBy|partitioningBy).forEach —
 				// value param is List<T>.
-				if method == "merge" {
-					// merge values would be List — fail closed (not a product case).
+				if method == "merge" || method == "reduceValues" {
+					// merge/reduceValues values would be List — fail closed (not a product case).
 					continue
 				}
 				elemOf[params[1]] = et
@@ -1691,6 +1699,9 @@ func javaStreamElementLambdaMethod(method string) bool {
 		"removeIf", "ifPresent", "ifPresentOrElse",
 		// Map value bi-lambdas (see javaMapValueBiLambdaMethod).
 		"computeIfPresent", "compute", "replaceAll", "merge",
+		// ConcurrentHashMap reduceValues — BiFunction reducer on V,V
+		// (see javaMapValueBiLambdaMethod).
+		"reduceValues",
 		// ConcurrentHashMap searchValues / forEachValue — unary Function/Consumer on V
 		// (see javaMapValueUnaryLambdaMethod).
 		"searchValues", "forEachValue":
@@ -1714,10 +1725,11 @@ func javaMapValueUnaryLambdaMethod(method string) bool {
 }
 
 // javaMapValueBiLambdaMethod reports Map methods whose bi-lambda args include the
-// map value type: forEach/computeIfPresent/compute/replaceAll → (K,V), merge → (V,V).
+// map value type: forEach/computeIfPresent/compute/replaceAll → (K,V),
+// merge / ConcurrentHashMap.reduceValues → (V,V).
 func javaMapValueBiLambdaMethod(method string) bool {
 	switch method {
-	case "forEach", "computeIfPresent", "compute", "replaceAll", "merge":
+	case "forEach", "computeIfPresent", "compute", "replaceAll", "merge", "reduceValues":
 		return true
 	default:
 		return false
@@ -4429,6 +4441,33 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// (var xa = m.searchValues(1L, a -> a); xa.m() / m.searchValues(1L, a -> a).m()).
 		// Non-identity / block Functions fail closed (U is not statically V).
 		return javaSearchValuesReturnType(val, obj, content, elemOf, valOf)
+	case "reduceValues":
+		// ConcurrentHashMap.reduceValues(threshold, BiFunction<? super V,? super V,? extends V>)
+		// returns V (2-arg reducer form). Threshold is ignored.
+		// 3-arg form (transformer + reducer) returns U — only recover when the
+		// unary transformer is identity so U = V; otherwise fail closed.
+		return javaReduceValuesReturnType(val, obj, content, elemOf, valOf)
+	default:
+		return ""
+	}
+}
+
+// javaReduceValuesReturnType recovers V from ConcurrentHashMap.reduceValues:
+// 2-arg (threshold, BiFunction) always returns V of the map;
+// 3-arg (threshold, Function, BiFunction) returns U — identity Function only.
+func javaReduceValuesReturnType(call, obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	args := javaCallArgs(call)
+	switch len(args) {
+	case 2:
+		// threshold + BiFunction<? super V,? super V,? extends V> → V
+		return javaMapPipelineValueType(obj, content, elemOf, valOf)
+	case 3:
+		// threshold + Function<? super V,? extends U> + BiFunction → U
+		// Identity transformer: U = V.
+		if javaIsIdentityLambda(args[1], content) {
+			return javaMapPipelineValueType(obj, content, elemOf, valOf)
+		}
+		return ""
 	default:
 		return ""
 	}
