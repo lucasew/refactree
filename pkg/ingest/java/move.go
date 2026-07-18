@@ -3031,10 +3031,7 @@ func javaListSetCopyOfElemType(call *grammar.Node, content []byte, elemOf, valOf
 	if recvN == nil {
 		return ""
 	}
-	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
-		return ""
-	}
-	switch ingest.NodeText(recvN, content) {
+	switch javaStaticFactoryReceiverName(recvN, content) {
 	case "List", "Set":
 	default:
 		return ""
@@ -3057,10 +3054,7 @@ func javaCollectionsNCopiesElemType(call *grammar.Node, content []byte) string {
 	if recvN == nil {
 		return ""
 	}
-	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
-		return ""
-	}
-	if ingest.NodeText(recvN, content) != "Collections" {
+	if javaStaticFactoryReceiverName(recvN, content) != "Collections" {
 		return ""
 	}
 	args := javaCallArgs(call)
@@ -3099,10 +3093,7 @@ func javaCollectionsListWrapperElemType(call *grammar.Node, content []byte, elem
 	if recvN == nil {
 		return ""
 	}
-	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
-		return ""
-	}
-	if ingest.NodeText(recvN, content) != "Collections" {
+	if javaStaticFactoryReceiverName(recvN, content) != "Collections" {
 		return ""
 	}
 	first := javaFirstCallArg(call)
@@ -3124,10 +3115,7 @@ func javaStreamConcatElemType(call *grammar.Node, content []byte, elemOf, valOf 
 	if recvN == nil {
 		return ""
 	}
-	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
-		return ""
-	}
-	if ingest.NodeText(recvN, content) != "Stream" {
+	if javaStaticFactoryReceiverName(recvN, content) != "Stream" {
 		return ""
 	}
 	args := javaCallArgs(call)
@@ -3361,10 +3349,7 @@ func javaStaticSupplierCreationElemType(call *grammar.Node, content []byte, recv
 	if recvN == nil {
 		return ""
 	}
-	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
-		return ""
-	}
-	if ingest.NodeText(recvN, content) != recvWant {
+	if javaStaticFactoryReceiverName(recvN, content) != recvWant {
 		return ""
 	}
 	args := javaCallArgs(call)
@@ -3410,10 +3395,7 @@ func javaStreamIterateElemType(call *grammar.Node, content []byte) string {
 	if recvN == nil {
 		return ""
 	}
-	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
-		return ""
-	}
-	if ingest.NodeText(recvN, content) != "Stream" {
+	if javaStaticFactoryReceiverName(recvN, content) != "Stream" {
 		return ""
 	}
 	args := javaCallArgs(call)
@@ -4117,15 +4099,10 @@ func javaGroupingByMapGetElemType(val *grammar.Node, content []byte, groupValOf 
 	return groupValOf[ingest.NodeText(obj, content)]
 }
 
-// javaIsArraysReceiver reports whether obj is the Arrays type name (static call site).
+// javaIsArraysReceiver reports whether obj is the Arrays type name (static call site),
+// including fully-qualified java.util.Arrays.
 func javaIsArraysReceiver(obj *grammar.Node, content []byte) bool {
-	if obj == nil || obj.IsNull() {
-		return false
-	}
-	if obj.Type() != "identifier" && obj.Type() != "type_identifier" {
-		return false
-	}
-	return ingest.NodeText(obj, content) == "Arrays"
+	return javaStaticFactoryReceiverName(obj, content) == "Arrays"
 }
 
 // javaArraysStreamElemType recovers T from Arrays.stream(T[] arr[, from, to]),
@@ -4244,10 +4221,7 @@ func javaCollectionsMapWrapperKeyType(call *grammar.Node, content []byte, elemOf
 	if recvN == nil {
 		return ""
 	}
-	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
-		return ""
-	}
-	if ingest.NodeText(recvN, content) != "Collections" {
+	if javaStaticFactoryReceiverName(recvN, content) != "Collections" {
 		return ""
 	}
 	first := javaFirstCallArg(call)
@@ -4268,10 +4242,7 @@ func javaMapCopyOfKeyType(call *grammar.Node, content []byte, elemOf, valOf map[
 	if recvN == nil {
 		return ""
 	}
-	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
-		return ""
-	}
-	if ingest.NodeText(recvN, content) != "Map" {
+	if javaStaticFactoryReceiverName(recvN, content) != "Map" {
 		return ""
 	}
 	first := javaFirstCallArg(call)
@@ -4404,10 +4375,7 @@ func javaCollectionsMapWrapperValueType(call *grammar.Node, content []byte, elem
 	if recvN == nil {
 		return ""
 	}
-	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
-		return ""
-	}
-	if ingest.NodeText(recvN, content) != "Collections" {
+	if javaStaticFactoryReceiverName(recvN, content) != "Collections" {
 		return ""
 	}
 	first := javaFirstCallArg(call)
@@ -4429,10 +4397,7 @@ func javaCollectionsSingletonMapValueType(call *grammar.Node, content []byte) st
 	if recvN == nil {
 		return ""
 	}
-	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
-		return ""
-	}
-	if ingest.NodeText(recvN, content) != "Collections" {
+	if javaStaticFactoryReceiverName(recvN, content) != "Collections" {
 		return ""
 	}
 	args := javaCallArgs(call)
@@ -4461,10 +4426,7 @@ func javaMapOfValueType(call *grammar.Node, content []byte) string {
 	if recvN == nil {
 		return ""
 	}
-	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
-		return ""
-	}
-	if ingest.NodeText(recvN, content) != "Map" {
+	if javaStaticFactoryReceiverName(recvN, content) != "Map" {
 		return ""
 	}
 	args := javaCallArgs(call)
@@ -4513,10 +4475,7 @@ func javaMapOfEntriesValueType(call *grammar.Node, content []byte) string {
 	if recvN == nil {
 		return ""
 	}
-	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
-		return ""
-	}
-	if ingest.NodeText(recvN, content) != "Map" {
+	if javaStaticFactoryReceiverName(recvN, content) != "Map" {
 		return ""
 	}
 	args := javaCallArgs(call)
@@ -4693,10 +4652,7 @@ func javaOptionalEntryValueType(opt *grammar.Node, content []byte, elemOf, valOf
 		if recv == nil {
 			return ""
 		}
-		if recv.Type() != "identifier" && recv.Type() != "type_identifier" {
-			return ""
-		}
-		if ingest.NodeText(recv, content) != "Optional" {
+		if javaStaticFactoryReceiverName(recv, content) != "Optional" {
 			return ""
 		}
 		first := javaFirstCallArg(opt)
@@ -4720,10 +4676,7 @@ func javaMapEntryCreationValueType(call *grammar.Node, content []byte) string {
 	if recvN == nil {
 		return ""
 	}
-	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
-		return ""
-	}
-	if ingest.NodeText(recvN, content) != "Map" {
+	if javaStaticFactoryReceiverName(recvN, content) != "Map" {
 		return ""
 	}
 	nameN := ingest.ChildByField(call, "name")
@@ -4949,10 +4902,7 @@ func javaMapCopyOfValueType(call *grammar.Node, content []byte, elemOf, valOf ma
 	if recvN == nil {
 		return ""
 	}
-	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
-		return ""
-	}
-	if ingest.NodeText(recvN, content) != "Map" {
+	if javaStaticFactoryReceiverName(recvN, content) != "Map" {
 		return ""
 	}
 	first := javaFirstCallArg(call)
@@ -5197,8 +5147,9 @@ func javaStaticCollectionOfElemType(call *grammar.Node, content []byte, method s
 }
 
 // javaStaticFactoryReceiverName returns the simple type/class leaf of a static
-// factory receiver: Stream, List, Optional, or the outermost field of a
-// qualified form (java.util.stream.Stream → Stream). Unknown shapes fail closed.
+// factory receiver: Stream, List, Optional, Map, Collections, Arrays, or the
+// outermost field of a qualified form (java.util.stream.Stream → Stream,
+// java.util.Collections → Collections). Unknown shapes fail closed.
 func javaStaticFactoryReceiverName(n *grammar.Node, content []byte) string {
 	if n == nil {
 		return ""
