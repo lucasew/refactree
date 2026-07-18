@@ -1851,6 +1851,7 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	// box.get("a").run() — TypedDict/record string-key value (fieldOf; same leaf as
 	// xa = box.get("a"); xa.run()).
 	// attrgetter("a")(box).run() — single-field getter (same leaf as box.a.run()).
+	// itemgetter("a")(box).run() — single string-key getter (same leaf as box["a"].run()).
 	// items.popleft().run() / d.get(k).run() / q.get().run() / items.pop().run() /
 	// list(items).pop().run() — collection/queue element accessors (same leaf as
 	// a = items.popleft(); a.run()). Unknown call receivers: unique-leaf only.
@@ -1863,6 +1864,9 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 			}
 			if ft := pythonAttrgetterFieldType(obj, content, fieldOf); ft != "" {
+				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
+			}
+			if ft := pythonItemgetterFieldType(obj, content, fieldOf); ft != "" {
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 			}
 			// copy.copy(item).run() — need typeOf (not threaded here); object copy
@@ -2299,7 +2303,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					// (same as items[0]). Multi-index / other callables fail closed.
 					// pair = itemgetter(0)(pairs) when pairs is a pair-iter (pairSlots +
 					// shared elemOf), not an element; use pair[i] / unpack / nested for.
-					if types := pythonItemgetterPairSlots(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+					// xa = itemgetter("a")(box) — TypedDict/record string-key (fieldOf).
+					if ft := pythonItemgetterFieldType(right, content, fieldOf); ft != "" {
+						typeOf[lname] = ft
+						pythonBindClassLocalFields(lname, ft, fieldIndex, fieldOf)
+						if ourReceivers[ft] {
+							out[lname] = true
+						}
+					} else if types := pythonItemgetterPairSlots(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
 						pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 					} else if et := pythonItemgetterElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 						out[lname] = true
@@ -2575,7 +2586,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				}
 				// a := itemgetter(0)(items) / operator.itemgetter(0)(items) /
 				// pair := itemgetter(0)(pairs) when pairs is a pair-iter.
-				if types := pythonItemgetterPairSlots(valueN, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+				// xa := itemgetter("a")(box) — TypedDict/record string-key (fieldOf).
+				if ft := pythonItemgetterFieldType(valueN, content, fieldOf); ft != "" {
+					typeOf[lname] = ft
+					pythonBindClassLocalFields(lname, ft, fieldIndex, fieldOf)
+					if ourReceivers[ft] {
+						out[lname] = true
+					}
+				} else if types := pythonItemgetterPairSlots(valueN, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
 					pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 				} else if et := pythonItemgetterElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 					out[lname] = true
@@ -3220,10 +3238,26 @@ func pythonFieldAccessType(attr *grammar.Node, content []byte, fieldOf map[strin
 // multi-field attrgetter("a","b") returns a tuple and fails closed. Stored
 // getters (g = attrgetter("a"); g(box)) are not tracked.
 func pythonAttrgetterFieldType(call *grammar.Node, content []byte, fieldOf map[string]string) string {
-	if call == nil || call.Type() != "call" || fieldOf == nil {
+	return pythonOperatorGetterFieldType(call, content, fieldOf, "attrgetter")
+}
+
+// pythonItemgetterFieldType recovers T from itemgetter("a")(box) /
+// operator.itemgetter("a")(box) when box is a typed local with annotated field a
+// of type T (fieldOf; same leaf as box["a"] / box.get("a")). Single string key
+// only — multi-key itemgetter("a","b") returns a tuple and fails closed. Numeric
+// itemgetter(i)(collection) uses pythonItemgetterElemType instead. Stored
+// getters (g = itemgetter("a"); g(box)) are not tracked.
+func pythonItemgetterFieldType(call *grammar.Node, content []byte, fieldOf map[string]string) string {
+	return pythonOperatorGetterFieldType(call, content, fieldOf, "itemgetter")
+}
+
+// pythonOperatorGetterFieldType recovers T from name("field")(box) /
+// operator.name("field")(box) for name in {attrgetter, itemgetter} via fieldOf.
+func pythonOperatorGetterFieldType(call *grammar.Node, content []byte, fieldOf map[string]string, name string) string {
+	if call == nil || call.Type() != "call" || fieldOf == nil || name == "" {
 		return ""
 	}
-	// Outer call: getter(obj) — function must itself be attrgetter(...).
+	// Outer call: getter(obj) — function must itself be name(...).
 	fn := ingest.ChildByField(call, "function")
 	if fn == nil || fn.Type() != "call" {
 		return ""
@@ -3234,13 +3268,13 @@ func pythonAttrgetterFieldType(call *grammar.Node, content []byte, fieldOf map[s
 	}
 	switch innerFn.Type() {
 	case "identifier":
-		if ingest.NodeText(innerFn, content) != "attrgetter" {
+		if ingest.NodeText(innerFn, content) != name {
 			return ""
 		}
 	case "attribute":
 		attr := ingest.ChildByField(innerFn, "attribute")
 		obj := ingest.ChildByField(innerFn, "object")
-		if attr == nil || ingest.NodeText(attr, content) != "attrgetter" {
+		if attr == nil || ingest.NodeText(attr, content) != name {
 			return ""
 		}
 		if obj == nil || obj.Type() != "identifier" || ingest.NodeText(obj, content) != "operator" {
@@ -3249,7 +3283,7 @@ func pythonAttrgetterFieldType(call *grammar.Node, content []byte, fieldOf map[s
 	default:
 		return ""
 	}
-	// attrgetter must have exactly one positional string arg (the field name).
+	// Getter must have exactly one positional string arg (the field/key name).
 	fieldArgs, ok := pythonCallPositionalArgNodes(fn)
 	if !ok || len(fieldArgs) != 1 || fieldArgs[0].Type() != "string" {
 		return ""
