@@ -1966,7 +1966,7 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 		if ft := pythonNamedtupleIndexType(obj, content, fieldOf); ft != "" {
 			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 		}
-		if et := pythonSubscriptElemType(obj, content, elemOf, nil, nil, nil, nil); et != "" {
+		if et := pythonSubscriptElemType(obj, content, elemOf, nil, nil, nil, nil, fieldOf); et != "" {
 			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 		}
 		return len(foreignReceivers) == 0
@@ -2307,6 +2307,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						if fname == "next" {
 							if types := pythonNextPairSlots(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
 								pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+							} else if types := pythonItemsCallPairSlots(right, content, elemOf, fieldOf); len(types) > 0 {
+								// p = next(asdict(pair).items()) / next(d.items()) —
+								// pair local (key untyped, value leaf); use p[1] / unpack.
+								pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 							} else if et := pythonNextElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
 							} else if et := pythonAstupleNextFirstField(right, content, fieldOf); ourReceivers[et] {
@@ -2322,6 +2326,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// pair is a tuple (pairSlots + shared elemOf), not an element.
 						if fname == "min" || fname == "max" {
 							if types := pythonMinMaxPairSlots(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+								pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+							} else if types := pythonItemsCallPairSlots(right, content, elemOf, fieldOf); len(types) > 0 {
+								// p = min(asdict(pair).items(), key=...) / max(d.items()) —
+								// pair local (same path as next(...items())).
 								pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 							} else if et := pythonMinMaxElemType(right, content, elemOf, egElems, typeOf, fieldOf); ourReceivers[et] {
 								out[lname] = true
@@ -2570,7 +2578,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						if ourReceivers[ft] {
 							out[lname] = true
 						}
-					} else if et := pythonSubscriptElemType(right, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots); ourReceivers[et] {
+					} else if et := pythonSubscriptElemType(right, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots, fieldOf); ourReceivers[et] {
 						out[lname] = true
 					}
 				}
@@ -2696,6 +2704,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						if len(targets) >= 2 && ourReceivers[vt] {
 							out[targets[1]] = true
 						}
+					} else if vt := pythonMinMaxItemsValueType(right, content, elemOf, fieldOf); vt != "" {
+						// k, x = min(asdict(pair).items(), key=...) / max(d.items()) —
+						// value leaf on 2nd slot (same as next(...items())).
+						if len(targets) >= 2 && ourReceivers[vt] {
+							out[targets[1]] = true
+						}
 					} else if et := pythonTeeElemType(right, content, elemOf, egElems, typeOf); et != "" {
 						// it1, it2 = tee(items) / itertools.tee(items[, n]) —
 						// each target is an iterator of items elements (like groupby's g).
@@ -2787,6 +2801,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					if fname == "next" {
 						if types := pythonNextPairSlots(valueN, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
 							pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+						} else if types := pythonItemsCallPairSlots(valueN, content, elemOf, fieldOf); len(types) > 0 {
+							pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 						} else if et := pythonNextElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 							out[lname] = true
 						} else if et := pythonAstupleNextFirstField(valueN, content, fieldOf); ourReceivers[et] {
@@ -2798,6 +2814,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					// pair := min(pairs) when pairs is a pair-iter (pairSlots + shared elemOf).
 					if fname == "min" || fname == "max" {
 						if types := pythonMinMaxPairSlots(valueN, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+							pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+						} else if types := pythonItemsCallPairSlots(valueN, content, elemOf, fieldOf); len(types) > 0 {
 							pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 						} else if et := pythonMinMaxElemType(valueN, content, elemOf, egElems, typeOf, fieldOf); ourReceivers[et] {
 							out[lname] = true
@@ -3016,7 +3034,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					if ourReceivers[ft] {
 						out[lname] = true
 					}
-				} else if et := pythonSubscriptElemType(valueN, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots); ourReceivers[et] {
+				} else if et := pythonSubscriptElemType(valueN, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots, fieldOf); ourReceivers[et] {
 					out[lname] = true
 				}
 			}
@@ -4214,26 +4232,58 @@ func pythonAstupleHomogeneousType(n *grammar.Node, content []byte, fieldOf map[s
 	return pythonHomogeneousAstupleFieldType(local, fieldOf)
 }
 
-// pythonNextItemsValueType recovers the value leaf from next(...items()) unpack:
+// pythonNextItemsValueType recovers the value leaf from next(...items()) unpack
+// (see pythonCallItemsValueType). Same leaf as for k, x in d.items() /
+// for k, x in asdict(...).items() when values are homogeneous.
+func pythonNextItemsValueType(call *grammar.Node, content []byte, elemOf, fieldOf map[string]string) string {
+	return pythonCallItemsValueType(call, content, elemOf, fieldOf, "next")
+}
+
+// pythonMinMaxItemsValueType recovers the value leaf from min/max(...items()) unpack:
+// k, x = min(asdict(pair).items(), key=...) / max(d.items()) when values are
+// homogeneous / typed-dict. Single-positional form only (min(a, b) fails closed).
+// Same leaf as next(...items()) / for k, x in ...items().
+func pythonMinMaxItemsValueType(call *grammar.Node, content []byte, elemOf, fieldOf map[string]string) string {
+	return pythonCallItemsValueType(call, content, elemOf, fieldOf, "min", "max")
+}
+
+// pythonCallItemsValueType recovers the value leaf from next/min/max of an items()
+// view used as a pair source:
 //   - k, a = next(d.items()) / next(iter(d.items())) when d is a known dict
 //     (elemOf stores the value leaf from dict[K, V])
-//   - k, x = next(asdict(pair).items()) / next(iter(asdict(pair).items())) /
+//   - k, x = next(asdict(pair).items()) / min(asdict(pair).items(), key=...) /
 //     vars(pair).items() / pair.__dict__.items() / d.items() after d = asdict(pair)
 //     when all declaration-order field types agree (fieldOf @astuple.*.#i)
 //
-// Peels identity wrappers iter/list/tuple on the items view. Default arg ignored.
-// Key slot stays untyped; mixed asdict fields and non-items forms fail closed ("").
-// Same leaf as for k, x in d.items() / for k, x in asdict(...).items() (homogeneous).
-func pythonNextItemsValueType(call *grammar.Node, content []byte, elemOf, fieldOf map[string]string) string {
-	if call == nil || call.Type() != "call" {
+// Peels identity wrappers iter/list/tuple on the items view. Default/key kwargs
+// ignored. Key slot stays untyped; mixed asdict fields and non-items forms fail
+// closed (""). callees lists accepted bare function names (next / min / max).
+// For min/max, requires exactly one positional arg (same as element typing).
+func pythonCallItemsValueType(call *grammar.Node, content []byte, elemOf, fieldOf map[string]string, callees ...string) string {
+	if call == nil || call.Type() != "call" || len(callees) == 0 {
 		return ""
 	}
 	fn := ingest.ChildByField(call, "function")
-	if fn == nil || fn.Type() != "identifier" || ingest.NodeText(fn, content) != "next" {
+	if fn == nil || fn.Type() != "identifier" {
+		return ""
+	}
+	fname := ingest.NodeText(fn, content)
+	okName := false
+	for _, c := range callees {
+		if fname == c {
+			okName = true
+			break
+		}
+	}
+	if !okName {
 		return ""
 	}
 	args, ok := pythonCallPositionalArgNodes(call)
 	if !ok || len(args) == 0 {
+		return ""
+	}
+	// min/max multi-arg form fails closed (not an items fold).
+	if (fname == "min" || fname == "max") && len(args) != 1 {
 		return ""
 	}
 	n := args[0]
@@ -4264,6 +4314,41 @@ func pythonNextItemsValueType(call *grammar.Node, content []byte, elemOf, fieldO
 		return vt
 	}
 	return pythonDictViewItemsHomogeneousValueType(n, content, fieldOf)
+}
+
+// pythonItemsCallPairSlots returns ["", valueType] for next/min/max(...items())
+// when the value leaf is known (key untyped). Used to bind pairSlots on
+// p = next(...items()) so later k, x = p / p[1] type. Empty when unknown.
+func pythonItemsCallPairSlots(call *grammar.Node, content []byte, elemOf, fieldOf map[string]string) []string {
+	vt := pythonNextItemsValueType(call, content, elemOf, fieldOf)
+	if vt == "" {
+		vt = pythonMinMaxItemsValueType(call, content, elemOf, fieldOf)
+	}
+	if vt == "" {
+		return nil
+	}
+	return []string{"", vt}
+}
+
+// pythonItemsCallSubscriptValueType returns the value leaf of
+// next(...items())[1] / min(...items())[1] / (next(...items()))[1].
+// Index must be integer literal 1 (value slot); [0]/other fail closed.
+func pythonItemsCallSubscriptValueType(sub *grammar.Node, content []byte, elemOf, fieldOf map[string]string) string {
+	if sub == nil || sub.Type() != "subscript" {
+		return ""
+	}
+	idx := ingest.ChildByField(sub, "subscript")
+	if idx == nil || idx.Type() != "integer" || ingest.NodeText(idx, content) != "1" {
+		return ""
+	}
+	val := ingest.ChildByField(sub, "value")
+	for val != nil && val.Type() == "parenthesized_expression" {
+		val = pythonParenInner(val)
+	}
+	if vt := pythonNextItemsValueType(val, content, elemOf, fieldOf); vt != "" {
+		return vt
+	}
+	return pythonMinMaxItemsValueType(val, content, elemOf, fieldOf)
 }
 
 // pythonDictViewItemsHomogeneousValueType recovers the shared value type of
@@ -5454,7 +5539,7 @@ func pythonItemgetterElemType(call *grammar.Node, content []byte, elemOf, egElem
 // pythonDictPopitemSubscriptValueType) and item[i] when item is a known
 // enumerate/zip pair local (pairSlots). Fails closed on slices (items[a:b] /
 // items[:]) — those yield sequences, not elements.
-func pythonSubscriptElemType(sub *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string, pairSlots, pairIterSlots map[string][]string) string {
+func pythonSubscriptElemType(sub *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string, pairSlots, pairIterSlots map[string][]string, fieldOf map[string]string) string {
 	if sub == nil || sub.Type() != "subscript" {
 		return ""
 	}
@@ -5465,6 +5550,10 @@ func pythonSubscriptElemType(sub *grammar.Node, content []byte, elemOf, egElems,
 	}
 	// d.popitem()[1] — pair value leaf (before generic collection subscript).
 	if et := pythonDictPopitemSubscriptValueType(sub, content, elemOf); et != "" {
+		return et
+	}
+	// next(...items())[1] / min(...items())[1] — items pair value leaf.
+	if et := pythonItemsCallSubscriptValueType(sub, content, elemOf, fieldOf); et != "" {
 		return et
 	}
 	// item[1] / next(pairs)[0] when pair/pair-iter slots known.

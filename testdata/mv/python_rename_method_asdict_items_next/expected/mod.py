@@ -65,6 +65,24 @@ def use_list_pattern(pair: Pair) -> int:
     return x.execute()
 
 
+def use_min_items(pair: Pair) -> int:
+    k, x = min(asdict(pair).items(), key=lambda kv: 0)
+    return x.execute()
+
+
+def use_next_sub(pair: Pair) -> int:
+    x = next(iter(asdict(pair).items()))[1]
+    return x.execute()
+
+
+def use_pair_local(pair: Pair) -> int:
+    p = next(iter(asdict(pair).items()))
+    k, x = p
+    return x.execute()
+
+
+
+
 def use_mixed_fail_closed(box: Box) -> int:
     k, item = next(iter(asdict(box).items()))
     return item.run()
