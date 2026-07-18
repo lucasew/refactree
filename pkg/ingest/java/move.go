@@ -1715,6 +1715,7 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // element (Collection<T> for forEach / enhanced-for),
 // as.stream().toArray() / toArray(generator) / as.toArray([generator]) → same
 // element (T[] for toArray()[i] / var arr = toArray(); arr[i]),
+// as.clone() → same element (T[] for clone()[i] / var arr = as.clone(); arr[i]),
 // m.values() → valOf[m],
 // m.keySet() / navigableKeySet() / descendingKeySet() → elemOf[m]
 // (Set of map keys K; Map stores K in elemOf — same key leaf as newSetFromMap),
@@ -1806,6 +1807,9 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// toList() returns List<T> — element preserved for forEach / for-var.
 			// toArray() / toArray(generator) returns T[] (Object[] for zero-arg Stream)
 			// — element preserved for toArray()[i] / var arr = toArray(); arr[i].
+			// clone() returns T[] of the same element type for arrays (and shallow
+			// Collection copies with the same E) — element preserved for clone()[i]
+			// / var arr = as.clone(); arr[i].
 			// reversed() returns List/SequencedCollection of the same element type
 			// (Java 21 SequencedCollection; order only, element type unchanged).
 			// Map.reversed() (SequencedMap) is not an element pipeline — key-type
@@ -1816,7 +1820,7 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// (NavigableSet reverse-order view; order only).
 			// headSet/tailSet/subSet(...) return SortedSet/NavigableSet of the same
 			// element type (range views; bounds/inclusivity args do not change E).
-			"findFirst", "findAny", "min", "max", "reduce", "toList", "toArray", "reversed", "subList",
+			"findFirst", "findAny", "min", "max", "reduce", "toList", "toArray", "clone", "reversed", "subList",
 			"descendingSet", "headSet", "tailSet", "subSet":
 			recv := ingest.ChildByField(obj, "object")
 			// Arrays.stream(arr[, from, to]) — element type from first arg, not
