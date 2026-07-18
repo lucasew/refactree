@@ -1096,7 +1096,8 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // / Optional.map(a -> a).ifPresent(x -> x.m()) / map(...).orElse(d) /
 // / Optional<A>.ifPresent(a -> a.m()) / opt.ifPresentOrElse(a -> a.m(), () -> {}) /
 // / CompletableFuture<A>.thenAccept(a -> a.m()) / thenApply(a -> a.m()) /
-// / thenCompose(a -> …) — CF result T under foreign same-leaf methods /
+// / thenCompose(a -> …) / applyToEither(other, a -> a.m()) / acceptEither(other, a -> a.m()) —
+// / CF result T under foreign same-leaf methods /
 // / CompletableFuture.whenComplete((a,e) -> a.m()) / handle((a,e) -> a.m()) /
 // / Map<K,A>.forEach((k,v) -> v.m()) /
 // Map.computeIfPresent/compute/replaceAll((k,v) -> v.m()) / Map.merge((v1,v2) -> v1.m()) /
@@ -1857,13 +1858,18 @@ func javaStreamElementLambdaMethod(method string) bool {
 		"removeIf", "ifPresent", "ifPresentOrElse",
 		// CompletableFuture.thenAccept(Consumer<? super T>) /
 		// thenApply(Function<? super T,? extends U>) /
-		// thenCompose(Function<? super T,? extends CompletionStage<U>>) —
+		// thenCompose(Function<? super T,? extends CompletionStage<U>>) /
+		// applyToEither(other, Function<? super T,? extends U>) /
+		// acceptEither(other, Consumer<? super T>) —
 		// unary functional arg applied to CF result T (same leaf as join/getNow).
-		// Identity thenApply return pipelines (thenApply(a -> a).join()) peel via
-		// javaStreamPipelineElemType / javaMapResultElemType; type-changing mappers
-		// and thenCompose stay fail-closed on the return path. Identity handle
-		// ((a,e)->a).join() peels the same way (first-param bi-lambda identity).
+		// applyToEither/acceptEither take other stage first; the Function/Consumer
+		// is the second arg and still binds as the sole unary lambda (other is not
+		// a lambda). Identity thenApply return pipelines (thenApply(a -> a).join())
+		// peel via javaStreamPipelineElemType / javaMapResultElemType; type-changing
+		// mappers and thenCompose stay fail-closed on the return path. Identity
+		// handle ((a,e)->a).join() peels the same way (first-param bi-lambda identity).
 		"thenAccept", "thenApply", "thenCompose",
+		"applyToEither", "acceptEither",
 		// CompletableFuture.whenComplete(BiConsumer<? super T,? super Throwable>) /
 		// handle(BiFunction<? super T,Throwable,? extends U>) —
 		// bi-lambda first param is CF result T (second is Throwable).
