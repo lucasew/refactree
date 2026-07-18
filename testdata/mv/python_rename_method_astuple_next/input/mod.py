@@ -44,6 +44,17 @@ def use_assign(box: Box) -> int:
     return xa.run() + xb.run()
 
 
+def use_tuple_local(box: Box) -> int:
+    t = astuple(box)
+    return next(iter(t)).run() + next(t).run()
+
+
+def use_list_local(box: Box) -> int:
+    xs = list(astuple(box))
+    xa = next(iter(xs))
+    return xa.run()
+
+
 def use_index_still(box: Box) -> int:
     # already covered by astuple_direct; keep B leaf untouched
     return astuple(box)[1].run()

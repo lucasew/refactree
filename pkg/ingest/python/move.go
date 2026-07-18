@@ -4761,16 +4761,25 @@ func pythonAstupleNextFirstField(call *grammar.Node, content []byte, fieldOf map
 	return pythonAstupleFirstFieldType(args[0], content, fieldOf)
 }
 
-// pythonAstupleFirstFieldType recovers fieldOf["@astuple.local.#0"] from an
-// expression that is astuple(local) / dataclasses.astuple(local) /
-// astuple(replace(local)) or an order-preserving wrapper of those
-// (iter/list/tuple). Same leaf as astuple(local)[0] / box.a for first field.
+// pythonAstupleFirstFieldType recovers the first declaration-order field type
+// from an expression that is:
+//   - astuple(local) / dataclasses.astuple(local) / astuple(replace(local))
+//     → fieldOf["@astuple.local.#0"]
+//   - t / list(t) / iter(t) when t = astuple(box) (or list/tuple(astuple(box)))
+//     → fieldOf["t.#0"] (index slots bound on assignment)
+//   - order-preserving wrappers of those (iter/list/tuple)
+// Same leaf as astuple(local)[0] / t[0] / box.a for first field.
 func pythonAstupleFirstFieldType(n *grammar.Node, content []byte, fieldOf map[string]string) string {
 	if n == nil || fieldOf == nil {
 		return ""
 	}
 	if n.Type() == "parenthesized_expression" {
 		return pythonAstupleFirstFieldType(pythonParenInner(n), content, fieldOf)
+	}
+	// t = astuple(box); next(t) / next(iter(t)) — assigned field-tuple local
+	// with index slots fieldOf["t.#0"] (also list(astuple)/tuple(astuple) assigns).
+	if n.Type() == "identifier" {
+		return fieldOf[ingest.NodeText(n, content)+".#0"]
 	}
 	if n.Type() != "call" {
 		return ""
