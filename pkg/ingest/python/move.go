@@ -1950,6 +1950,9 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	// list(asdict(box).values())[i].run() / list(d.values())[i].run() after
 	// d = asdict(box) / vars / __dict__ — same declaration-order slots (dict
 	// preserves order; values()[i] is field i — same leaf as next(...values())).
+	// list(asdict(box).items())[i][1].run() / list(d.items())[i][1].run() —
+	// items pair value at declaration-order index i (same leaf as values()[i];
+	// deep stack: asdict→items→list→[i]→[1]).
 	// items[0].run() / d["k"].run() / list(items)[0].run() — collection subscript
 	// element (same leaf as a = items[0]; a.run()). Slices fail closed.
 	if obj.Type() == "subscript" {
@@ -4351,6 +4354,149 @@ func pythonItemsCallSubscriptValueType(sub *grammar.Node, content []byte, elemOf
 	return pythonMinMaxItemsValueType(val, content, elemOf, fieldOf)
 }
 
+// pythonItemsIndexValueType recovers T from the deep items stack
+// list/tuple(...items())[i][1] (and parenthesized forms):
+//   - list(asdict(box).items())[0][1] / tuple(vars(box).items())[0][1] /
+//     list(box.__dict__.items())[0][1] / d = asdict(box); list(d.items())[0][1]
+//     → fieldOf[@astuple.local.#i] (declaration-order; same leaf as
+//     list(...values())[i] / asdict(box)["field_i"])
+//   - list(d.items())[0][1] when d: dict[K, A] → elemOf[d] (homogeneous values;
+//     any non-slice index yields the same value leaf)
+//
+// Outer value-slot index must be integer literal 1; pair index i is a
+// non-negative integer literal. [0] (key), slices, and unknown forms fail closed.
+func pythonItemsIndexValueType(sub *grammar.Node, content []byte, elemOf, fieldOf map[string]string) string {
+	if sub == nil || sub.Type() != "subscript" {
+		return ""
+	}
+	valIdx := ingest.ChildByField(sub, "subscript")
+	if valIdx == nil || valIdx.Type() != "integer" || ingest.NodeText(valIdx, content) != "1" {
+		return ""
+	}
+	pairExpr := ingest.ChildByField(sub, "value")
+	for pairExpr != nil && pairExpr.Type() == "parenthesized_expression" {
+		pairExpr = pythonParenInner(pairExpr)
+	}
+	if pairExpr == nil || pairExpr.Type() != "subscript" {
+		return ""
+	}
+	for i := uint32(0); i < pairExpr.ChildCount(); i++ {
+		if pairExpr.Child(i).Type() == "slice" {
+			return ""
+		}
+	}
+	pairIdxN := ingest.ChildByField(pairExpr, "subscript")
+	if pairIdxN == nil || pairIdxN.Type() != "integer" {
+		return ""
+	}
+	pairIdx := ingest.NodeText(pairIdxN, content)
+	if pairIdx == "" {
+		return ""
+	}
+	for _, c := range pairIdx {
+		if c < '0' || c > '9' {
+			return ""
+		}
+	}
+	seq := ingest.ChildByField(pairExpr, "value")
+	for seq != nil && seq.Type() == "parenthesized_expression" {
+		seq = pythonParenInner(seq)
+	}
+	if seq == nil {
+		return ""
+	}
+	// asdict/vars/__dict__ items — index-aware field leaf (mixed OK).
+	if local := pythonDictViewItemsSeqLocal(seq, content); local != "" && fieldOf != nil {
+		if ft := fieldOf["@astuple."+local+".#"+pairIdx]; ft != "" {
+			return ft
+		}
+	}
+	// typed dict list(d.items())[i][1] — homogeneous value leaf (index ignored).
+	if vt := pythonDictItemsSeqValueType(seq, content, elemOf); vt != "" {
+		return vt
+	}
+	return ""
+}
+
+// pythonDictViewItemsSeqLocal recovers the identifier local whose
+// declaration-order field slots are exposed by list/tuple of a dict-view
+// items() chain: list(asdict(box).items()) / tuple(vars(box).items()) /
+// list(box.__dict__.items()) / list(d.items()) when d = asdict(box) /
+// vars(box) / box.__dict__ (bindFields records @astuple.d.#i). Peels
+// list/tuple wrappers only (bare dict_items is not indexable). Pair index i
+// then value slot [1] is field i — same leaf as list(...values())[i]. Other
+// forms fail closed ("").
+func pythonDictViewItemsSeqLocal(n *grammar.Node, content []byte) string {
+	if n == nil {
+		return ""
+	}
+	if n.Type() == "parenthesized_expression" {
+		return pythonDictViewItemsSeqLocal(pythonParenInner(n), content)
+	}
+	if n.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil {
+		return ""
+	}
+	name := pythonSimpleCalleeName(fn, content)
+	// list(...items()) / tuple(...items()) — materialize order-preserving sequence.
+	if name == "list" || name == "tuple" {
+		args, ok := pythonCallPositionalArgNodes(n)
+		if !ok || len(args) != 1 {
+			return ""
+		}
+		return pythonDictViewItemsSeqLocal(args[0], content)
+	}
+	if name != "items" || fn.Type() != "attribute" {
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(n)
+	if !ok || len(args) != 0 {
+		return ""
+	}
+	obj := ingest.ChildByField(fn, "object")
+	if obj == nil {
+		return ""
+	}
+	// Assigned dict-view local: d.items() after d = asdict(box) / vars / __dict__.
+	if obj.Type() == "identifier" {
+		return ingest.NodeText(obj, content)
+	}
+	return pythonDictViewObjectLocal(obj, content)
+}
+
+// pythonDictItemsSeqValueType recovers the homogeneous value leaf of
+// list/tuple(d.items()) when d is a known dict/mapping local (elemOf).
+// Peels list/tuple wrappers; bare d.items() without materialization fails
+// closed for index chains (dict_items is not indexable). Same leaf as
+// next(d.items()) unpack value / for k, a in d.items().
+func pythonDictItemsSeqValueType(n *grammar.Node, content []byte, elemOf map[string]string) string {
+	if n == nil || elemOf == nil {
+		return ""
+	}
+	if n.Type() == "parenthesized_expression" {
+		return pythonDictItemsSeqValueType(pythonParenInner(n), content, elemOf)
+	}
+	if n.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil {
+		return ""
+	}
+	name := pythonSimpleCalleeName(fn, content)
+	if name == "list" || name == "tuple" {
+		args, ok := pythonCallPositionalArgNodes(n)
+		if !ok || len(args) != 1 {
+			return ""
+		}
+		return pythonDictItemsSeqValueType(args[0], content, elemOf)
+	}
+	return pythonDictItemsValueType(n, content, elemOf)
+}
+
 // pythonDictViewItemsHomogeneousValueType recovers the shared value type of
 // asdict(box).items() / vars(box).items() / box.__dict__.items() /
 // d.items() after d = asdict(box) / vars / __dict__ when all declaration-order
@@ -5554,6 +5700,11 @@ func pythonSubscriptElemType(sub *grammar.Node, content []byte, elemOf, egElems,
 	}
 	// next(...items())[1] / min(...items())[1] — items pair value leaf.
 	if et := pythonItemsCallSubscriptValueType(sub, content, elemOf, fieldOf); et != "" {
+		return et
+	}
+	// list(...items())[i][1] / tuple(...items())[i][1] — deep items stack value
+	// at declaration-order index i (asdict) or homogeneous typed-dict value.
+	if et := pythonItemsIndexValueType(sub, content, elemOf, fieldOf); et != "" {
 		return et
 	}
 	// item[1] / next(pairs)[0] when pair/pair-iter slots known.
