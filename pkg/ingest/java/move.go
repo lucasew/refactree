@@ -3453,6 +3453,7 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	as.removeFirst() / as.removeLast() → elemOf[as] (SequencedCollection / List / Deque)
 //	vs.elementAt(i) / vs.firstElement() / vs.lastElement() → elemOf[vs] (Vector)
 //	ss.first() / ss.last() → elemOf[ss] (SortedSet / NavigableSet)
+//	ns.ceiling(e) / ns.floor(e) / ns.higher(e) / ns.lower(e) → elemOf[ns] (NavigableSet)
 //	ia.next()                 → elemOf[ia]   (Iterator<A>)
 //	as.iterator().next()      → elemOf[as]   (via type-preserving iterator())
 //	lia.previous()            → elemOf[lia]  (ListIterator<A>)
@@ -3539,7 +3540,10 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// (same element type as List.get / getFirst / getLast).
 		"elementAt", "firstElement", "lastElement",
 		// SortedSet / NavigableSet first/last return E (same element type as get).
-		"first", "last":
+		"first", "last",
+		// NavigableSet ceiling/floor/higher/lower return E (search endpoints;
+		// probe arg does not change the element type leaf).
+		"ceiling", "floor", "higher", "lower":
 		// Map-like (2 type args recorded in valOf) → value type; else element type.
 		// Identifier receiver only — chained gets fail closed.
 		if obj != nil && obj.Type() == "identifier" {
