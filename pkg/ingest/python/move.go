@@ -1848,6 +1848,9 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 		return enclosingClass == "" || !ourReceivers[enclosingClass]
 	}
 	// Box().method / make().method — ctor name via maps.
+	// box.get("a").run() — TypedDict/record string-key value (fieldOf; same leaf as
+	// xa = box.get("a"); xa.run()).
+	// attrgetter("a")(box).run() — single-field getter (same leaf as box.a.run()).
 	// items.popleft().run() / d.get(k).run() / q.get().run() / items.pop().run() /
 	// list(items).pop().run() — collection/queue element accessors (same leaf as
 	// a = items.popleft(); a.run()). Unknown call receivers: unique-leaf only.
@@ -1856,6 +1859,14 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 			if fn.Type() == "identifier" {
 				return pythonRenameByTypeMaps(ingest.NodeText(fn, content), ourReceivers, foreignReceivers, nil)
 			}
+			if ft := pythonRecordKeyAccessType(obj, content, fieldOf); ft != "" {
+				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
+			}
+			if ft := pythonAttrgetterFieldType(obj, content, fieldOf); ft != "" {
+				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
+			}
+			// copy.copy(item).run() — need typeOf (not threaded here); object copy
+			// chains rely on assignment form (a = copy.copy(item); a.run()).
 			if et := pythonCollectionAccessElemType(obj, content, elemOf); et != "" {
 				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 			}
@@ -1876,9 +1887,13 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 		}
 		return len(foreignReceivers) == 0
 	}
+	// box["a"].run() — TypedDict/record string-key value (fieldOf).
 	// items[0].run() / d["k"].run() / list(items)[0].run() — collection subscript
 	// element (same leaf as a = items[0]; a.run()). Slices fail closed.
 	if obj.Type() == "subscript" {
+		if ft := pythonRecordKeyAccessType(obj, content, fieldOf); ft != "" {
+			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
+		}
 		if et := pythonSubscriptElemType(obj, content, elemOf, nil, nil, nil, nil); et != "" {
 			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 		}
@@ -2030,7 +2045,9 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `xa = box.a` / `box.a.run()` when box is a typed local of a class/dataclass
 // with annotated field a: A (fieldOf; under foreign same-leaf methods),
 // or a collections.namedtuple with field types recovered from same-file
-// constructors (`Box = namedtuple("Box", ["a","b"]); box = Box(A(), B())`).
+// constructors (`Box = namedtuple("Box", ["a","b"]); box = Box(A(), B())`),
+// `xa = box["a"]` / `box["a"].run()` / `xa = box.get("a")` for TypedDict-style
+// string keys of the same annotated fields (fieldOf).
 // fieldOf maps "local.field" → field type leaf for class field access.
 // elemOf maps collection locals → element type leaf (list[A] / deque[A] /
 // dict value / Queue[A] → "A") for direct access chains under foreign same-leaf.
@@ -2204,6 +2221,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								// a = items.popleft() (deque) — element type of receiver.
 								// a = d.get(k) / d.get(k, default) — element/value type of
 								// the receiver collection (dict value leaf via elemOf).
+								// a = box.get("a") / box.pop("a") / box.setdefault("a") —
+								// TypedDict/record string-key value via fieldOf (key-specific).
 								// a = d.setdefault(k) / d.setdefault(k, default) — same.
 								// Default arg on get/setdefault is ignored (same as next's default).
 								// pair = pairs.pop() / pairs.pop(0) when pairs is a pair-iter
@@ -2220,8 +2239,27 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 										break
 									}
 								}
+								if ft := pythonRecordKeyAccessType(right, content, fieldOf); ft != "" {
+									typeOf[lname] = ft
+									pythonBindClassLocalFields(lname, ft, fieldIndex, fieldOf)
+									if ourReceivers[ft] {
+										out[lname] = true
+									}
+									break
+								}
 								if et := pythonIterableElemType(obj, content, elemOf, egElems, typeOf); ourReceivers[et] {
 									out[lname] = true
+								}
+							case "copy", "deepcopy":
+								// a = copy.copy(item) / copy.deepcopy(item) — preserve object
+								// type of the single arg (typed local / Class()). Collection
+								// form xs = copy.copy(items) is handled via elemOf below.
+								if tn := pythonCopyCallObjectType(right, content, typeOf); tn != "" {
+									typeOf[lname] = tn
+									pythonBindClassLocalFields(lname, tn, fieldIndex, fieldOf)
+									if ourReceivers[tn] {
+										out[lname] = true
+									}
 								}
 							case "heappop", "heappushpop", "heapreplace":
 								// a = heapq.heappop(items) / heapq.heappushpop(items, x) /
@@ -2266,17 +2304,34 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					} else if et := pythonItemgetterElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 						out[lname] = true
 					}
+					// xa = attrgetter("a")(box) / operator.attrgetter("a")(box) —
+					// single-field getter on a typed local yields the field type
+					// (same as box.a / box["a"]). Multi-field attrgetter fails closed.
+					if ft := pythonAttrgetterFieldType(right, content, fieldOf); ft != "" {
+						typeOf[lname] = ft
+						pythonBindClassLocalFields(lname, ft, fieldIndex, fieldOf)
+						if ourReceivers[ft] {
+							out[lname] = true
+						}
+					}
 				}
 				// a = items[0] / a = d[k] / a = list(items)[0] — element/value of collection.
 				// a = item[1] when item from enumerate/zip pair (pairSlots).
 				// a = pairs[0][0] / a = list(zip(...))[0][0] — double subscript slot.
 				// pair = pairs[0] / pair = list(zip(...))[0] — index into pair-iter binds
 				// pairSlots (+ elemOf when slots share type, for nested for/next).
+				// xa = box["a"] — TypedDict/record string-key value (fieldOf).
 				// Slices (items[1:3]) fail closed (sequence, not element).
 				if right != nil && right.Type() == "subscript" {
 					if types := pythonPairSlotsOf(right, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots); len(types) > 0 {
 						// Foreign slots too — shadow prior same-name pair locals.
 						pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+					} else if ft := pythonRecordKeyAccessType(right, content, fieldOf); ft != "" {
+						typeOf[lname] = ft
+						pythonBindClassLocalFields(lname, ft, fieldIndex, fieldOf)
+						if ourReceivers[ft] {
+							out[lname] = true
+						}
 					} else if et := pythonSubscriptElemType(right, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots); ourReceivers[et] {
 						out[lname] = true
 					}
@@ -2457,6 +2512,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							// a := items.pop() / items.pop(0) / d.pop(k)
 							// a := items.popleft() (deque)
 							// a := d.get(k) / d.get(k, default)
+							// a := box.get("a") / box.pop("a") — TypedDict/record key (fieldOf).
 							// a := d.setdefault(k) / d.setdefault(k, default)
 							// pair := pairs.pop() when pairs is a pair-iter (pairSlots + shared elemOf).
 							obj := ingest.ChildByField(fn, "object")
@@ -2466,8 +2522,25 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 									break
 								}
 							}
+							if ft := pythonRecordKeyAccessType(valueN, content, fieldOf); ft != "" {
+								typeOf[lname] = ft
+								pythonBindClassLocalFields(lname, ft, fieldIndex, fieldOf)
+								if ourReceivers[ft] {
+									out[lname] = true
+								}
+								break
+							}
 							if et := pythonIterableElemType(obj, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
+							}
+						case "copy", "deepcopy":
+							// a := copy.copy(item) / copy.deepcopy(item) — object type of arg.
+							if tn := pythonCopyCallObjectType(valueN, content, typeOf); tn != "" {
+								typeOf[lname] = tn
+								pythonBindClassLocalFields(lname, tn, fieldIndex, fieldOf)
+								if ourReceivers[tn] {
+									out[lname] = true
+								}
 							}
 						case "heappop", "heappushpop", "heapreplace":
 							// a := heapq.heappop(items) / heapq.heappushpop /
@@ -2507,14 +2580,29 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				} else if et := pythonItemgetterElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 					out[lname] = true
 				}
+				// xa := attrgetter("a")(box) / operator.attrgetter("a")(box).
+				if ft := pythonAttrgetterFieldType(valueN, content, fieldOf); ft != "" {
+					typeOf[lname] = ft
+					pythonBindClassLocalFields(lname, ft, fieldIndex, fieldOf)
+					if ourReceivers[ft] {
+						out[lname] = true
+					}
+				}
 			}
 			// a := items[0] / a := d[k] — element/value of known collection.
 			// pair := pairs[0] / pair := list(zip(...))[0] — pairSlots (+ shared elemOf).
 			// a := pairs[0][0] — double subscript slot.
+			// xa := box["a"] — TypedDict/record string-key value (fieldOf).
 			// Slices fail closed (sequence, not element).
 			if valueN.Type() == "subscript" {
 				if types := pythonPairSlotsOf(valueN, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots); len(types) > 0 {
 					pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+				} else if ft := pythonRecordKeyAccessType(valueN, content, fieldOf); ft != "" {
+					typeOf[lname] = ft
+					pythonBindClassLocalFields(lname, ft, fieldIndex, fieldOf)
+					if ourReceivers[ft] {
+						out[lname] = true
+					}
 				} else if et := pythonSubscriptElemType(valueN, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots); ourReceivers[et] {
 					out[lname] = true
 				}
@@ -2972,9 +3060,11 @@ func pythonExprClassType(n *grammar.Node, content []byte) string {
 
 // pythonMergeFunctionalNamedTupleFields indexes field types from functional
 // typing.NamedTuple factories (types live in the call, not a class body):
-//   Box = NamedTuple("Box", [("a", A), ("b", B)])
-//   Box = NamedTuple("Box", a=A, b=B)
-//   Box = typing.NamedTuple(...)
+//
+//	Box = NamedTuple("Box", [("a", A), ("b", B)])
+//	Box = NamedTuple("Box", a=A, b=B)
+//	Box = typing.NamedTuple(...)
+//
 // Enables box.a.run() / xa = box.a under foreign same-leaf methods.
 func pythonMergeFunctionalNamedTupleFields(root *grammar.Node, content []byte, fieldIndex map[string]map[string]string) {
 	if root == nil || fieldIndex == nil {
@@ -3122,6 +3212,141 @@ func pythonFieldAccessType(attr *grammar.Node, content []byte, fieldOf map[strin
 		return ""
 	}
 	return fieldOf[ingest.NodeText(obj, content)+"."+ingest.NodeText(field, content)]
+}
+
+// pythonAttrgetterFieldType recovers T from attrgetter("a")(box) /
+// operator.attrgetter("a")(box) when box is a typed local with annotated field a
+// of type T (fieldOf; same leaf as box.a / box["a"]). Single string field only —
+// multi-field attrgetter("a","b") returns a tuple and fails closed. Stored
+// getters (g = attrgetter("a"); g(box)) are not tracked.
+func pythonAttrgetterFieldType(call *grammar.Node, content []byte, fieldOf map[string]string) string {
+	if call == nil || call.Type() != "call" || fieldOf == nil {
+		return ""
+	}
+	// Outer call: getter(obj) — function must itself be attrgetter(...).
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "call" {
+		return ""
+	}
+	innerFn := ingest.ChildByField(fn, "function")
+	if innerFn == nil {
+		return ""
+	}
+	switch innerFn.Type() {
+	case "identifier":
+		if ingest.NodeText(innerFn, content) != "attrgetter" {
+			return ""
+		}
+	case "attribute":
+		attr := ingest.ChildByField(innerFn, "attribute")
+		obj := ingest.ChildByField(innerFn, "object")
+		if attr == nil || ingest.NodeText(attr, content) != "attrgetter" {
+			return ""
+		}
+		if obj == nil || obj.Type() != "identifier" || ingest.NodeText(obj, content) != "operator" {
+			return ""
+		}
+	default:
+		return ""
+	}
+	// attrgetter must have exactly one positional string arg (the field name).
+	fieldArgs, ok := pythonCallPositionalArgNodes(fn)
+	if !ok || len(fieldArgs) != 1 || fieldArgs[0].Type() != "string" {
+		return ""
+	}
+	_, field := pythonStringContent(fieldArgs[0], content)
+	if field == "" {
+		return ""
+	}
+	// Outer call: getter(obj) — exactly one positional arg (identifier local).
+	objArgs, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(objArgs) != 1 || objArgs[0].Type() != "identifier" {
+		return ""
+	}
+	return fieldOf[ingest.NodeText(objArgs[0], content)+"."+field]
+}
+
+// pythonCopyCallObjectType recovers T from copy.copy(x) / copy.deepcopy(x) when
+// x is a typed object local or Class() ctor (typeOf / ctor name). Collection
+// copies use pythonIterableElemType instead. Bare copy(x) (from copy import copy)
+// is not tracked. Wrong arity / other modules fail closed.
+func pythonCopyCallObjectType(call *grammar.Node, content []byte, typeOf map[string]string) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "attribute" {
+		return ""
+	}
+	attr := ingest.ChildByField(fn, "attribute")
+	obj := ingest.ChildByField(fn, "object")
+	if attr == nil || obj == nil || obj.Type() != "identifier" {
+		return ""
+	}
+	method := ingest.NodeText(attr, content)
+	if method != "copy" && method != "deepcopy" {
+		return ""
+	}
+	if ingest.NodeText(obj, content) != "copy" {
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) != 1 {
+		return ""
+	}
+	return pythonObjectExprType(args[0], content, typeOf)
+}
+
+// pythonRecordKeyAccessType recovers T from box["a"] / box.get("a") /
+// box.pop("a") / box.setdefault("a"[, default]) when box is a typed local with
+// annotated field a of type T (TypedDict / dataclass-style string keys via
+// fieldOf). Only identifier receivers and string-literal keys; non-string keys,
+// multi-arg pop without a string first arg, and unknown fields fail closed.
+// Homogeneous dict value typing stays on the elemOf path.
+func pythonRecordKeyAccessType(n *grammar.Node, content []byte, fieldOf map[string]string) string {
+	if n == nil || fieldOf == nil {
+		return ""
+	}
+	switch n.Type() {
+	case "subscript":
+		val := ingest.ChildByField(n, "value")
+		if val == nil {
+			val = ingest.ChildByField(n, "object")
+		}
+		sub := ingest.ChildByField(n, "subscript")
+		if val == nil || val.Type() != "identifier" || sub == nil || sub.Type() != "string" {
+			return ""
+		}
+		_, key := pythonStringContent(sub, content)
+		if key == "" {
+			return ""
+		}
+		return fieldOf[ingest.NodeText(val, content)+"."+key]
+	case "call":
+		fn := ingest.ChildByField(n, "function")
+		if fn == nil || fn.Type() != "attribute" {
+			return ""
+		}
+		attr := ingest.ChildByField(fn, "attribute")
+		obj := ingest.ChildByField(fn, "object")
+		if attr == nil || obj == nil || obj.Type() != "identifier" {
+			return ""
+		}
+		switch ingest.NodeText(attr, content) {
+		case "get", "setdefault", "pop":
+			// First positional arg must be a string key; default/other args ignored.
+			args, ok := pythonCallPositionalArgNodes(n)
+			if !ok || len(args) == 0 || args[0].Type() != "string" {
+				return ""
+			}
+			_, key := pythonStringContent(args[0], content)
+			if key == "" {
+				return ""
+			}
+			return fieldOf[ingest.NodeText(obj, content)+"."+key]
+		}
+	}
+	return ""
 }
 
 // pythonBindMatchSeqPatterns binds capture names from match list/tuple/mapping
@@ -4234,13 +4459,31 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		if fn := ingest.ChildByField(right, "function"); fn != nil && fn.Type() == "attribute" {
 			if attr := ingest.ChildByField(fn, "attribute"); attr != nil {
 				switch ingest.NodeText(attr, content) {
-				case "copy", "elements":
-					// copy() and Counter.elements() — zero-arg; element type of receiver.
+				case "copy", "deepcopy", "elements":
+					// copy.copy(xs) / copy.deepcopy(xs) — module-qualified; preserve
+					// the arg's element type (same as items.copy() for collections).
+					// items.copy() / Counter.elements() — zero-arg; element type of receiver.
+					// Other receivers / arity fail closed.
 					args, ok := pythonCallPositionalArgNodes(right)
-					if !ok || len(args) != 0 {
+					if !ok {
 						return ""
 					}
 					obj := ingest.ChildByField(fn, "object")
+					method := ingest.NodeText(attr, content)
+					if (method == "copy" || method == "deepcopy") &&
+						obj != nil && obj.Type() == "identifier" &&
+						ingest.NodeText(obj, content) == "copy" {
+						if len(args) != 1 {
+							return ""
+						}
+						return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
+					}
+					if method == "deepcopy" {
+						return ""
+					}
+					if len(args) != 0 {
+						return ""
+					}
 					return pythonIterableElemType(obj, content, elemOf, egElems, typeOf)
 				case "values":
 					obj, method := pythonAttrCall(right, content)
