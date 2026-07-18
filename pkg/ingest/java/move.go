@@ -1721,7 +1721,8 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // (ArrayList<A>) as.clone() / (List<A>) x → "A" (single type-arg generic cast;
 // multi-arg Map casts fail closed so .get uses the value path, not key-as-elem),
 // (A[]) expr → "A" (array cast element), else peel cast value (as.clone() under cast),
-// m.values() → valOf[m],
+// m.values() / m.sequencedValues() → valOf[m]
+// (Collection/SequencedCollection of map values V; sequencedValues is order-only, Java 21),
 // m.keySet() / navigableKeySet() / descendingKeySet() → elemOf[m]
 // (Set of map keys K; Map stores K in elemOf — same key leaf as newSetFromMap),
 // List.of(new A()) / Stream.of(new A()) / Arrays.asList(new A()) → "A",
@@ -1909,8 +1910,10 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 				return ""
 			}
 			return javaStreamPipelineElemType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
-		case "values":
+		case "values", "sequencedValues":
 			// m.values() / collect(toMap(...)).values() — Collection of map values.
+			// m.sequencedValues() — SequencedCollection of map values V (Java 21;
+			// order only; same V leaf as values — enables getFirst/getLast/forEach).
 			return javaMapPipelineValueType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
 		case "keySet", "navigableKeySet", "descendingKeySet":
 			// m.keySet() / navigableKeySet() / descendingKeySet() — Set of map keys K
