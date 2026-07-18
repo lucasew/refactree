@@ -1601,6 +1601,13 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 		return
 	}
 	method := ingest.NodeText(nameN, content)
+	// Stream.collect(Collectors.reducing/maxBy/minBy(...)) — BinaryOperator /
+	// mapper lambdas sit on the collector, not on stream methods. Bind from the
+	// collect receiver's stream element type (Collectors receiver has no elemOf).
+	if method == "collect" {
+		javaBindCollectorsReducingLambdaParams(call, content, ourReceivers, elemOf, valOf, out)
+		return
+	}
 	if !javaStreamElementLambdaMethod(method) {
 		return
 	}
@@ -1871,7 +1878,9 @@ func javaStreamElementLambdaMethod(method string) bool {
 // javaMapEntryUnaryLambdaMethod reports ConcurrentHashMap-style methods whose
 // unary functional arg is applied to Map.Entry<K,V> (not V / not stream elems):
 // forEachEntry(threshold, Consumer<? super Map.Entry<K,V>>) — 2-arg form;
-//   3-arg (Function+Consumer) is handled specially (consumer is on U, not Entry),
+//
+//	3-arg (Function+Consumer) is handled specially (consumer is on U, not Entry),
+//
 // searchEntries(threshold, Function<? super Map.Entry<K,V>, ? extends U>),
 // reduceEntries(threshold, Function<? super Map.Entry<K,V>, ? extends U>, BiFunction)
 // — 3-arg transformer only (2-arg form is an Entry bi-lambda; see case 2).
@@ -2135,13 +2144,16 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// collect(Collectors.flatMapping(a -> Stream.of(a), toList()/…))
 			// (Stream.of / ofNullable rewrap only) /
 			// collect(Collectors.teeing(toList()/…, …, (list, …) -> list)) —
-			// Collection of the stream element type. Other collectors
+			// Collection of the stream element type.
+			// collect(Collectors.reducing(...)/maxBy(...)/minBy(...)) — Optional<T>
+			// or T of the stream element (same leaf as stream.reduce/min/max for
+			// orElse/ifPresent / var opt tracking). Other collectors
 			// (groupingBy, type-changing mapping/flatMapping, toMap, …) fail closed here
 			// (toMap values recovered via javaMapPipelineValueType / javaToMapCollectValueType).
-			if !javaIsToListOrSetCollector(obj, content) {
-				return ""
+			if javaIsToListOrSetCollector(obj, content) || javaIsReducingMaxMinCollector(obj, content) {
+				return javaStreamPipelineElemType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
 			}
-			return javaStreamPipelineElemType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
+			return ""
 		case "values", "sequencedValues":
 			// m.values() / collect(toMap(...)).values() — Collection of map values.
 			// m.sequencedValues() — SequencedCollection of map values V (Java 21;
@@ -4690,6 +4702,13 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// the stream element type, which matches the common T-identity product case).
 		// One-arg reduce(BinaryOperator) returns Optional<T> — fail closed here.
 		return javaStreamReduceIdentityElemType(val, obj, content, elemOf, valOf)
+	case "collect":
+		// Stream.collect(Collectors.reducing(identity, op[, mapper])) returns T when
+		// the collector is identity reducing (2-arg or identity-mapper 3-arg).
+		// Optional forms (1-arg reducing / maxBy / minBy) fail closed here so var
+		// binds via javaStreamPipelineElemType → elemOf for orElse/ifPresent.
+		// toList/toSet collect is Collection — also fails closed here (elemOf path).
+		return javaStreamCollectReducingIdentityElemType(val, obj, content, elemOf, valOf)
 	case "searchValues":
 		// ConcurrentHashMap.searchValues(threshold, Function<? super V,? extends U>)
 		// returns U. Identity Function (a -> a) yields V of the map receiver
@@ -5077,6 +5096,156 @@ func javaStreamReduceIdentityElemType(call, obj *grammar.Node, content []byte, e
 		return ""
 	}
 	return javaStreamPipelineElemType(obj, content, elemOf, valOf)
+}
+
+// javaIsReducingMaxMinCollector reports Stream.collect args that yield Optional<T>
+// or T of the stream element type: Collectors.reducing(...) / maxBy(...) / minBy(...)
+// (or static-import reducing/maxBy/minBy). Type-changing 3-arg reducing (non-identity
+// mapper) still reports true for pipeline peel — scalar identity return recovery is
+// gated separately in javaStreamCollectReducingIdentityElemType.
+func javaIsReducingMaxMinCollector(collectCall *grammar.Node, content []byte) bool {
+	first := javaCollectFirstArg(collectCall)
+	return javaIsReducingMaxMinCollectorExpr(first, content)
+}
+
+// javaIsReducingMaxMinCollectorExpr reports a reducing/maxBy/minBy collector expression.
+func javaIsReducingMaxMinCollectorExpr(n *grammar.Node, content []byte) bool {
+	if n == nil || n.Type() != "method_invocation" {
+		return false
+	}
+	nameN := ingest.ChildByField(n, "name")
+	if nameN == nil {
+		return false
+	}
+	switch ingest.NodeText(nameN, content) {
+	case "reducing", "maxBy", "minBy":
+	default:
+		return false
+	}
+	if obj := ingest.ChildByField(n, "object"); obj != nil {
+		if obj.Type() != "identifier" && obj.Type() != "type_identifier" {
+			return false
+		}
+		if ingest.NodeText(obj, content) != "Collectors" {
+			return false
+		}
+	}
+	// At least one arg (op / comparator / identity+op).
+	return len(javaCallArgs(n)) >= 1
+}
+
+// javaStreamCollectReducingIdentityElemType recovers T from
+// stream.collect(Collectors.reducing(identity, op)) / reducing(identity, mapper, op)
+// when the result is T (not Optional). One-arg reducing / maxBy / minBy return
+// Optional and fail closed here. 3-arg requires identity mapper (a -> a) so U=T.
+func javaStreamCollectReducingIdentityElemType(collectCall, streamObj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	if collectCall == nil || streamObj == nil {
+		return ""
+	}
+	first := javaCollectFirstArg(collectCall)
+	if first == nil || first.Type() != "method_invocation" {
+		return ""
+	}
+	nameN := ingest.ChildByField(first, "name")
+	if nameN == nil || ingest.NodeText(nameN, content) != "reducing" {
+		return ""
+	}
+	if obj := ingest.ChildByField(first, "object"); obj != nil {
+		if obj.Type() != "identifier" && obj.Type() != "type_identifier" {
+			return ""
+		}
+		if ingest.NodeText(obj, content) != "Collectors" {
+			return ""
+		}
+	}
+	args := javaCallArgs(first)
+	switch len(args) {
+	case 2:
+		// reducing(identity, BinaryOperator) → T. First arg must not be the op lambda.
+		if args[0].Type() == "lambda_expression" {
+			return ""
+		}
+		return javaStreamPipelineElemType(streamObj, content, elemOf, valOf)
+	case 3:
+		// reducing(identity, mapper, BinaryOperator) → U. Identity mapper only (U=T).
+		if args[0].Type() == "lambda_expression" {
+			return ""
+		}
+		if !javaIsIdentityLambda(args[1], content) {
+			return ""
+		}
+		return javaStreamPipelineElemType(streamObj, content, elemOf, valOf)
+	default:
+		// reducing(BinaryOperator) → Optional<T>; maxBy/minBy not here.
+		return ""
+	}
+}
+
+// javaBindCollectorsReducingLambdaParams binds BinaryOperator / identity-mapper
+// params on collect(Collectors.reducing(...)) from the stream element type of the
+// collect receiver. maxBy/minBy have no T BinaryOperator at the collector top level
+// (Comparator only). Type-changing 3-arg mappers fail closed on the reducer.
+func javaBindCollectorsReducingLambdaParams(collectCall *grammar.Node, content []byte, ourReceivers map[string]bool, elemOf, valOf map[string]string, out map[string]bool) {
+	if collectCall == nil || out == nil {
+		return
+	}
+	streamObj := ingest.ChildByField(collectCall, "object")
+	et := javaStreamPipelineElemType(streamObj, content, elemOf, valOf)
+	if et == "" || !ourReceivers[et] {
+		return
+	}
+	first := javaCollectFirstArg(collectCall)
+	if first == nil || first.Type() != "method_invocation" {
+		return
+	}
+	nameN := ingest.ChildByField(first, "name")
+	if nameN == nil || ingest.NodeText(nameN, content) != "reducing" {
+		return
+	}
+	if obj := ingest.ChildByField(first, "object"); obj != nil {
+		if obj.Type() != "identifier" && obj.Type() != "type_identifier" {
+			return
+		}
+		if ingest.NodeText(obj, content) != "Collectors" {
+			return
+		}
+	}
+	args := javaCallArgs(first)
+	bindBi := func(n *grammar.Node) {
+		if n == nil || n.Type() != "lambda_expression" {
+			return
+		}
+		params := javaInferredLambdaParamNames(n, content)
+		if len(params) != 2 {
+			return
+		}
+		out[params[0]] = true
+		out[params[1]] = true
+	}
+	bindUnary := func(n *grammar.Node) {
+		if n == nil || n.Type() != "lambda_expression" {
+			return
+		}
+		params := javaInferredLambdaParamNames(n, content)
+		if len(params) != 1 {
+			return
+		}
+		out[params[0]] = true
+	}
+	switch len(args) {
+	case 1:
+		// reducing(BinaryOperator<? super T>)
+		bindBi(args[0])
+	case 2:
+		// reducing(identity, BinaryOperator)
+		bindBi(args[1])
+	case 3:
+		// reducing(identity, mapper, BinaryOperator on U) — identity mapper only.
+		if javaIsIdentityLambda(args[1], content) {
+			bindUnary(args[1])
+			bindBi(args[2])
+		}
+	}
 }
 
 // javaMethodCallArgCount returns the number of real arguments on a
