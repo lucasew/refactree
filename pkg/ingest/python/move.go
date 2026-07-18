@@ -1947,6 +1947,9 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	// astuple(replace(box))[0].run() / list(astuple(box))[0].run() /
 	// tuple(astuple(box))[0].run() — declaration-order index slots of first arg
 	// (same leaf as t = astuple(box); t[0].run(); not box[0]).
+	// list(asdict(box).values())[i].run() / list(d.values())[i].run() after
+	// d = asdict(box) / vars / __dict__ — same declaration-order slots (dict
+	// preserves order; values()[i] is field i — same leaf as next(...values())).
 	// items[0].run() / d["k"].run() / list(items)[0].run() — collection subscript
 	// element (same leaf as a = items[0]; a.run()). Slices fail closed.
 	if obj.Type() == "subscript" {
@@ -2145,6 +2148,8 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // named keys; replace peels to the same dataclass),
 // plus direct chains `astuple(box)[0].run()` / `astuple(replace(box))[0].run()` /
 // `list(astuple(box))[0].run()` / `tuple(astuple(box))[0].run()` /
+// `list(asdict(box).values())[0].run()` / `list(d.values())[0].run()` after
+// `d = asdict(box)` / vars / `__dict__` (dict preserves declaration order),
 // `xa = astuple(box)[0]` (synthetic `@astuple.box.#i` slots — not `box.#i`, so
 // bare `box[0]` stays unbound for non-indexable dataclasses),
 // plus assignment `xs = list(astuple(box)); xs[0]` (index slots on xs),
@@ -4010,10 +4015,14 @@ func pythonDunderDictObjectType(attr *grammar.Node, content []byte, typeOf map[s
 // dataclasses.astuple(box)[0] / astuple(replace(box))[0] /
 // list(astuple(box))[0] / tuple(astuple(box))[0] when box is a typed local with
 // declaration-order field 0 of type T (fieldOf["@astuple.box.#0"]; same leaf as
-// t = astuple(box); t[0] / box.a). First positional arg must be an identifier
-// local or replace(local); non-decimal integer indices and other callees fail
-// closed. Does not treat bare box[0] as valid (synthetic @astuple. prefix —
-// dataclasses are not indexable).
+// t = astuple(box); t[0] / box.a). Also list/tuple(asdict(box).values())[i] /
+// list(vars(box).values())[i] / list(box.__dict__.values())[i] /
+// d = asdict(box); list(d.values())[i] (dict preserves declaration order —
+// values()[i] is field i; same leaf as next(asdict(box).values()) / box.a).
+// First positional arg must be an identifier local or replace(local); bare
+// dict_values is not indexable so list/tuple wrap is required; non-decimal
+// integer indices and other callees fail closed. Does not treat bare box[0]
+// as valid (synthetic @astuple. prefix — dataclasses are not indexable).
 func pythonAstupleIndexAccessType(sub *grammar.Node, content []byte, fieldOf map[string]string) string {
 	if sub == nil || sub.Type() != "subscript" || fieldOf == nil {
 		return ""
@@ -4037,9 +4046,63 @@ func pythonAstupleIndexAccessType(sub *grammar.Node, content []byte, fieldOf map
 	}
 	objLocal := pythonAstupleObjectLocal(val, content)
 	if objLocal == "" {
+		// list/tuple(asdict(box).values())[i] / list(d.values())[i]
+		objLocal = pythonDictViewValuesSeqLocal(val, content)
+	}
+	if objLocal == "" {
 		return ""
 	}
 	return fieldOf["@astuple."+objLocal+".#"+idxText]
+}
+
+// pythonDictViewValuesSeqLocal recovers the identifier local whose
+// declaration-order field slots are exposed by list/tuple of a dict-view
+// values() chain: list(asdict(box).values()) / tuple(vars(box).values()) /
+// list(box.__dict__.values()) / list(d.values()) when d = asdict(box) /
+// vars(box) / box.__dict__ (bindFields records @astuple.d.#i). Peels
+// list/tuple wrappers only (bare dict_values is not indexable). Same leaves
+// as list(astuple(box))[i] / next(asdict(box).values()). Other forms fail
+// closed ("").
+func pythonDictViewValuesSeqLocal(n *grammar.Node, content []byte) string {
+	if n == nil {
+		return ""
+	}
+	if n.Type() == "parenthesized_expression" {
+		return pythonDictViewValuesSeqLocal(pythonParenInner(n), content)
+	}
+	if n.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil {
+		return ""
+	}
+	name := pythonSimpleCalleeName(fn, content)
+	// list(...values()) / tuple(...values()) — materialize order-preserving sequence.
+	if name == "list" || name == "tuple" {
+		args, ok := pythonCallPositionalArgNodes(n)
+		if !ok || len(args) != 1 {
+			return ""
+		}
+		return pythonDictViewValuesSeqLocal(args[0], content)
+	}
+	if name != "values" || fn.Type() != "attribute" {
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(n)
+	if !ok || len(args) != 0 {
+		return ""
+	}
+	obj := ingest.ChildByField(fn, "object")
+	if obj == nil {
+		return ""
+	}
+	// Assigned dict-view local: d.values() after d = asdict(box) / vars / __dict__.
+	// bindFields(d, Box) records @astuple.d.#i (not d.#i — dicts stay non-indexable).
+	if obj.Type() == "identifier" {
+		return ingest.NodeText(obj, content)
+	}
+	return pythonDictViewObjectLocal(obj, content)
 }
 
 // pythonAstupleObjectLocal recovers the identifier local whose declaration-order
