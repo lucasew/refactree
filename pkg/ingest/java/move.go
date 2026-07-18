@@ -1701,6 +1701,8 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // as / as.stream() / as.iterator() / as.spliterator() / as.stream().filter(...) → elemOf[as],
 // as.reversed() / as.reversed().stream() → elemOf[as] (SequencedCollection/List view),
 // as.subList(i, j) / as.subList(i, j).get(0) → elemOf[as] (List view; bounds only),
+// as.descendingSet() / as.headSet/tailSet/subSet(...) → elemOf[as]
+// (NavigableSet/SortedSet views; order/bounds only),
 // as.stream().findFirst() / findAny() / min() / max() / reduce(op) → same element
 // (Optional wraps T; ifPresent / orElse use T),
 // as.stream().toList() / collect(Collectors.toList()/toSet()/toUnmodifiableList()/
@@ -1798,7 +1800,12 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// elemOf would mis-type .get(k); value typing uses javaMapPipelineValueType.
 			// subList(from, to) returns List of the same element type
 			// (List view; bounds only, element type unchanged).
-			"findFirst", "findAny", "min", "max", "reduce", "toList", "toArray", "reversed", "subList":
+			// descendingSet() returns NavigableSet of the same element type
+			// (NavigableSet reverse-order view; order only).
+			// headSet/tailSet/subSet(...) return SortedSet/NavigableSet of the same
+			// element type (range views; bounds/inclusivity args do not change E).
+			"findFirst", "findAny", "min", "max", "reduce", "toList", "toArray", "reversed", "subList",
+			"descendingSet", "headSet", "tailSet", "subSet":
 			recv := ingest.ChildByField(obj, "object")
 			// Arrays.stream(arr[, from, to]) — element type from first arg, not
 			// from receiver Arrays (unlike coll.stream() which uses elemOf[coll]).
