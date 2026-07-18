@@ -1724,6 +1724,8 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // Collections.unmodifiableSortedSet/NavigableSet(as) / synchronizedSortedSet/NavigableSet(as) /
 // checkedSortedSet/NavigableSet(as, …) → elemOf[as] (SortedSet/NavigableSet wrappers;
 // same element type; Class args ignored — mirrors unmodifiableSortedMap/NavigableMap),
+// Collections.unmodifiableSequencedCollection/Set(as) / synchronizedSequencedCollection/Set(as)
+// → elemOf[as] (SequencedCollection/Set wrappers; same E — Java 21; mirrors *SequencedMap),
 // Collections.list(Enumeration) / Collections.enumeration(coll) → enumeration/coll element type,
 // List.copyOf(as) / Set.copyOf(as) → elemOf[as] (Collection of first-arg elements),
 // Stream.concat(s1, s2) → element type when both stream args agree,
@@ -1874,6 +1876,8 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			"unmodifiableSet", "synchronizedSet", "checkedSet",
 			"unmodifiableSortedSet", "synchronizedSortedSet", "checkedSortedSet",
 			"unmodifiableNavigableSet", "synchronizedNavigableSet", "checkedNavigableSet",
+			"unmodifiableSequencedCollection", "synchronizedSequencedCollection",
+			"unmodifiableSequencedSet", "synchronizedSequencedSet",
 			"unmodifiableCollection", "synchronizedCollection", "checkedCollection",
 			"list", "enumeration":
 			// Collections.unmodifiableList/Set/Collection(as) /
@@ -1885,6 +1889,9 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// checkedSortedSet/NavigableSet(as, A.class) — same E (SortedSet/
 			// NavigableSet wrappers; Class args ignored; mirrors *SortedMap/
 			// *NavigableMap on the value path).
+			// Collections.unmodifiableSequencedCollection/Set(as) /
+			// synchronizedSequencedCollection/Set(as) — same E (Sequenced
+			// wrappers; Java 21; mirrors unmodifiableSequencedMap).
 			// Collections.list(Enumeration) — ArrayList of enumeration elements.
 			// Collections.enumeration(coll) — Enumeration of coll elements.
 			return javaCollectionsListWrapperElemType(obj, content, elemOf, valOf)
@@ -2235,6 +2242,8 @@ func javaCollectionsNCopiesElemType(call *grammar.Node, content []byte) string {
 // synchronizedList/Set/Collection(coll) / checkedList/Set/Collection(coll, type) /
 // Collections.unmodifiableSortedSet/NavigableSet(coll) /
 // synchronizedSortedSet/NavigableSet(coll) / checkedSortedSet/NavigableSet(coll, type) /
+// Collections.unmodifiableSequencedCollection/Set(coll) /
+// synchronizedSequencedCollection/Set(coll) /
 // Collections.list(enumeration) / Collections.enumeration(coll).
 // First arg's element type; the Class arg on checked* is ignored.
 // Non-Collections receivers fail closed.
@@ -3085,6 +3094,8 @@ func javaArraysStreamElemType(call *grammar.Node, content []byte, elemOf, valOf 
 // stream.collect(toMap(key, a -> a[, …])) → stream element type,
 // stream.collect(collectingAndThen(toMap(key, a -> a[, …]), finisher)) → same,
 // Collections.unmodifiableMap/synchronizedMap/checkedMap(m[, …]) → valOf[m],
+// Collections.unmodifiableSequencedMap/synchronizedSequencedMap(m) → valOf[m]
+// (SequencedMap wrappers; same V — Java 21; mirrors unmodifiableSequencedSet),
 // Collections.singletonMap(k, new T(...)) → T,
 // Map.of(k, new T(...), …) → T (homogeneous value creations),
 // Map.ofEntries(Map.entry(k, new T(...)), …) → T (homogeneous entry values),
@@ -3128,8 +3139,10 @@ func javaMapPipelineValueType(obj *grammar.Node, content []byte, elemOf, valOf m
 			return javaToMapCollectValueType(obj, content, elemOf, valOf)
 		case "unmodifiableMap", "synchronizedMap", "checkedMap",
 			"unmodifiableSortedMap", "synchronizedSortedMap", "checkedSortedMap",
-			"unmodifiableNavigableMap", "synchronizedNavigableMap", "checkedNavigableMap":
+			"unmodifiableNavigableMap", "synchronizedNavigableMap", "checkedNavigableMap",
+			"unmodifiableSequencedMap", "synchronizedSequencedMap":
 			// Collections.*Map wrappers — value type of first-arg map (Class args ignored).
+			// SequencedMap wrappers (Java 21) same V; mirrors *SequencedSet element path.
 			return javaCollectionsMapWrapperValueType(obj, content, elemOf, valOf)
 		case "singletonMap":
 			// Collections.singletonMap(k, new T(...)) — value type from second arg.
@@ -3161,7 +3174,7 @@ func javaMapPipelineValueType(obj *grammar.Node, content []byte, elemOf, valOf m
 
 // javaCollectionsMapWrapperValueType recovers V from
 // Collections.unmodifiableMap/synchronizedMap/checkedMap(m[, keyClass, valueClass])
-// (and Sorted/Navigable variants). First arg's map value type; Class args ignored.
+// (and Sorted/Navigable/Sequenced variants). First arg's map value type; Class args ignored.
 // Non-Collections receivers fail closed.
 func javaCollectionsMapWrapperValueType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	if call == nil || call.Type() != "method_invocation" {
