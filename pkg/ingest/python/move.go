@@ -2264,6 +2264,9 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `map/filter/takewhile/dropwhile/filterfalse(lambda x: x.m(), items)` /
 // `itertools.takewhile/groupby/...` — untyped unary lambda params from the iterable
 // element type (under foreign same-leaf).
+// `reduce/functools.reduce(lambda a, b: a.m(), items)` /
+// `accumulate/itertools.accumulate(items, lambda a, b: a.m())` — untyped bi-lambda
+// params from the iterable element type (same-leaf fold; under foreign same-leaf).
 // fieldOf maps "local.field" → field type leaf for class field access.
 // elemOf maps collection locals → element type leaf (list[A] / deque[A] /
 // dict value / Queue[A] → "A") for direct access chains under foreign same-leaf.
@@ -3416,12 +3419,13 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 	return out, fieldOf, elemOf, typeOf, pairSlots
 }
 
-// pythonBindIterableLambdaParams types untyped unary lambda parameters when the
-// call is sorted/min/max/groupby/nlargest/nsmallest with key=lambda,
-// collection.sort(key=lambda), or map/filter/takewhile/dropwhile/filterfalse with
-// a lambda over a known iterable element type of ourReceivers. Bare and
-// module-qualified forms (itertools./heapq.) use the leaf callee name.
-// Multi-param lambdas and non-lambda callables fail closed.
+// pythonBindIterableLambdaParams types untyped lambda parameters when the call
+// is sorted/min/max/groupby/nlargest/nsmallest with key=lambda,
+// collection.sort(key=lambda), map/filter/takewhile/dropwhile/filterfalse with
+// a unary lambda, or reduce/accumulate with a bi-lambda, over a known iterable
+// element type of ourReceivers. Bare and module-qualified forms
+// (itertools./heapq./functools.) use the leaf callee name.
+// Wrong-arity lambdas and non-lambda callables fail closed.
 // Foreign element types are not bound (same as for-loop targets).
 func pythonBindIterableLambdaParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, elemOf, egElems, typeOf map[string]string, out map[string]bool) {
 	if call == nil || call.Type() != "call" || out == nil {
@@ -3490,6 +3494,41 @@ func pythonBindIterableLambdaParams(call *grammar.Node, content []byte, ourRecei
 			return
 		}
 		pythonBindUnaryLambdaParam(args[0], content, out)
+	case "reduce":
+		// reduce(lambda a, b: ..., iterable[, init]) / functools.reduce(...) —
+		// both bi-lambda params are the iterable element type (same-leaf fold;
+		// mirrors assignment result typing via pythonReduceElemType). Non-lambda
+		// callables fail closed.
+		args, ok := pythonCallPositionalArgNodes(call)
+		if !ok || len(args) < 2 || args[0].Type() != "lambda" {
+			return
+		}
+		et := pythonIterableElemType(args[1], content, elemOf, egElems, typeOf)
+		if !ourReceivers[et] {
+			return
+		}
+		pythonBindBiLambdaParams(args[0], content, out)
+	case "accumulate":
+		// accumulate(iterable, lambda a, b: ...) / itertools.accumulate(...) —
+		// both bi-lambda params are the 1st-arg element type. func= keyword
+		// form also accepted; initial= ignored (same-leaf product case).
+		args, ok := pythonCallPositionalArgNodes(call)
+		if !ok || len(args) == 0 {
+			return
+		}
+		et := pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
+		if !ourReceivers[et] {
+			return
+		}
+		var lam *grammar.Node
+		if len(args) >= 2 && args[1].Type() == "lambda" {
+			lam = args[1]
+		} else if kw := pythonKeywordArgValue(call, content, "func"); kw != nil && kw.Type() == "lambda" {
+			lam = kw
+		}
+		if lam != nil {
+			pythonBindBiLambdaParams(lam, content, out)
+		}
 	}
 }
 
@@ -3501,6 +3540,18 @@ func pythonBindUnaryLambdaParam(lam *grammar.Node, content []byte, out map[strin
 		return
 	}
 	out[names[0]] = true
+}
+
+// pythonBindBiLambdaParams records both untyped bi-lambda parameters as typed
+// locals of ourReceivers (same-leaf fold: reduce/accumulate). Wrong arity /
+// defaulted / typed forms fail closed.
+func pythonBindBiLambdaParams(lam *grammar.Node, content []byte, out map[string]bool) {
+	names := pythonLambdaParamNames(lam, content)
+	if len(names) != 2 {
+		return
+	}
+	out[names[0]] = true
+	out[names[1]] = true
 }
 
 // pythonLambdaParamNames returns bare identifier parameters of a lambda.
