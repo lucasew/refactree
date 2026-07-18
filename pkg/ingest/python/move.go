@@ -2104,11 +2104,20 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								// the receiver collection (dict value leaf via elemOf).
 								// a = d.setdefault(k) / d.setdefault(k, default) — same.
 								// Default arg on get/setdefault is ignored (same as next's default).
+								// pair = pairs.pop() / pairs.pop(0) when pairs is a pair-iter
+								// (list(zip(...)), …) — pair is a tuple (pairSlots + shared
+								// elemOf), not an element; use pair[i] / unpack / nested for.
 								// popitem() yields a (key, value) pair — single-name bind fails
 								// closed (pair, not value); use unpack `k, a = d.popitem()` or
 								// pair subscript `a = d.popitem()[1]` (via pythonSubscriptElemType).
 								// Other methods fail closed.
 								obj := ingest.ChildByField(fn, "object")
+								if ingest.NodeText(attr, content) == "pop" {
+									if types := pythonPopPairSlots(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+										pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+										break
+									}
+								}
 								if et := pythonIterableElemType(obj, content, elemOf, egElems, typeOf); ourReceivers[et] {
 									out[lname] = true
 								}
@@ -2317,7 +2326,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							// a := items.popleft() (deque)
 							// a := d.get(k) / d.get(k, default)
 							// a := d.setdefault(k) / d.setdefault(k, default)
+							// pair := pairs.pop() when pairs is a pair-iter (pairSlots + shared elemOf).
 							obj := ingest.ChildByField(fn, "object")
+							if ingest.NodeText(attr, content) == "pop" {
+								if types := pythonPopPairSlots(valueN, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+									pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+									break
+								}
+							}
 							if et := pythonIterableElemType(obj, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
 							}
@@ -3081,9 +3097,9 @@ func pythonPairSlotSubscriptType(sub *grammar.Node, content []byte, pairSlots ma
 }
 
 // pythonPairSlotsOf recovers per-slot types for a pair expression:
-// pair local (pairSlots), next(pair_iter), or pair_iter[i] / list(zip(...))[i]
-// (index into a pair-yielding sequence yields one pair with those slots).
-// Parenthesized forms accepted. Slices fail closed.
+// pair local (pairSlots), next(pair_iter), pair_iter.pop() / list(zip(...)).pop(),
+// or pair_iter[i] / list(zip(...))[i] (index into a pair-yielding sequence yields
+// one pair with those slots). Parenthesized forms accepted. Slices fail closed.
 func pythonPairSlotsOf(n *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string, pairSlots, pairIterSlots map[string][]string) []string {
 	if n == nil {
 		return nil
@@ -3102,7 +3118,11 @@ func pythonPairSlotsOf(n *grammar.Node, content []byte, elemOf, egElems, typeOf 
 		return pairSlots[ingest.NodeText(n, content)]
 	case "call":
 		// next(pairs) / next(zip(xs, ys))
-		return pythonNextPairSlots(n, content, elemOf, egElems, typeOf, pairIterSlots)
+		if types := pythonNextPairSlots(n, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+			return types
+		}
+		// pairs.pop() / pairs.pop(0) / list(zip(...)).pop()
+		return pythonPopPairSlots(n, content, elemOf, egElems, typeOf, pairIterSlots)
 	case "subscript":
 		// pairs[0] / list(zip(...))[0] / (list(zip(...)))[0] — one pair from a
 		// pair-yielding sequence. Any non-slice index yields the same slots.
@@ -3250,9 +3270,30 @@ func pythonNextPairSlots(call *grammar.Node, content []byte, elemOf, egElems, ty
 	return pythonPairIterSlotsOf(args[0], content, elemOf, egElems, typeOf, pairIterSlots)
 }
 
+// pythonPopPairSlots recovers pair slot types for pairs.pop() / pairs.pop(i) /
+// list(zip(...)).pop() when the receiver is a known pair-iter. Index args are
+// ignored (any pop removes one pair with the same slots). popitem and other
+// methods fail closed. Yields the tuple slots of one pair — not an element leaf.
+func pythonPopPairSlots(call *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string, pairIterSlots map[string][]string) []string {
+	if call == nil || call.Type() != "call" {
+		return nil
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "attribute" {
+		return nil
+	}
+	attr := ingest.ChildByField(fn, "attribute")
+	if attr == nil || ingest.NodeText(attr, content) != "pop" {
+		return nil
+	}
+	obj := ingest.ChildByField(fn, "object")
+	return pythonPairIterSlotsOf(obj, content, elemOf, egElems, typeOf, pairIterSlots)
+}
+
 // pythonAssignPairUnpackTypes recovers per-slot types for multi-target unpack
 // from a known pair: a, b = next(zip(...)) / a, b = next(pairs) /
 // a, b = pair / a, b = pairs[0] / a, b = list(zip(...))[0] /
+// a, b = pairs.pop() / a, b = list(zip(...)).pop() /
 // [a, b] = next(pairs) when pair/pair-iter slots are known.
 // Parenthesized forms accepted. Untyped slots stay "" (enumerate index).
 func pythonAssignPairUnpackTypes(right *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string, pairSlots map[string][]string, pairIterSlots map[string][]string) []string {
