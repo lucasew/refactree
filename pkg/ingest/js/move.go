@@ -2040,6 +2040,24 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 			// new Map([[k, new A()]]).forEach((v) => v.run()) /
 			// [new A()].forEach((v) => v.run()) — bind forEach value/elem param.
 			jsBindForEachParams(n, content, ourReceivers, out, arrayLocals, factories, mapLocals, entryArrayLocals, setLocals, extra)
+			// xs.push(new A()) / xs.unshift(new A()) — bare array mutation.
+			// Bind arrayLocals so xs[0].run() / for (const a of xs) peel under
+			// foreign same-leaf. Foreign elems too for shadowing.
+			if local, et := jsArrayMutationElemType(n, content, out, factories); local != "" && et != "" {
+				arrayLocals[local] = et
+			}
+		case "assignment_expression":
+			// xs = [...xs, new A()] / xs = xs.concat([new A()]) / xs = [new A()] —
+			// rebind arrayLocals from RHS (self-target untyped arms are wildcards).
+			// Foreign too for shadowing (ys after xs).
+			left := ingest.ChildByField(n, "left")
+			right := ingest.ChildByField(n, "right")
+			if left != nil && left.Type() == "identifier" && right != nil {
+				name := ingest.NodeText(left, content)
+				if t := jsArrayAssignSourceElemType(right, content, arrayLocals, out, factories, extra, name); t != "" {
+					arrayLocals[name] = t
+				}
+			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
@@ -4022,9 +4040,19 @@ func jsObjectLiteralNestedArrayElemType(n *grammar.Node, content []byte, arrayLo
 // jsArraySpreadElemType recovers T from an array literal that includes spread
 // elements when every element is either spread of an array-source of T or a
 // concrete expression of type T. Enables [...[new A()]][0].run() /
-// [...as][0].run() / [...[new A()], new A()][0].run() under foreign same-leaf
-// methods. Empty / mixed / non-array spreads fail closed.
+// [...as][0].run() / [...[new A()], new A()][0].run() /
+// [...[], new A()][0].run() under foreign same-leaf methods.
+// Empty array spreads are wildcards; mixed / non-array spreads fail closed.
+// selfTarget is empty for expression peels; see jsArraySpreadAssignElemType
+// for assignment self-target untyped arms.
 func jsArraySpreadElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals) string {
+	return jsArraySpreadElemTypeSelf(n, content, arrayLocals, typedLocals, factories, extra, "")
+}
+
+// jsArraySpreadElemTypeSelf is jsArraySpreadElemType with optional selfTarget:
+// when selfTarget is set (assignment `xs = [...xs, new A()]`), an untyped
+// identifier spread equal to selfTarget is a wildcard (same as empty []).
+func jsArraySpreadElemTypeSelf(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals, selfTarget string) string {
 	if n == nil {
 		return ""
 	}
@@ -4066,6 +4094,17 @@ func jsArraySpreadElemType(n *grammar.Node, content []byte, arrayLocals, typedLo
 			}
 			if arg == nil {
 				return ""
+			}
+			// Empty [] spread is a wildcard ([...[], new A()]).
+			if jsIsEmptyArrayLiteral(arg) {
+				continue
+			}
+			// xs = [...xs, new A()] — untyped self spread is wildcard.
+			if selfTarget != "" && arg.Type() == "identifier" {
+				name := ingest.NodeText(arg, content)
+				if name == selfTarget && (arrayLocals == nil || arrayLocals[name] == "") {
+					continue
+				}
 			}
 			t = jsArraySourceElemType(arg, content, arrayLocals, typedLocals, factories, extra)
 		} else {
@@ -4229,27 +4268,9 @@ func jsArrayIdentityElemType(n *grammar.Node, content []byte, arrayLocals, typed
 		}
 		return t
 	case "concat":
-		t := jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories, extra)
-		if t == "" {
-			return ""
-		}
-		// Each arg must be element T or array-source of T (zero args = identity).
-		if args != nil {
-			for i := uint32(0); i < args.ChildCount(); i++ {
-				ch := args.Child(i)
-				if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
-					continue
-				}
-				if jsExprConcreteType(ch, content, typedLocals, factories) == t {
-					continue
-				}
-				if jsArraySourceElemType(ch, content, arrayLocals, typedLocals, factories, extra) == t {
-					continue
-				}
-				return ""
-			}
-		}
-		return t
+		// [].concat([new A()]) / [new A()].concat() / as.concat([new A()]) —
+		// empty-array receiver is a wildcard (type from args). Mixed inserts fail closed.
+		return jsArrayConcatElemType(obj, args, content, arrayLocals, typedLocals, factories, extra, "")
 	case "toSpliced":
 		t := jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories, extra)
 		if t == "" {
@@ -6146,6 +6167,179 @@ func jsIsNumericIndexArg(n *grammar.Node, content []byte) bool {
 		return (ot == "-" || ot == "+") && arg.Type() == "number"
 	}
 	return false
+}
+
+// jsIsEmptyArrayLiteral reports [] (no elements). Parenthesized forms accepted.
+func jsIsEmptyArrayLiteral(n *grammar.Node) bool {
+	if n == nil {
+		return false
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "array" {
+		return false
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		el := n.Child(i)
+		if el == nil || el.Type() == "[" || el.Type() == "]" || el.Type() == "," {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// jsArrayConcatElemType recovers T from arr.concat(…) when the receiver and
+// each arg peel to uniform element type T. Empty-array receiver is a wildcard
+// (type from args). When selfTarget is set (assignment `xs = xs.concat(…)`),
+// an untyped identifier receiver equal to selfTarget is also a wildcard.
+// Zero-arg concat is identity of a typed receiver. Mixed inserts fail closed.
+func jsArrayConcatElemType(obj, args *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals, selfTarget string) string {
+	recvT := jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories, extra)
+	wildRecv := false
+	if recvT == "" {
+		if jsIsEmptyArrayLiteral(obj) {
+			wildRecv = true
+		} else if selfTarget != "" && obj != nil && obj.Type() == "identifier" {
+			name := ingest.NodeText(obj, content)
+			if name == selfTarget && (arrayLocals == nil || arrayLocals[name] == "") {
+				wildRecv = true
+			}
+		}
+		if !wildRecv {
+			return ""
+		}
+	}
+	// Each arg must be element T or array-source of T (zero args = identity of recv).
+	argT := ""
+	sawArg := false
+	if args != nil {
+		for i := uint32(0); i < args.ChildCount(); i++ {
+			ch := args.Child(i)
+			if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+				continue
+			}
+			var t string
+			if ct := jsExprConcreteType(ch, content, typedLocals, factories); ct != "" {
+				t = ct
+			} else if at := jsArraySourceElemType(ch, content, arrayLocals, typedLocals, factories, extra); at != "" {
+				t = at
+			} else {
+				return ""
+			}
+			if !sawArg {
+				argT = t
+				sawArg = true
+			} else if argT != t {
+				return ""
+			}
+		}
+	}
+	if recvT != "" {
+		if sawArg && argT != recvT {
+			return ""
+		}
+		return recvT
+	}
+	// Wildcard receiver — need at least one typed arg.
+	if !sawArg {
+		return ""
+	}
+	return argT
+}
+
+// jsArrayMutationElemType recovers (local, T) from xs.push(new A()) /
+// xs.unshift(new A()) / xs.push(new A(), new A()) when every positional arg is
+// a Class() (or typed local/factory) of the same T and the receiver is an
+// identifier. Enables bare array mutation peels under foreign same-leaf.
+// Spread args / mixed types / non-ident receivers fail closed.
+func jsArrayMutationElemType(call *grammar.Node, content []byte, typedLocals, factories map[string]string) (local, classType string) {
+	if call == nil || call.Type() != "call_expression" {
+		return "", ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	args := ingest.ChildByField(call, "arguments")
+	if fn == nil || args == nil {
+		return "", ""
+	}
+	if fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain" {
+		return "", ""
+	}
+	prop := ingest.ChildByField(fn, "property")
+	obj := ingest.ChildByField(fn, "object")
+	if prop == nil || obj == nil || obj.Type() != "identifier" {
+		return "", ""
+	}
+	switch ingest.NodeText(prop, content) {
+	case "push", "unshift":
+		// ok
+	default:
+		return "", ""
+	}
+	found := ""
+	saw := false
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		// Spread / non-concrete — fail closed.
+		if ch.Type() == "spread_element" {
+			return "", ""
+		}
+		t := jsExprConcreteType(ch, content, typedLocals, factories)
+		if t == "" {
+			return "", ""
+		}
+		if !saw {
+			found = t
+			saw = true
+		} else if found != t {
+			return "", ""
+		}
+	}
+	if !saw {
+		return "", ""
+	}
+	return ingest.NodeText(obj, content), found
+}
+
+// jsArrayAssignSourceElemType recovers T from an assignment RHS used to rebind
+// an array local: [new A()] / [...xs, new A()] / xs.concat([new A()]) /
+// [].concat(new A()) with selfTarget wildcards for untyped self arms.
+// Foreign leaves returned too so dual-class B rebinds shadow A.
+func jsArrayAssignSourceElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals, selfTarget string) string {
+	if n == nil {
+		return ""
+	}
+	// Prefer ordinary array-source peels (already-typed spreads/concats/literals).
+	if t := jsArraySourceElemType(n, content, arrayLocals, typedLocals, factories, extra); t != "" {
+		return t
+	}
+	// Spread with self-target / empty wildcards (xs = [...xs, new A()]).
+	if t := jsArraySpreadElemTypeSelf(n, content, arrayLocals, typedLocals, factories, extra, selfTarget); t != "" {
+		return t
+	}
+	// Concat with self-target / empty receiver (xs = xs.concat([new A()])).
+	if n.Type() == "call_expression" {
+		fn := ingest.ChildByField(n, "function")
+		if fn != nil && (fn.Type() == "member_expression" || fn.Type() == "member_expression_optional" || fn.Type() == "optional_chain") {
+			if prop := ingest.ChildByField(fn, "property"); prop != nil && ingest.NodeText(prop, content) == "concat" {
+				return jsArrayConcatElemType(ingest.ChildByField(fn, "object"), ingest.ChildByField(n, "arguments"), content, arrayLocals, typedLocals, factories, extra, selfTarget)
+			}
+		}
+	}
+	return ""
 }
 
 // jsArrayPopShiftElemType recovers T from arr.pop() / arr.shift() when the

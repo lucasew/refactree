@@ -4202,6 +4202,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// values only (mixed fail closed; index slots still bound above).
 						elemOf[lname] = et
 					}
+					// d = da.data when da is UserDict of nested list values —
+					// underlying .data shares @nested leaf (scalar .data peels
+					// via pythonIterableElemType above). Foreign too for shadowing.
+					if obj := pythonDataAttrObjectIdent(right, content); obj != "" {
+						if nest := elemOf["@nested."+obj]; nest != "" {
+							elemOf["@nested."+lname] = nest
+						}
+					}
 				}
 			}
 			// a, b = A(), B() / (a, b) = A(), B() / a, b = (A(), B()) /
@@ -9239,15 +9247,27 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		return ""
 	case "attribute":
 		// e.exceptions from except* A as e
+		// xs.data / da.data — UserList/UserDict underlying container shares
+		// element/value type of the collection local (xs.data[0].run() /
+		// for a in xs.data / d = xs.data; d[0].run() under foreign same-leaf).
 		obj := ingest.ChildByField(right, "object")
 		attr := ingest.ChildByField(right, "attribute")
 		if obj == nil || attr == nil || obj.Type() != "identifier" {
 			return ""
 		}
-		if ingest.NodeText(attr, content) != "exceptions" || egElems == nil {
-			return ""
+		switch ingest.NodeText(attr, content) {
+		case "exceptions":
+			if egElems == nil {
+				return ""
+			}
+			return egElems[ingest.NodeText(obj, content)]
+		case "data":
+			if elemOf == nil {
+				return ""
+			}
+			return elemOf[ingest.NodeText(obj, content)]
 		}
-		return egElems[ingest.NodeText(obj, content)]
+		return ""
 	}
 	return ""
 }
@@ -11357,9 +11377,28 @@ func pythonParseMappingNestedListElemString(s string) string {
 	return pythonParseContainerElemString(valueAnn)
 }
 
+// pythonDataAttrObjectIdent returns the object identifier for xs.data /
+// da.data attribute access (UserList/UserDict underlying container). Other
+// attributes and non-ident objects return "".
+func pythonDataAttrObjectIdent(n *grammar.Node, content []byte) string {
+	if n == nil || n.Type() != "attribute" {
+		return ""
+	}
+	obj := ingest.ChildByField(n, "object")
+	attr := ingest.ChildByField(n, "attribute")
+	if obj == nil || attr == nil || obj.Type() != "identifier" {
+		return ""
+	}
+	if ingest.NodeText(attr, content) != "data" {
+		return ""
+	}
+	return ingest.NodeText(obj, content)
+}
+
 // pythonNestedMappingSubscriptElemType recovers T from da["k"] when da is a
 // mapping of list/set of T (elemOf["@nested."+da]). The subscript expression
-// is a collection of T (not T itself).
+// is a collection of T (not T itself). Also da.data["k"] when da is UserDict
+// of nested list values (underlying .data shares @nested leaf).
 func pythonNestedMappingSubscriptElemType(sub *grammar.Node, content []byte, elemOf map[string]string) string {
 	if sub == nil || sub.Type() != "subscript" || elemOf == nil {
 		return ""
@@ -11371,10 +11410,26 @@ func pythonNestedMappingSubscriptElemType(sub *grammar.Node, content []byte, ele
 		}
 	}
 	val := ingest.ChildByField(sub, "value")
-	if val == nil || val.Type() != "identifier" {
+	if val == nil {
 		return ""
 	}
-	return elemOf["@nested."+ingest.NodeText(val, content)]
+	switch val.Type() {
+	case "identifier":
+		return elemOf["@nested."+ingest.NodeText(val, content)]
+	case "attribute":
+		// da.data["k"] — UserDict underlying mapping shares @nested leaf.
+		obj := ingest.ChildByField(val, "object")
+		attr := ingest.ChildByField(val, "attribute")
+		if obj == nil || attr == nil || obj.Type() != "identifier" {
+			return ""
+		}
+		if ingest.NodeText(attr, content) != "data" {
+			return ""
+		}
+		return elemOf["@nested."+ingest.NodeText(obj, content)]
+	default:
+		return ""
+	}
 }
 
 // pythonNestedMappingValuesElemType recovers T from da.values() when da is a
