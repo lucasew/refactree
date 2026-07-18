@@ -2185,6 +2185,7 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 			// Multi-value RHS is position-wise: a, b := &A{}, &B{} binds a→A, b→B
 			// so foreign same-leaf methods on b are not rewritten.
 			// Multi-return call: a, b := makeAB() with makeAB() (*A, *B) likewise.
+			// Func-literal result: f := func() *A { … } binds f→A so f().Run renames.
 			names := identListNames(ingest.ChildByField(n, "left"), content)
 			right := ingest.ChildByField(n, "right")
 			if chTyp, ok := channelReceiveElemType(right, content, rangeSrc); ok {
@@ -2210,6 +2211,16 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, types[i]})
 					}
 				}
+			} else if types := typeNamesFromFuncLiteralResults(right, content); len(types) > 0 {
+				// f := func() *A { … } / f, g := func() *A {…}, func() *B {…}
+				for i, name := range names {
+					if name == "" || name == "_" {
+						continue
+					}
+					if i < len(types) && types[i] != "" {
+						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, types[i]})
+					}
+				}
 			}
 		case "var_spec":
 			// var a, b T / var a, b = … — name is a repeated field; ChildByField
@@ -2227,6 +2238,9 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 					if len(types) == 0 {
 						types = typeNamesFromCallResults(valueN, content, funcResults)
 					}
+					if len(types) == 0 {
+						types = typeNamesFromFuncLiteralResults(valueN, content)
+					}
 					if len(types) > 0 {
 						for i, name := range names {
 							if name == "" || name == "_" {
@@ -2239,6 +2253,9 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 						break
 					}
 					typ = typeNameFromRHS(valueN, content)
+				} else if types := typeNamesFromFuncLiteralResults(valueN, content); len(types) == 1 && types[0] != "" {
+					// var f = func() *A { … } — single-name func-literal result.
+					typ = types[0]
 				} else {
 					typ = typeNameFromRHS(valueN, content)
 				}
@@ -2721,6 +2738,44 @@ func functionResultTypes(decl *grammar.Node, content []byte) []string {
 		return []string{typ}
 	}
 	return nil
+}
+
+// typeNamesFromFuncLiteralResults returns positional concrete result types when
+// n is a func_literal (or expression_list of func_literals):
+//
+//	f := func() *A { return &A{} }     → ["A"]
+//	f, g := func() *A {…}, func() *B {…} → ["A","B"]
+//
+// Multi-result func literals (func() (*A, error)) fail closed (not a lone
+// method receiver). Used so f().Run renames under foreign same-leaf methods.
+func typeNamesFromFuncLiteralResults(n *grammar.Node, content []byte) []string {
+	if n == nil {
+		return nil
+	}
+	if n.Type() == "expression_list" {
+		var out []string
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			types := typeNamesFromFuncLiteralResults(c, content)
+			if len(types) != 1 || types[0] == "" {
+				// Position must be a single-result func literal.
+				return nil
+			}
+			out = append(out, types[0])
+		}
+		return out
+	}
+	if n.Type() != "func_literal" {
+		return nil
+	}
+	types := functionResultTypes(n, content)
+	if len(types) != 1 || types[0] == "" {
+		return nil
+	}
+	return types
 }
 
 // typeNamesFromCallResults returns positional result types when n is a call to
@@ -3777,9 +3832,19 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType, valueT
 		// Collection results (getA() []*A) are not method receivers here;
 		// those go through index (getA()[0].M). Multi-result calls cannot
 		// appear as a lone value (compile error).
-		if fn != nil && fn.Type() == "identifier" && len(funcResults) > 0 {
-			if types := funcResults[ingest.NodeText(fn, content)]; len(types) == 1 && types[0] != "" {
-				return types[0]
+		if fn != nil && fn.Type() == "identifier" {
+			name := ingest.NodeText(fn, content)
+			if len(funcResults) > 0 {
+				if types := funcResults[name]; len(types) == 1 && types[0] != "" {
+					return types[0]
+				}
+			}
+			// f().M — local func var f := func() *A { … } bound via valueType
+			// (func-literal result leaf). Enables f().Run under foreign same-leaf.
+			if valueType != nil {
+				if t, ok := valueType(name, n.StartByte()); ok && t != "" {
+					return t
+				}
 			}
 		}
 	case "unary_expression":
