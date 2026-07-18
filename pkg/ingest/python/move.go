@@ -1850,6 +1850,7 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	// Box().method / make().method — ctor name via maps.
 	// box.get("a").run() — TypedDict/record string-key value (fieldOf; same leaf as
 	// xa = box.get("a"); xa.run()).
+	// getattr(box, "a").run() — builtin field access (same leaf as box.a.run()).
 	// attrgetter("a")(box).run() — single-field getter (same leaf as box.a.run()).
 	// itemgetter("a")(box).run() — single string-key getter (same leaf as box["a"].run()).
 	// items.popleft().run() / d.get(k).run() / q.get().run() / items.pop().run() /
@@ -1857,6 +1858,10 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	// a = items.popleft(); a.run()). Unknown call receivers: unique-leaf only.
 	if obj.Type() == "call" {
 		if fn := ingest.ChildByField(obj, "function"); fn != nil {
+			// getattr(box, "a") before bare-ident ctor path (function is identifier).
+			if ft := pythonGetattrFieldType(obj, content, fieldOf); ft != "" {
+				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
+			}
 			if fn.Type() == "identifier" {
 				return pythonRenameByTypeMaps(ingest.NodeText(fn, content), ourReceivers, foreignReceivers, nil)
 			}
@@ -2325,6 +2330,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							out[lname] = true
 						}
 					}
+					// xa = getattr(box, "a") — builtin field access (same leaf as box.a).
+					if ft := pythonGetattrFieldType(right, content, fieldOf); ft != "" {
+						typeOf[lname] = ft
+						pythonBindClassLocalFields(lname, ft, fieldIndex, fieldOf)
+						if ourReceivers[ft] {
+							out[lname] = true
+						}
+					}
 				}
 				// a = items[0] / a = d[k] / a = list(items)[0] — element/value of collection.
 				// a = item[1] when item from enumerate/zip pair (pairSlots).
@@ -2600,6 +2613,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				}
 				// xa := attrgetter("a")(box) / operator.attrgetter("a")(box).
 				if ft := pythonAttrgetterFieldType(valueN, content, fieldOf); ft != "" {
+					typeOf[lname] = ft
+					pythonBindClassLocalFields(lname, ft, fieldIndex, fieldOf)
+					if ourReceivers[ft] {
+						out[lname] = true
+					}
+				}
+				// xa := getattr(box, "a") — builtin field access (same leaf as box.a).
+				if ft := pythonGetattrFieldType(valueN, content, fieldOf); ft != "" {
 					typeOf[lname] = ft
 					pythonBindClassLocalFields(lname, ft, fieldIndex, fieldOf)
 					if ourReceivers[ft] {
@@ -3239,6 +3260,34 @@ func pythonFieldAccessType(attr *grammar.Node, content []byte, fieldOf map[strin
 // getters (g = attrgetter("a"); g(box)) are not tracked.
 func pythonAttrgetterFieldType(call *grammar.Node, content []byte, fieldOf map[string]string) string {
 	return pythonOperatorGetterFieldType(call, content, fieldOf, "attrgetter")
+}
+
+// pythonGetattrFieldType recovers T from getattr(box, "a") when box is a typed
+// local with annotated field a of type T (fieldOf; same leaf as box.a /
+// attrgetter("a")(box)). Exactly two positional args: identifier local + string
+// field name. Three-arg getattr(obj, name, default), non-string attr names, and
+// non-identifier objects fail closed. Bare builtin name only — getattr from
+// other modules / getattr stored in a variable are not tracked.
+func pythonGetattrFieldType(call *grammar.Node, content []byte, fieldOf map[string]string) string {
+	if call == nil || call.Type() != "call" || fieldOf == nil {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "identifier" || ingest.NodeText(fn, content) != "getattr" {
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) != 2 {
+		return ""
+	}
+	if args[0].Type() != "identifier" || args[1].Type() != "string" {
+		return ""
+	}
+	_, field := pythonStringContent(args[1], content)
+	if field == "" {
+		return ""
+	}
+	return fieldOf[ingest.NodeText(args[0], content)+"."+field]
 }
 
 // pythonItemgetterFieldType recovers T from itemgetter("a")(box) /
