@@ -3898,12 +3898,17 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					}
 				}
 				// xs = [A()] / (A(),) / [B()] — track element type for later for-loops.
-				// aa = [[A()]] / ((A(),),) — nested list/tuple local of leaf A (@nested)
-				// so aa[0][0].run() / match aa: case [[xa]]: peel under foreign same-leaf.
-				// da = {"k": [A()]} / {"k": (A(),)} / {"k": {A()}} — mapping of list/tuple/set
-				// of leaf A (@nested); also dict(k=[A()]) / dict([("k", [A()])]) /
-				// dict({"k": [A()]}) so da["k"][0].run() / for a in da["k"] /
-				// match da: case {"k": [xa]}: peel.
+				// aa = [[A()]] / ((A(),),) / [{"k": A()}] — nested list/tuple/dict-row
+				// local of leaf A (@nested) so aa[0][0].run() / la[0]["k"].run() /
+				// match aa: case [[xa]]: peel under foreign same-leaf.
+				// da = {"k": [A()]} / {"k": (A(),)} / {"k": {A()}} / {"k": frozenset([A()])} /
+				// {"k": deque([A()])} / {"outer": {"k": A()}} — mapping of list/tuple/set/
+				// frozenset/deque/dict of leaf A (@nested); also dict(k=[A()]) /
+				// OrderedDict(k=[A()]) / ChainMap({"k": [A()]}) / dict([("k", [A()])]) /
+				// dict({"k": [A()]}) / {k: [A()] for k in ...} so da["k"][0].run() /
+				// for a in da["k"] / match da: case {"k": [xa]}: peel.
+				// da = {"k": A()} / dict(k=A()) / OrderedDict(k=A()) / ChainMap({"k": A()}) /
+				// {k: A() for k in ...} — scalar mapping values of A (elemOf).
 				// xs = list(items) / filter(...) — preserve element type via wrappers.
 				// d = dict.fromkeys(keys, A()) — value leaf is A (for .values/.get).
 				// pairs = zip/enumerate/product/pairwise(...) /
@@ -3918,14 +3923,20 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					} else if et := pythonHomogeneousCtorElem(right, content); et != "" {
 						elemOf[lname] = et
 					} else if nest := pythonNestedHomogeneousCtorElem(right, content); nest != "" {
-						// aa = [[A()]] — not a scalar list of A; store nested leaf.
+						// aa = [[A()]] / [{"k": A()}] — not a scalar list of A; store nested leaf.
 						// Foreign too for shadowing (bb = [[B()]] after aa = [[A()]]).
 						elemOf["@nested."+lname] = nest
 					} else if nest := pythonNestedDictHomogeneousListCtorElem(right, content); nest != "" {
-						// da = {"k": [A()]} / dict(k=[A()]) / dict([("k",[A()])]) —
-						// not scalar dict values of A; store nested leaf.
+						// da = {"k": [A()]} / OrderedDict(k=[A()]) / ChainMap({"k":[A()]}) /
+						// {k: [A()] for k in ...} / {"outer": {"k": A()}} — not scalar
+						// dict values of A; store nested leaf.
 						// Foreign too for shadowing (db = {"k": [B()]} after da).
 						elemOf["@nested."+lname] = nest
+					} else if et := pythonHomogeneousDictValueCtorElem(right, content); et != "" {
+						// da = {"k": A()} / dict(k=A()) / OrderedDict(k=A()) /
+						// ChainMap({"k": A()}) / {k: A() for k in ...} — scalar values.
+						// Foreign too for shadowing (db = {"k": B()} after da).
+						elemOf[lname] = et
 					} else if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); et != "" {
 						elemOf[lname] = et
 					} else if et := pythonDictViewValuesHomogeneousType(right, content, fieldOf); et != "" {
@@ -9688,14 +9699,16 @@ func pythonHomogeneousCtorElem(collection *grammar.Node, content []byte) string 
 }
 
 // pythonNestedHomogeneousCtorElem recovers T from one-level nested list/tuple
-// literals of homogeneous Class() rows:
+// literals of homogeneous Class() rows (or dict-of-Class rows):
 //
 //	[[A()]] / [[A()], [A()]] / ((A(),),) / ([A()],) → "A"
+//	[{"k": A()}] / [{"k": A()}, {"m": A()}] / ({"k": A()},) → "A"
 //
 // Stored as elemOf["@nested."+name] so aa = [[A()]]; aa[0][0].run() /
-// match aa: case [[xa]]: / case [row]: row[0].run() peel under foreign same-leaf
-// (same leaf as annotated list[list[A]]). Mixed row leaves / deeper nests /
-// sets of lists / non-list rows fail closed.
+// la = [{"k": A()}]; la[0]["k"].run() / match aa: case [[xa]]: / case [row]:
+// row[0].run() peel under foreign same-leaf (same leaf as annotated list[list[A]]
+// / list[dict[str, A]]). Mixed row leaves / deeper nests / sets of lists /
+// non-list/dict rows fail closed.
 func pythonNestedHomogeneousCtorElem(collection *grammar.Node, content []byte) string {
 	if collection == nil {
 		return ""
@@ -9727,6 +9740,20 @@ func pythonNestedHomogeneousCtorElem(collection *grammar.Node, content []byte) s
 			if et != nest {
 				return ""
 			}
+		case "dictionary":
+			// Row is a mapping of Class() values: {"k": A()} (list-of-dict).
+			et := pythonHomogeneousDictLiteralValueCtorElem(ch, content)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				nest = et
+				saw = true
+				continue
+			}
+			if et != nest {
+				return ""
+			}
 		default:
 			// Nested non-list / Class() at outer level → not a nest of rows.
 			return ""
@@ -9738,20 +9765,293 @@ func pythonNestedHomogeneousCtorElem(collection *grammar.Node, content []byte) s
 	return nest
 }
 
+// pythonHomogeneousDictValueCtorElem recovers T from mapping constructors whose
+// values are homogeneous Class() instances (scalar mapping values, not nested
+// collections):
+//
+//	{"k": A()} / {"k": A(), "m": A()} → "A"
+//	dict(k=A()) / OrderedDict(k=A()) / dict({"k": A()}) / OrderedDict([("k", A())]) → "A"
+//	ChainMap({"k": A()}) / ChainMap({"k": A()}, {"m": A()}) → "A"
+//	{k: A() for k in ...} → "A"
+//
+// Stored as elemOf[name] so da["k"].run() / for a in da.values() peel under
+// foreign same-leaf (same leaf as annotated dict[str, A]). Nested
+// {"k": [A()]} / dict(k=[A()]) stays on @nested paths; mixed leaves / empty /
+// splat fail closed.
+func pythonHomogeneousDictValueCtorElem(collection *grammar.Node, content []byte) string {
+	if collection == nil {
+		return ""
+	}
+	switch collection.Type() {
+	case "dictionary":
+		return pythonHomogeneousDictLiteralValueCtorElem(collection, content)
+	case "dictionary_comprehension":
+		return pythonHomogeneousDictCompValueCtorElem(collection, content)
+	case "call":
+		return pythonHomogeneousDictCallValueCtorElem(collection, content)
+	default:
+		return ""
+	}
+}
+
+// pythonHomogeneousDictLiteralValueCtorElem recovers T from a dictionary
+// literal whose values are Class() calls of the same T.
+func pythonHomogeneousDictLiteralValueCtorElem(collection *grammar.Node, content []byte) string {
+	if collection == nil || collection.Type() != "dictionary" {
+		return ""
+	}
+	var elem string
+	saw := false
+	for i := uint32(0); i < collection.ChildCount(); i++ {
+		ch := collection.Child(i)
+		switch ch.Type() {
+		case "{", "}", ",", "comment":
+			continue
+		case "pair":
+			val := ingest.ChildByField(ch, "value")
+			et := pythonClassCtorName(val, content)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				elem = et
+				saw = true
+				continue
+			}
+			if et != elem {
+				return ""
+			}
+		default:
+			// Splat / comprehension / unknown — fail closed.
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return elem
+}
+
+// pythonHomogeneousDictCompValueCtorElem recovers T from
+// `{k: A() for k in ...}` when the pair value is a Class() call.
+// Nested fors / non-Class values fail closed.
+func pythonHomogeneousDictCompValueCtorElem(comp *grammar.Node, content []byte) string {
+	if comp == nil || comp.Type() != "dictionary_comprehension" {
+		return ""
+	}
+	forCount := 0
+	var pair *grammar.Node
+	for i := uint32(0); i < comp.ChildCount(); i++ {
+		ch := comp.Child(i)
+		switch ch.Type() {
+		case "for_in_clause":
+			forCount++
+		case "pair":
+			if pair == nil {
+				pair = ch
+			}
+		}
+	}
+	// Nested fors fail closed (value type still recoverable, but keep product-solid).
+	if forCount != 1 || pair == nil {
+		return ""
+	}
+	return pythonClassCtorName(ingest.ChildByField(pair, "value"), content)
+}
+
+// pythonHomogeneousDictCallValueCtorElem recovers T from dict/OrderedDict/ChainMap
+// constructors whose values are Class() instances (scalar mapping values).
+func pythonHomogeneousDictCallValueCtorElem(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	name := pythonSimpleCalleeName(fn, content)
+	switch name {
+	case "dict", "OrderedDict":
+		// ok — kwargs / pairs / single dict (same shapes as nested path)
+	case "ChainMap":
+		// ChainMap(*maps) — each positional is a dict of Class() values.
+		return pythonHomogeneousChainMapValueCtorElem(call, content)
+	default:
+		return ""
+	}
+	argList := ingest.ChildByField(call, "arguments")
+	if argList == nil {
+		return ""
+	}
+	var positionals []*grammar.Node
+	var keywords []*grammar.Node
+	for i := uint32(0); i < argList.ChildCount(); i++ {
+		ch := argList.Child(i)
+		switch ch.Type() {
+		case "(", ")", ",", "comment":
+			continue
+		case "keyword_argument":
+			keywords = append(keywords, ch)
+		case "list_splat", "dictionary_splat", "parenthesized_list_splat":
+			return ""
+		default:
+			positionals = append(positionals, ch)
+		}
+	}
+	// All-keyword form: dict(k=A()) / OrderedDict(k=A(), m=A())
+	if len(positionals) == 0 {
+		if len(keywords) == 0 {
+			return ""
+		}
+		var elem string
+		saw := false
+		for _, kw := range keywords {
+			et := pythonClassCtorName(ingest.ChildByField(kw, "value"), content)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				elem = et
+				saw = true
+				continue
+			}
+			if et != elem {
+				return ""
+			}
+		}
+		if !saw {
+			return ""
+		}
+		return elem
+	}
+	// Single positional only (no kwargs): dict({"k": A()}) / dict([("k", A())])
+	if len(positionals) != 1 || len(keywords) != 0 {
+		return ""
+	}
+	arg := positionals[0]
+	switch arg.Type() {
+	case "dictionary":
+		return pythonHomogeneousDictLiteralValueCtorElem(arg, content)
+	case "list", "tuple":
+		return pythonHomogeneousDictPairsValueCtorElem(arg, content)
+	default:
+		return ""
+	}
+}
+
+// pythonHomogeneousChainMapValueCtorElem recovers T from
+// ChainMap({"k": A()}) / ChainMap({"k": A()}, {"m": A()}) when every
+// positional map has homogeneous Class() values of the same T.
+func pythonHomogeneousChainMapValueCtorElem(call *grammar.Node, content []byte) string {
+	argList := ingest.ChildByField(call, "arguments")
+	if argList == nil {
+		return ""
+	}
+	var elem string
+	saw := false
+	for i := uint32(0); i < argList.ChildCount(); i++ {
+		ch := argList.Child(i)
+		switch ch.Type() {
+		case "(", ")", ",", "comment":
+			continue
+		case "keyword_argument", "list_splat", "dictionary_splat", "parenthesized_list_splat":
+			return ""
+		case "dictionary":
+			et := pythonHomogeneousDictLiteralValueCtorElem(ch, content)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				elem = et
+				saw = true
+				continue
+			}
+			if et != elem {
+				return ""
+			}
+		default:
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return elem
+}
+
+// pythonHomogeneousDictPairsValueCtorElem recovers T from a list/tuple of
+// key/value pairs where each value is a Class() call of the same T:
+//
+//	[("k", A())] / (("k", A()),) / [("k", A()), ("m", A())] → "A"
+func pythonHomogeneousDictPairsValueCtorElem(pairs *grammar.Node, content []byte) string {
+	if pairs == nil {
+		return ""
+	}
+	switch pairs.Type() {
+	case "list", "tuple":
+		// ok
+	default:
+		return ""
+	}
+	var elem string
+	saw := false
+	for i := uint32(0); i < pairs.ChildCount(); i++ {
+		ch := pairs.Child(i)
+		switch ch.Type() {
+		case "[", "]", "(", ")", ",", "comment":
+			continue
+		case "list", "tuple":
+			var elems []*grammar.Node
+			for j := uint32(0); j < ch.ChildCount(); j++ {
+				el := ch.Child(j)
+				switch el.Type() {
+				case "[", "]", "(", ")", ",", "comment":
+					continue
+				default:
+					elems = append(elems, el)
+				}
+			}
+			if len(elems) != 2 {
+				return ""
+			}
+			et := pythonClassCtorName(elems[1], content)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				elem = et
+				saw = true
+				continue
+			}
+			if et != elem {
+				return ""
+			}
+		default:
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return elem
+}
+
 // pythonNestedDictHomogeneousListCtorElem recovers T from mapping constructors
-// whose values are homogeneous Class() list/tuple/set collections of the same T:
+// whose values are homogeneous Class() list/tuple/set/frozenset/deque collections
+// of the same T, or homogeneous dict-of-Class (dict-of-dict):
 //
 //	{"k": [A()]} / {"k": [A()], "m": [A()]} / {"k": (A(),)} / {"k": {A()}} → "A"
-//	dict(k=[A()]) / dict(k=[A()], m=(A(),)) → "A"
-//	dict([("k", [A()])]) / dict((("k", [A()]),)) → "A"
-//	dict({"k": [A()]}) → "A"
+//	{"k": frozenset([A()])} / {"k": deque([A()])} → "A"
+//	{"outer": {"k": A()}} → "A"
+//	dict(k=[A()]) / OrderedDict(k=[A()]) / dict(k=[A()], m=(A(),)) → "A"
+//	dict([("k", [A()])]) / OrderedDict((("k", [A()]),)) → "A"
+//	dict({"k": [A()]}) / OrderedDict({"k": [A()]}) → "A"
+//	ChainMap({"k": [A()]}) / ChainMap({"k": [A()]}, {"m": [A()]}) → "A"
+//	{k: [A()] for k in ...} → "A"
 //
 // Stored as elemOf["@nested."+name] so da = {"k": [A()]}; da["k"][0].run() /
 // match da: case {"k": [xa]}: / ga = da["k"]; ga[0].run() / for a in da["k"] /
 // for ga in da.values(); ga[0].run() / next(iter(da["k"])).run() peel under
-// foreign same-leaf (same leaf as annotated dict[str, list[A]] / set[A]).
-// Scalar {"k": A()} / dict(k=A()) stays on other paths; mixed value leaves /
-// empty / splat / comprehension / mixed positional+kwargs fail closed.
+// foreign same-leaf (same leaf as annotated dict[str, list[A]] / set[A] /
+// dict[str, dict[str, A]]). Scalar {"k": A()} / dict(k=A()) stays on other
+// paths; mixed value leaves / empty / splat / mixed positional+kwargs fail closed.
 func pythonNestedDictHomogeneousListCtorElem(collection *grammar.Node, content []byte) string {
 	if collection == nil {
 		return ""
@@ -9759,6 +10059,8 @@ func pythonNestedDictHomogeneousListCtorElem(collection *grammar.Node, content [
 	switch collection.Type() {
 	case "dictionary":
 		return pythonNestedDictLiteralHomogeneousListCtorElem(collection, content)
+	case "dictionary_comprehension":
+		return pythonNestedDictCompHomogeneousListCtorElem(collection, content)
 	case "call":
 		return pythonNestedDictCallHomogeneousListCtorElem(collection, content)
 	default:
@@ -9767,7 +10069,8 @@ func pythonNestedDictHomogeneousListCtorElem(collection *grammar.Node, content [
 }
 
 // pythonNestedDictValueCollectionElem recovers T when val is a homogeneous
-// Class() list/tuple/set of T. Other shapes fail closed ("").
+// Class() list/tuple/set, a frozenset/deque/set/list/tuple(...) wrapper of those,
+// or a dictionary of Class() values (dict-of-dict). Other shapes fail closed ("").
 func pythonNestedDictValueCollectionElem(val *grammar.Node, content []byte) string {
 	if val == nil {
 		return ""
@@ -9775,13 +10078,42 @@ func pythonNestedDictValueCollectionElem(val *grammar.Node, content []byte) stri
 	switch val.Type() {
 	case "list", "tuple", "set":
 		return pythonHomogeneousCtorElem(val, content)
+	case "dictionary":
+		// Nested mapping of Class() values: {"k": A()} inside outer map.
+		return pythonHomogeneousDictLiteralValueCtorElem(val, content)
+	case "call":
+		// frozenset([A()]) / deque([A()]) / set([A()]) / list([A()]) /
+		// tuple((A(),)) / collections.deque([A()]) — single positional
+		// homogeneous Class() collection.
+		fn := ingest.ChildByField(val, "function")
+		name := pythonSimpleCalleeName(fn, content)
+		switch name {
+		case "frozenset", "deque", "set", "list", "tuple":
+			// ok
+		default:
+			return ""
+		}
+		args, ok := pythonCallPositionalArgNodes(val)
+		if !ok || len(args) == 0 {
+			return ""
+		}
+		// deque accepts optional maxlen kw-only; reject extra positionals.
+		if name == "deque" {
+			if len(args) > 1 {
+				return ""
+			}
+		} else if len(args) != 1 {
+			return ""
+		}
+		return pythonHomogeneousCtorElem(args[0], content)
 	default:
 		return ""
 	}
 }
 
 // pythonNestedDictLiteralHomogeneousListCtorElem recovers T from a dictionary
-// literal whose values are homogeneous Class() list/tuple/set collections.
+// literal whose values are homogeneous Class() list/tuple/set/frozenset/deque
+// collections or dict-of-Class.
 func pythonNestedDictLiteralHomogeneousListCtorElem(collection *grammar.Node, content []byte) string {
 	if collection == nil || collection.Type() != "dictionary" {
 		return ""
@@ -9818,20 +10150,56 @@ func pythonNestedDictLiteralHomogeneousListCtorElem(collection *grammar.Node, co
 	return nest
 }
 
-// pythonNestedDictCallHomogeneousListCtorElem recovers T from dict(...) forms:
+// pythonNestedDictCompHomogeneousListCtorElem recovers T from
+// `{k: [A()] for k in ...}` / `{k: frozenset([A()]) for k in ...}` /
+// `{k: {"m": A()} for k in ...}` when the pair value is a nested collection
+// of Class() T. Nested fors fail closed.
+func pythonNestedDictCompHomogeneousListCtorElem(comp *grammar.Node, content []byte) string {
+	if comp == nil || comp.Type() != "dictionary_comprehension" {
+		return ""
+	}
+	forCount := 0
+	var pair *grammar.Node
+	for i := uint32(0); i < comp.ChildCount(); i++ {
+		ch := comp.Child(i)
+		switch ch.Type() {
+		case "for_in_clause":
+			forCount++
+		case "pair":
+			if pair == nil {
+				pair = ch
+			}
+		}
+	}
+	if forCount != 1 || pair == nil {
+		return ""
+	}
+	return pythonNestedDictValueCollectionElem(ingest.ChildByField(pair, "value"), content)
+}
+
+// pythonNestedDictCallHomogeneousListCtorElem recovers T from dict/OrderedDict/
+// ChainMap forms:
 //
-//	dict(k=[A()]) / dict(k=[A()], m={A()}) — all-keyword values
-//	dict([("k", [A()])]) / dict((("k", [A()]),)) — single list/tuple of pairs
-//	dict({"k": [A()]}) — single dictionary arg (same as literal path)
+//	dict(k=[A()]) / OrderedDict(k=[A()], m={A()}) — all-keyword values
+//	dict([("k", [A()])]) / OrderedDict((("k", [A()]),)) — single list/tuple of pairs
+//	dict({"k": [A()]}) / OrderedDict({"k": [A()]}) — single dictionary arg
+//	ChainMap({"k": [A()]}) / ChainMap({"k": [A()]}, {"m": [A()]}) — one+ maps
 //
-// Mixed positional+kwargs, multi-positional, splat, empty, and non-collection
-// values fail closed.
+// Mixed positional+kwargs (dict/OrderedDict), splat, empty, and non-collection
+// values fail closed. collections.OrderedDict / collections.ChainMap accepted
+// via attribute leaf (pythonSimpleCalleeName).
 func pythonNestedDictCallHomogeneousListCtorElem(call *grammar.Node, content []byte) string {
 	if call == nil || call.Type() != "call" {
 		return ""
 	}
 	fn := ingest.ChildByField(call, "function")
-	if fn == nil || fn.Type() != "identifier" || ingest.NodeText(fn, content) != "dict" {
+	name := pythonSimpleCalleeName(fn, content)
+	switch name {
+	case "dict", "OrderedDict":
+		// kwargs / pairs / single dict
+	case "ChainMap":
+		return pythonNestedChainMapHomogeneousListCtorElem(call, content)
+	default:
 		return ""
 	}
 	argList := ingest.ChildByField(call, "arguments")
@@ -9853,7 +10221,7 @@ func pythonNestedDictCallHomogeneousListCtorElem(call *grammar.Node, content []b
 			positionals = append(positionals, ch)
 		}
 	}
-	// All-keyword form: dict(k=[A()], m=(A(),))
+	// All-keyword form: dict(k=[A()], m=(A(),)) / OrderedDict(k=[A()])
 	if len(positionals) == 0 {
 		if len(keywords) == 0 {
 			return ""
@@ -9895,10 +10263,52 @@ func pythonNestedDictCallHomogeneousListCtorElem(call *grammar.Node, content []b
 	}
 }
 
+// pythonNestedChainMapHomogeneousListCtorElem recovers T from
+// ChainMap({"k": [A()]}) / ChainMap({"k": [A()]}, {"m": deque([A()])}) when
+// every positional map has nested collection (or dict-of-Class) values of T.
+func pythonNestedChainMapHomogeneousListCtorElem(call *grammar.Node, content []byte) string {
+	argList := ingest.ChildByField(call, "arguments")
+	if argList == nil {
+		return ""
+	}
+	var nest string
+	saw := false
+	for i := uint32(0); i < argList.ChildCount(); i++ {
+		ch := argList.Child(i)
+		switch ch.Type() {
+		case "(", ")", ",", "comment":
+			continue
+		case "keyword_argument", "list_splat", "dictionary_splat", "parenthesized_list_splat":
+			return ""
+		case "dictionary":
+			et := pythonNestedDictLiteralHomogeneousListCtorElem(ch, content)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				nest = et
+				saw = true
+				continue
+			}
+			if et != nest {
+				return ""
+			}
+		default:
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return nest
+}
+
 // pythonNestedDictPairsHomogeneousListCtorElem recovers T from a list/tuple of
-// key/value pairs where each value is a homogeneous Class() list/tuple/set:
+// key/value pairs where each value is a homogeneous Class() list/tuple/set/
+// frozenset/deque (or dict-of-Class):
 //
 //	[("k", [A()])] / (("k", [A()]),) / [("k", [A()]), ("m", {A()})] → "A"
+//	[("k", frozenset([A()]))] / [("outer", {"k": A()})] → "A"
 //
 // Pair must be a 2-element list/tuple (key ignored; value is 2nd slot). Other
 // shapes / mixed leaves fail closed.
