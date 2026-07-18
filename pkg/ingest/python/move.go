@@ -4751,7 +4751,10 @@ func pythonNextElemType(call *grammar.Node, content []byte, elemOf, egElems, typ
 // next(tuple(astuple(box))) / dataclasses.astuple / astuple(replace(box)) forms,
 // and next(asdict(box).values()) / next(iter(asdict(box).values())) /
 // vars(box).values() / box.__dict__.values() (dict preserves declaration order;
-// first value is field 0 — same leaf as next(astuple(box))).
+// first value is field 0 — same leaf as next(astuple(box))),
+// plus assigned dict-view locals: d = asdict(box); next(d.values()) /
+// d = vars(box); next(iter(d.values())) / d = box.__dict__; next(d.values())
+// (bindFields on d records @astuple.d.#i — same leaf as next(asdict(box).values())).
 // next always yields the first tuple/dict-view element — same leaf as astuple(box)[0].
 // Peels identity order-preserving wrappers iter/list/tuple only (not reversed).
 // Fails closed when the iterable is not an astuple/dict-view chain or field 0 is unknown.
@@ -4773,6 +4776,8 @@ func pythonAstupleNextFirstField(call *grammar.Node, content []byte, fieldOf map
 //   - asdict(local).values() / vars(local).values() / local.__dict__.values()
 //     → fieldOf["@astuple.local.#0"] (dict preserves declaration order; first
 //     value is field 0 — same leaf as next(astuple(local)) / local.a)
+//   - d.values() when d = asdict(box) / vars(box) / box.__dict__ (or walrus)
+//     → fieldOf["@astuple.d.#0"] (bindFields on the assigned dict-view local)
 //   - order-preserving wrappers of those (iter/list/tuple)
 // Same leaf as astuple(local)[0] / t[0] / box.a for first field.
 func pythonAstupleFirstFieldType(n *grammar.Node, content []byte, fieldOf map[string]string) string {
@@ -4807,7 +4812,9 @@ func pythonAstupleFirstFieldType(n *grammar.Node, content []byte, fieldOf map[st
 	case "values":
 		// asdict(box).values() / vars(box).values() / box.__dict__.values() —
 		// zero-arg values view; first yield is declaration-order field 0.
-		// Assigned d = asdict(box); d.values() fails closed (no dict-view peel).
+		// d = asdict(box); d.values() / d = vars(box); d.values() /
+		// d = box.__dict__; d.values() — assigned dict-view local (bindFields
+		// recorded @astuple.d.#i; same leaf as next(asdict(box).values())).
 		if fn.Type() != "attribute" {
 			return ""
 		}
@@ -4816,6 +4823,14 @@ func pythonAstupleFirstFieldType(n *grammar.Node, content []byte, fieldOf map[st
 			return ""
 		}
 		obj := ingest.ChildByField(fn, "object")
+		if obj == nil {
+			return ""
+		}
+		// Assigned dict-view local: d.values() after d = asdict(box) / vars / __dict__.
+		// bindFields(d, Box) records @astuple.d.#0 (not d.#0 — dicts stay non-indexable).
+		if obj.Type() == "identifier" {
+			return fieldOf["@astuple."+ingest.NodeText(obj, content)+".#0"]
+		}
 		local := pythonDictViewObjectLocal(obj, content)
 		if local == "" {
 			return ""
