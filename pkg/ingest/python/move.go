@@ -1887,6 +1887,7 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `a = d.get(k)` / `a = d.get(k, default)` (dict value type; default ignored like next),
 // `a = d.setdefault(k)` / `a = d.setdefault(k, default)` (same dict value type),
 // `k, a = d.popitem()` (dict value leaf on 2nd unpack slot; pair itself untyped),
+// `a = d.popitem()[1]` / `a = (d.popitem())[1]` (pair value slot; [0]/other fail closed),
 // `xs = items.copy()` / `xs = items or []` (elemOf preserved for later index/for),
 // `a = it.__next__()` when `it = iter(items)` (or other known iterable) has element type,
 // as-bindings (`case A() as a`, `with A() as a`, `except A as e`),
@@ -1901,7 +1902,8 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `a := heappop(items)`, `a := heapq.heappop(items)`,
 // `a := heappushpop(items, x)`, `a := heapreplace(items, x)` / heapq.*,
 // `a := items.pop()`, `a := items.popleft()`, `a := d.get(k)`,
-// `a := d.setdefault(k)`, `a := it.__next__()`, `a := items[0]` — same RHS typing as plain assignment),
+// `a := d.setdefault(k)`, `a := it.__next__()`, `a := items[0]`,
+// `a := d.popitem()[1]` — same RHS typing as plain assignment),
 // for/comprehension targets over known collections
 // (`for a in [A()]`, `for a in items` with `items: list[A]`,
 // `for a in items.copy()` / `for a in items or []`,
@@ -2069,7 +2071,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								// a = d.setdefault(k) / d.setdefault(k, default) — same.
 								// Default arg on get/setdefault is ignored (same as next's default).
 								// popitem() yields a (key, value) pair — single-name bind fails
-								// closed (pair, not value); use unpack `k, a = d.popitem()`.
+								// closed (pair, not value); use unpack `k, a = d.popitem()` or
+								// pair subscript `a = d.popitem()[1]` (via pythonSubscriptElemType).
 								// Other methods fail closed.
 								obj := ingest.ChildByField(fn, "object")
 								if et := pythonIterableElemType(obj, content, elemOf, egElems, typeOf); ourReceivers[et] {
@@ -2908,7 +2911,9 @@ func pythonItemgetterElemType(call *grammar.Node, content []byte, elemOf, egElem
 
 // pythonSubscriptElemType recovers the element type of items[i] / d[k] when the
 // subscripted value is a known collection (elemOf / wrappers / literals).
-// Fails closed on slices (items[a:b] / items[:]) — those yield sequences, not elements.
+// Also covers d.popitem()[1] / (d.popitem())[1] (pair value leaf; see
+// pythonDictPopitemSubscriptValueType). Fails closed on slices (items[a:b] /
+// items[:]) — those yield sequences, not elements.
 func pythonSubscriptElemType(sub *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
 	if sub == nil || sub.Type() != "subscript" {
 		return ""
@@ -2917,6 +2922,10 @@ func pythonSubscriptElemType(sub *grammar.Node, content []byte, elemOf, egElems,
 		if sub.Child(i).Type() == "slice" {
 			return ""
 		}
+	}
+	// d.popitem()[1] — pair value leaf (before generic collection subscript).
+	if et := pythonDictPopitemSubscriptValueType(sub, content, elemOf); et != "" {
+		return et
 	}
 	val := ingest.ChildByField(sub, "value")
 	return pythonIterableElemType(val, content, elemOf, egElems, typeOf)
@@ -3450,13 +3459,33 @@ func pythonDictItemsValueType(right *grammar.Node, content []byte, elemOf map[st
 // pythonDictPopitemValueType returns the value type of d.popitem() when d is a
 // known dict/mapping local (elemOf stores the value leaf from dict[K, V]).
 // popitem() yields a (key, value) pair — callers bind the value via unpack
-// (k, a = d.popitem()); the pair itself is not an element type.
+// (k, a = d.popitem()) or pair subscript (a = d.popitem()[1]); the pair itself
+// is not an element type.
 func pythonDictPopitemValueType(right *grammar.Node, content []byte, elemOf map[string]string) string {
 	obj, method := pythonAttrCall(right, content)
 	if obj == "" || method != "popitem" || elemOf == nil {
 		return ""
 	}
 	return elemOf[obj]
+}
+
+// pythonDictPopitemSubscriptValueType returns the value type of d.popitem()[1]
+// when d is a known dict/mapping local. Index must be the integer literal 1
+// (value slot of the (key, value) pair). [0] (key) and other indices fail closed.
+// Parenthesized (d.popitem())[1] is accepted.
+func pythonDictPopitemSubscriptValueType(sub *grammar.Node, content []byte, elemOf map[string]string) string {
+	if sub == nil || sub.Type() != "subscript" {
+		return ""
+	}
+	idx := ingest.ChildByField(sub, "subscript")
+	if idx == nil || idx.Type() != "integer" || ingest.NodeText(idx, content) != "1" {
+		return ""
+	}
+	val := ingest.ChildByField(sub, "value")
+	for val != nil && val.Type() == "parenthesized_expression" {
+		val = pythonParenInner(val)
+	}
+	return pythonDictPopitemValueType(val, content, elemOf)
 }
 
 // pythonGroupbyGroupElemType recovers the element type of the group iterator
