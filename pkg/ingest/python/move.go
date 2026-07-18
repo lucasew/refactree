@@ -2081,6 +2081,7 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // first positional arg (fieldOf for `d["a"].run()` / `d.get("a").run()` under
 // foreign same-leaf methods; asdict yields a dict of field values),
 // `d = vars(box)` / walrus — same field-key binding (vars yields obj.__dict__),
+// `d = box.__dict__` / walrus — same field-key binding (instance attribute dict),
 // `t = astuple(box)` / `dataclasses.astuple(box)` / walrus — ordered index
 // slots of the first positional arg (fieldOf["t.#0"] for `t[0].run()`; astuple
 // yields a tuple of field values in declaration order, not named keys).
@@ -2449,8 +2450,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// xa = box.a — dataclass/class field access when box is a typed local
 				// with annotated field a: A (under foreign same-leaf methods).
 				// xa = replace(box).a / dataclasses.replace(box).a — field of first arg.
+				// d = box.__dict__ — same field keys as vars/asdict (not a field leaf).
 				if right != nil && right.Type() == "attribute" {
-					if ft := pythonFieldAccessType(right, content, fieldOf); ft != "" {
+					if tn := pythonDunderDictObjectType(right, content, typeOf); tn != "" {
+						bindFields(lname, tn)
+					} else if ft := pythonFieldAccessType(right, content, fieldOf); ft != "" {
 						typeOf[lname] = ft
 						bindFields(lname, ft)
 						if ourReceivers[ft] {
@@ -2781,8 +2785,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			}
 			// xa := box.a — dataclass/class field access (same as plain assignment).
 			// xa := replace(box).a / dataclasses.replace(box).a — field of first arg.
+			// d := box.__dict__ — same field keys as vars/asdict (not a field leaf).
 			if valueN.Type() == "attribute" {
-				if ft := pythonFieldAccessType(valueN, content, fieldOf); ft != "" {
+				if tn := pythonDunderDictObjectType(valueN, content, typeOf); tn != "" {
+					bindFields(lname, tn)
+				} else if ft := pythonFieldAccessType(valueN, content, fieldOf); ft != "" {
 					typeOf[lname] = ft
 					bindFields(lname, ft)
 					if ourReceivers[ft] {
@@ -3721,6 +3728,21 @@ func pythonVarsCallObjectType(call *grammar.Node, content []byte, typeOf map[str
 		return ""
 	}
 	return pythonObjectExprType(args[0], content, typeOf)
+}
+
+// pythonDunderDictObjectType recovers T from x.__dict__ when x is a typed object
+// local or Class() ctor. __dict__ is the instance attribute dict (field keys via
+// bindFields; same leaf as vars(x) / asdict(x)). Other attributes fail closed.
+func pythonDunderDictObjectType(attr *grammar.Node, content []byte, typeOf map[string]string) string {
+	if attr == nil || attr.Type() != "attribute" {
+		return ""
+	}
+	field := ingest.ChildByField(attr, "attribute")
+	obj := ingest.ChildByField(attr, "object")
+	if field == nil || obj == nil || ingest.NodeText(field, content) != "__dict__" {
+		return ""
+	}
+	return pythonObjectExprType(obj, content, typeOf)
 }
 
 // pythonReplaceFieldAccessType recovers T from replace(box).a /
