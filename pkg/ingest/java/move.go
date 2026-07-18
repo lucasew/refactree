@@ -1728,6 +1728,7 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // → elemOf[as] (SequencedCollection/Set wrappers; same E — Java 21; mirrors *SequencedMap),
 // Collections.asLifoQueue(as) / checkedQueue(as, …) → elemOf[as] (Queue wrappers; same E;
 // Class arg on checkedQueue ignored — mirrors checkedList/Set),
+// Collections.newSetFromMap(m) → elemOf[m] (Set of map keys K; Map stores K in elemOf),
 // Collections.list(Enumeration) / Collections.enumeration(coll) → enumeration/coll element type,
 // List.copyOf(as) / Set.copyOf(as) → elemOf[as] (Collection of first-arg elements),
 // Stream.concat(s1, s2) → element type when both stream args agree,
@@ -1882,6 +1883,7 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			"unmodifiableSequencedSet", "synchronizedSequencedSet",
 			"unmodifiableCollection", "synchronizedCollection", "checkedCollection",
 			"asLifoQueue", "checkedQueue",
+			"newSetFromMap",
 			"list", "enumeration":
 			// Collections.unmodifiableList/Set/Collection(as) /
 			// synchronizedList/Set/Collection(as) /
@@ -1897,6 +1899,8 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// wrappers; Java 21; mirrors unmodifiableSequencedMap).
 			// Collections.asLifoQueue(deque) / checkedQueue(queue, A.class) —
 			// Queue of first-arg element type (Class arg ignored).
+			// Collections.newSetFromMap(map) — Set of first-arg map key type
+			// (Map stores K in elemOf; same key leaf as Map.keySet).
 			// Collections.list(Enumeration) — ArrayList of enumeration elements.
 			// Collections.enumeration(coll) — Enumeration of coll elements.
 			return javaCollectionsListWrapperElemType(obj, content, elemOf, valOf)
@@ -2250,8 +2254,10 @@ func javaCollectionsNCopiesElemType(call *grammar.Node, content []byte) string {
 // Collections.unmodifiableSequencedCollection/Set(coll) /
 // synchronizedSequencedCollection/Set(coll) /
 // Collections.asLifoQueue(coll) / checkedQueue(coll, type) /
+// Collections.newSetFromMap(map) /
 // Collections.list(enumeration) / Collections.enumeration(coll).
-// First arg's element type; the Class arg on checked* is ignored.
+// First arg's element type (map key type for newSetFromMap — Map stores K in
+// elemOf); the Class arg on checked* is ignored.
 // Non-Collections receivers fail closed.
 func javaCollectionsListWrapperElemType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	if call == nil || call.Type() != "method_invocation" {
