@@ -2000,6 +2000,10 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // match mapping value captures from a known dict subject
 // (`match d: case {"k": a}:` / `case {"k": a as x}:` with `d: dict[K, A]` —
 // value slots are the dict value leaf; **rest fails closed),
+// match TypedDict/record key captures from a known object subject
+// (`match box: case {"a": xa}:` / `case {"a": xa as x}:` with `box: Box`
+// and annotated field a: A — key-specific fieldOf leaf; non-string keys
+// and **rest fail closed),
 // walrus (`a := A()`, `a := next(items)`, `a := next(x for x in items)`,
 // `a := min(items)`, `a := choice(items)`, `a := random.choice(items)`,
 // `a := heappop(items)`, `a := heapq.heappop(items)`,
@@ -2902,12 +2906,20 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// match items: case [a]: / case [a, *rest]: — bind sequence captures
 			// from the subject's element type (items: list[A] / xs = [A()] / …).
 			// match d: case {"k": a}: — bind mapping value captures from the
-			// subject's dict value leaf (d: dict[K, A] / …). Without this,
-			// a.m() is skipped under foreign same-leaf; *rest loops also stay
-			// untyped. as_pattern cases still handled above when walked.
+			// subject's dict value leaf (d: dict[K, A] / …).
+			// match box: case {"a": xa}: — TypedDict/record key-specific value
+			// captures via fieldOf (box: Box with a: A; not homogeneous elemOf).
+			// Without this, a.m() is skipped under foreign same-leaf; *rest loops
+			// also stay untyped. as_pattern cases still handled above when walked.
 			subject := ingest.ChildByField(n, "subject")
 			if subject != nil {
-				if et := pythonIterableElemType(subject, content, elemOf, egElems, typeOf); et != "" {
+				et := pythonIterableElemType(subject, content, elemOf, egElems, typeOf)
+				subjLocal := ""
+				if subject.Type() == "identifier" {
+					subjLocal = ingest.NodeText(subject, content)
+				}
+				// Homogeneous dict/list path and TypedDict key path are independent.
+				if et != "" || subjLocal != "" {
 					body := ingest.ChildByField(n, "body")
 					if body != nil {
 						for i := uint32(0); i < body.ChildCount(); i++ {
@@ -2921,7 +2933,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								if p.Type() == "block" {
 									break
 								}
-								pythonBindMatchSeqPatterns(p, content, et, ourReceivers, out, elemOf)
+								if et != "" {
+									pythonBindMatchSeqPatterns(p, content, et, ourReceivers, out, elemOf)
+								}
+								if subjLocal != "" {
+									pythonBindMatchRecordKeyPatterns(p, content, subjLocal, fieldOf, ourReceivers, out)
+								}
 							}
 						}
 					}
@@ -3624,12 +3641,63 @@ func pythonRecordKeyAccessType(n *grammar.Node, content []byte, fieldOf map[stri
 	return ""
 }
 
+// pythonBindMatchRecordKeyPatterns binds capture names from match dict_pattern
+// value slots when the subject is a TypedDict/record local with key-specific
+// field types in fieldOf (`match box: case {"a": xa}:` → xa typed as field a).
+// Only string-literal keys; capture keys (`{k: a}`), non-string keys, unknown
+// fields, and **rest fail closed. Reuses pythonBindMatchMapValueCaptures per key.
+func pythonBindMatchRecordKeyPatterns(n *grammar.Node, content []byte, local string, fieldOf map[string]string, ourReceivers, out map[string]bool) {
+	if n == nil || n.IsNull() || local == "" || fieldOf == nil {
+		return
+	}
+	switch n.Type() {
+	case "dict_pattern":
+		// Children alternate field=key / field=value (string key + case_pattern value).
+		// Multi-pair patterns have multiple key/value field children; pair by walk order.
+		var pendingKey string
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			switch n.FieldNameForChild(i) {
+			case "key":
+				pendingKey = ""
+				if ch.Type() == "string" {
+					_, pendingKey = pythonStringContent(ch, content)
+				}
+				// Capture keys / non-string keys fail closed (no field leaf).
+			case "value":
+				if pendingKey != "" {
+					if ft := fieldOf[local+"."+pendingKey]; ft != "" {
+						pythonBindMatchMapValueCaptures(ch, content, ft, ourReceivers, out)
+					}
+				}
+				pendingKey = ""
+			}
+		}
+		return
+	case "case_pattern", "pattern", "as_pattern":
+		// Unwrap; for as_pattern only the left pattern can contain a dict_pattern.
+		// (Whole-match alias typing is not record-key specific.)
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "as" || ch.Type() == "as_pattern_target" {
+				continue
+			}
+			pythonBindMatchRecordKeyPatterns(ch, content, local, fieldOf, ourReceivers, out)
+		}
+		return
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		pythonBindMatchRecordKeyPatterns(n.Child(i), content, local, fieldOf, ourReceivers, out)
+	}
+}
+
 // pythonBindMatchSeqPatterns binds capture names from match list/tuple/mapping
 // patterns when the match subject has element/value type et.
 // Sequence: fixed slots → out (if ourReceivers); *rest → elemOf (including
 // foreign, for shadowing). Mapping: value captures in case {"k": a} → out;
 // **rest fails closed (mapping, not an element). Fails closed on nested /
 // class patterns inside the sequence/value (those use other binders).
+// TypedDict key-specific captures use pythonBindMatchRecordKeyPatterns instead.
 func pythonBindMatchSeqPatterns(n *grammar.Node, content []byte, et string, ourReceivers, out map[string]bool, elemOf map[string]string) {
 	if n == nil || n.IsNull() || et == "" {
 		return
