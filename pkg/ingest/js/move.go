@@ -1510,8 +1510,12 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 	}
 	// await Promise.resolve(new A() / a / makeA()) / Promise.resolve(...) — identity peels
 	// under foreign same-leaf methods (same leaf as const a = await …; a.run()).
+	// Also Promise.race/any([new A()]) value peels (uniform array element type).
 	if obj.Type() == "await_expression" || obj.Type() == "call_expression" {
 		if t := jsPromiseResolveArgType(obj, content, typedLocals, factories); t != "" {
+			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
+		if t := jsPromiseRaceValueType(obj, content, typedLocals, factories); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 	}
@@ -1568,6 +1572,9 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						out[ingest.NodeText(nameN, content)] = ctor
 					} else if t := jsPromiseResolveArgType(valN, content, out, factories); ourReceivers[t] {
 						// await Promise.resolve(new A() / a / makeA()) — resolved value is A.
+						out[ingest.NodeText(nameN, content)] = t
+					} else if t := jsPromiseRaceValueType(valN, content, out, factories); ourReceivers[t] {
+						// await Promise.race/any([new A()]) — value is A when elems agree.
 						out[ingest.NodeText(nameN, content)] = t
 					}
 				} else if nameN.Type() == "array_pattern" {
@@ -1876,9 +1883,11 @@ func jsBindPromiseThenParams(call *grammar.Node, content []byte, ourReceivers ma
 	obj := ingest.ChildByField(fn, "object")
 	// Promise.resolve(new T() / typed local / factory) → scalar param type.
 	resolveT := jsPromiseResolveArgType(obj, content, out, factories)
+	// Promise.race/any([new T(), …]) → scalar value type when elems agree.
+	raceT := jsPromiseRaceValueType(obj, content, out, factories)
 	// Promise.all([new T(), …]) → array element type for [a] destructure.
 	allT := jsPromiseAllElemType(obj, content, out, factories)
-	if !ourReceivers[resolveT] && !ourReceivers[allT] {
+	if !ourReceivers[resolveT] && !ourReceivers[raceT] && !ourReceivers[allT] {
 		return
 	}
 	args := ingest.ChildByField(call, "arguments")
@@ -1926,11 +1935,17 @@ func jsBindPromiseThenParams(call *grammar.Node, content []byte, ourReceivers ma
 	if param == nil {
 		return
 	}
-	// Promise.resolve → bare identifier param.
-	if ourReceivers[resolveT] && param.Type() == "identifier" {
+	// Promise.resolve / Promise.race|any → bare identifier param.
+	scalarT := ""
+	if ourReceivers[resolveT] {
+		scalarT = resolveT
+	} else if ourReceivers[raceT] {
+		scalarT = raceT
+	}
+	if scalarT != "" && param.Type() == "identifier" {
 		name := ingest.NodeText(param, content)
 		if name != "" && name != "_" {
-			out[name] = resolveT
+			out[name] = scalarT
 		}
 		return
 	}
@@ -2000,7 +2015,25 @@ func jsBindArrayPatternNames(pattern *grammar.Node, content []byte, typeLeaf str
 // and (await Promise.all([new A()]))[0].run() under foreign same-leaf methods.
 // Non-Promise.all / non-array / mixed / empty args fail closed.
 func jsPromiseAllElemType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
-	if n == nil {
+	return jsPromiseArrayElemType(n, content, typedLocals, factories, "all")
+}
+
+// jsPromiseRaceValueType recovers T from Promise.race([new T(), …]) /
+// Promise.any([new T(), …]) when every array element peels to the same T.
+// The settled value is T (scalar), not an array — unlike Promise.all.
+// Enables Promise.race([new A()]).then(a => a.run()) and
+// (await Promise.race([new A()])).run() under foreign same-leaf methods.
+func jsPromiseRaceValueType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	if t := jsPromiseArrayElemType(n, content, typedLocals, factories, "race"); t != "" {
+		return t
+	}
+	return jsPromiseArrayElemType(n, content, typedLocals, factories, "any")
+}
+
+// jsPromiseArrayElemType recovers the uniform element type of
+// Promise.<method>([…]) for method in {all, race, any}.
+func jsPromiseArrayElemType(n *grammar.Node, content []byte, typedLocals, factories map[string]string, method string) string {
+	if n == nil || method == "" {
 		return ""
 	}
 	if n.Type() == "await_expression" {
@@ -2013,7 +2046,7 @@ func jsPromiseAllElemType(n *grammar.Node, content []byte, typedLocals, factorie
 			arg = ch
 			break
 		}
-		return jsPromiseAllElemType(arg, content, typedLocals, factories)
+		return jsPromiseArrayElemType(arg, content, typedLocals, factories, method)
 	}
 	if n.Type() == "parenthesized_expression" {
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -2021,7 +2054,7 @@ func jsPromiseAllElemType(n *grammar.Node, content []byte, typedLocals, factorie
 			if ch.Type() == "(" || ch.Type() == ")" {
 				continue
 			}
-			return jsPromiseAllElemType(ch, content, typedLocals, factories)
+			return jsPromiseArrayElemType(ch, content, typedLocals, factories, method)
 		}
 		return ""
 	}
@@ -2040,7 +2073,7 @@ func jsPromiseAllElemType(n *grammar.Node, content []byte, typedLocals, factorie
 	if obj.Type() != "identifier" || ingest.NodeText(obj, content) != "Promise" {
 		return ""
 	}
-	if prop.Type() != "property_identifier" || ingest.NodeText(prop, content) != "all" {
+	if prop.Type() != "property_identifier" || ingest.NodeText(prop, content) != method {
 		return ""
 	}
 	args := ingest.ChildByField(n, "arguments")
@@ -2127,33 +2160,6 @@ func jsExprConcreteType(n *grammar.Node, content []byte, typedLocals, factories 
 	}
 	if n.Type() == "call_expression" {
 		return jsFactoryCallReturnType(n, content, factories)
-	}
-	return ""
-}
-
-// jsFirstFormalParamName returns the first simple identifier parameter name.
-func jsFirstFormalParamName(params *grammar.Node, content []byte) string {
-	if params == nil {
-		return ""
-	}
-	for i := uint32(0); i < params.ChildCount(); i++ {
-		ch := params.Child(i)
-		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
-			continue
-		}
-		if ch.Type() == "identifier" {
-			return ingest.NodeText(ch, content)
-		}
-		// TS required_parameter / optional_parameter
-		if nameN := ingest.ChildByField(ch, "pattern"); nameN != nil && nameN.Type() == "identifier" {
-			return ingest.NodeText(nameN, content)
-		}
-		if nameN := ingest.ChildByField(ch, "name"); nameN != nil && nameN.Type() == "identifier" {
-			return ingest.NodeText(nameN, content)
-		}
-		if nameN := ingest.ChildByType(ch, "identifier"); nameN != nil {
-			return ingest.NodeText(nameN, content)
-		}
 	}
 	return ""
 }
