@@ -2574,11 +2574,15 @@ func sameFileFuncResultTypes(root *grammar.Node, content []byte) map[string][]st
 // sameFileGenericPeelFuncs maps same-file generic helpers whose call result
 // peels from the first argument under foreign same-leaf methods:
 //
-//	"arg"  — func Id[T any](v T) T: peel first-arg concrete type
-//	         (Id(A{}).Run / a := Id(A{}); a.Run)
-//	"elem" — func First[T any](xs []T) T / At[T](xs []T, i int) T:
-//	         peel first-arg slice/array element type
-//	         (First([]A{{}}).Run / a := First(xs); a.Run with xs []A)
+//	"arg"  — func Id[T any](v T) T / First2[T, U any](a T, b U) T:
+//	         peel first-arg concrete type (first value param type = result
+//	         type param; extra type/value params allowed)
+//	         (Id(A{}).Run / First2(A{}, B{}).Run / a := Id(A{}); a.Run)
+//	"elem" — func First[T any](xs []T) T / At[T](xs []T, i int) T /
+//	         Get[K comparable, V any](m map[K]V, k K) V:
+//	         peel first-arg slice/array element or map value type
+//	         (First([]A{{}}).Run / Get(map[string]A{…}, k).Run /
+//	         a := First(xs); a.Run with xs []A)
 //
 // Only these shapes are recognized; other generics fail closed.
 func sameFileGenericPeelFuncs(root *grammar.Node, content []byte) map[string]string {
@@ -2609,22 +2613,13 @@ func sameFileGenericPeelFuncs(root *grammar.Node, content []byte) map[string]str
 	return out
 }
 
-// goGenericIdentityFuncName returns the function name when decl is
-// func Name[T …](v T) T (single type param, single value param of that param,
-// result is that param). Other shapes fail closed.
-func goGenericIdentityFuncName(decl *grammar.Node, content []byte) string {
-	if decl == nil || decl.Type() != "function_declaration" {
-		return ""
+// goGenericTypeParamNames returns the ordered type-parameter names of a
+// generic function_declaration (including multi-name decls like [T, U any]).
+// Empty when the decl is non-generic or malformed.
+func goGenericTypeParamNames(decl *grammar.Node, content []byte) []string {
+	if decl == nil {
+		return nil
 	}
-	nameN := ingest.ChildByField(decl, "name")
-	if nameN == nil || nameN.Type() != "identifier" {
-		return ""
-	}
-	name := ingest.NodeText(nameN, content)
-	if name == "" {
-		return ""
-	}
-	// Exactly one type parameter T.
 	tpList := ingest.ChildByField(decl, "type_parameters")
 	if tpList == nil {
 		// Some grammars expose type_parameter_list as a child without field name.
@@ -2637,7 +2632,7 @@ func goGenericIdentityFuncName(decl *grammar.Node, content []byte) string {
 		}
 	}
 	if tpList == nil || tpList.Type() != "type_parameter_list" {
-		return ""
+		return nil
 	}
 	var typeParams []string
 	for i := uint32(0); i < tpList.ChildCount(); i++ {
@@ -2645,77 +2640,128 @@ func goGenericIdentityFuncName(decl *grammar.Node, content []byte) string {
 		if ch == nil || ch.Type() != "type_parameter_declaration" {
 			continue
 		}
-		// First identifier in the declaration is the type param name.
-		var pname string
+		// Collect every identifier before the constraint (T / T, U any).
+		sawName := false
 		for j := uint32(0); j < ch.ChildCount(); j++ {
 			c := ch.Child(j)
-			if c != nil && c.Type() == "identifier" {
-				pname = ingest.NodeText(c, content)
-				break
+			if c == nil {
+				continue
+			}
+			switch c.Type() {
+			case "identifier":
+				pname := ingest.NodeText(c, content)
+				if pname != "" {
+					typeParams = append(typeParams, pname)
+					sawName = true
+				}
+			case ",", "comment":
+				continue
+			default:
+				// type_constraint / other — stop name harvest for this decl.
+				if sawName {
+					break
+				}
 			}
 		}
-		if pname == "" {
-			return ""
+		if !sawName {
+			return nil
 		}
-		typeParams = append(typeParams, pname)
 	}
-	if len(typeParams) != 1 {
-		return ""
-	}
-	tParam := typeParams[0]
+	return typeParams
+}
 
-	// Exactly one value parameter of type T (bare type_identifier).
-	params := ingest.ChildByField(decl, "parameters")
-	if params == nil || params.Type() != "parameter_list" {
+// goGenericResultTypeParam returns the bare type-param name of the function
+// result when it is a type_identifier matching one of typeParams.
+func goGenericResultTypeParam(decl *grammar.Node, content []byte, typeParams []string) string {
+	if decl == nil || len(typeParams) == 0 {
 		return ""
 	}
-	var paramTypes []string
-	for i := uint32(0); i < params.ChildCount(); i++ {
-		p := params.Child(i)
-		if p == nil || p.Type() != "parameter_declaration" {
-			continue
-		}
-		// Skip if multi-name without shared type handling — one slot per decl.
-		typeN := ingest.ChildByField(p, "type")
-		if typeN == nil || typeN.Type() != "type_identifier" {
-			return ""
-		}
-		paramTypes = append(paramTypes, ingest.NodeText(typeN, content))
-		// Multi-name param (a, b T) — still one type; count names.
-		names := parameterDeclNames(p, content)
-		if len(names) > 1 {
-			return ""
-		}
+	paramSet := map[string]bool{}
+	for _, p := range typeParams {
+		paramSet[p] = true
 	}
-	if len(paramTypes) != 1 || paramTypes[0] != tParam {
-		return ""
-	}
-
-	// Result is bare T (field "result" or sibling type_identifier before block).
 	result := ingest.ChildByField(decl, "result")
 	if result == nil {
 		for i := uint32(0); i < decl.ChildCount(); i++ {
 			ch := decl.Child(i)
 			if ch != nil && ch.Type() == "type_identifier" {
-				// Prefer the result slot: not inside type_parameter_list/parameters.
+				// Last type_identifier before block is typically the result.
 				result = ch
 			}
 		}
-		// Last type_identifier before block is typically the result; verify text.
-		if result == nil {
+	}
+	if result == nil || result.Type() != "type_identifier" {
+		return ""
+	}
+	r := ingest.NodeText(result, content)
+	if !paramSet[r] {
+		return ""
+	}
+	return r
+}
+
+// goGenericIdentityFuncName returns the function name when decl is
+// func Name[T …](v T[, …]) T (or multi-param First2[T, U any](a T, b U) T):
+// result is a type param Ti and the first value param's type is bare Ti.
+// Extra type params and extra value params are allowed. Other shapes fail closed.
+func goGenericIdentityFuncName(decl *grammar.Node, content []byte) string {
+	if decl == nil || decl.Type() != "function_declaration" {
+		return ""
+	}
+	nameN := ingest.ChildByField(decl, "name")
+	if nameN == nil || nameN.Type() != "identifier" {
+		return ""
+	}
+	name := ingest.NodeText(nameN, content)
+	if name == "" {
+		return ""
+	}
+	typeParams := goGenericTypeParamNames(decl, content)
+	if len(typeParams) == 0 {
+		return ""
+	}
+	tParam := goGenericResultTypeParam(decl, content, typeParams)
+	if tParam == "" {
+		return ""
+	}
+
+	// First value parameter of type Ti (bare type_identifier). Extra params OK.
+	params := ingest.ChildByField(decl, "parameters")
+	if params == nil || params.Type() != "parameter_list" {
+		return ""
+	}
+	var firstParamType *grammar.Node
+	for i := uint32(0); i < params.ChildCount(); i++ {
+		p := params.Child(i)
+		if p == nil || p.Type() != "parameter_declaration" {
+			continue
+		}
+		firstParamType = ingest.ChildByField(p, "type")
+		// Multi-name first param (a, b T) — still one type slot; allow only if
+		// single name so dual-class First2(a T, b U) stays first-arg peel.
+		names := parameterDeclNames(p, content)
+		if len(names) > 1 {
 			return ""
 		}
+		break
 	}
-	if result.Type() != "type_identifier" || ingest.NodeText(result, content) != tParam {
+	if firstParamType == nil || firstParamType.Type() != "type_identifier" {
+		return ""
+	}
+	if ingest.NodeText(firstParamType, content) != tParam {
 		return ""
 	}
 	return name
 }
 
 // goGenericSliceElemFuncName returns the function name when decl is
-// func Name[T …](xs []T[, …]) T or ([N]T): single type param T, result bare T,
-// first value parameter is a slice/array of T. Extra value params allowed
-// (At[T](xs []T, i int) T). Other shapes fail closed.
+// func Name[T …](xs []T[, …]) T / ([N]T) / map[K]T value peel:
+//
+//	First[T](xs []T) T / At[T](xs []T, i int) T — slice/array element
+//	Get[K comparable, V any](m map[K]V, k K) V — map value
+//
+// Result is type param Ti; first value param is []Ti / [N]Ti / map[K]Ti.
+// Extra type/value params allowed. Other shapes fail closed.
 func goGenericSliceElemFuncName(decl *grammar.Node, content []byte) string {
 	if decl == nil || decl.Type() != "function_declaration" {
 		return ""
@@ -2728,45 +2774,20 @@ func goGenericSliceElemFuncName(decl *grammar.Node, content []byte) string {
 	if name == "" {
 		return ""
 	}
-	// Exactly one type parameter T.
-	tpList := ingest.ChildByField(decl, "type_parameters")
-	if tpList == nil {
-		for i := uint32(0); i < decl.ChildCount(); i++ {
-			ch := decl.Child(i)
-			if ch != nil && ch.Type() == "type_parameter_list" {
-				tpList = ch
-				break
-			}
-		}
-	}
-	if tpList == nil || tpList.Type() != "type_parameter_list" {
+	typeParams := goGenericTypeParamNames(decl, content)
+	if len(typeParams) == 0 {
 		return ""
 	}
-	var typeParams []string
-	for i := uint32(0); i < tpList.ChildCount(); i++ {
-		ch := tpList.Child(i)
-		if ch == nil || ch.Type() != "type_parameter_declaration" {
-			continue
-		}
-		var pname string
-		for j := uint32(0); j < ch.ChildCount(); j++ {
-			c := ch.Child(j)
-			if c != nil && c.Type() == "identifier" {
-				pname = ingest.NodeText(c, content)
-				break
-			}
-		}
-		if pname == "" {
-			return ""
-		}
-		typeParams = append(typeParams, pname)
-	}
-	if len(typeParams) != 1 {
+	tParam := goGenericResultTypeParam(decl, content, typeParams)
+	if tParam == "" {
 		return ""
 	}
-	tParam := typeParams[0]
+	paramSet := map[string]bool{}
+	for _, p := range typeParams {
+		paramSet[p] = true
+	}
 
-	// First value parameter is []T or [N]T; further params allowed.
+	// First value parameter is []T / [N]T / map[K]T; further params allowed.
 	params := ingest.ChildByField(decl, "parameters")
 	if params == nil || params.Type() != "parameter_list" {
 		return ""
@@ -2787,7 +2808,7 @@ func goGenericSliceElemFuncName(decl *grammar.Node, content []byte) string {
 	if paramCount < 1 || firstParamType == nil {
 		return ""
 	}
-	// Peel []T / [N]T (and parenthesized).
+	// Peel []T / [N]T / map[K]T (and parenthesized).
 	pt := firstParamType
 	for pt != nil && pt.Type() == "parenthesized_type" {
 		var inner *grammar.Node
@@ -2801,28 +2822,27 @@ func goGenericSliceElemFuncName(decl *grammar.Node, content []byte) string {
 		}
 		pt = inner
 	}
-	if pt == nil || (pt.Type() != "slice_type" && pt.Type() != "array_type") {
+	if pt == nil {
 		return ""
 	}
-	el := ingest.ChildByField(pt, "element")
-	if el == nil || el.Type() != "type_identifier" || ingest.NodeText(el, content) != tParam {
-		return ""
-	}
-
-	// Result is bare T.
-	result := ingest.ChildByField(decl, "result")
-	if result == nil {
-		for i := uint32(0); i < decl.ChildCount(); i++ {
-			ch := decl.Child(i)
-			if ch != nil && ch.Type() == "type_identifier" {
-				result = ch
-			}
-		}
-		if result == nil {
+	switch pt.Type() {
+	case "slice_type", "array_type":
+		el := ingest.ChildByField(pt, "element")
+		if el == nil || el.Type() != "type_identifier" || ingest.NodeText(el, content) != tParam {
 			return ""
 		}
-	}
-	if result.Type() != "type_identifier" || ingest.NodeText(result, content) != tParam {
+	case "map_type":
+		// map[K]V with V == result type param; K should be a type param too
+		// (Get[K, V]) so non-generic map helpers fail closed.
+		val := ingest.ChildByField(pt, "value")
+		if val == nil || val.Type() != "type_identifier" || ingest.NodeText(val, content) != tParam {
+			return ""
+		}
+		key := ingest.ChildByField(pt, "key")
+		if key == nil || key.Type() != "type_identifier" || !paramSet[ingest.NodeText(key, content)] {
+			return ""
+		}
+	default:
 		return ""
 	}
 	return name
@@ -2849,28 +2869,14 @@ func goCallFirstArgNode(call *grammar.Node) *grammar.Node {
 
 // goCallFirstArgType recovers the concrete named type of the first positional
 // argument of a call_expression (A{} / &A{} / new(A) / nested peels). Used by
-// generic identity Id(arg) peels. Requires exactly one arg (identity shape).
+// generic identity Id(arg) and multi-param First2(a, b) peels (first value
+// param is the result type param; extra args ignored).
 func goCallFirstArgType(call *grammar.Node, content []byte, indexElemType, valueType func(name string, at uint32) (string, bool), funcColl map[string][]rangeSourceInfo, funcResults map[string][]string, genericPeels map[string]string) string {
 	if call == nil || call.Type() != "call_expression" {
 		return ""
 	}
-	args := ingest.ChildByField(call, "arguments")
-	if args == nil {
-		return ""
-	}
-	var first *grammar.Node
-	count := 0
-	for i := uint32(0); i < args.ChildCount(); i++ {
-		c := args.Child(i)
-		if c == nil || c.Type() == "(" || c.Type() == ")" || c.Type() == "," {
-			continue
-		}
-		count++
-		if first == nil {
-			first = c
-		}
-	}
-	if count != 1 || first == nil {
+	first := goCallFirstArgNode(call)
+	if first == nil {
 		return ""
 	}
 	// Prefer composite / unary peels (A{} / &A{}) before full complex (avoids
@@ -3223,7 +3229,10 @@ func typeNameFromRHS(n *grammar.Node, content []byte) string {
 			return typeNameFromTypeNode(t, content)
 		}
 	case "call_expression":
-		// new(T) / make — function is "new"
+		// new(T) — type is the first type argument. Other calls (Get(map[string]A{}, k),
+		// First2(A{}, B{}), helpers) must not fall through into argument type nodes:
+		// typeNameFromTypeNode would harvest the first type_identifier (e.g. map key
+		// "string") and poison short-var bindings ahead of generic peels.
 		if fn := ingest.ChildByField(n, "function"); fn != nil && ingest.NodeText(fn, content) == "new" {
 			if args := ingest.ChildByField(n, "arguments"); args != nil && args.ChildCount() > 0 {
 				// argument_list children
@@ -3234,6 +3243,7 @@ func typeNameFromRHS(n *grammar.Node, content []byte) string {
 				}
 			}
 		}
+		return ""
 	case "type_conversion_expression", "type_assertion_expression":
 		if t := ingest.ChildByField(n, "type"); t != nil {
 			return typeNameFromTypeNode(t, content)
