@@ -11,8 +11,9 @@ import (
 
 // ExpandPackageDirs implements ingest.PackageMovePlanner.
 // Java packages often exist under multiple source roots (src/main/java,
-// src/test/java, src/main/java-templates, ...); moving only one root leaves
-// PackageLocation errors when package clauses are rewritten elsewhere.
+// src/test/java, src/jmh/java, src/testFixtures/java, src/main/java-templates,
+// ...); moving only one root leaves PackageLocation errors when package clauses
+// are rewritten elsewhere.
 func (moveDriver) ExpandPackageDirs(result *ingest.Result, srcDir, dstDir string) [][2]string {
 	srcDir = ingest.CleanRelDir(srcDir)
 	dstDir = ingest.CleanRelDir(dstDir)
@@ -131,11 +132,18 @@ func (moveDriver) RewriteSupportFiles(rootDir string, result *ingest.Result, mov
 
 func sourceRootSuffix(dir string) (string, bool) {
 	dir = strings.Trim(strings.TrimPrefix(dir, "./"), "/")
+	// Longer / more specific roots first. The bare "src/" fallback must stay
+	// last so Gradle source sets like jmh/testFixtures are not swallowed as
+	// part of the package path (suffix would become "jmh/java/com/foo").
 	for _, root := range []string{
 		"src/main/java-templates/",
 		"src/test/java-templates/",
 		"src/main/java/",
 		"src/test/java/",
+		"src/jmh/java/",
+		"src/testFixtures/java/",
+		"src/integrationTest/java/",
+		"src/androidTest/java/",
 		"src/main/resources/",
 		"src/test/resources/",
 		"src/",
