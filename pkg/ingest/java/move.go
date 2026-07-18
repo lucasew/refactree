@@ -1658,6 +1658,18 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 				}
 			}
 		case 2:
+			// ConcurrentHashMap.reduceEntries(threshold, BiFunction on Entry,Entry) —
+			// 2-arg form only; bind entryValOf for e.getValue().m() on both params.
+			// 3-arg form's BiFunction is on U (not Entry) — fail closed here.
+			if method == "reduceEntries" {
+				if entryValOf != nil && len(javaCallArgs(call)) == 2 {
+					if vt := javaMapPipelineValueType(obj, content, elemOf, valOf); vt != "" {
+						entryValOf[params[0]] = vt
+						entryValOf[params[1]] = vt
+					}
+				}
+				continue
+			}
 			// Map bi-lambdas — value type from valOf[map] / collect(toMap(...)).
 			// forEach/computeIfPresent/compute/replaceAll/ConcurrentHashMap.search:
 			// (K,V) → second is V.
@@ -1720,9 +1732,9 @@ func javaStreamElementLambdaMethod(method string) bool {
 		// ConcurrentHashMap searchValues / forEachValue — unary Function/Consumer on V
 		// (see javaMapValueUnaryLambdaMethod).
 		"searchValues", "forEachValue",
-		// ConcurrentHashMap forEachEntry / searchEntries — unary Consumer/Function on
-		// Map.Entry<K,V> (see javaMapEntryUnaryLambdaMethod).
-		"forEachEntry", "searchEntries":
+		// ConcurrentHashMap forEachEntry / searchEntries / reduceEntries —
+		// Entry Consumer/Function/BiFunction (see javaMapEntryUnaryLambdaMethod).
+		"forEachEntry", "searchEntries", "reduceEntries":
 		return true
 	default:
 		return false
@@ -1732,10 +1744,12 @@ func javaStreamElementLambdaMethod(method string) bool {
 // javaMapEntryUnaryLambdaMethod reports ConcurrentHashMap-style methods whose
 // unary functional arg is applied to Map.Entry<K,V> (not V / not stream elems):
 // forEachEntry(threshold, Consumer<? super Map.Entry<K,V>>),
-// searchEntries(threshold, Function<? super Map.Entry<K,V>, ? extends U>).
+// searchEntries(threshold, Function<? super Map.Entry<K,V>, ? extends U>),
+// reduceEntries(threshold, Function<? super Map.Entry<K,V>, ? extends U>, BiFunction)
+// — 3-arg transformer only (2-arg form is an Entry bi-lambda; see case 2).
 func javaMapEntryUnaryLambdaMethod(method string) bool {
 	switch method {
-	case "forEachEntry", "searchEntries":
+	case "forEachEntry", "searchEntries", "reduceEntries":
 		return true
 	default:
 		return false
@@ -3728,6 +3742,13 @@ func javaEntryExprValueType(obj *grammar.Node, content []byte, elemOf, valOf, en
 			"ceilingEntry", "floorEntry", "higherEntry", "lowerEntry":
 			// NavigableMap.*Entry → Map.Entry<K,V>; V from map value type.
 			return javaMapPipelineValueType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
+		case "reduceEntries":
+			// ConcurrentHashMap.reduceEntries(threshold, BiFunction) returns
+			// Map.Entry<K,V> (2-arg form). 3-arg returns U — fail closed here.
+			if len(javaCallArgs(obj)) == 2 {
+				return javaMapPipelineValueType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
+			}
+			return ""
 		case "next", "previous":
 			// m.entrySet().iterator().next() / m.entrySet().listIterator().previous()
 			// — Entry of V; recover V via the entrySet pipeline under the iterator.
@@ -4508,9 +4529,76 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// 3-arg form (transformer + reducer) returns U — only recover when the
 		// unary transformer is identity so U = V; otherwise fail closed.
 		return javaReduceValuesReturnType(val, obj, content, elemOf, valOf)
+	case "searchEntries":
+		// ConcurrentHashMap.searchEntries(threshold, Function<? super Entry,? extends U>)
+		// returns U. Entry getValue mapper (e -> e.getValue()) yields V of the map
+		// (var xa = m.searchEntries(1L, e -> e.getValue()); xa.m()).
+		// Non-getValue / block Functions fail closed (U is not statically V).
+		return javaSearchEntriesReturnType(val, obj, content, elemOf, valOf)
 	default:
 		return ""
 	}
+}
+
+// javaSearchEntriesReturnType recovers U from ConcurrentHashMap.searchEntries when
+// the Function is an expression-bodied Entry getValue mapper (e -> e.getValue()),
+// so U = V of the map receiver. Threshold arg is ignored. Other Functions fail closed.
+func javaSearchEntriesReturnType(call, obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	args := javaCallArgs(call)
+	if len(args) < 2 {
+		return ""
+	}
+	fn := args[len(args)-1]
+	if !javaIsEntryGetValueLambda(fn, content) {
+		return ""
+	}
+	return javaMapPipelineValueType(obj, content, elemOf, valOf)
+}
+
+// javaIsEntryGetValueLambda reports expression-bodied unary lambdas of the form
+// e -> e.getValue() (optionally parenthesized body). Used to recover U=V from
+// ConcurrentHashMap.searchEntries getValue mappers. Blocks / other bodies fail closed.
+func javaIsEntryGetValueLambda(n *grammar.Node, content []byte) bool {
+	if n == nil || n.Type() != "lambda_expression" {
+		return false
+	}
+	params := javaInferredLambdaParamNames(n, content)
+	if len(params) != 1 {
+		return false
+	}
+	body := ingest.ChildByField(n, "body")
+	for body != nil && !body.IsNull() && body.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(body, "expression")
+		if inner == nil {
+			for i := uint32(0); i < body.ChildCount(); i++ {
+				ch := body.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		body = inner
+	}
+	if body == nil || body.IsNull() || body.Type() != "method_invocation" {
+		return false
+	}
+	nameN := ingest.ChildByField(body, "name")
+	objN := ingest.ChildByField(body, "object")
+	if nameN == nil || objN == nil {
+		return false
+	}
+	if ingest.NodeText(nameN, content) != "getValue" {
+		return false
+	}
+	if len(javaCallArgs(body)) != 0 {
+		return false
+	}
+	if objN.Type() != "identifier" && objN.Type() != "type_identifier" {
+		return false
+	}
+	return ingest.NodeText(objN, content) == params[0]
 }
 
 // javaReduceValuesReturnType recovers V from ConcurrentHashMap.reduceValues:
