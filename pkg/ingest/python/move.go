@@ -1911,6 +1911,9 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `for a in islice(xs, n)` / `for a in itertools.islice(xs, n)`,
 // `for a in accumulate(xs)` / `for a in itertools.accumulate(xs)`,
 // `for a in cycle(xs)` / `for a in itertools.cycle(xs)`,
+// `for a in takewhile/dropwhile/filterfalse(pred, xs)` /
+// `for a in itertools.takewhile/dropwhile/filterfalse(pred, xs)`,
+// `for a in compress(xs, selectors)` / `for a in itertools.compress(xs, selectors)`,
 // `for a in Counter(items)` / `for a in collections.Counter(items)`,
 // `for a in Counter(items).elements()`,
 // `for a in dict.fromkeys(items)` / `d = dict.fromkeys(keys, A()); d.values()`),
@@ -2246,6 +2249,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// for a in reversed/sorted/list/iter(items) /
 			// for a in filter(pred, items) / for a in map(A, names) /
 			// for a in chain/islice/accumulate/cycle / itertools.chain/islice/accumulate/cycle /
+			// for a in takewhile/dropwhile/filterfalse / itertools.takewhile/dropwhile/filterfalse /
+			// for a in compress / itertools.compress /
 			// for a in dict.fromkeys(items) /
 			// [a.m() for a in xs] / for a in e.exceptions
 			left := ingest.ChildByField(n, "left")
@@ -2786,6 +2791,8 @@ func pythonSubscriptElemType(sub *grammar.Node, content []byte, elemOf, egElems 
 // islice / itertools.islice (1st arg iterable; start/stop/step ignored),
 // accumulate / itertools.accumulate (1st arg iterable; func/initial ignored),
 // cycle / itertools.cycle (1st arg iterable; repeats forever),
+// takewhile / dropwhile / filterfalse / itertools.* (2nd arg iterable; pred ignored),
+// compress / itertools.compress (1st arg data; selectors ignored),
 // Counter / collections.Counter (keys = iterable elements; .elements() same),
 // dict.fromkeys(iterable[, value]) (keys = 1st-arg elements; value ignored here),
 // items.copy() (zero-arg; same element type as receiver),
@@ -2858,19 +2865,30 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 				// chain(*iterables) from itertools — shared element type when
 				// all args agree; any untyped or mismatched arg fails closed.
 				return pythonChainElemType(right, content, elemOf, egElems)
-			case "islice", "accumulate", "cycle":
+			case "islice", "accumulate", "cycle", "compress":
 				// islice(iterable, stop) / islice(iterable, start, stop[, step])
 				// accumulate(iterable[, func, *, initial])
 				// cycle(iterable)
+				// compress(data, selectors)
 				// — element type equals the iterable (1st arg).
 				// func / initial kwargs or extra positional func are ignored
 				// (same-leaf product case; type-changing fold fails closed only
 				// when the 1st arg itself is untyped).
+				// compress selectors (2nd arg) ignored — only filter which items yield.
 				args, ok := pythonCallPositionalArgNodes(right)
 				if !ok || len(args) == 0 {
 					return ""
 				}
 				return pythonIterableElemType(args[0], content, elemOf, egElems)
+			case "takewhile", "dropwhile", "filterfalse":
+				// takewhile(pred, iterable) / dropwhile(pred, iterable) /
+				// filterfalse(pred, iterable) — keep iterable's element type
+				// (pred only selects; same as filter).
+				args, ok := pythonCallPositionalArgNodes(right)
+				if !ok || len(args) < 2 {
+					return ""
+				}
+				return pythonIterableElemType(args[1], content, elemOf, egElems)
 			}
 		}
 		// items.copy() / list(items).copy() — zero-arg shallow copy preserves
@@ -2880,7 +2898,8 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		// d.values() — dict value type stored in elemOf[d].
 		// dict.fromkeys(iterable[, value]) — iteration yields keys (1st arg elements).
 		// itertools.chain(...) / itertools.islice(...) / itertools.accumulate(...) /
-		// itertools.cycle(...) — same as bare helpers.
+		// itertools.cycle(...) / itertools.compress(...) /
+		// itertools.takewhile/dropwhile/filterfalse(...) — same as bare helpers.
 		// collections.deque(xs) / collections.Counter(xs) — same as bare forms.
 		if fn := ingest.ChildByField(right, "function"); fn != nil && fn.Type() == "attribute" {
 			if attr := ingest.ChildByField(fn, "attribute"); attr != nil {
@@ -2914,7 +2933,7 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 						return ""
 					}
 					return pythonIterableElemType(args[0], content, elemOf, egElems)
-				case "chain", "islice", "accumulate", "cycle":
+				case "chain", "islice", "accumulate", "cycle", "compress":
 					objN := ingest.ChildByField(fn, "object")
 					if objN == nil || objN.Type() != "identifier" {
 						return ""
@@ -2925,12 +2944,27 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 					if ingest.NodeText(attr, content) == "chain" {
 						return pythonChainElemType(right, content, elemOf, egElems)
 					}
-					// islice / accumulate / cycle — element type of 1st positional arg.
+					// islice / accumulate / cycle / compress — element type of 1st arg.
 					args, ok := pythonCallPositionalArgNodes(right)
 					if !ok || len(args) == 0 {
 						return ""
 					}
 					return pythonIterableElemType(args[0], content, elemOf, egElems)
+				case "takewhile", "dropwhile", "filterfalse":
+					// itertools.takewhile/dropwhile/filterfalse(pred, iterable)
+					// — element type of 2nd positional arg (same as filter).
+					objN := ingest.ChildByField(fn, "object")
+					if objN == nil || objN.Type() != "identifier" {
+						return ""
+					}
+					if ingest.NodeText(objN, content) != "itertools" {
+						return ""
+					}
+					args, ok := pythonCallPositionalArgNodes(right)
+					if !ok || len(args) < 2 {
+						return ""
+					}
+					return pythonIterableElemType(args[1], content, elemOf, egElems)
 				case "deque", "Counter":
 					// collections.deque(iterable[, maxlen]) /
 					// collections.Counter(iterable) — element of 1st arg.
