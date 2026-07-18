@@ -2469,6 +2469,133 @@ func pythonFutureResultCallType(call *grammar.Node, content []byte, futureOf map
 	return ""
 }
 
+// pythonSimpleNamespaceFieldTypes recovers field→Class leaves from
+// SimpleNamespace(k=A(), m=B()) / types.SimpleNamespace(...). Keyword args only;
+// each value must be a Class() call. Splat / positional / non-Class values fail
+// closed (nil). Used to bind fieldOf["da.k"] for da.k.run() under foreign
+// same-leaf without inventing namedtuple fieldIndex entries.
+func pythonSimpleNamespaceFieldTypes(call *grammar.Node, content []byte) map[string]string {
+	if call == nil || call.Type() != "call" {
+		return nil
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil {
+		return nil
+	}
+	if pythonSimpleCalleeName(fn, content) != "SimpleNamespace" {
+		return nil
+	}
+	// types.SimpleNamespace — require module ident "types". Bare SimpleNamespace
+	// (from types import SimpleNamespace) accepted by leaf name alone.
+	if fn.Type() == "attribute" {
+		obj := ingest.ChildByField(fn, "object")
+		if obj == nil || obj.Type() != "identifier" || ingest.NodeText(obj, content) != "types" {
+			return nil
+		}
+	}
+	argList := ingest.ChildByField(call, "arguments")
+	if argList == nil {
+		return nil
+	}
+	out := map[string]string{}
+	saw := false
+	for i := uint32(0); i < argList.ChildCount(); i++ {
+		ch := argList.Child(i)
+		switch ch.Type() {
+		case "(", ")", ",", "comment":
+			continue
+		case "keyword_argument":
+			nameN := ingest.ChildByField(ch, "name")
+			valN := ingest.ChildByField(ch, "value")
+			if nameN == nil || nameN.Type() != "identifier" {
+				return nil
+			}
+			et := pythonClassCtorName(valN, content)
+			if et == "" {
+				return nil
+			}
+			out[ingest.NodeText(nameN, content)] = et
+			saw = true
+		default:
+			// Positional / splat — fail closed (product kwargs-only form).
+			return nil
+		}
+	}
+	if !saw {
+		return nil
+	}
+	return out
+}
+
+// pythonMappingAppendNestedType recovers (mapLocal, T) from
+// da["k"].append(A()) / da.get("k").append(A()) / da.setdefault("k").append(A())
+// when the appended value is a Class() call. Enables defaultdict(list) mutation
+// peels: da["k"][0].run() via elemOf["@nested."+da] under foreign same-leaf.
+// Identifier receivers (ga.append) fail closed here (elemOf on the list local is
+// a separate path). Non-Class append args / non-mapping receivers fail closed.
+func pythonMappingAppendNestedType(call *grammar.Node, content []byte) (mapLocal, classType string) {
+	if call == nil || call.Type() != "call" {
+		return "", ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "attribute" {
+		return "", ""
+	}
+	attr := ingest.ChildByField(fn, "attribute")
+	if attr == nil || ingest.NodeText(attr, content) != "append" {
+		return "", ""
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) != 1 {
+		return "", ""
+	}
+	et := pythonClassCtorName(args[0], content)
+	if et == "" {
+		return "", ""
+	}
+	obj := ingest.ChildByField(fn, "object")
+	if obj == nil {
+		return "", ""
+	}
+	switch obj.Type() {
+	case "subscript":
+		// da["k"].append(A()) — non-slice key only.
+		for i := uint32(0); i < obj.ChildCount(); i++ {
+			if obj.Child(i).Type() == "slice" {
+				return "", ""
+			}
+		}
+		val := ingest.ChildByField(obj, "value")
+		if val == nil || val.Type() != "identifier" {
+			return "", ""
+		}
+		return ingest.NodeText(val, content), et
+	case "call":
+		// da.get("k").append(A()) / da.setdefault("k").append(A()).
+		objFn := ingest.ChildByField(obj, "function")
+		if objFn == nil || objFn.Type() != "attribute" {
+			return "", ""
+		}
+		objAttr := ingest.ChildByField(objFn, "attribute")
+		if objAttr == nil {
+			return "", ""
+		}
+		switch ingest.NodeText(objAttr, content) {
+		case "get", "setdefault":
+			// ok
+		default:
+			return "", ""
+		}
+		recv := ingest.ChildByField(objFn, "object")
+		if recv == nil || recv.Type() != "identifier" {
+			return "", ""
+		}
+		return ingest.NodeText(recv, content), et
+	default:
+		return "", ""
+	}
+}
+
 // pythonFutureSetResultType recovers T from fa.set_result(T()) / fa.set_result(T())
 // when the first positional arg is a Class() call (or bare Class identifier is
 // not accepted — result value is the instance). Enables futureOf binding for
@@ -3508,6 +3635,18 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					// (not a field value). Application ga(box) peels via getterOf.
 					if spec := pythonOperatorGetterLocalSpec(right, content); spec != "" {
 						getterOf[lname] = spec
+					}
+					// da = SimpleNamespace(k=A()) / types.SimpleNamespace(k=A()) —
+					// bind fieldOf["da.k"] so da.k.run() / xa = da.k peel under
+					// foreign same-leaf. Dedicated path (not namedtuple fieldIndex):
+					// kwargs are attributes, not invented ctor fields.
+					// Foreign fields too for shadowing (db = SimpleNamespace(k=B())).
+					if fields := pythonSimpleNamespaceFieldTypes(right, content); len(fields) > 0 {
+						for f, t := range fields {
+							if f != "" && t != "" {
+								fieldOf[lname+"."+f] = t
+							}
+						}
 					}
 					// a = A.make() / a = A.create() — @staticmethod / @classmethod
 					// factory (attribute callee; "Class.method" keys in funcReturns).
@@ -4621,6 +4760,13 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// Foreign results too for shadowing.
 			if fut, et := pythonFutureSetResultType(n, content); fut != "" && et != "" {
 				futureOf[fut] = et
+			}
+			// da["k"].append(A()) / da.get("k").append(A()) — mutation fills a
+			// mapping-of-list bucket (defaultdict(list) product path). Bind
+			// @nested leaf so da["k"][0].run() / for a in da["k"] peel under
+			// foreign same-leaf. Foreign appends too for shadowing.
+			if mapLocal, et := pythonMappingAppendNestedType(n, content); mapLocal != "" && et != "" {
+				elemOf["@nested."+mapLocal] = et
 			}
 		case "as_pattern":
 			// match `case A() as a`, with `with A() as a`, except `except A as e`.
@@ -10081,7 +10227,9 @@ func pythonNestedDictHomogeneousListCtorElem(collection *grammar.Node, content [
 
 // pythonNestedDictValueCollectionElem recovers T when val is a homogeneous
 // Class() list/tuple/set, a frozenset/deque/set/list/tuple(...) wrapper of those,
-// or a dictionary of Class() values (dict-of-dict). Other shapes fail closed ("").
+// a dictionary of Class() values (dict-of-dict), or a dict/OrderedDict call whose
+// values are Class() (OrderedDict(outer=OrderedDict(k=A()))). Other shapes fail
+// closed ("").
 func pythonNestedDictValueCollectionElem(val *grammar.Node, content []byte) string {
 	if val == nil {
 		return ""
@@ -10096,27 +10244,31 @@ func pythonNestedDictValueCollectionElem(val *grammar.Node, content []byte) stri
 		// frozenset([A()]) / deque([A()]) / set([A()]) / list([A()]) /
 		// tuple((A(),)) / collections.deque([A()]) — single positional
 		// homogeneous Class() collection.
+		// OrderedDict(k=A()) / dict(k=A()) / OrderedDict({"k": A()}) /
+		// collections.OrderedDict(k=A()) — nested scalar mapping of Class()
+		// (outer OrderedDict(outer=OrderedDict(k=A())) peels via @nested).
 		fn := ingest.ChildByField(val, "function")
 		name := pythonSimpleCalleeName(fn, content)
 		switch name {
 		case "frozenset", "deque", "set", "list", "tuple":
-			// ok
+			args, ok := pythonCallPositionalArgNodes(val)
+			if !ok || len(args) == 0 {
+				return ""
+			}
+			// deque accepts optional maxlen kw-only; reject extra positionals.
+			if name == "deque" {
+				if len(args) > 1 {
+					return ""
+				}
+			} else if len(args) != 1 {
+				return ""
+			}
+			return pythonHomogeneousCtorElem(args[0], content)
+		case "dict", "OrderedDict":
+			return pythonHomogeneousDictValueCtorElem(val, content)
 		default:
 			return ""
 		}
-		args, ok := pythonCallPositionalArgNodes(val)
-		if !ok || len(args) == 0 {
-			return ""
-		}
-		// deque accepts optional maxlen kw-only; reject extra positionals.
-		if name == "deque" {
-			if len(args) > 1 {
-				return ""
-			}
-		} else if len(args) != 1 {
-			return ""
-		}
-		return pythonHomogeneousCtorElem(args[0], content)
 	default:
 		return ""
 	}
@@ -10376,7 +10528,6 @@ func pythonNestedDictPairsHomogeneousListCtorElem(pairs *grammar.Node, content [
 	}
 	return nest
 }
-
 
 // pythonCollectionNestedListElemType recovers T from collection annotations whose
 // element is itself a list/set/sequence of T:
