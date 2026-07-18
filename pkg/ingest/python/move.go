@@ -1924,6 +1924,9 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `pairs = zip/zip_longest/product/pairwise(...); for a, b in pairs` /
 // `for pair in pairs: for a in pair` (assigned pair-iter; shared → elemOf),
 // `for item in enumerate(xs): a = item[1]` (pair-slot subscript; [0] fails closed),
+// `a, b = next(zip(xs, ys))` / `a, b = next(pairs)` when pairs = zip/... /
+// `a, b = pair` when pair = next(pairs) / for-pair (pairSlots unpack),
+// `i, a = next(enumerate(xs))` (index slot untyped; value is element),
 // `for k, g in groupby(xs)` / `for k, g in itertools.groupby(xs)` —
 // group g is an iterable of xs elements (key untyped; key= ignored),
 // `for a in reversed/sorted/list/iter(items)`,
@@ -2162,12 +2165,22 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			}
 			// a, b = A(), B() / (a, b) = A(), B() / a, b = (A(), B()) /
 			// [a, b] = [A(), B()] /
+			// a, b = next(zip(xs, ys)) / a, b = next(pairs) / a, b = pair
+			// (pair-slot unpack; see pythonAssignPairUnpackTypes) /
 			// k, a = d.popitem() (value leaf on 2nd slot; same as for k, a in d.items()) /
 			// it1, it2 = tee(items) / itertools.tee(items[, n]) (each → elemOf) /
 			// a, *rest = items / *rest, a = items / a, = items (items: list[A])
 			if left != nil && right != nil {
 				if targets := pythonPatternIdents(left, content); len(targets) > 0 {
 					if types := pythonCtorListTypes(right, content); len(types) > 0 {
+						for i, name := range targets {
+							if i < len(types) && ourReceivers[types[i]] {
+								out[name] = true
+							}
+						}
+					} else if types := pythonAssignPairUnpackTypes(right, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots); len(types) > 0 {
+						// a, b = next(zip(...)) / next(pairs) / pair when pairSlots known.
+						// Per-slot: ourReceivers only; untyped slots (enumerate index) skip.
 						for i, name := range targets {
 							if i < len(types) && ourReceivers[types[i]] {
 								out[name] = true
@@ -3140,6 +3153,33 @@ func pythonNextPairSlots(call *grammar.Node, content []byte, elemOf, egElems, ty
 		return nil
 	}
 	return pythonPairIterSlotsOf(args[0], content, elemOf, egElems, typeOf, pairIterSlots)
+}
+
+// pythonAssignPairUnpackTypes recovers per-slot types for multi-target unpack
+// from a known pair: a, b = next(zip(...)) / a, b = next(pairs) /
+// a, b = pair / [a, b] = next(pairs) when pair/pair-iter slots are known.
+// Parenthesized forms accepted. Untyped slots stay "" (enumerate index).
+func pythonAssignPairUnpackTypes(right *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string, pairSlots map[string][]string, pairIterSlots map[string][]string) []string {
+	if right == nil {
+		return nil
+	}
+	for right != nil && right.Type() == "parenthesized_expression" {
+		right = pythonParenInner(right)
+	}
+	if right == nil {
+		return nil
+	}
+	switch right.Type() {
+	case "identifier":
+		if pairSlots == nil {
+			return nil
+		}
+		return pairSlots[ingest.NodeText(right, content)]
+	case "call":
+		return pythonNextPairSlots(right, content, elemOf, egElems, typeOf, pairIterSlots)
+	default:
+		return nil
+	}
 }
 
 // pythonBindPairLoopTarget records pairSlots for a single-target for-loop over a
