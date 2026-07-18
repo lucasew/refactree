@@ -1651,6 +1651,12 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 	typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf := pythonTypedLocals(pf.Root, content, ourReceivers)
 
 	var edits []ingest.Edit
+	// mc = methodcaller("run"); mc(A()) — rename name string when all applications
+	// type as our receiver (foreign/unknown apps fail closed). Inline
+	// methodcaller("run")(A()) stays on pythonMethodcallerStringEdits below.
+	if mcStored := pythonStoredMethodcallerStringEdits(fileRel, pf.Root, content, oldLeaf, newLeaf, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf); len(mcStored) > 0 {
+		edits = append(edits, mcStored...)
+	}
 	var walk func(n *grammar.Node, enclosingClass string)
 	walk = func(n *grammar.Node, enclosingClass string) {
 		if n == nil || n.IsNull() {
@@ -1797,7 +1803,7 @@ func pythonGetattrMethodStringEdits(fileRel string, call *grammar.Node, content 
 // leaf rename the string — methodcaller("run")(B()) keeps "run".
 // Multi-arg methodcaller (extra bound args) still renames the name string when
 // the applied target is ours. Stored getters (mc = methodcaller("run"); mc(a))
-// fail closed (no application site to type the target).
+// are handled by pythonStoredMethodcallerStringEdits (application-typed).
 func pythonMethodcallerStringEdits(fileRel string, call *grammar.Node, content []byte, oldLeaf, newLeaf, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, fieldOf, elemOf, typeOf map[string]string, pairSlots map[string][]string, factoryOf, futureOf map[string]string) []ingest.Edit {
 	if call == nil || call.Type() != "call" {
 		return nil
@@ -1807,7 +1813,34 @@ func pythonMethodcallerStringEdits(fileRel string, call *grammar.Node, content [
 	if fn == nil || fn.Type() != "call" {
 		return nil
 	}
-	mcFn := ingest.ChildByField(fn, "function")
+	contentN := pythonMethodcallerNameContent(fn, content, oldLeaf)
+	if contentN == nil {
+		return nil
+	}
+	// Applied target (first positional of outer call) must type as our receiver.
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) < 1 {
+		return nil
+	}
+	if !pythonShouldRenameAttr(args[0], content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf) {
+		return nil
+	}
+	return []ingest.Edit{{
+		File:      fileRel,
+		StartByte: contentN.StartByte(),
+		EndByte:   contentN.EndByte(),
+		NewText:   newLeaf,
+	}}
+}
+
+// pythonMethodcallerNameContent returns the string content node of the method
+// name when call is methodcaller("oldLeaf") / operator.methodcaller("oldLeaf")
+// (extra bound args allowed). Non-methodcaller / non-matching names fail closed.
+func pythonMethodcallerNameContent(call *grammar.Node, content []byte, oldLeaf string) *grammar.Node {
+	if call == nil || call.Type() != "call" {
+		return nil
+	}
+	mcFn := ingest.ChildByField(call, "function")
 	if mcFn == nil {
 		return nil
 	}
@@ -1828,9 +1861,7 @@ func pythonMethodcallerStringEdits(fileRel string, call *grammar.Node, content [
 	default:
 		return nil
 	}
-	// First positional of methodcaller is the method name string.
-	mcArgs := ingest.ChildByField(fn, "arguments")
-	nameStr := pythonFirstStringArg(mcArgs)
+	nameStr := pythonFirstStringArg(ingest.ChildByField(call, "arguments"))
 	if nameStr == nil {
 		return nil
 	}
@@ -1838,20 +1869,118 @@ func pythonMethodcallerStringEdits(fileRel string, call *grammar.Node, content [
 	if contentN == nil || text != oldLeaf {
 		return nil
 	}
-	// Applied target (first positional of outer call) must type as our receiver.
-	args, ok := pythonCallPositionalArgNodes(call)
-	if !ok || len(args) < 1 {
+	return contentN
+}
+
+// pythonStoredMethodcallerStringEdits renames method name strings on
+// mc = methodcaller("old") / operator.methodcaller("old") when every application
+// mc(target) in the same function/module scope types as our receiver. Mixed
+// (mc(A())+mc(B())), foreign-only, or unknown targets fail closed so B.run is
+// preserved. Each function_definition is its own scope so same local names in
+// different functions do not clobber each other. Inline methodcaller("old")(A())
+// stays on pythonMethodcallerStringEdits.
+func pythonStoredMethodcallerStringEdits(fileRel string, root *grammar.Node, content []byte, oldLeaf, newLeaf string, ourReceivers, foreignReceivers, typedLocals map[string]bool, fieldOf, elemOf, typeOf map[string]string, pairSlots map[string][]string, factoryOf, futureOf map[string]string) []ingest.Edit {
+	if root == nil || oldLeaf == "" {
 		return nil
 	}
-	if !pythonShouldRenameAttr(args[0], content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf) {
-		return nil
+	type mcBind struct {
+		nameNode *grammar.Node
+		ourApp   bool
+		badApp   bool // foreign or unknown application
 	}
-	return []ingest.Edit{{
-		File:      fileRel,
-		StartByte: contentN.StartByte(),
-		EndByte:   contentN.EndByte(),
-		NewText:   newLeaf,
-	}}
+	var edits []ingest.Edit
+	seen := map[uint32]bool{}
+	// processScope collects methodcaller locals and applications under scope,
+	// without descending into nested function_definition bodies (those get their
+	// own processScope call). classHere is the enclosing class for self peels.
+	processScope := func(scope *grammar.Node, classHere string) {
+		if scope == nil || scope.IsNull() {
+			return
+		}
+		binds := map[string]*mcBind{}
+		var walk func(n *grammar.Node, class string)
+		walk = func(n *grammar.Node, class string) {
+			if n == nil || n.IsNull() {
+				return
+			}
+			// Nested functions are separate scopes — skip body here.
+			if n != scope && n.Type() == "function_definition" {
+				return
+			}
+			classNow := class
+			if n.Type() == "class_definition" {
+				if nameN := ingest.ChildByField(n, "name"); nameN != nil {
+					classNow = ingest.NodeText(nameN, content)
+				}
+			}
+			if n.Type() == "assignment" {
+				left := ingest.ChildByField(n, "left")
+				right := ingest.ChildByField(n, "right")
+				if left != nil && left.Type() == "identifier" && right != nil {
+					if contentN := pythonMethodcallerNameContent(right, content, oldLeaf); contentN != nil {
+						binds[ingest.NodeText(left, content)] = &mcBind{nameNode: contentN}
+					}
+				}
+			}
+			if n.Type() == "call" {
+				fn := ingest.ChildByField(n, "function")
+				if fn != nil && fn.Type() == "identifier" {
+					if b := binds[ingest.NodeText(fn, content)]; b != nil {
+						args, ok := pythonCallPositionalArgNodes(n)
+						if !ok || len(args) < 1 {
+							b.badApp = true
+						} else if pythonShouldRenameAttr(args[0], content, classNow, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf) {
+							b.ourApp = true
+						} else {
+							b.badApp = true
+						}
+					}
+				}
+			}
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				walk(n.Child(i), classNow)
+			}
+		}
+		walk(scope, classHere)
+		for _, b := range binds {
+			if b == nil || b.nameNode == nil || !b.ourApp || b.badApp {
+				continue
+			}
+			start := b.nameNode.StartByte()
+			if seen[start] {
+				continue
+			}
+			seen[start] = true
+			edits = append(edits, ingest.Edit{
+				File:      fileRel,
+				StartByte: start,
+				EndByte:   b.nameNode.EndByte(),
+				NewText:   newLeaf,
+			})
+		}
+	}
+	// Module scope (top-level statements) + each function body.
+	processScope(root, "")
+	var walkFuncs func(n *grammar.Node, classHere string)
+	walkFuncs = func(n *grammar.Node, classHere string) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		classNow := classHere
+		if n.Type() == "class_definition" {
+			if nameN := ingest.ChildByField(n, "name"); nameN != nil {
+				classNow = ingest.NodeText(nameN, content)
+			}
+		}
+		if n.Type() == "function_definition" {
+			processScope(n, classNow)
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walkFuncs(n.Child(i), classNow)
+		}
+	}
+	walkFuncs(root, "")
+	return edits
 }
 
 // pythonReplaceKeywordEdits rewrites field keywords on replace(obj, oldLeaf=…).
