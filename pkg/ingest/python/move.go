@@ -5047,6 +5047,7 @@ func pythonClassFieldOrder(root *grammar.Node, content []byte) map[string][]stri
 // plus same-file constructors Box(A(), B()) / Box(a=A(), b=B()) →
 // fieldIndex["Box"]["a"]="A". Enables box.a.run() / xa = box.a under foreign
 // same-leaf methods (same fieldOf path as annotated dataclass fields).
+// Only known namedtuple/annotated types are indexed — dict(k=A()) kwargs are not.
 func pythonMergeNamedtupleFields(root *grammar.Node, content []byte, fieldIndex map[string]map[string]string) {
 	if root == nil || fieldIndex == nil {
 		return
@@ -5182,17 +5183,27 @@ func pythonSplitNamedtupleFieldString(s string) []string {
 }
 
 // pythonIndexNamedtupleCtorFields fills fieldIndex[typeName] from a constructor
-// call: keyword Class() args always; positional Class() args when fieldNames
-// are known from the namedtuple factory (order-sensitive).
+// call for a *known* type only: namedtuple factory field names and/or prior
+// annotated class fields. Keyword Class() args (Box(a=A(), b=B())) and
+// positional Class() args (Box(A(), B()) — order-sensitive via fieldNames)
+// refine those fields.
+//
+// Unknown callees (dict(k=A()) / OrderedDict(k=A()) / OrderedDict(k=frozenset([A()])))
+// must not invent fieldIndex["dict"] / fieldIndex["OrderedDict"]: last dual-class
+// write would bindFields da.k → B and under-rename A.run (B shadows A).
 func pythonIndexNamedtupleCtorFields(call *grammar.Node, typeName string, content []byte, fieldNames []string, fieldIndex map[string]map[string]string) {
 	if call == nil || typeName == "" || fieldIndex == nil {
+		return
+	}
+	// Known type only — namedtuple factory list and/or annotated class fields.
+	if len(fieldNames) == 0 && len(fieldIndex[typeName]) == 0 {
 		return
 	}
 	argList := ingest.ChildByField(call, "arguments")
 	if argList == nil {
 		return
 	}
-	// Keyword: Box(a=A(), b=B()) — no factory field list required.
+	// Keyword: Box(a=A(), b=B()) — field names may come from factory or annotations.
 	for i := uint32(0); i < argList.ChildCount(); i++ {
 		ch := argList.Child(i)
 		if ch.Type() != "keyword_argument" {
