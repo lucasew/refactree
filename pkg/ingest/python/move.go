@@ -1914,7 +1914,8 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	// dict-view field keys of first arg / object (same leaf as d = asdict(box);
 	// d["a"].run()).
 	// astuple(box)[0].run() / dataclasses.astuple(box)[0].run() /
-	// astuple(replace(box))[0].run() — declaration-order index slots of first arg
+	// astuple(replace(box))[0].run() / list(astuple(box))[0].run() /
+	// tuple(astuple(box))[0].run() — declaration-order index slots of first arg
 	// (same leaf as t = astuple(box); t[0].run(); not box[0]).
 	// items[0].run() / d["k"].run() / list(items)[0].run() — collection subscript
 	// element (same leaf as a = items[0]; a.run()). Slices fail closed.
@@ -2113,10 +2114,12 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `t[0].run()`; astuple yields a tuple of field values in declaration order, not
 // named keys; replace peels to the same dataclass),
 // plus direct chains `astuple(box)[0].run()` / `astuple(replace(box))[0].run()` /
+// `list(astuple(box))[0].run()` / `tuple(astuple(box))[0].run()` /
 // `xa = astuple(box)[0]` (synthetic `@astuple.box.#i` slots — not `box.#i`, so
 // bare `box[0]` stays unbound for non-indexable dataclasses),
-// plus unpack `xa, xb = astuple(box)` / `xa, *rest = astuple(box)` (per-slot
-// field types; *rest of mixed tuple fails closed).
+// plus assignment `xs = list(astuple(box)); xs[0]` (index slots on xs),
+// plus unpack `xa, xb = astuple(box)` / `xa, xb = list(astuple(box))` /
+// `xa, *rest = astuple(box)` (per-slot field types; *rest of mixed tuple fails closed).
 // fieldOf maps "local.field" → field type leaf for class field access.
 // elemOf maps collection locals → element type leaf (list[A] / deque[A] /
 // dict value / Queue[A] → "A") for direct access chains under foreign same-leaf.
@@ -3845,6 +3848,8 @@ func pythonAsdictCallObjectType(call *grammar.Node, content []byte, typeOf map[s
 // when the first positional arg is a typed object local, Class() ctor, or
 // replace(x) / dataclasses.replace(x) of those (return type of replace is the
 // dataclass of its first arg — same leaf as astuple(box)).
+// Also peels identity wrappers list(astuple(x)) / tuple(astuple(x)) that preserve
+// declaration-order field slots (xs = list(astuple(box)); xs[0] / unpack).
 // astuple returns a tuple of field values in declaration order (index slots via
 // pythonBindNamedtupleIndexFields + fieldOrder); not the object itself.
 // Keywords (tuple_factory=) ignored for typing. Other callees / missing first
@@ -3854,7 +3859,19 @@ func pythonAstupleCallObjectType(call *grammar.Node, content []byte, typeOf map[
 		return ""
 	}
 	fn := ingest.ChildByField(call, "function")
-	if fn == nil || pythonSimpleCalleeName(fn, content) != "astuple" {
+	if fn == nil {
+		return ""
+	}
+	name := pythonSimpleCalleeName(fn, content)
+	// list(astuple(box)) / tuple(astuple(box)) — same ordered slots as bare astuple.
+	if name == "list" || name == "tuple" {
+		args, ok := pythonCallPositionalArgNodes(call)
+		if !ok || len(args) != 1 || args[0].Type() != "call" {
+			return ""
+		}
+		return pythonAstupleCallObjectType(args[0], content, typeOf)
+	}
+	if name != "astuple" {
 		return ""
 	}
 	args, ok := pythonCallPositionalArgNodes(call)
@@ -3925,12 +3942,13 @@ func pythonDunderDictObjectType(attr *grammar.Node, content []byte, typeOf map[s
 }
 
 // pythonAstupleIndexAccessType recovers T from astuple(box)[0] /
-// dataclasses.astuple(box)[0] / astuple(replace(box))[0] when box is a typed
-// local with declaration-order field 0 of type T (fieldOf["@astuple.box.#0"];
-// same leaf as t = astuple(box); t[0] / box.a). First positional arg must be an
-// identifier local or replace(local); non-decimal integer indices and other
-// callees fail closed. Does not treat bare box[0] as valid (synthetic @astuple.
-// prefix — dataclasses are not indexable).
+// dataclasses.astuple(box)[0] / astuple(replace(box))[0] /
+// list(astuple(box))[0] / tuple(astuple(box))[0] when box is a typed local with
+// declaration-order field 0 of type T (fieldOf["@astuple.box.#0"]; same leaf as
+// t = astuple(box); t[0] / box.a). First positional arg must be an identifier
+// local or replace(local); non-decimal integer indices and other callees fail
+// closed. Does not treat bare box[0] as valid (synthetic @astuple. prefix —
+// dataclasses are not indexable).
 func pythonAstupleIndexAccessType(sub *grammar.Node, content []byte, fieldOf map[string]string) string {
 	if sub == nil || sub.Type() != "subscript" || fieldOf == nil {
 		return ""
@@ -3962,13 +3980,33 @@ func pythonAstupleIndexAccessType(sub *grammar.Node, content []byte, fieldOf map
 // pythonAstupleObjectLocal recovers the identifier local whose declaration-order
 // field values are exposed by astuple(x) / dataclasses.astuple(x). Accepts bare
 // identifier locals and replace(local) / dataclasses.replace(local) (same object
-// type as local). Other forms fail closed ("").
+// type as local). Also peels identity wrappers list(astuple(...)) /
+// tuple(astuple(...)) that preserve declaration-order slots (same index leaves
+// as bare astuple). Other forms fail closed ("").
 func pythonAstupleObjectLocal(n *grammar.Node, content []byte) string {
-	if n == nil || n.Type() != "call" {
+	if n == nil {
+		return ""
+	}
+	if n.Type() == "parenthesized_expression" {
+		return pythonAstupleObjectLocal(pythonParenInner(n), content)
+	}
+	if n.Type() != "call" {
 		return ""
 	}
 	fn := ingest.ChildByField(n, "function")
-	if fn == nil || pythonSimpleCalleeName(fn, content) != "astuple" {
+	if fn == nil {
+		return ""
+	}
+	name := pythonSimpleCalleeName(fn, content)
+	// list(astuple(box)) / tuple(astuple(box)) — same ordered slots as bare astuple.
+	if name == "list" || name == "tuple" {
+		args, ok := pythonCallPositionalArgNodes(n)
+		if !ok || len(args) != 1 {
+			return ""
+		}
+		return pythonAstupleObjectLocal(args[0], content)
+	}
+	if name != "astuple" {
 		return ""
 	}
 	args, ok := pythonCallPositionalArgNodes(n)
