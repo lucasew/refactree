@@ -2039,8 +2039,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// a = next(iter(items)) / next(items) / next(x for x in items) /
 						// next(reversed(items)) — result type is the element type of
 						// the iterable arg (identity genexp preserves that type).
+						// pair = next(pairs) when pairs = zip/enumerate(...) — pair is a
+						// tuple (pairSlots), not an element; use pair[i] / unpack.
 						if fname == "next" {
-							if et := pythonNextElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
+							if types := pythonNextPairSlots(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+								pairSlots[lname] = types
+							} else if et := pythonNextElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
 							}
 						}
@@ -2134,16 +2138,17 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// a = item[1] when item from enumerate/zip pair (pairSlots).
 				// Slices (items[1:3]) fail closed (sequence, not element).
 				if right != nil && right.Type() == "subscript" {
-					if et := pythonSubscriptElemType(right, content, elemOf, egElems, typeOf, pairSlots); ourReceivers[et] {
+					if et := pythonSubscriptElemType(right, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots); ourReceivers[et] {
 						out[lname] = true
 					}
 				}
 				// xs = [A()] / (A(),) / [B()] — track element type for later for-loops.
 				// xs = list(items) / filter(...) — preserve element type via wrappers.
 				// d = dict.fromkeys(keys, A()) — value leaf is A (for .values/.get).
-				// pairs = zip/enumerate/product/pairwise(...) — pair-iter slots (not elements).
+				// pairs = zip/enumerate/product/pairwise(...) /
+				// pairs = list(zip(...)) / tuple/iter(zip(...)) — pair-iter slots.
 				if right != nil {
-					if types := pythonEnumerateZipTargetTypes(right, content, elemOf, egElems, typeOf); len(types) > 0 {
+					if types := pythonPairIterSlotsOf(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
 						// Foreign slots too — shadow prior same-name pair-iters.
 						pairIterSlots[lname] = types
 					} else if et := pythonDictFromkeysValueType(right, content); et != "" {
@@ -2235,9 +2240,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						}
 					}
 					// a := next(iter(items)) / next(items) / next(x for x in items) /
-					// next(reversed(items))
+					// next(reversed(items)) /
+					// pair := next(pairs) when pairs is a pair-iter (pairSlots).
 					if fname == "next" {
-						if et := pythonNextElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
+						if types := pythonNextPairSlots(valueN, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+							pairSlots[lname] = types
+						} else if et := pythonNextElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 							out[lname] = true
 						}
 					}
@@ -2315,7 +2323,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// a := items[0] / a := d[k] — element/value of known collection.
 			// Slices fail closed (sequence, not element).
 			if valueN.Type() == "subscript" {
-				if et := pythonSubscriptElemType(valueN, content, elemOf, egElems, typeOf, pairSlots); ourReceivers[et] {
+				if et := pythonSubscriptElemType(valueN, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots); ourReceivers[et] {
 					out[lname] = true
 				}
 			}
@@ -3003,7 +3011,7 @@ func pythonItemgetterElemType(call *grammar.Node, content []byte, elemOf, egElem
 // pythonDictPopitemSubscriptValueType) and item[i] when item is a known
 // enumerate/zip pair local (pairSlots). Fails closed on slices (items[a:b] /
 // items[:]) — those yield sequences, not elements.
-func pythonSubscriptElemType(sub *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string, pairSlots map[string][]string) string {
+func pythonSubscriptElemType(sub *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string, pairSlots, pairIterSlots map[string][]string) string {
 	if sub == nil || sub.Type() != "subscript" {
 		return ""
 	}
@@ -3016,21 +3024,21 @@ func pythonSubscriptElemType(sub *grammar.Node, content []byte, elemOf, egElems,
 	if et := pythonDictPopitemSubscriptValueType(sub, content, elemOf); et != "" {
 		return et
 	}
-	// item[1] when item from enumerate/zip pair local (pairSlots).
-	if et := pythonPairSlotSubscriptType(sub, content, pairSlots); et != "" {
+	// item[1] / next(pairs)[0] when pair/pair-iter slots known.
+	if et := pythonPairSlotSubscriptType(sub, content, pairSlots, elemOf, egElems, typeOf, pairIterSlots); et != "" {
 		return et
 	}
 	val := ingest.ChildByField(sub, "value")
 	return pythonIterableElemType(val, content, elemOf, egElems, typeOf)
 }
 
-// pythonPairSlotSubscriptType returns pairSlots[name][i] for name[i] when i is a
-// non-negative integer literal and name is a known pair/tuple local (from
-// `for item in enumerate/zip(...)` or `for pair in pairs` with pairs = zip(...)).
+// pythonPairSlotSubscriptType returns the slot type for pair[i] / next(pairs)[i]
+// when i is a non-negative integer literal. pair is a known pair local (pairSlots)
+// or next(pairs) / next(zip(...)) yields a pair from a known pair-iter.
 // Untyped slots (""), OOB indices, and non-literal indices fail closed.
 // Parenthesized (item)[1] is accepted.
-func pythonPairSlotSubscriptType(sub *grammar.Node, content []byte, pairSlots map[string][]string) string {
-	if sub == nil || sub.Type() != "subscript" || pairSlots == nil {
+func pythonPairSlotSubscriptType(sub *grammar.Node, content []byte, pairSlots map[string][]string, elemOf, egElems, typeOf map[string]string, pairIterSlots map[string][]string) string {
+	if sub == nil || sub.Type() != "subscript" {
 		return ""
 	}
 	idxN := ingest.ChildByField(sub, "subscript")
@@ -3052,14 +3060,86 @@ func pythonPairSlotSubscriptType(sub *grammar.Node, content []byte, pairSlots ma
 	for val != nil && val.Type() == "parenthesized_expression" {
 		val = pythonParenInner(val)
 	}
-	if val == nil || val.Type() != "identifier" {
+	if val == nil {
 		return ""
 	}
-	slots := pairSlots[ingest.NodeText(val, content)]
+	var slots []string
+	switch val.Type() {
+	case "identifier":
+		if pairSlots == nil {
+			return ""
+		}
+		slots = pairSlots[ingest.NodeText(val, content)]
+	case "call":
+		// next(pairs)[i] / next(zip(xs, ys))[i]
+		slots = pythonNextPairSlots(val, content, elemOf, egElems, typeOf, pairIterSlots)
+	default:
+		return ""
+	}
 	if idx < 0 || idx >= len(slots) {
 		return ""
 	}
 	return slots[idx]
+}
+
+// pythonPairIterSlotsOf recovers per-slot types for a pair-iterator expression:
+// zip/enumerate/product/pairwise calls, assigned pair-iter locals, and identity
+// wrappers list/tuple/iter around those. Not an element type — each yield is a tuple.
+func pythonPairIterSlotsOf(right *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string, pairIterSlots map[string][]string) []string {
+	if right == nil {
+		return nil
+	}
+	for right != nil && right.Type() == "parenthesized_expression" {
+		right = pythonParenInner(right)
+	}
+	if right == nil {
+		return nil
+	}
+	switch right.Type() {
+	case "identifier":
+		if pairIterSlots == nil {
+			return nil
+		}
+		return pairIterSlots[ingest.NodeText(right, content)]
+	case "call":
+		if types := pythonEnumerateZipTargetTypes(right, content, elemOf, egElems, typeOf); len(types) > 0 {
+			return types
+		}
+		// list(zip(...)) / tuple(zip(...)) / iter(zip(...)) — unwrap identity wrappers.
+		fn := ingest.ChildByField(right, "function")
+		if fn == nil || fn.Type() != "identifier" {
+			return nil
+		}
+		switch ingest.NodeText(fn, content) {
+		case "list", "tuple", "iter":
+			args, ok := pythonCallPositionalArgNodes(right)
+			if !ok || len(args) != 1 {
+				return nil
+			}
+			return pythonPairIterSlotsOf(args[0], content, elemOf, egElems, typeOf, pairIterSlots)
+		}
+		return nil
+	default:
+		return nil
+	}
+}
+
+// pythonNextPairSlots recovers pair slot types for next(pair_iter[, default]).
+// The default arg is ignored (same as next element typing). Yields the tuple
+// slots of one pair-iter item — not an element leaf.
+func pythonNextPairSlots(call *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string, pairIterSlots map[string][]string) []string {
+	if call == nil || call.Type() != "call" {
+		return nil
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "identifier" || ingest.NodeText(fn, content) != "next" {
+		return nil
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) == 0 {
+		return nil
+	}
+	return pythonPairIterSlotsOf(args[0], content, elemOf, egElems, typeOf, pairIterSlots)
 }
 
 // pythonBindPairLoopTarget records pairSlots for a single-target for-loop over a
