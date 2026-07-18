@@ -1435,6 +1435,7 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // collect(teeing(toList()/…, …, (list, …) -> list)) → same element (Collection<T> for forEach / enhanced-for),
 // m.values() → valOf[m],
 // List.of(new A()) / Stream.of(new A()) / Arrays.asList(new A()) → "A",
+// Collections.singletonList(new A()) → "A",
 // List.copyOf(as) / Set.copyOf(as) → elemOf[as] (Collection of first-arg elements),
 // Arrays.stream(as) / Arrays.stream(new A[]{...}) → "A",
 // Optional.of(new A()) / Optional.ofNullable(new A()) → "A",
@@ -1521,9 +1522,10 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 		case "values":
 			// m.values() — Collection of map values (valOf[m]).
 			return javaMapPipelineValueType(ingest.ChildByField(obj, "object"), content, valOf)
-		case "of", "asList", "ofNullable":
+		case "of", "asList", "ofNullable", "singletonList":
 			// List.of(new A()) / Stream.of(new A(), new A()) / Arrays.asList(new A())
 			// / Set.of(new A()) / Optional.of(new A()) / Optional.ofNullable(new A())
+			// / Collections.singletonList(new A())
 			// — element type from homogeneous new T(...) args.
 			return javaStaticCollectionOfElemType(obj, content, name)
 		case "copyOf":
@@ -2370,8 +2372,9 @@ func javaMapEntryDeclaredValueType(typeN *grammar.Node, content []byte) string {
 }
 
 // javaStaticCollectionOfElemType recovers the element type of List/Stream/Set.of(...)
-// Arrays.asList(...), and Optional.of/ofNullable(...) when every argument is
-// `new T(...)` with the same T. Non-creation args and mixed types fail closed.
+// Arrays.asList(...), Optional.of/ofNullable(...), and Collections.singletonList(...)
+// when every argument is `new T(...)` with the same T. Non-creation args and mixed
+// types fail closed.
 func javaStaticCollectionOfElemType(call *grammar.Node, content []byte, method string) string {
 	if call == nil || call.Type() != "method_invocation" {
 		return ""
@@ -2398,6 +2401,10 @@ func javaStaticCollectionOfElemType(call *grammar.Node, content []byte, method s
 		}
 	case "asList":
 		if recv != "Arrays" {
+			return ""
+		}
+	case "singletonList":
+		if recv != "Collections" {
 			return ""
 		}
 	default:
