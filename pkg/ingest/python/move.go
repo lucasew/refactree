@@ -1916,6 +1916,8 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `for a, b in pairwise(xs)` / `for a, b in itertools.pairwise(xs)`,
 // `for a, b in batched(xs, n)` / `for a, b in itertools.batched(xs, n)` /
 // `for batch in batched(xs, n): for a in batch` (batch → elemOf; n/strict ignored),
+// `for combo in combinations(xs, r): for a in combo` /
+// `for combo in permutations/combinations_with_replacement(...)` (combo → elemOf),
 // `for k, g in groupby(xs)` / `for k, g in itertools.groupby(xs)` —
 // group g is an iterable of xs elements (key untyped; key= ignored),
 // `for a in reversed/sorted/list/iter(items)`,
@@ -2328,6 +2330,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// for a, b in pairwise / itertools.pairwise /
 			// for a, b in product / itertools.product /
 			// for a, b in combinations/permutations / itertools.* /
+			// for combo in combinations/permutations / itertools.* (combo → elemOf) /
 			// for a, b in batched / itertools.batched (each slot → elem; n ignored) /
 			// for batch in batched / itertools.batched (batch → elemOf) /
 			// for k, g in groupby / itertools.groupby (g → elemOf; key untyped) /
@@ -2356,6 +2359,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// Bind into elemOf so nested `for a in batch` / next(batch) type.
 				if et := pythonBatchedElemType(right, content, elemOf, egElems, typeOf); et != "" {
 					// Foreign element types too — shadow prior same-name collections.
+					elemOf[ingest.NodeText(left, content)] = et
+					break
+				}
+				// for combo in combinations/permutations/combinations_with_replacement —
+				// combo is a tuple of xs elements (elemOf), not an element itself.
+				if et := pythonCombPermElemType(right, content, elemOf, egElems, typeOf); et != "" {
 					elemOf[ingest.NodeText(left, content)] = et
 					break
 				}
