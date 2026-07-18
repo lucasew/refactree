@@ -3173,9 +3173,10 @@ func jsArrayEntriesValueType(n *grammar.Node, content []byte, arrayLocals, typed
 	return jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories)
 }
 
-// jsMapValueType recovers T from new Map([[k, v], …]) when every pair value
-// peels to the same concrete type T. Single array-literal arg of 2-element
-// pair arrays only; empty / mixed / non-pair elems / non-Map ctor fail closed.
+// jsMapValueType recovers T from new Map([[k, v], …]) / new WeakMap([[k, v], …])
+// when every pair value peels to the same concrete type T. Single array-literal
+// arg of 2-element pair arrays only; empty / mixed / non-pair elems / other
+// ctors fail closed. WeakMap shares the same pair-value peel as Map.
 func jsMapValueType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
 	if n == nil {
 		return ""
@@ -3205,7 +3206,13 @@ func jsMapValueType(n *grammar.Node, content []byte, typedLocals, factories map[
 			}
 		}
 	}
-	if ctor == nil || ctor.Type() != "identifier" || ingest.NodeText(ctor, content) != "Map" {
+	if ctor == nil || ctor.Type() != "identifier" {
+		return ""
+	}
+	switch ingest.NodeText(ctor, content) {
+	case "Map", "WeakMap":
+		// ok
+	default:
 		return ""
 	}
 	args := ingest.ChildByField(n, "arguments")
