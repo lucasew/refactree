@@ -1858,6 +1858,8 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	// getter (same leaf as box.a / replace(box).a).
 	// itemgetter("a")(box).run() / itemgetter("a")(asdict(box)).run() — single
 	// string-key getter (same leaf as box["a"] / asdict(box)["a"]).
+	// copy.copy(asdict(box)["a"]).run() / copy.deepcopy(vars(box)["a"]).run() —
+	// object copy of a dict-view field key (same leaf as asdict(box)["a"].run()).
 	// items.popleft().run() / d.get(k).run() / q.get().run() / items.pop().run() /
 	// list(items).pop().run() — collection/queue element accessors (same leaf as
 	// a = items.popleft(); a.run()). Unknown call receivers: unique-leaf only.
@@ -1865,6 +1867,13 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 		if fn := ingest.ChildByField(obj, "function"); fn != nil {
 			// getattr(box, "a") before bare-ident ctor path (function is identifier).
 			if ft := pythonGetattrFieldType(obj, content, fieldOf); ft != "" {
+				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
+			}
+			// copy.copy(asdict(box)["a"]).run() / copy.deepcopy(vars(box)["a"]).run() —
+			// preserve field type of dict-view key arg (same leaf as
+			// xa = copy.copy(asdict(box)["a"]); xa.run()). typeOf not threaded here;
+			// bare typed-local args (copy.copy(item)) still use assignment form.
+			if ft := pythonCopyCallObjectType(obj, content, nil, fieldOf); ft != "" {
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 			}
 			if fn.Type() == "identifier" {
@@ -1882,8 +1891,6 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 			if ft := pythonItemgetterFieldType(obj, content, fieldOf); ft != "" {
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 			}
-			// copy.copy(item).run() — need typeOf (not threaded here); object copy
-			// chains rely on assignment form (a = copy.copy(item); a.run()).
 			if et := pythonCollectionAccessElemType(obj, content, elemOf); et != "" {
 				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 			}
@@ -2299,9 +2306,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						}
 						// a = copy(item) / deepcopy(item) — from copy import copy, deepcopy;
 						// preserve object type of the single arg (same as copy.copy(item)).
+						// a = copy(asdict(box)["a"]) — dict-view field key (fieldOf).
 						// Collection form xs = copy(items) is handled via elemOf below.
 						if fname == "copy" || fname == "deepcopy" {
-							if tn := pythonCopyCallObjectType(right, content, typeOf); tn != "" {
+							if tn := pythonCopyCallObjectType(right, content, typeOf, fieldOf); tn != "" {
 								typeOf[lname] = tn
 								bindFields(lname, tn)
 								if ourReceivers[tn] {
@@ -2363,9 +2371,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								}
 							case "copy", "deepcopy":
 								// a = copy.copy(item) / copy.deepcopy(item) — preserve object
-								// type of the single arg (typed local / Class()). Collection
-								// form xs = copy.copy(items) is handled via elemOf below.
-								if tn := pythonCopyCallObjectType(right, content, typeOf); tn != "" {
+								// type of the single arg (typed local / Class()).
+								// a = copy.copy(asdict(box)["a"]) — dict-view field key (fieldOf).
+								// Collection form xs = copy.copy(items) is handled via elemOf below.
+								if tn := pythonCopyCallObjectType(right, content, typeOf, fieldOf); tn != "" {
 									typeOf[lname] = tn
 									bindFields(lname, tn)
 									if ourReceivers[tn] {
@@ -2714,8 +2723,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						}
 					}
 					// a := copy(item) / deepcopy(item) — from copy import copy, deepcopy.
+					// a := copy(asdict(box)["a"]) — dict-view field key (fieldOf).
 					if fname == "copy" || fname == "deepcopy" {
-						if tn := pythonCopyCallObjectType(valueN, content, typeOf); tn != "" {
+						if tn := pythonCopyCallObjectType(valueN, content, typeOf, fieldOf); tn != "" {
 							typeOf[lname] = tn
 							bindFields(lname, tn)
 							if ourReceivers[tn] {
@@ -2768,7 +2778,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							}
 						case "copy", "deepcopy":
 							// a := copy.copy(item) / copy.deepcopy(item) — object type of arg.
-							if tn := pythonCopyCallObjectType(valueN, content, typeOf); tn != "" {
+							// a := copy.copy(asdict(box)["a"]) — dict-view field key (fieldOf).
+							if tn := pythonCopyCallObjectType(valueN, content, typeOf, fieldOf); tn != "" {
 								typeOf[lname] = tn
 								bindFields(lname, tn)
 								if ourReceivers[tn] {
@@ -3763,9 +3774,11 @@ func pythonOperatorGetterObjectLocal(n *grammar.Node, content []byte, name strin
 
 // pythonCopyCallObjectType recovers T from copy.copy(x) / copy.deepcopy(x) /
 // bare copy(x) / deepcopy(x) (from copy import copy, deepcopy) when x is a typed
-// object local or Class() ctor (typeOf / ctor name). Collection copies use
+// object local or Class() ctor (typeOf / ctor name), or a dict-view field key
+// access asdict(box)["a"] / vars(box)["a"] / box.__dict__["a"] / .get("a")
+// (fieldOf; same leaf as xa = asdict(box)["a"]). Collection copies use
 // pythonIterableElemType instead. Wrong arity / other modules fail closed.
-func pythonCopyCallObjectType(call *grammar.Node, content []byte, typeOf map[string]string) string {
+func pythonCopyCallObjectType(call *grammar.Node, content []byte, typeOf map[string]string, fieldOf map[string]string) string {
 	if call == nil || call.Type() != "call" {
 		return ""
 	}
@@ -3801,7 +3814,16 @@ func pythonCopyCallObjectType(call *grammar.Node, content []byte, typeOf map[str
 	if !ok || len(args) != 1 {
 		return ""
 	}
-	return pythonObjectExprType(args[0], content, typeOf)
+	if tn := pythonObjectExprType(args[0], content, typeOf); tn != "" {
+		return tn
+	}
+	// copy.copy(asdict(box)["a"]) / copy.copy(asdict(box).get("a")) /
+	// copy.copy(vars(box)["a"]) / copy.copy(box.__dict__["a"]) — field type of
+	// the dict-view key (same leaf as xa = asdict(box)["a"]; xa.run()).
+	if ft := pythonDictViewKeyAccessType(args[0], content, fieldOf); ft != "" {
+		return ft
+	}
+	return ""
 }
 
 // pythonReplaceCallObjectType recovers T from replace(x) / dataclasses.replace(x)
