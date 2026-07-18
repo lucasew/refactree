@@ -1078,6 +1078,7 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // var m = stream.collect(groupingBy/partitioningBy);
 // m.values() / m.forEach / m.get → group lists with element T for nested forEach / for-var.
 // collect(toMap|toConcurrentMap|toUnmodifiableMap(key, a -> a[, …])) → Map of T values:
+// collect(collectingAndThen(toMap(...), finisher)) → same Map of T values:
 // var m = stream.collect(toMap(...)); m.values() / m.forEach / m.get → T.
 // Collections.unmodifiableMap/synchronizedMap/checkedMap(m) / singletonMap(k, new T()) /
 // Map.of(k, new T()) / Map.ofEntries(Map.entry(k, new T())) / Map.copyOf(m) →
@@ -2640,6 +2641,7 @@ func javaArraysStreamElemType(call *grammar.Node, content []byte, elemOf, valOf 
 // javaMapPipelineValueType recovers the value type of a Map-typed expression:
 // m → valOf[m],
 // stream.collect(toMap(key, a -> a[, …])) → stream element type,
+// stream.collect(collectingAndThen(toMap(key, a -> a[, …]), finisher)) → same,
 // Collections.unmodifiableMap/synchronizedMap/checkedMap(m[, …]) → valOf[m],
 // Collections.singletonMap(k, new T(...)) → T,
 // Map.of(k, new T(...), …) → T (homogeneous value creations),
@@ -2974,16 +2976,55 @@ func javaMapCopyOfValueType(call *grammar.Node, content []byte, elemOf, valOf ma
 // Stream.collect(Collectors.toMap/toConcurrentMap/toUnmodifiableMap(
 // keyMapper, valueMapper[, merge[, mapFactory]])) /
 // collect(toMap|toConcurrentMap|toUnmodifiableMap(...)) (static import) when the
-// value mapper is an identity lambda (a -> a). Result is Map<?, T> with T the stream
+// value mapper is an identity lambda (a -> a), and
+// collect(Collectors.collectingAndThen(toMap|toConcurrentMap|toUnmodifiableMap(...), finisher))
+// when the downstream is such a toMap (finisher not inspected — identity /
+// Collections::unmodifiableMap common). Result is Map<?, T> with T the stream
 // element type. Type-changing value mappers and method-ref value mappers fail closed.
 // toUnmodifiableMap accepts at most merge (no mapFactory); arity 2–4 still fails closed
 // on non-identity value mappers only.
 func javaIsToMapIdentityValueCollector(collectCall *grammar.Node, content []byte) bool {
 	first := javaCollectFirstArg(collectCall)
-	if first == nil || first.Type() != "method_invocation" {
+	if first == nil {
 		return false
 	}
-	nameN := ingest.ChildByField(first, "name")
+	// collectingAndThen(toMap(...), finisher) — unwrap to the downstream toMap.
+	if javaIsCollectingAndThenCall(first, content) {
+		first = javaFirstCallArg(first)
+	}
+	return javaIsToMapIdentityValueCollectorExpr(first, content)
+}
+
+// javaIsCollectingAndThenCall reports Collectors.collectingAndThen(...) /
+// collectingAndThen(...) (static import). Downstream/finisher are not inspected.
+func javaIsCollectingAndThenCall(n *grammar.Node, content []byte) bool {
+	if n == nil || n.Type() != "method_invocation" {
+		return false
+	}
+	nameN := ingest.ChildByField(n, "name")
+	if nameN == nil || ingest.NodeText(nameN, content) != "collectingAndThen" {
+		return false
+	}
+	if obj := ingest.ChildByField(n, "object"); obj != nil {
+		if obj.Type() != "identifier" && obj.Type() != "type_identifier" {
+			return false
+		}
+		if ingest.NodeText(obj, content) != "Collectors" {
+			return false
+		}
+	}
+	return true
+}
+
+// javaIsToMapIdentityValueCollectorExpr reports toMap/toConcurrentMap/
+// toUnmodifiableMap(key, a -> a[, …]) / Collectors.toMap(...) (static import or
+// Collectors. receiver) with an identity value mapper. Used for bare collect(toMap)
+// and as the downstream of collectingAndThen(toMap, finisher).
+func javaIsToMapIdentityValueCollectorExpr(n *grammar.Node, content []byte) bool {
+	if n == nil || n.Type() != "method_invocation" {
+		return false
+	}
+	nameN := ingest.ChildByField(n, "name")
 	if nameN == nil {
 		return false
 	}
@@ -2992,7 +3033,7 @@ func javaIsToMapIdentityValueCollector(collectCall *grammar.Node, content []byte
 	default:
 		return false
 	}
-	if obj := ingest.ChildByField(first, "object"); obj != nil {
+	if obj := ingest.ChildByField(n, "object"); obj != nil {
 		if obj.Type() != "identifier" && obj.Type() != "type_identifier" {
 			return false
 		}
@@ -3000,7 +3041,7 @@ func javaIsToMapIdentityValueCollector(collectCall *grammar.Node, content []byte
 			return false
 		}
 	}
-	args := javaCallArgs(first)
+	args := javaCallArgs(n)
 	// keyMapper + valueMapper required; mergeFunction and mapFactory optional
 	// (toMap/toConcurrentMap up to 4; toUnmodifiableMap up to 3 in the JDK).
 	if len(args) < 2 || len(args) > 4 {
@@ -3010,8 +3051,9 @@ func javaIsToMapIdentityValueCollector(collectCall *grammar.Node, content []byte
 }
 
 // javaToMapCollectValueType recovers T from stream.collect(toMap|toConcurrentMap|
-// toUnmodifiableMap(key, a -> a[, …])). Result is Map of T values (not List groups
-// like groupingBy).
+// toUnmodifiableMap(key, a -> a[, …])) and
+// collect(collectingAndThen(toMap|…(key, a -> a[, …]), finisher)).
+// Result is Map of T values (not List groups like groupingBy).
 func javaToMapCollectValueType(val *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	for val != nil && !val.IsNull() && val.Type() == "parenthesized_expression" {
 		inner := ingest.ChildByField(val, "expression")
