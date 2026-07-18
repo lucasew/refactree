@@ -1530,9 +1530,14 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 	}
-	// (await Promise.all([new A()]))[0].run() — element peel under foreign same-leaf.
+	// (await Promise.all([new A()]))[0].run() / [new A()][0].run() /
+	// Array.from([new A()])[0].run() / Object.values({k: new A()})[0].run() —
+	// element peel under foreign same-leaf.
 	if obj.Type() == "subscript_expression" {
 		if t := jsPromiseAllSubscriptType(obj, content, typedLocals, factories); t != "" {
+			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
+		if t := jsArrayElemSubscriptType(obj, content, arrayLocals, typedLocals, factories); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 	}
@@ -1628,9 +1633,14 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 					} else if t := jsIdentityCloneType(valN, content, out, factories); ourReceivers[t] {
 						// const a = structuredClone(new A()) / Object.assign(new A()[, …])
 						out[ingest.NodeText(nameN, content)] = t
-					} else if t := jsUniformArrayElemType(valN, content, out, factories); ourReceivers[t] {
-						// const as = [new A() / a / makeA()] — array local of element type A.
+					} else if t := jsArraySourceElemType(valN, content, arrayLocals, out, factories); ourReceivers[t] {
+						// const as = [new A()] / Array.from([new A()]) /
+						// Object.values({k: new A()}) — array local of element type A.
 						arrayLocals[ingest.NodeText(nameN, content)] = t
+					} else if t := jsArrayElemSubscriptType(valN, content, arrayLocals, out, factories); ourReceivers[t] {
+						// const a = [new A()][0] / Array.from([new A()])[0] /
+						// Object.values({k: new A()})[0]
+						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsIteratorSourceYieldType(valN, content, generators, genLocals, arrayLocals, out, factories); ourReceivers[t] {
 						// const ga = genA() / const ia = [new A()].values() /
 						// const ia = [new A()][Symbol.iterator]() — iterator of A.
@@ -2647,8 +2657,9 @@ func jsUniformArrayElemType(n *grammar.Node, content []byte, typedLocals, factor
 	return found
 }
 
-// jsArraySourceElemType recovers T from an array literal or array local whose
-// elements uniformly peel to T.
+// jsArraySourceElemType recovers T from an array-like expression whose elements
+// uniformly peel to T: array literal, array local, Array.from([…]) (no mapfn),
+// or Object.values({…}) when all property values agree.
 func jsArraySourceElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string) string {
 	if n == nil {
 		return ""
@@ -2672,9 +2683,171 @@ func jsArraySourceElemType(n *grammar.Node, content []byte, arrayLocals, typedLo
 		return t
 	}
 	if n.Type() == "identifier" && arrayLocals != nil {
-		return arrayLocals[ingest.NodeText(n, content)]
+		if t := arrayLocals[ingest.NodeText(n, content)]; t != "" {
+			return t
+		}
+	}
+	if t := jsArrayFromElemType(n, content, arrayLocals, typedLocals, factories); t != "" {
+		return t
+	}
+	if t := jsObjectValuesElemType(n, content, typedLocals, factories); t != "" {
+		return t
 	}
 	return ""
+}
+
+// jsArrayFromElemType recovers T from Array.from(arrLike) when the first arg
+// peels to uniform element type T and no mapfn is present (single-arg only).
+func jsArrayFromElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string) string {
+	if n == nil || n.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	args := ingest.ChildByField(n, "arguments")
+	if fn == nil || args == nil {
+		return ""
+	}
+	// Array.from
+	if fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain" {
+		return ""
+	}
+	obj := ingest.ChildByField(fn, "object")
+	prop := ingest.ChildByField(fn, "property")
+	if obj == nil || prop == nil ||
+		obj.Type() != "identifier" || ingest.NodeText(obj, content) != "Array" ||
+		ingest.NodeText(prop, content) != "from" {
+		return ""
+	}
+	// Single positional arg only (no mapfn).
+	var first *grammar.Node
+	count := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		count++
+		if first == nil {
+			first = ch
+		}
+	}
+	if count != 1 || first == nil {
+		return ""
+	}
+	return jsArraySourceElemType(first, content, arrayLocals, typedLocals, factories)
+}
+
+// jsObjectValuesElemType recovers T from Object.values({…}) when every property
+// value peels to the same concrete type T. Non-object-literal / mixed / empty
+// / method / spread entries fail closed.
+func jsObjectValuesElemType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	if n == nil || n.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	args := ingest.ChildByField(n, "arguments")
+	if fn == nil || args == nil {
+		return ""
+	}
+	if fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain" {
+		return ""
+	}
+	obj := ingest.ChildByField(fn, "object")
+	prop := ingest.ChildByField(fn, "property")
+	if obj == nil || prop == nil ||
+		obj.Type() != "identifier" || ingest.NodeText(obj, content) != "Object" ||
+		ingest.NodeText(prop, content) != "values" {
+		return ""
+	}
+	var first *grammar.Node
+	count := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		count++
+		if first == nil {
+			first = ch
+		}
+	}
+	if count != 1 || first == nil {
+		return ""
+	}
+	// Peel parens around object literal.
+	for first != nil && first.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < first.ChildCount(); i++ {
+			ch := first.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		first = inner
+	}
+	if first == nil || first.Type() != "object" {
+		return ""
+	}
+	found := ""
+	saw := false
+	for i := uint32(0); i < first.ChildCount(); i++ {
+		ch := first.Child(i)
+		if ch == nil || ch.Type() == "{" || ch.Type() == "}" || ch.Type() == "," {
+			continue
+		}
+		var val *grammar.Node
+		switch ch.Type() {
+		case "pair":
+			val = ingest.ChildByField(ch, "value")
+		case "shorthand_property_identifier":
+			// {a} after const a = new A() — value is the identifier itself.
+			val = ch
+		default:
+			// method_definition / spread_element / … fail closed.
+			return ""
+		}
+		if val == nil {
+			return ""
+		}
+		// shorthand is property_identifier-like; peel as identifier via text.
+		t := ""
+		if val.Type() == "shorthand_property_identifier" {
+			if typedLocals != nil {
+				t = typedLocals[ingest.NodeText(val, content)]
+			}
+		} else {
+			t = jsExprConcreteType(val, content, typedLocals, factories)
+		}
+		if t == "" {
+			return ""
+		}
+		if !saw {
+			found = t
+			saw = true
+		} else if found != t {
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return found
+}
+
+// jsArrayElemSubscriptType recovers T from arr[i] / Array.from([new T()])[i] /
+// Object.values({k: new T()})[i] when the indexed object peels to a uniform
+// array element type T. Index must be a numeric literal.
+func jsArrayElemSubscriptType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string) string {
+	if n == nil || n.Type() != "subscript_expression" {
+		return ""
+	}
+	idx := ingest.ChildByField(n, "index")
+	if idx == nil || idx.Type() != "number" {
+		return ""
+	}
+	return jsArraySourceElemType(ingest.ChildByField(n, "object"), content, arrayLocals, typedLocals, factories)
 }
 
 // jsIsSymbolIteratorIndex reports whether n is Symbol.iterator (member form).
