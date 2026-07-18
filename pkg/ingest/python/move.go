@@ -2110,7 +2110,9 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // yields a tuple of field values in declaration order, not named keys),
 // plus direct chains `astuple(box)[0].run()` / `xa = astuple(box)[0]` (synthetic
 // `@astuple.box.#i` slots — not `box.#i`, so bare `box[0]` stays unbound for
-// non-indexable dataclasses).
+// non-indexable dataclasses),
+// plus unpack `xa, xb = astuple(box)` / `xa, *rest = astuple(box)` (per-slot
+// field types; *rest of mixed tuple fails closed).
 // fieldOf maps "local.field" → field type leaf for class field access.
 // elemOf maps collection locals → element type leaf (list[A] / deque[A] /
 // dict value / Queue[A] → "A") for direct access chains under foreign same-leaf.
@@ -2546,9 +2548,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// a, b = next(zip(xs, ys)) / a, b = next(pairs) / a, b = pair /
 			// a, b = pairs[0] / a, b = list(zip(...))[0]
 			// (pair-slot unpack; see pythonAssignPairUnpackTypes) /
+			// xa, xb = astuple(box) / dataclasses.astuple(box) (declaration-order
+			// field types; same leaf as t = astuple(box); xa = t[0]) /
 			// k, a = d.popitem() (value leaf on 2nd slot; same as for k, a in d.items()) /
 			// it1, it2 = tee(items) / itertools.tee(items[, n]) (each → elemOf) /
-			// a, *rest = items / *rest, a = items / a, = items (items: list[A])
+			// a, *rest = items / *rest, a = items / a, = items (items: list[A]) /
+			// xa, *rest = astuple(box) (fixed slots by declaration order; *rest fails closed)
 			if left != nil && right != nil {
 				if targets := pythonPatternIdents(left, content); len(targets) > 0 {
 					if types := pythonCtorListTypes(right, content); len(types) > 0 {
@@ -2564,6 +2569,18 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						for i, name := range targets {
 							if i < len(types) && ourReceivers[types[i]] {
 								out[name] = true
+							}
+						}
+					} else if types := pythonAstupleFieldTypes(right, content, typeOf, fieldOrder, fieldIndex); len(types) > 0 {
+						// xa, xb = astuple(box) / dataclasses.astuple(box) —
+						// declaration-order field types (heterogeneous; not elemOf).
+						for i, name := range targets {
+							if i < len(types) && types[i] != "" {
+								typeOf[name] = types[i]
+								bindFields(name, types[i])
+								if ourReceivers[types[i]] {
+									out[name] = true
+								}
 							}
 						}
 					} else if vt := pythonDictPopitemValueType(right, content, elemOf); vt != "" {
@@ -2590,6 +2607,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				} else if fixed, star, ok := pythonUnpackFixedAndStar(left, content); ok {
 					// a, *rest = items / *rest, a = items — fixed slots are elements;
 					// *rest is a sequence of the same element type (elemOf[rest]).
+					// xa, *rest = astuple(box) — fixed slots by declaration order;
+					// *rest of heterogeneous tuple fails closed (no elemOf).
 					if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); et != "" {
 						for _, name := range fixed {
 							if ourReceivers[et] {
@@ -2599,6 +2618,16 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						if star != "" {
 							// Foreign element types too — shadow prior same-name collections.
 							elemOf[star] = et
+						}
+					} else if types := pythonAstupleFieldTypes(right, content, typeOf, fieldOrder, fieldIndex); len(types) > 0 {
+						for i, name := range fixed {
+							if i < len(types) && types[i] != "" {
+								typeOf[name] = types[i]
+								bindFields(name, types[i])
+								if ourReceivers[types[i]] {
+									out[name] = true
+								}
+							}
 						}
 					}
 				}
@@ -3787,6 +3816,27 @@ func pythonAstupleCallObjectType(call *grammar.Node, content []byte, typeOf map[
 		return ""
 	}
 	return pythonObjectExprType(args[0], content, typeOf)
+}
+
+// pythonAstupleFieldTypes recovers declaration-order field type leaves from
+// astuple(box) / dataclasses.astuple(box) for unpack `xa, xb = astuple(box)`
+// (same order as t = astuple(box); t[i]). Missing types yield "" slots (fail
+// closed per target). Other callees / unknown object type fail closed (nil).
+func pythonAstupleFieldTypes(call *grammar.Node, content []byte, typeOf map[string]string, fieldOrder map[string][]string, fieldIndex map[string]map[string]string) []string {
+	tn := pythonAstupleCallObjectType(call, content, typeOf)
+	if tn == "" || fieldOrder == nil || fieldIndex == nil {
+		return nil
+	}
+	names := fieldOrder[tn]
+	fields := fieldIndex[tn]
+	if len(names) == 0 || fields == nil {
+		return nil
+	}
+	out := make([]string, len(names))
+	for i, fname := range names {
+		out[i] = fields[fname]
+	}
+	return out
 }
 
 // pythonVarsCallObjectType recovers T from vars(x) when the first positional
