@@ -4543,16 +4543,31 @@ func javaTypeName(typeN *grammar.Node, content []byte) string {
 	case "type_identifier", "identifier":
 		return ingest.NodeText(typeN, content)
 	case "generic_type":
+		// List<A> / Map.Entry<K,V> / java.util.List<A> — simple name of the head.
+		// Scoped heads (Map.Entry) have no direct type_identifier child; walk the
+		// head node so javaMapEntryDeclaredValueType can see "Entry".
 		if name := ingest.ChildByField(typeN, "type"); name != nil {
-			return javaTypeName(name, content)
+			if tn := javaTypeName(name, content); tn != "" {
+				return tn
+			}
 		}
-		if name := ingest.ChildByType(typeN, "type_identifier"); name != nil {
-			return ingest.NodeText(name, content)
+		for i := uint32(0); i < typeN.ChildCount(); i++ {
+			ch := typeN.Child(i)
+			if ch.Type() == "type_arguments" {
+				continue
+			}
+			if tn := javaTypeName(ch, content); tn != "" {
+				return tn
+			}
 		}
+		return ""
 	case "scoped_type_identifier":
+		// Map.Entry / java.util.List / Outer.Inner — simple name is the rightmost
+		// type_identifier (Entry / List / Inner). Field "name" when present.
 		if name := ingest.ChildByField(typeN, "name"); name != nil {
 			return ingest.NodeText(name, content)
 		}
+		return javaScopedTypeSimpleName(typeN, content)
 	case "array_type":
 		if elem := ingest.ChildByField(typeN, "element"); elem != nil {
 			return javaTypeName(elem, content)
@@ -4562,4 +4577,29 @@ func javaTypeName(typeN *grammar.Node, content []byte) string {
 		return ingest.NodeText(id, content)
 	}
 	return ""
+}
+
+// javaScopedTypeSimpleName returns the rightmost type_identifier of a
+// scoped_type_identifier chain (Map.Entry → Entry, java.util.List → List).
+// Left segments are package/outer type names and are not the local type leaf.
+func javaScopedTypeSimpleName(n *grammar.Node, content []byte) string {
+	if n == nil || n.IsNull() {
+		return ""
+	}
+	var last string
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		if n.Type() == "type_identifier" {
+			last = ingest.NodeText(n, content)
+			return
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(n)
+	return last
 }
