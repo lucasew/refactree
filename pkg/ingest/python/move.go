@@ -1646,7 +1646,8 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 	// typeOf maps object locals → type leaf (item: A → "A"; foreign too for shadowing)
 	// so direct copy.copy(item).run() can resolve without assignment form.
 	// pairSlots maps pair locals → per-slot types (p = next(...items()); p[1].run()).
-	typedLocals, fieldOf, elemOf, typeOf, pairSlots := pythonTypedLocals(pf.Root, content, ourReceivers)
+	// factoryOf maps partial factory locals → class leaf (pa = partial(A); pa().run()).
+	typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf := pythonTypedLocals(pf.Root, content, ourReceivers)
 
 	var edits []ingest.Edit
 	var walk func(n *grammar.Node, enclosingClass string)
@@ -1665,7 +1666,7 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			obj := ingest.ChildByField(n, "object")
 			attr := ingest.ChildByField(n, "attribute")
 			if obj != nil && attr != nil && ingest.NodeText(attr, content) == oldLeaf {
-				if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots) {
+				if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf) {
 					edits = append(edits, ingest.Edit{
 						File:      fileRel,
 						StartByte: attr.StartByte(),
@@ -1683,7 +1684,7 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			sub := ingest.ChildByField(n, "subscript")
 			if obj != nil && sub != nil && sub.Type() == "string" {
 				if contentN, text := pythonStringContent(sub, content); contentN != nil && text == oldLeaf {
-					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots) {
+					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf) {
 						edits = append(edits, ingest.Edit{
 							File:      fileRel,
 							StartByte: contentN.StartByte(),
@@ -1701,7 +1702,7 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 				obj := ingest.ChildByField(fn, "object")
 				attr := ingest.ChildByField(fn, "attribute")
 				if obj != nil && attr != nil && ingest.NodeText(attr, content) == "get" {
-					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots) {
+					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf) {
 						if key := pythonFirstStringArg(args); key != nil {
 							if contentN, text := pythonStringContent(key, content); contentN != nil && text == oldLeaf {
 								edits = append(edits, ingest.Edit{
@@ -1827,7 +1828,8 @@ func pythonRenameByTypeMaps(name string, ourReceivers, foreignReceivers, typedLo
 // (items.popleft().run() / d.get(k).run() / items[0].run() under foreign same-leaf methods).
 // typeOf maps object locals → type leaf (item: A → "A") for direct copy.copy(item).run()
 // and similar identity wrappers that need the arg's class leaf under foreign same-leaf.
-func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, fieldOf, elemOf, typeOf map[string]string, pairSlots map[string][]string) bool {
+// factoryOf maps partial factory locals → class leaf (pa = partial(A); pa().run()).
+func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, fieldOf, elemOf, typeOf map[string]string, pairSlots map[string][]string, factoryOf map[string]string) bool {
 	if obj == nil {
 		return false
 	}
@@ -1883,6 +1885,8 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	// typed as iterable element (same leaf as a = reduce(...); a.run()).
 	// partial(A)().run() / functools.partial(A)().run() — factory call result is A
 	// (same leaf as Class() ctor under foreign same-leaf methods).
+	// pa().run() after pa = partial(A) / functools.partial(A) — factory local
+	// call result is A (same leaf as partial(A)().run()).
 	// ex.submit(lambda: A()).result().run() — Future result is A (Callable lambda
 	// body Class(); same leaf as Java ExecutorService.submit(() -> new A()).get()).
 	// items.popleft().run() / d.get(k).run() / q.get().run() / items.pop().run() /
@@ -1905,6 +1909,10 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 			}
 			// partial(A)().run() / functools.partial(A)().run() — before Class() path.
 			if et := pythonPartialCallResultType(obj, content); et != "" {
+				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+			}
+			// pa().run() after pa = partial(A) — factory local call yields A.
+			if et := pythonPartialFactoryLocalResultType(obj, content, factoryOf); et != "" {
 				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 			}
 			// ex.submit(lambda: A()).result().run() — Future.result peel.
@@ -2118,6 +2126,21 @@ func pythonPartialCallResultType(call *grammar.Node, content []byte) string {
 		return ""
 	}
 	return pythonPartialFactoryClassType(fn, content)
+}
+
+// pythonPartialFactoryLocalResultType recovers T from pa() when pa is a local
+// bound to partial(T) / functools.partial(T) via factoryOf. Enables
+// pa = partial(A); pa().run() under foreign same-leaf methods. Unknown locals
+// and non-factory identifiers fail closed.
+func pythonPartialFactoryLocalResultType(call *grammar.Node, content []byte, factoryOf map[string]string) string {
+	if call == nil || call.Type() != "call" || factoryOf == nil {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "identifier" {
+		return ""
+	}
+	return factoryOf[ingest.NodeText(fn, content)]
 }
 
 // pythonPartialFactoryClassType recovers T from partial(T[, ...]) /
@@ -2405,7 +2428,9 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // dict value / Queue[A] → "A") for direct access chains under foreign same-leaf.
 // typeOf maps object locals → type leaf (item: A / x = A() → "A"; foreign too)
 // for direct identity wrappers under foreign same-leaf (copy.copy(item).run()).
-func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string, map[string]string, map[string]string, map[string][]string) {
+// factoryOf maps partial factory locals → class leaf (pa = partial(A) → "A") so
+// pa().run() peels under foreign same-leaf (local itself is not an A instance).
+func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string, map[string]string, map[string]string, map[string][]string, map[string]string) {
 	out := map[string]bool{}
 	// Collection locals → element type leaf (list[A] / [A()] / dict value → "A").
 	elemOf := map[string]string{}
@@ -2424,8 +2449,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 	pairIterSlots := map[string][]string{}
 	// Class field access: "box.a" → "A" when box is typed as a class with field a: A.
 	fieldOf := map[string]string{}
+	// partial factory locals → class leaf (pa = partial(A) / functools.partial(A)).
+	factoryOf := map[string]string{}
 	if root == nil || len(ourReceivers) == 0 {
-		return out, fieldOf, elemOf, typeOf, pairSlots
+		return out, fieldOf, elemOf, typeOf, pairSlots, factoryOf
 	}
 	fieldIndex := pythonClassFieldIndex(root, content)
 	// Declaration order for positional match class patterns (case Box(xa, xb)).
@@ -2507,6 +2534,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				}
 				if right != nil && right.Type() == "call" {
 					fn := ingest.ChildByField(right, "function")
+					// pa = partial(A) / functools.partial(A) — factory local (not an A
+					// instance). Call result pa() is A under foreign same-leaf.
+					// Foreign factories too for shadowing (pb = partial(B)).
+					if et := pythonPartialFactoryClassType(right, content); et != "" {
+						factoryOf[lname] = et
+					}
 					if fn != nil && fn.Type() == "identifier" {
 						fname := ingest.NodeText(fn, content)
 						if ourReceivers[fname] {
@@ -2525,6 +2558,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							if tn := pythonCastTypeArg(right, content); ourReceivers[tn] {
 								out[lname] = true
 							}
+						}
+						// a = pa() after pa = partial(A) — Class() result of factory local.
+						if et := factoryOf[fname]; ourReceivers[et] {
+							out[lname] = true
+							typeOf[lname] = et
+							bindFields(lname, et)
 						}
 						// a = next(iter(items)) / next(items) / next(x for x in items) /
 						// next(reversed(items)) — result type is the element type of
@@ -3550,7 +3589,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 		}
 	}
 	walk(root)
-	return out, fieldOf, elemOf, typeOf, pairSlots
+	return out, fieldOf, elemOf, typeOf, pairSlots, factoryOf
 }
 
 // pythonBindIterableLambdaParams types untyped lambda parameters when the call
