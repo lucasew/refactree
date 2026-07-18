@@ -1728,6 +1728,11 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			if mcEdits := pythonMethodcallerStringEdits(fileRel, n, content, oldLeaf, newLeaf, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf); len(mcEdits) > 0 {
 				edits = append(edits, mcEdits...)
 			}
+			// getattr(A(), "run") / getattr(A(), "run")() — method name string when
+			// the object arg types as our receiver. Foreign same-leaf keeps "run".
+			if gaEdits := pythonGetattrMethodStringEdits(fileRel, n, content, oldLeaf, newLeaf, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf); len(gaEdits) > 0 {
+				edits = append(edits, gaEdits...)
+			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), classHere)
@@ -1749,6 +1754,40 @@ func pythonFirstStringArg(args *grammar.Node) *grammar.Node {
 		}
 	}
 	return nil
+}
+
+// pythonGetattrMethodStringEdits rewrites the attr name string on
+// getattr(target, "old") when target types as our receiver (Class() / typed
+// local). Enables getattr(A(), "run")() / fa = getattr(A(), "run") under foreign
+// same-leaf methods — getattr(B(), "run") keeps "run". Three-arg getattr
+// (default) still renames the name when the object is ours. Non-builtin getattr
+// / non-string names fail closed.
+func pythonGetattrMethodStringEdits(fileRel string, call *grammar.Node, content []byte, oldLeaf, newLeaf, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, fieldOf, elemOf, typeOf map[string]string, pairSlots map[string][]string, factoryOf, futureOf map[string]string) []ingest.Edit {
+	if call == nil || call.Type() != "call" {
+		return nil
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "identifier" || ingest.NodeText(fn, content) != "getattr" {
+		return nil
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) < 2 || args[1].Type() != "string" {
+		return nil
+	}
+	contentN, text := pythonStringContent(args[1], content)
+	if contentN == nil || text != oldLeaf {
+		return nil
+	}
+	// Object arg must type as our receiver (same gate as methodcaller target).
+	if !pythonShouldRenameAttr(args[0], content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf) {
+		return nil
+	}
+	return []ingest.Edit{{
+		File:      fileRel,
+		StartByte: contentN.StartByte(),
+		EndByte:   contentN.EndByte(),
+		NewText:   newLeaf,
+	}}
 }
 
 // pythonMethodcallerStringEdits rewrites the method name string on
