@@ -2217,6 +2217,18 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								out[lname] = true
 							}
 						}
+						// a = copy(item) / deepcopy(item) — from copy import copy, deepcopy;
+						// preserve object type of the single arg (same as copy.copy(item)).
+						// Collection form xs = copy(items) is handled via elemOf below.
+						if fname == "copy" || fname == "deepcopy" {
+							if tn := pythonCopyCallObjectType(right, content, typeOf); tn != "" {
+								typeOf[lname] = tn
+								pythonBindClassLocalFields(lname, tn, fieldIndex, fieldOf)
+								if ourReceivers[tn] {
+									out[lname] = true
+								}
+							}
+						}
 					} else if fn != nil && fn.Type() == "attribute" {
 						if attr := ingest.ChildByField(fn, "attribute"); attr != nil {
 							switch ingest.NodeText(attr, content) {
@@ -2522,6 +2534,16 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					if fname == "reduce" {
 						if et := pythonReduceElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 							out[lname] = true
+						}
+					}
+					// a := copy(item) / deepcopy(item) — from copy import copy, deepcopy.
+					if fname == "copy" || fname == "deepcopy" {
+						if tn := pythonCopyCallObjectType(valueN, content, typeOf); tn != "" {
+							typeOf[lname] = tn
+							pythonBindClassLocalFields(lname, tn, fieldIndex, fieldOf)
+							if ourReceivers[tn] {
+								out[lname] = true
+							}
 						}
 					}
 				} else if fn != nil && fn.Type() == "attribute" {
@@ -3349,28 +3371,40 @@ func pythonOperatorGetterFieldType(call *grammar.Node, content []byte, fieldOf m
 	return fieldOf[ingest.NodeText(objArgs[0], content)+"."+field]
 }
 
-// pythonCopyCallObjectType recovers T from copy.copy(x) / copy.deepcopy(x) when
-// x is a typed object local or Class() ctor (typeOf / ctor name). Collection
-// copies use pythonIterableElemType instead. Bare copy(x) (from copy import copy)
-// is not tracked. Wrong arity / other modules fail closed.
+// pythonCopyCallObjectType recovers T from copy.copy(x) / copy.deepcopy(x) /
+// bare copy(x) / deepcopy(x) (from copy import copy, deepcopy) when x is a typed
+// object local or Class() ctor (typeOf / ctor name). Collection copies use
+// pythonIterableElemType instead. Wrong arity / other modules fail closed.
 func pythonCopyCallObjectType(call *grammar.Node, content []byte, typeOf map[string]string) string {
 	if call == nil || call.Type() != "call" {
 		return ""
 	}
 	fn := ingest.ChildByField(call, "function")
-	if fn == nil || fn.Type() != "attribute" {
+	if fn == nil {
 		return ""
 	}
-	attr := ingest.ChildByField(fn, "attribute")
-	obj := ingest.ChildByField(fn, "object")
-	if attr == nil || obj == nil || obj.Type() != "identifier" {
-		return ""
-	}
-	method := ingest.NodeText(attr, content)
-	if method != "copy" && method != "deepcopy" {
-		return ""
-	}
-	if ingest.NodeText(obj, content) != "copy" {
+	switch fn.Type() {
+	case "identifier":
+		// copy(x) / deepcopy(x) — from copy import copy, deepcopy.
+		name := ingest.NodeText(fn, content)
+		if name != "copy" && name != "deepcopy" {
+			return ""
+		}
+	case "attribute":
+		// copy.copy(x) / copy.deepcopy(x) — module-qualified.
+		attr := ingest.ChildByField(fn, "attribute")
+		obj := ingest.ChildByField(fn, "object")
+		if attr == nil || obj == nil || obj.Type() != "identifier" {
+			return ""
+		}
+		method := ingest.NodeText(attr, content)
+		if method != "copy" && method != "deepcopy" {
+			return ""
+		}
+		if ingest.NodeText(obj, content) != "copy" {
+			return ""
+		}
+	default:
 		return ""
 	}
 	args, ok := pythonCallPositionalArgNodes(call)
@@ -4438,12 +4472,18 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		// chain(xs, ys) / islice(xs, n) — itertools helpers (bare or imported).
 		if fn := ingest.ChildByField(right, "function"); fn != nil && fn.Type() == "identifier" {
 			switch ingest.NodeText(fn, content) {
-			case "reversed", "sorted", "list", "tuple", "set", "frozenset", "iter", "deque", "Counter":
+			case "reversed", "sorted", "list", "tuple", "set", "frozenset", "iter", "deque", "Counter", "copy", "deepcopy":
 				// Counter(iterable) keys are the iterable elements (product case).
 				// frozenset(iterable) same as set (immutable). Mapping/kwargs
 				// constructors fail closed when untyped / non-iterable.
+				// copy(xs) / deepcopy(xs) — from copy import copy, deepcopy; preserve
+				// the arg's element type (same as copy.copy(xs) module-qualified).
 				args, ok := pythonCallPositionalArgNodes(right)
 				if !ok || len(args) == 0 {
+					return ""
+				}
+				// copy/deepcopy require exactly one positional arg (object/collection).
+				if name := ingest.NodeText(fn, content); (name == "copy" || name == "deepcopy") && len(args) != 1 {
 					return ""
 				}
 				return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
