@@ -2004,6 +2004,9 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // (`match box: case {"a": xa}:` / `case {"a": xa as x}:` with `box: Box`
 // and annotated field a: A — key-specific fieldOf leaf; non-string keys
 // and **rest fail closed),
+// match class-pattern keyword captures
+// (`match box: case Box(a=xa, b=xb):` / `case Box(a=xa as x):` — field types
+// of Box via fieldIndex; positional Box(xa, xb) fails closed),
 // walrus (`a := A()`, `a := next(items)`, `a := next(x for x in items)`,
 // `a := min(items)`, `a := choice(items)`, `a := random.choice(items)`,
 // `a := heappop(items)`, `a := heapq.heappop(items)`,
@@ -2902,6 +2905,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			if name, typ := pythonAsPatternBinding(n, content); name != "" && ourReceivers[typ] {
 				out[name] = true
 			}
+		case "class_pattern":
+			// match case Box(a=xa, b=xb): keyword value captures get field types
+			// of Box (dataclass / annotated class via fieldIndex). Positional
+			// Box(xa, xb) fails closed (declaration order not required here).
+			pythonBindClassPatternKeywordCaptures(n, content, fieldIndex, ourReceivers, out)
 		case "match_statement":
 			// match items: case [a]: / case [a, *rest]: — bind sequence captures
 			// from the subject's element type (items: list[A] / xs = [A()] / …).
@@ -3639,6 +3647,102 @@ func pythonRecordKeyAccessType(n *grammar.Node, content []byte, fieldOf map[stri
 		}
 	}
 	return ""
+}
+
+// pythonBindClassPatternKeywordCaptures binds value captures from
+// `case Box(a=xa, b=xb):` keyword_patterns using annotated fields of Box
+// (fieldIndex). Unknown fields and positional-only patterns fail closed.
+// Grammar often wraps `a=xa as x` as as_pattern(keyword_pattern(a=xa), x)
+// rather than keyword_pattern(a=(xa as x)); both alias and inner capture bind.
+func pythonBindClassPatternKeywordCaptures(n *grammar.Node, content []byte, fieldIndex map[string]map[string]string, ourReceivers, out map[string]bool) {
+	if n == nil || n.IsNull() || n.Type() != "class_pattern" || fieldIndex == nil {
+		return
+	}
+	typeName := pythonClassPatternTypeName(n, content)
+	if typeName == "" {
+		return
+	}
+	fields := fieldIndex[typeName]
+	if len(fields) == 0 {
+		return
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		if ch.Type() != "case_pattern" {
+			continue
+		}
+		payload := pythonMatchPatternInner(ch)
+		if payload == nil {
+			continue
+		}
+		// Optional outer as: case Box(a=xa as x) → as_pattern(keyword_pattern, x).
+		var outerAlias string
+		if payload.Type() == "as_pattern" {
+			var left *grammar.Node
+			seenAs := false
+			for j := uint32(0); j < payload.ChildCount(); j++ {
+				c := payload.Child(j)
+				if c.Type() == "as" {
+					seenAs = true
+					continue
+				}
+				if !seenAs {
+					left = c
+					continue
+				}
+				switch c.Type() {
+				case "identifier":
+					outerAlias = ingest.NodeText(c, content)
+				case "as_pattern_target":
+					if id := ingest.ChildByType(c, "identifier"); id != nil {
+						outerAlias = ingest.NodeText(id, content)
+					}
+				}
+			}
+			if left == nil {
+				continue
+			}
+			// Unwrap case_pattern wrapper on the left if present.
+			if left.Type() == "case_pattern" || left.Type() == "pattern" {
+				left = pythonMatchPatternInner(left)
+			}
+			if left == nil {
+				continue
+			}
+			payload = left
+		}
+		if payload.Type() != "keyword_pattern" {
+			// Positional capture — fail closed (no field key).
+			continue
+		}
+		// keyword_pattern: <field ident> = <value pattern>
+		var key string
+		var valuePat *grammar.Node
+		for j := uint32(0); j < payload.ChildCount(); j++ {
+			c := payload.Child(j)
+			if c.Type() == "=" {
+				continue
+			}
+			if key == "" && c.Type() == "identifier" {
+				key = ingest.NodeText(c, content)
+				continue
+			}
+			valuePat = c
+		}
+		if key == "" {
+			continue
+		}
+		ft := fields[key]
+		if ft == "" || !ourReceivers[ft] {
+			continue
+		}
+		if valuePat != nil {
+			pythonBindMatchMapValueCaptures(valuePat, content, ft, ourReceivers, out)
+		}
+		if outerAlias != "" {
+			out[outerAlias] = true
+		}
+	}
 }
 
 // pythonBindMatchRecordKeyPatterns binds capture names from match dict_pattern
