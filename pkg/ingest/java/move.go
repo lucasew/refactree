@@ -1886,7 +1886,7 @@ func javaStreamElementLambdaMethod(method string) bool {
 		// javaFlatMapResultElemType. Type-changing mappers fail closed on the
 		// return path. Identity handle ((a,e)->a).join() peels the same way
 		// (first-param bi-lambda identity).
-		"thenAccept", "thenApply", "thenCompose",
+		"thenAccept", "thenApply", "thenApplyAsync", "thenCompose",
 		"applyToEither", "acceptEither",
 		// CompletableFuture.whenComplete(BiConsumer<? super T,? super Throwable>) /
 		// handle(BiFunction<? super T,Throwable,? extends U>) —
@@ -2231,11 +2231,13 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// Enables mapMulti((a,c)->c.accept(a)).forEach(x -> x.m()) /
 			// var s = mapMulti(...); s.forEach(...) under foreign same-leaf methods.
 			return javaMapMultiResultElemType(obj, content, elemOf, valOf)
-		case "thenApply":
-			// CompletableFuture.thenApply(Function): recover U when mapper is
-			// identity (a -> a) or new T(...) — same shapes as Optional.map.
-			// Enables thenApply(a -> a).join() / var f2 = thenApply(a -> a); f2.join()
-			// under foreign same-leaf methods. Type-changing mappers fail closed.
+		case "thenApply", "thenApplyAsync":
+			// CompletableFuture.thenApply / thenApplyAsync(Function[, Executor]):
+			// recover U when mapper is identity (a -> a) or new T(...) — same shapes
+			// as Optional.map. Executor arg ignored; javaMapResultElemType picks the
+			// first lambda among args. Enables thenApplyAsync(a -> a).join() /
+			// var f2 = thenApplyAsync(a -> a); f2.join() under foreign same-leaf.
+			// Type-changing mappers fail closed.
 			return javaMapResultElemType(obj, content, elemOf, valOf)
 		case "applyToEither":
 			// CompletableFuture.applyToEither(other, Function): recover U when the
@@ -3054,6 +3056,51 @@ func javaIsCollectionCopyCtorType(leaf string) bool {
 		"CopyOnWriteArrayList", "CopyOnWriteArraySet",
 		"LinkedBlockingQueue", "LinkedBlockingDeque", "ArrayBlockingQueue",
 		"PriorityBlockingQueue", "DelayQueue", "SynchronousQueue":
+		return true
+	default:
+		return false
+	}
+}
+
+// javaMapCopyCreationValueType recovers V from Map copy constructors:
+//
+//	new HashMap<>(Map.of("k", new A())) / new LinkedHashMap<>(m) / new TreeMap<>(m)
+//	new HashMap<K,V>(…) — V from declared type args
+//
+// Prefers declared second type arg; diamond peels the first constructor arg as a
+// map pipeline value (javaMapPipelineValueType). Non-map types / empty ctors fail
+// closed so collection copy ctors stay on the element path.
+func javaMapCopyCreationValueType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	if call == nil || call.Type() != "object_creation_expression" {
+		return ""
+	}
+	typeN := ingest.ChildByField(call, "type")
+	if typeN == nil {
+		return ""
+	}
+	leaf := javaTypeName(typeN, content)
+	if !javaIsMapCopyCtorType(leaf) {
+		return ""
+	}
+	if args := javaTypeArgNames(typeN, content); len(args) >= 2 && args[1] != "" {
+		return args[1]
+	}
+	ctorArgs := javaCallArgs(call)
+	if len(ctorArgs) < 1 {
+		return ""
+	}
+	// First arg is the source map (capacity/load-factor overloads fail closed when
+	// the arg is not a typed map pipeline).
+	return javaMapPipelineValueType(ctorArgs[0], content, elemOf, valOf)
+}
+
+// javaIsMapCopyCtorType reports concrete Map types whose Map-copy constructor
+// preserves value type V.
+func javaIsMapCopyCtorType(leaf string) bool {
+	switch leaf {
+	case "HashMap", "LinkedHashMap", "TreeMap", "WeakHashMap", "IdentityHashMap",
+		"Hashtable", "ConcurrentHashMap", "ConcurrentSkipListMap",
+		"EnumMap":
 		return true
 	default:
 		return false
@@ -4035,6 +4082,12 @@ func javaMapPipelineValueType(obj *grammar.Node, content []byte, elemOf, valOf m
 			return ""
 		}
 		return valOf[ingest.NodeText(obj, content)]
+	case "object_creation_expression":
+		// new HashMap<>(Map.of("k", new A())) / new LinkedHashMap<>(m) /
+		// new TreeMap<>(m) — Map copy ctor value type V (declared type args or
+		// first-arg map pipeline). Enables .get(k).m() / .values().forEach /
+		// var m2 = new HashMap<>(m) under foreign same-leaf methods.
+		return javaMapCopyCreationValueType(obj, content, elemOf, valOf)
 	case "cast_expression":
 		// (HashMap<K,V>) m.clone() / (Map<K,V>) x — recover V from a multi-arg
 		// generic cast. Single-arg List casts fail closed here (element path).
