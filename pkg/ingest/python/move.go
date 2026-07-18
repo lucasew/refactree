@@ -1863,6 +1863,8 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	// getter (same leaf as box.a / replace(box).a).
 	// itemgetter("a")(box).run() / itemgetter("a")(asdict(box)).run() — single
 	// string-key getter (same leaf as box["a"] / asdict(box)["a"]).
+	// itemgetter(0)(items).run() / operator.itemgetter(0)(items).run() — collection
+	// element via single-index getter (same leaf as a = itemgetter(0)(items); a.run()).
 	// copy.copy(asdict(box)["a"]).run() / copy.deepcopy(vars(box)["a"]).run() —
 	// object copy of a dict-view field key (same leaf as asdict(box)["a"].run()).
 	// copy.copy(box.a).run() / copy.copy(item).run() — field / typed-local arg
@@ -1951,6 +1953,12 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 			}
 			if ft := pythonItemgetterFieldType(obj, content, fieldOf); ft != "" {
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
+			}
+			// itemgetter(0)(items).run() / operator.itemgetter(0)(list(items)).run() —
+			// single-index getter on a known collection (same leaf as assignment).
+			// Multi-index / string-key itemgetter use field path or fail closed.
+			if et := pythonItemgetterElemType(obj, content, elemOf, nil, typeOf); et != "" {
+				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 			}
 			// random.choice(seq).run() — module-qualified form (function is attribute).
 			if et := pythonRandomChoiceElemType(obj, content, elemOf, nil, typeOf); et != "" {
