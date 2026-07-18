@@ -1435,6 +1435,7 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // collect(teeing(toList()/…, …, (list, …) -> list)) → same element (Collection<T> for forEach / enhanced-for),
 // m.values() → valOf[m],
 // List.of(new A()) / Stream.of(new A()) / Arrays.asList(new A()) → "A",
+// List.copyOf(as) / Set.copyOf(as) → elemOf[as] (Collection of first-arg elements),
 // Arrays.stream(as) / Arrays.stream(new A[]{...}) → "A",
 // Optional.of(new A()) / Optional.ofNullable(new A()) → "A",
 // Optional.flatMap(a -> Optional.of(a)) / ofNullable(a) / Optional::of → same element
@@ -1525,6 +1526,10 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// / Set.of(new A()) / Optional.of(new A()) / Optional.ofNullable(new A())
 			// — element type from homogeneous new T(...) args.
 			return javaStaticCollectionOfElemType(obj, content, name)
+		case "copyOf":
+			// List.copyOf(coll) / Set.copyOf(coll) — Collection of first-arg element type
+			// (unlike of/asList which take new T(...) args).
+			return javaListSetCopyOfElemType(obj, content, elemOf, valOf)
 		default:
 			// flatMapTo*/mapTo*/… change the element type — fail closed.
 			return ""
@@ -1793,6 +1798,32 @@ func javaFirstCallArg(call *grammar.Node) *grammar.Node {
 		}
 	}
 	return nil
+}
+
+// javaListSetCopyOfElemType recovers the element type of List.copyOf(coll) /
+// Set.copyOf(coll): a Collection of the first argument's element type.
+// Receiver must be List or Set; other receivers (and missing/empty args) fail closed.
+func javaListSetCopyOfElemType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	recvN := ingest.ChildByField(call, "object")
+	if recvN == nil {
+		return ""
+	}
+	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
+		return ""
+	}
+	switch ingest.NodeText(recvN, content) {
+	case "List", "Set":
+	default:
+		return ""
+	}
+	first := javaFirstCallArg(call)
+	if first == nil {
+		return ""
+	}
+	return javaStreamPipelineElemType(first, content, elemOf, valOf)
 }
 
 // javaIsToListOrSetCollector reports Stream.collect args that produce a
