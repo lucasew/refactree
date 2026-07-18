@@ -1243,7 +1243,8 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 	}
 	defer pf.Close()
 
-	typedLocals := jsTypedLocals(pf.Root, content, ourReceivers)
+	factories := jsSameFileFactoryReturns(pf.Root, content)
+	typedLocals := jsTypedLocals(pf.Root, content, ourReceivers, factories)
 	// Unique method leaf: ExtraRename already rewrites every simple obj.oldLeaf.
 	// Apply the same aggressiveness to object-pattern property keys.
 	uniqueLeaf := len(foreignReceivers) == 0
@@ -1285,7 +1286,7 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 			obj := ingest.ChildByField(n, "object")
 			prop := ingest.ChildByField(n, "property")
 			if obj != nil && prop != nil && ingest.NodeText(prop, content) == oldLeaf {
-				if jsShouldRenameMember(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals) {
+				if jsShouldRenameMember(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, factories) {
 					addEdit(prop.StartByte(), prop.EndByte(), newLeaf)
 				}
 			}
@@ -1302,7 +1303,7 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 			nameN := ingest.ChildByField(n, "name")
 			valN := ingest.ChildByField(n, "value")
 			if nameN != nil && nameN.Type() == "object_pattern" && valN != nil {
-				if uniqueLeaf || jsShouldRenameMember(valN, content, classHere, ourReceivers, foreignReceivers, typedLocals) {
+				if uniqueLeaf || jsShouldRenameMember(valN, content, classHere, ourReceivers, foreignReceivers, typedLocals, factories) {
 					jsCollectObjectPatternMethodEdits(nameN, content, oldLeaf, newLeaf, addEdit)
 					// Shorthand `{ helper }` also renames the local binding — rewrite
 					// bare oldLeaf identifiers later in the same statement_block.
@@ -1472,7 +1473,9 @@ func jsRenameByTypeMaps(name string, ourReceivers, foreignReceivers map[string]b
 }
 
 // jsShouldRenameMember decides whether obj.oldLeaf is a call on one of our receivers.
-func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers map[string]bool, typedLocals map[string]string) bool {
+// factories maps same-file factory names → class leaf (makeA → A) for
+// Promise.resolve(makeA()) peels under foreign same-leaf methods.
+func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers map[string]bool, typedLocals, factories map[string]string) bool {
 	if obj == nil {
 		return false
 	}
@@ -1505,10 +1508,10 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 	if obj.Type() == "identifier" {
 		return jsRenameByTypeMaps(ingest.NodeText(obj, content), ourReceivers, foreignReceivers, typedLocals)
 	}
-	// await Promise.resolve(new A() / a) / Promise.resolve(...) — identity peels
+	// await Promise.resolve(new A() / a / makeA()) / Promise.resolve(...) — identity peels
 	// under foreign same-leaf methods (same leaf as const a = await …; a.run()).
 	if obj.Type() == "await_expression" || obj.Type() == "call_expression" {
-		if t := jsPromiseResolveArgType(obj, content, typedLocals); t != "" {
+		if t := jsPromiseResolveArgType(obj, content, typedLocals, factories); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 	}
@@ -1526,7 +1529,8 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 // jsTypedLocals maps local names → concrete type leaf for ourReceivers
 // (const b = new Box() → "Box"). Also covers simple TS-style typed parameters
 // and Promise.resolve then callback params.
-func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) map[string]string {
+// factories maps same-file factory names → class leaf for Promise.resolve(makeA()).
+func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool, factories map[string]string) map[string]string {
 	out := map[string]string{}
 	if root == nil || len(ourReceivers) == 0 {
 		return out
@@ -1541,6 +1545,7 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 			// const box = new Box(); var box = new Box()
 			// const a = await Promise.resolve(new A())
 			// const a = await Promise.resolve(x) after const x = new A()
+			// const a = await Promise.resolve(makeA()) after function makeA(){return new A()}
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				child := n.Child(i)
 				if child.Type() != "variable_declarator" {
@@ -1553,8 +1558,8 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 				}
 				if ctor := jsNewExpressionType(valN, content); ourReceivers[ctor] {
 					out[ingest.NodeText(nameN, content)] = ctor
-				} else if t := jsPromiseResolveArgType(valN, content, out); ourReceivers[t] {
-					// await Promise.resolve(new A() / a) — resolved value is A.
+				} else if t := jsPromiseResolveArgType(valN, content, out, factories); ourReceivers[t] {
+					// await Promise.resolve(new A() / a / makeA()) — resolved value is A.
 					out[ingest.NodeText(nameN, content)] = t
 				}
 			}
@@ -1576,8 +1581,8 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 		case "formal_parameters":
 			// plain JS has no types; walk children for TS parameters
 		case "call_expression":
-			// Promise.resolve(new A() / a).then(a => a.run()) — bind then callback param.
-			jsBindPromiseThenParams(n, content, ourReceivers, out)
+			// Promise.resolve(new A() / a / makeA()).then(a => a.run()) — bind then callback param.
+			jsBindPromiseThenParams(n, content, ourReceivers, out, factories)
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
@@ -1612,14 +1617,149 @@ func jsNewExpressionType(n *grammar.Node, content []byte) string {
 	return ""
 }
 
+// jsSameFileFactoryReturns maps same-file factory names → class leaf recovered
+// from body-only `return new T()` / expression-body arrow `() => new T()`.
+// function makeA(){ return new A() } / const makeA = () => new A() /
+// const makeA = function(){ return new A() }. Mixed/non-new returns fail closed.
+// Same-file name → last wins (nested decls included when walked).
+func jsSameFileFactoryReturns(root *grammar.Node, content []byte) map[string]string {
+	out := map[string]string{}
+	if root == nil {
+		return out
+	}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		switch n.Type() {
+		case "function_declaration", "generator_function_declaration":
+			nameN := ingest.ChildByField(n, "name")
+			if nameN != nil && nameN.Type() == "identifier" {
+				name := ingest.NodeText(nameN, content)
+				if name != "" {
+					if t := jsFuncBodyNewReturn(n, content); t != "" {
+						out[name] = t
+					}
+				}
+			}
+		case "lexical_declaration", "variable_declaration":
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				child := n.Child(i)
+				if child == nil || child.Type() != "variable_declarator" {
+					continue
+				}
+				nameN := ingest.ChildByField(child, "name")
+				valN := ingest.ChildByField(child, "value")
+				if nameN == nil || nameN.Type() != "identifier" || valN == nil {
+					continue
+				}
+				switch valN.Type() {
+				case "arrow_function", "function_expression", "generator_function":
+					if t := jsFuncBodyNewReturn(valN, content); t != "" {
+						out[ingest.NodeText(nameN, content)] = t
+					}
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	return out
+}
+
+// jsFuncBodyNewReturn recovers T when every return in fn is `return new T()`
+// (or arrow expression body is `new T()`). Nested function bodies are skipped.
+// Zero, mixed, or non-new returns fail closed ("").
+func jsFuncBodyNewReturn(fn *grammar.Node, content []byte) string {
+	if fn == nil {
+		return ""
+	}
+	// Arrow expression body: () => new A()
+	if fn.Type() == "arrow_function" {
+		if body := ingest.ChildByField(fn, "body"); body != nil && body.Type() != "statement_block" {
+			return jsNewExpressionType(body, content)
+		}
+	}
+	body := ingest.ChildByField(fn, "body")
+	if body == nil || body.Type() != "statement_block" {
+		return ""
+	}
+	const fail = "-"
+	found := ""
+	saw := false
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() || found == fail {
+			return
+		}
+		switch n.Type() {
+		case "function_declaration", "generator_function_declaration",
+			"function_expression", "generator_function", "arrow_function",
+			"method_definition", "class_declaration", "class":
+			// Nested scopes: do not harvest their returns for the outer factory.
+			return
+		case "return_statement":
+			var expr *grammar.Node
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch == nil || ch.Type() == "return" || ch.Type() == ";" {
+					continue
+				}
+				expr = ch
+				break
+			}
+			t := jsNewExpressionType(expr, content)
+			if t == "" {
+				found = fail
+				return
+			}
+			if !saw {
+				found = t
+				saw = true
+			} else if found != t {
+				found = fail
+			}
+			return
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(body)
+	if !saw || found == fail {
+		return ""
+	}
+	return found
+}
+
+// jsFactoryCallReturnType recovers T from makeA() / makeA(...) when makeA is
+// listed in factories (same-file body return new T()). Callee must be a bare
+// identifier; member callees / unknown names fail closed.
+func jsFactoryCallReturnType(call *grammar.Node, content []byte, factories map[string]string) string {
+	if call == nil || call.Type() != "call_expression" || factories == nil {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "identifier" {
+		return ""
+	}
+	return factories[ingest.NodeText(fn, content)]
+}
+
 // jsPromiseResolveArgType recovers T from Promise.resolve(new T()) /
-// Promise.resolve(a) when a is a typed local / await Promise.resolve(...).
+// Promise.resolve(a) when a is a typed local / Promise.resolve(makeA()) when
+// makeA is a same-file factory returning new T() / await Promise.resolve(...).
 // Enables (await Promise.resolve(new A())).run(),
-// const a = new A(); Promise.resolve(a).then(x => x.run()), and
+// const a = new A(); Promise.resolve(a).then(x => x.run()),
+// Promise.resolve(makeA()).then(x => x.run()), and
 // const a = await Promise.resolve(new A()); a.run() under foreign same-leaf.
 // Non-Promise receivers / multi-arg / unknown args fail closed.
 // typedLocals maps local → type leaf (may be nil).
-func jsPromiseResolveArgType(n *grammar.Node, content []byte, typedLocals map[string]string) string {
+// factories maps factory name → class leaf (may be nil).
+func jsPromiseResolveArgType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -1634,7 +1774,7 @@ func jsPromiseResolveArgType(n *grammar.Node, content []byte, typedLocals map[st
 			arg = ch
 			break
 		}
-		return jsPromiseResolveArgType(arg, content, typedLocals)
+		return jsPromiseResolveArgType(arg, content, typedLocals, factories)
 	}
 	if n.Type() == "parenthesized_expression" {
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -1642,7 +1782,7 @@ func jsPromiseResolveArgType(n *grammar.Node, content []byte, typedLocals map[st
 			if ch.Type() == "(" || ch.Type() == ")" {
 				continue
 			}
-			return jsPromiseResolveArgType(ch, content, typedLocals)
+			return jsPromiseResolveArgType(ch, content, typedLocals, factories)
 		}
 		return ""
 	}
@@ -1692,15 +1832,21 @@ func jsPromiseResolveArgType(n *grammar.Node, content []byte, typedLocals map[st
 			return t
 		}
 	}
+	// Promise.resolve(makeA()) after function makeA(){ return new A() }.
+	if first.Type() == "call_expression" && factories != nil {
+		if t := jsFactoryCallReturnType(first, content, factories); t != "" {
+			return t
+		}
+	}
 	return ""
 }
 
 // jsBindPromiseThenParams types the first parameter of
-// Promise.resolve(new A() / a).then(x => …) / .then(function(x) { … }) when the
-// call receiver is Promise.resolve(...). Under foreign same-leaf methods,
+// Promise.resolve(new A() / a / makeA()).then(x => …) / .then(function(x) { … })
+// when the call receiver is Promise.resolve(...). Under foreign same-leaf methods,
 // only our-receiver resolved values bind so B is preserved.
 // out maps param name → type leaf.
-func jsBindPromiseThenParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, out map[string]string) {
+func jsBindPromiseThenParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, out, factories map[string]string) {
 	if call == nil || call.Type() != "call_expression" || out == nil {
 		return
 	}
@@ -1713,8 +1859,8 @@ func jsBindPromiseThenParams(call *grammar.Node, content []byte, ourReceivers ma
 		return
 	}
 	obj := ingest.ChildByField(fn, "object")
-	// Receiver must be Promise.resolve(new T() / typed local) (possibly parenthesized).
-	t := jsPromiseResolveArgType(obj, content, out)
+	// Receiver must be Promise.resolve(new T() / typed local / factory) (possibly parenthesized).
+	t := jsPromiseResolveArgType(obj, content, out, factories)
 	if !ourReceivers[t] {
 		return
 	}
