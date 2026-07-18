@@ -2260,7 +2260,8 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // plus unpack `xa, xb = astuple(box)` / `xa, xb = list(astuple(box))` /
 // `xa, *rest = astuple(box)` (per-slot field types; *rest of mixed tuple fails closed),
 // `sorted/min/max/groupby(items, key=lambda x: x.m())` / `items.sort(key=lambda x: x.m())` /
-// `nlargest/nsmallest(n, items, key=lambda x: x.m())` / `heapq.nlargest(...)` /
+// `nlargest/nsmallest(n, items, key=lambda x: x.m())` /
+// `nlargest/nsmallest(n, items, lambda x: x.m())` (positional key) / `heapq.nlargest(...)` /
 // `map/filter/takewhile/dropwhile/filterfalse(lambda x: x.m(), items)` /
 // `itertools.takewhile/groupby/...` — untyped unary lambda params from the iterable
 // element type (under foreign same-leaf).
@@ -3351,6 +3352,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			}
 		case "call":
 			// sorted/min/max/groupby/nlargest/nsmallest(..., key=lambda x: x.m()) /
+			// nlargest/nsmallest(n, items, lambda x: x.m()) (positional key) /
 			// items.sort(key=lambda x: x.m()) /
 			// map/filter/takewhile/dropwhile/filterfalse(lambda x: x.m(), items) —
 			// untyped unary lambda params from the iterable element type.
@@ -3420,11 +3422,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 }
 
 // pythonBindIterableLambdaParams types untyped lambda parameters when the call
-// is sorted/min/max/groupby/nlargest/nsmallest with key=lambda,
-// collection.sort(key=lambda), map/filter/takewhile/dropwhile/filterfalse with
-// a unary lambda, or reduce/accumulate with a bi-lambda, over a known iterable
-// element type of ourReceivers. Bare and module-qualified forms
-// (itertools./heapq./functools.) use the leaf callee name.
+// is sorted/min/max/groupby/nlargest/nsmallest with key=lambda (keyword or
+// nlargest/nsmallest positional 3rd arg), collection.sort(key=lambda),
+// map/filter/takewhile/dropwhile/filterfalse with a unary lambda, or
+// reduce/accumulate with a bi-lambda, over a known iterable element type of
+// ourReceivers. Bare and module-qualified forms (itertools./heapq./functools.)
+// use the leaf callee name.
 // Wrong-arity lambdas and non-lambda callables fail closed.
 // Foreign element types are not bound (same as for-loop targets).
 func pythonBindIterableLambdaParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, elemOf, egElems, typeOf map[string]string, out map[string]bool) {
@@ -3469,7 +3472,8 @@ func pythonBindIterableLambdaParams(call *grammar.Node, content []byte, ourRecei
 		}
 	case "nlargest", "nsmallest":
 		// nlargest(n, iterable[, key]) / heapq.nlargest(...) — 2nd positional is
-		// iterable; key= lambda param is that element type (n ignored).
+		// iterable; key lambda (key= keyword or 3rd positional) param is that
+		// element type (n ignored). Non-lambda key callables fail closed.
 		args, ok := pythonCallPositionalArgNodes(call)
 		if !ok || len(args) < 2 {
 			return
@@ -3478,7 +3482,13 @@ func pythonBindIterableLambdaParams(call *grammar.Node, content []byte, ourRecei
 		if !ourReceivers[et] {
 			return
 		}
-		if lam := pythonKeywordArgValue(call, content, "key"); lam != nil {
+		var lam *grammar.Node
+		if kw := pythonKeywordArgValue(call, content, "key"); kw != nil && kw.Type() == "lambda" {
+			lam = kw
+		} else if len(args) >= 3 && args[2].Type() == "lambda" {
+			lam = args[2]
+		}
+		if lam != nil {
 			pythonBindUnaryLambdaParam(lam, content, out)
 		}
 	case "map", "filter", "takewhile", "dropwhile", "filterfalse":
