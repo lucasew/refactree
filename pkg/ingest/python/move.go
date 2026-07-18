@@ -2217,8 +2217,8 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 						return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 					}
 				}
-				// make_a().run() after def make_a() -> A / @lru_cache def make_a() -> A —
-				// same-file annotated factory return (before Class() ctor path).
+				// make_a().run() after def make_a() -> A / def make_a(): return A() /
+				// @lru_cache def make_a() -> A — same-file factory return (before Class() ctor path).
 				if rt := funcReturns[name]; rt != "" {
 					return pythonRenameByTypeMaps(rt, ourReceivers, foreignReceivers, nil)
 				}
@@ -2730,9 +2730,12 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 
 // pythonSameFileFuncReturnTypes maps same-file function names to concrete return
 // type leaves from annotations: def make_a() -> A / @lru_cache def make_a() -> A.
-// Decorated definitions (lru_cache / functools.lru_cache / cache / etc.) peel
-// through to the nested function_definition. Nested functions inside bodies are
-// included (same-file name → last wins). Missing / non-simple returns fail closed.
+// When no return annotation is present, recovers T from body-only `return T()`
+// when every return in the function body is a call of the same bare identifier
+// (def make_a(): return A()). Decorated definitions (lru_cache / functools.lru_cache
+// / cache / etc.) peel through to the nested function_definition. Nested functions
+// inside bodies are included (same-file name → last wins). Missing / mixed /
+// non-simple returns fail closed.
 func pythonSameFileFuncReturnTypes(root *grammar.Node, content []byte) map[string]string {
 	out := map[string]string{}
 	if root == nil {
@@ -2746,11 +2749,18 @@ func pythonSameFileFuncReturnTypes(root *grammar.Node, content []byte) map[strin
 		switch n.Type() {
 		case "function_definition", "async_function_definition":
 			nameN := ingest.ChildByField(n, "name")
-			retN := ingest.ChildByField(n, "return_type")
-			if nameN != nil && nameN.Type() == "identifier" && retN != nil {
+			if nameN != nil && nameN.Type() == "identifier" {
 				name := ingest.NodeText(nameN, content)
-				if tn := pythonTypeName(retN, content); name != "" && tn != "" {
-					out[name] = tn
+				if name != "" {
+					retN := ingest.ChildByField(n, "return_type")
+					if retN != nil {
+						if tn := pythonTypeName(retN, content); tn != "" {
+							out[name] = tn
+						}
+					} else if tn := pythonFuncBodyReturnCtor(n, content); tn != "" {
+						// Body-only factory: def make_a(): return A()
+						out[name] = tn
+					}
 				}
 			}
 		}
@@ -2760,6 +2770,68 @@ func pythonSameFileFuncReturnTypes(root *grammar.Node, content []byte) map[strin
 	}
 	walk(root)
 	return out
+}
+
+// pythonFuncBodyReturnCtor recovers T when every return in fn's body is
+// `return T(...)` (call of a bare identifier). Nested function/class/lambda
+// bodies are skipped. Zero, mixed, or non-ctor returns fail closed ("").
+func pythonFuncBodyReturnCtor(fn *grammar.Node, content []byte) string {
+	if fn == nil {
+		return ""
+	}
+	body := ingest.ChildByField(fn, "body")
+	if body == nil {
+		return ""
+	}
+	const fail = "-"
+	found := ""
+	saw := false
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() || found == fail {
+			return
+		}
+		switch n.Type() {
+		case "function_definition", "async_function_definition", "class_definition", "lambda":
+			// Nested scopes: do not harvest their returns for the outer factory.
+			return
+		case "return_statement":
+			var expr *grammar.Node
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch == nil || ch.Type() == "return" {
+					continue
+				}
+				expr = ch
+				break
+			}
+			t := ""
+			if expr != nil && expr.Type() == "call" {
+				if f := ingest.ChildByField(expr, "function"); f != nil && f.Type() == "identifier" {
+					t = ingest.NodeText(f, content)
+				}
+			}
+			if t == "" {
+				found = fail
+				return
+			}
+			if !saw {
+				found = t
+				saw = true
+			} else if found != t {
+				found = fail
+			}
+			return
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(body)
+	if !saw || found == fail {
+		return ""
+	}
+	return found
 }
 
 func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string, map[string]string, map[string]string, map[string][]string, map[string]string, map[string]string, map[string]string, map[string]string) {
