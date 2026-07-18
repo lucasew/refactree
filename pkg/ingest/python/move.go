@@ -2145,6 +2145,8 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // (`for a in [A()]`, `for a in items` with `items: list[A]`,
 // `for a in items.copy()` / `for a in items or []`,
 // `for a in d.values()` / `for k, a in d.items()` with `d: dict[K, A]`,
+// `for item in d.items(): item[1]` / `for item in asdict(...).items(): item[1]`
+// (pairSlots; key untyped — same leaf as p = next(...items()); p[1]),
 // `for i, a in enumerate(items)` / `for a, b in zip(xs, ys)`,
 // `for a, b in zip(*[xs, ys])` / `for a, b in zip(*(xs, ys))`,
 // `for a, b in zip_longest(xs, ys)` / `for a, b in itertools.zip_longest(xs, ys)`,
@@ -2230,6 +2232,8 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // — same homogeneous-values gate (mixed fields fail closed),
 // `for k, x in asdict(box).items()` / `for k, x in d.items()` after d = asdict(box) /
 // vars / `__dict__` — same homogeneous-values gate (value slot only; key untyped),
+// `for item in asdict(box).items(): item[1]` / `for item in d.items(): item[1]` —
+// pairSlots (key untyped; same leaf as p = next(...items()); p[1]),
 // `xa, xb = asdict(box).values()` / `list(asdict(box).values())` / `d.values()` after
 // d = asdict(box) / vars / `__dict__` — declaration-order field types (dict preserves
 // order; same leaf as `xa, xb = astuple(box)` / `list(asdict(box).values())[i]`),
@@ -3199,6 +3203,13 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// enumerate has untyped index → pairSlots only (item[1] path).
 				// zip(*[xs, ys]) splat + identity wrappers via pythonPairIterSlotsOf.
 				if types := pythonPairIterSlotsOf(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+					pythonBindPairLoopTarget(ingest.NodeText(left, content), types, pairSlots, elemOf)
+					break
+				}
+				// for item in d.items() / asdict(...).items() / list(d.items()) —
+				// pair local (key untyped, value leaf); use item[1] / k, a = item.
+				// Same slots as p = next(...items()). Mixed asdict fields fail closed.
+				if types := pythonItemsViewPairSlots(right, content, elemOf, fieldOf); len(types) > 0 {
 					pythonBindPairLoopTarget(ingest.NodeText(left, content), types, pairSlots, elemOf)
 					break
 				}
@@ -4396,6 +4407,48 @@ func pythonItemsCallPairSlots(call *grammar.Node, content []byte, elemOf, fieldO
 		return nil
 	}
 	return []string{"", vt}
+}
+
+// pythonItemsViewPairSlots returns ["", valueType] for d.items() /
+// asdict(box).items() / vars(box).items() / box.__dict__.items() /
+// list/tuple/iter(...items()) when the value leaf is known (key untyped).
+// Used to bind pairSlots on for item in d.items() so item[1] / k, a = item type
+// (same leaf as p = next(...items())). Mixed asdict fields and non-items forms
+// fail closed (nil).
+func pythonItemsViewPairSlots(n *grammar.Node, content []byte, elemOf, fieldOf map[string]string) []string {
+	if n == nil {
+		return nil
+	}
+	// Peel identity wrappers that preserve items() pair yields: iter / list / tuple.
+	for {
+		if n == nil {
+			return nil
+		}
+		if n.Type() == "parenthesized_expression" {
+			n = pythonParenInner(n)
+			continue
+		}
+		if n.Type() != "call" {
+			break
+		}
+		wfn := ingest.ChildByField(n, "function")
+		name := pythonSimpleCalleeName(wfn, content)
+		if name != "iter" && name != "list" && name != "tuple" {
+			break
+		}
+		wargs, ok := pythonCallPositionalArgNodes(n)
+		if !ok || len(wargs) == 0 {
+			return nil
+		}
+		n = wargs[0]
+	}
+	if vt := pythonDictItemsValueType(n, content, elemOf); vt != "" {
+		return []string{"", vt}
+	}
+	if vt := pythonDictViewItemsHomogeneousValueType(n, content, fieldOf); vt != "" {
+		return []string{"", vt}
+	}
+	return nil
 }
 
 // pythonItemsCallSubscriptValueType returns the value leaf of
