@@ -1868,6 +1868,8 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	// (same leaf as box.a.run() / a = copy.copy(item); a.run()).
 	// next(iter(items)).run() / next(items).run() — iterable element (same leaf as
 	// a = next(iter(items)); a.run()). Default arg ignored (same as assignment).
+	// next(iter(astuple(box))).run() — first declaration-order field of the
+	// heterogeneous field tuple (same leaf as astuple(box)[0].run()).
 	// items.popleft().run() / d.get(k).run() / q.get().run() / items.pop().run() /
 	// list(items).pop().run() — collection/queue element accessors (same leaf as
 	// a = items.popleft(); a.run()). Unknown call receivers: unique-leaf only.
@@ -1888,8 +1890,13 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 				// next(iter(items)).run() / next(items).run() / next(reversed(items)).run()
 				// — before Class() ctor path (function is bare "next", not a class).
 				// Element type of the iterable arg (same path as assignment binding).
+				// next(iter(astuple(box))).run() — first field of heterogeneous
+				// astuple (not a homogeneous collection elemOf).
 				if name == "next" {
 					if et := pythonNextElemType(obj, content, elemOf, nil, typeOf); et != "" {
+						return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+					}
+					if et := pythonAstupleNextFirstField(obj, content, fieldOf); et != "" {
 						return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 					}
 				}
@@ -2271,6 +2278,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// a = next(iter(items)) / next(items) / next(x for x in items) /
 						// next(reversed(items)) — result type is the element type of
 						// the iterable arg (identity genexp preserves that type).
+						// a = next(iter(astuple(box))) — first declaration-order field
+						// of the heterogeneous field tuple (same leaf as astuple(box)[0]).
 						// pair = next(pairs) when pairs = zip/enumerate(...) — pair is a
 						// tuple (pairSlots + shared elemOf), not an element; use pair[i] /
 						// unpack / nested for a in pair.
@@ -2278,6 +2287,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							if types := pythonNextPairSlots(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
 								pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 							} else if et := pythonNextElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
+								out[lname] = true
+							} else if et := pythonAstupleNextFirstField(right, content, fieldOf); ourReceivers[et] {
 								out[lname] = true
 							}
 						}
@@ -2700,11 +2711,15 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					}
 					// a := next(iter(items)) / next(items) / next(x for x in items) /
 					// next(reversed(items)) /
+					// a := next(iter(astuple(box))) — first declaration-order field
+					// of the heterogeneous field tuple (same leaf as astuple(box)[0]).
 					// pair := next(pairs) when pairs is a pair-iter (pairSlots + shared elemOf).
 					if fname == "next" {
 						if types := pythonNextPairSlots(valueN, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
 							pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 						} else if et := pythonNextElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
+							out[lname] = true
+						} else if et := pythonAstupleNextFirstField(valueN, content, fieldOf); ourReceivers[et] {
 							out[lname] = true
 						}
 					}
@@ -4720,13 +4735,67 @@ func pythonExceptClauseIsStar(n *grammar.Node) bool {
 // items: list[A]; next(x for x in items) → A for identity genexps). Used for both
 // assignment (`a = next(...)`) and direct chains (`next(...).run()`). Fails closed
 // on splat args or empty call. Default arg is ignored (result may be union with
-// default at runtime; we still bind the element type).
+// default at runtime; we still bind the element type). Heterogeneous astuple field
+// tuples are handled separately by pythonAstupleNextFirstField (first field only;
+// not shared with choice/min which are not first-element).
 func pythonNextElemType(call *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
 	args, ok := pythonCallPositionalArgNodes(call)
 	if !ok || len(args) == 0 {
 		return ""
 	}
 	return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
+}
+
+// pythonAstupleNextFirstField recovers the first declaration-order field type from
+// next(astuple(box)) / next(iter(astuple(box))) / next(list(astuple(box))) /
+// next(tuple(astuple(box))) / dataclasses.astuple / astuple(replace(box)) forms.
+// next always yields the first tuple element — same leaf as astuple(box)[0].
+// Peels identity order-preserving wrappers iter/list/tuple only (not reversed).
+// Fails closed when the iterable is not an astuple chain or field 0 is unknown.
+// Intentionally not used for choice/min (not first-element semantics).
+func pythonAstupleNextFirstField(call *grammar.Node, content []byte, fieldOf map[string]string) string {
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) == 0 {
+		return ""
+	}
+	return pythonAstupleFirstFieldType(args[0], content, fieldOf)
+}
+
+// pythonAstupleFirstFieldType recovers fieldOf["@astuple.local.#0"] from an
+// expression that is astuple(local) / dataclasses.astuple(local) /
+// astuple(replace(local)) or an order-preserving wrapper of those
+// (iter/list/tuple). Same leaf as astuple(local)[0] / box.a for first field.
+func pythonAstupleFirstFieldType(n *grammar.Node, content []byte, fieldOf map[string]string) string {
+	if n == nil || fieldOf == nil {
+		return ""
+	}
+	if n.Type() == "parenthesized_expression" {
+		return pythonAstupleFirstFieldType(pythonParenInner(n), content, fieldOf)
+	}
+	if n.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil {
+		return ""
+	}
+	// Peel identity wrappers that preserve declaration order: iter / list / tuple.
+	// reversed would yield last-first and fails closed here.
+	name := pythonSimpleCalleeName(fn, content)
+	switch name {
+	case "iter", "list", "tuple":
+		args, ok := pythonCallPositionalArgNodes(n)
+		if !ok || len(args) == 0 {
+			return ""
+		}
+		return pythonAstupleFirstFieldType(args[0], content, fieldOf)
+	}
+	// astuple(box) / dataclasses.astuple(box) / list(astuple(box)) via ObjectLocal.
+	local := pythonAstupleObjectLocal(n, content)
+	if local == "" {
+		return ""
+	}
+	return fieldOf["@astuple."+local+".#0"]
 }
 
 // pythonMinMaxElemType recovers the element type of min(iterable) / max(iterable)
