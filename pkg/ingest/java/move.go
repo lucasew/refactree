@@ -1046,15 +1046,17 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 	//   ca.call().m() — Callable element (generic type arg)
 	//   fa.join().m() / fa.getNow(d).m() / fa.resultNow().m() — CompletableFuture
 	//   fn.apply(x).m() — Function/UnaryOperator/BiFunction result (R / T)
-	//   Objects.requireNonNull(x).m() — identity wrapper (type of x)
+	//   Objects.requireNonNull(x).m() / requireNonNullElse(x, d).m() /
+	//     requireNonNullElseGet(x, s).m() — identity wrappers (type of x)
 	//   qa.poll().m() / as.getFirst().m() / … — other collection accessors
 	//   ba.a().m() — record component accessor (compOf from record header)
 	if obj.Type() == "method_invocation" {
 		if et := javaCollectionAccessElemType(obj, content, elemOf, valOf, entryValOf, compOf); et != "" {
 			return javaRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 		}
-		// Objects.requireNonNull(a) when a is a typed local (A a) — identity
-		// preserves the local's type leaf under foreign same-leaf methods.
+		// Objects.requireNonNull(a) / requireNonNullElse(a, d) /
+		// requireNonNullElseGet(a, s) when a is a typed local (A a) — first-arg
+		// type leaf under foreign same-leaf methods.
 		if id := javaObjectsRequireNonNullArgIdent(obj, content); id != "" {
 			return javaRenameByTypeMaps(id, ourReceivers, foreignReceivers, typedLocals)
 		}
@@ -1243,11 +1245,13 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// / am.pollFirstEntry().getValue() / am.ceilingEntry(k).getValue()
 					// / ba.a() when ba is a record local with component type A
 					// / Objects.requireNonNull(new A()) / Objects.requireNonNull(as.get(0))
+					// / Objects.requireNonNullElse(new A(), d) / requireNonNullElseGet(...)
 					// / as[0] / (as)[0] when as is A[] (array element via elemOf)
 					out[name] = true
 				} else if id := javaObjectsRequireNonNullArgIdent(valN, content); id != "" && out[id] {
-					// var xa = Objects.requireNonNull(a) when a is already a typed local
-					// (A a formal / prior bind). Identity wrapper preserves a's type.
+					// var xa = Objects.requireNonNull(a) / requireNonNullElse(a, d) /
+					// requireNonNullElseGet(a, s) when a is already a typed local
+					// (A a formal / prior bind). First-arg type leaf preserved.
 					out[name] = true
 				} else if vt := javaEntryExprValueType(valN, content, elemOf, valOf, entryValOf); vt != "" {
 					// var ea = Map.entry(k, new A()) / am.firstEntry() /
@@ -3727,9 +3731,10 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	fa.getNow(d) → elemOf[fa] (CompletableFuture<A>; default does not change T)
 //	fn.apply(x) → valOf[fn] / elemOf[fn] (Function<T,R> R / UnaryOperator<T> T /
 //	  BiFunction<T,U,R> R; apply args do not change the result type leaf)
-//	Objects.requireNonNull(x[, msg]) → type of x (identity; msg does not change T)
-//	  (new A() / A.make() / as.get(i) / oa.get() / …; bare typed locals via
-//	  javaObjectsRequireNonNullArgIdent + typedLocals)
+//	Objects.requireNonNull(x[, msg]) / requireNonNullElse(x, d) /
+//	  requireNonNullElseGet(x, s) → type of x (first-arg leaf; msg/default/supplier
+//	  do not change T) (new A() / A.make() / as.get(i) / oa.get() / …; bare typed
+//	  locals via javaObjectsRequireNonNullArgIdent + typedLocals)
 //	Map.of(k, new A()).get(k) / Map.ofEntries(...).get(k) /
 //	  Collections.singletonMap(k, new A()).get(k) / Map.copyOf(m).get(k) → A
 //	  (map factory/pipeline value type; getOrDefault/remove/put/compute same V)
@@ -3943,10 +3948,11 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// Stream.min/max return Optional — bind via orElse/ifPresent on the pipeline,
 		// not as a bare var of the element type.
 		return javaCollectionsMinMaxElemType(val, obj, content, elemOf, valOf)
-	case "requireNonNull":
-		// Objects.requireNonNull(x[, msg]) returns x (identity). Message/supplier
-		// does not change the type leaf. Bare typed-local identifiers are handled
-		// via javaObjectsRequireNonNullArgIdent + typedLocals (no type-name map).
+	case "requireNonNull", "requireNonNullElse", "requireNonNullElseGet":
+		// Objects.requireNonNull(x[, msg]) / requireNonNullElse(x, d) /
+		// requireNonNullElseGet(x, s) return T of x (first arg). Message, default,
+		// and supplier do not change the type leaf. Bare typed-local identifiers
+		// are handled via javaObjectsRequireNonNullArgIdent + typedLocals.
 		return javaObjectsRequireNonNullElemType(val, obj, content, elemOf, valOf, entryValOf, compOf)
 	case "reduce":
 		// Stream.reduce(identity, accumulator[, combiner]) returns the identity type
@@ -4016,10 +4022,11 @@ func javaArrayAccessElemType(val *grammar.Node, content []byte, elemOf, valOf ma
 	return ""
 }
 
-// javaObjectsRequireNonNullElemType recovers T from Objects.requireNonNull(x[, msg])
-// when x's type is statically recoverable without a scalar local type map:
-// new T(...) / T.make() / cast / collection-accessor / field access. Bare typed
-// locals use javaObjectsRequireNonNullArgIdent instead.
+// javaObjectsRequireNonNullElemType recovers T from Objects.requireNonNull(x[, msg]),
+// requireNonNullElse(x, d), or requireNonNullElseGet(x, s) when x's type is
+// statically recoverable without a scalar local type map: new T(...) / T.make() /
+// cast / collection-accessor / field access. Bare typed locals use
+// javaObjectsRequireNonNullArgIdent instead.
 func javaObjectsRequireNonNullElemType(call, obj *grammar.Node, content []byte, elemOf, valOf, entryValOf, compOf map[string]string) string {
 	if call == nil || obj == nil {
 		return ""
@@ -4051,14 +4058,20 @@ func javaObjectsRequireNonNullElemType(call, obj *grammar.Node, content []byte, 
 }
 
 // javaObjectsRequireNonNullArgIdent returns the first-arg identifier of
-// Objects.requireNonNull(id[, msg]) when that arg is a bare identifier.
-// Empty when the call is not Objects.requireNonNull or the arg is not an id.
+// Objects.requireNonNull(id[, msg]) / requireNonNullElse(id, d) /
+// requireNonNullElseGet(id, s) when that arg is a bare identifier.
+// Empty when the call is not one of those Objects methods or the arg is not an id.
 func javaObjectsRequireNonNullArgIdent(call *grammar.Node, content []byte) string {
 	if call == nil || call.Type() != "method_invocation" {
 		return ""
 	}
 	nameN := ingest.ChildByField(call, "name")
-	if nameN == nil || ingest.NodeText(nameN, content) != "requireNonNull" {
+	if nameN == nil {
+		return ""
+	}
+	switch ingest.NodeText(nameN, content) {
+	case "requireNonNull", "requireNonNullElse", "requireNonNullElseGet":
+	default:
 		return ""
 	}
 	obj := ingest.ChildByField(call, "object")
