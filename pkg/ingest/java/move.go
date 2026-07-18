@@ -1762,11 +1762,19 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 					out[params[0]] = true
 					out[params[1]] = true
 				} else if method == "reduceValues" {
-					// 2-arg form only (threshold, BiFunction on V,V).
-					// 3-arg transformer form has BiFunction on U — fail closed.
-					if len(javaCallArgs(call)) == 2 {
+					// 2-arg form: BiFunction on V,V — both params are V.
+					// 3-arg form: BiFunction on U; identity transformer (a -> a)
+					// yields U=V so both reducer params are V. Non-identity fail closed.
+					callArgs := javaCallArgs(call)
+					switch len(callArgs) {
+					case 2:
 						out[params[0]] = true
 						out[params[1]] = true
+					case 3:
+						if javaIsIdentityLambda(callArgs[1], content) {
+							out[params[0]] = true
+							out[params[1]] = true
+						}
 					}
 				} else {
 					out[params[1]] = true
