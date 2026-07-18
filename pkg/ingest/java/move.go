@@ -1016,15 +1016,20 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 	if obj.Type() == "identifier" || obj.Type() == "type_identifier" {
 		return javaRenameByTypeMaps(ingest.NodeText(obj, content), ourReceivers, foreignReceivers, typedLocals)
 	}
-	// e.getValue().m() — Map.Entry local value type (entrySet for-var / forEach).
+	// e.getValue().m() / e.setValue(v).m() — Map.Entry local value type
+	// (entrySet for-var / forEach). setValue returns the previous V.
 	// Map.entry(k, new A()).getValue().m() — creation value type (self-contained).
-	// am.firstEntry().getValue().m() / am.pollFirstEntry().getValue().m() —
-	// map value type via valOf[am] (NavigableMap entry accessors).
+	// am.firstEntry().getValue().m() / am.pollFirstEntry().getValue().m() /
+	// am.firstEntry().setValue(v).m() — map value type via valOf[am]
+	// (NavigableMap entry accessors).
 	if obj.Type() == "method_invocation" {
 		nameN := ingest.ChildByField(obj, "name")
-		if nameN != nil && ingest.NodeText(nameN, content) == "getValue" {
-			if vt := javaEntryExprValueType(ingest.ChildByField(obj, "object"), content, nil, valOf, entryValOf); vt != "" {
-				return javaRenameByTypeMaps(vt, ourReceivers, foreignReceivers, nil)
+		if nameN != nil {
+			switch ingest.NodeText(nameN, content) {
+			case "getValue", "setValue":
+				if vt := javaEntryExprValueType(ingest.ChildByField(obj, "object"), content, nil, valOf, entryValOf); vt != "" {
+					return javaRenameByTypeMaps(vt, ourReceivers, foreignReceivers, nil)
+				}
 			}
 		}
 		// Unknown method receivers: unique-leaf only.
@@ -1092,11 +1097,12 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // Collections.unmodifiableMap/synchronizedMap/checkedMap(m) / singletonMap(k, new T()) /
 // Map.of(k, new T()) / Map.ofEntries(Map.entry(k, new T())) / Map.copyOf(m) →
 // same Map value typing for values/forEach/get.
-// entryValOf maps Map.Entry locals → value type leaf for e.getValue().m()
-// (for (var e : m.entrySet()) / m.entrySet().forEach(e -> …) / Map.Entry<K,A> e /
-// var ea = Map.entry(...) / var ea = am.firstEntry()).
+// entryValOf maps Map.Entry locals → value type leaf for e.getValue().m() /
+// e.setValue(v).m() (for (var e : m.entrySet()) / m.entrySet().forEach(e -> …) /
+// Map.Entry<K,A> e / var ea = Map.entry(...) / var ea = am.firstEntry()).
 // valOf maps Map locals → value type leaf (also returned for inline
-// am.firstEntry().getValue().m() under foreign same-leaf methods).
+// am.firstEntry().getValue().m() / am.firstEntry().setValue(v).m() under
+// foreign same-leaf methods).
 func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string, map[string]string) {
 	out := map[string]bool{}
 	entryValOf := map[string]string{}
@@ -1175,14 +1181,16 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// / qa.poll() / qa.peek() / qa.take() / da.takeFirst()/takeLast()
 					// / as.remove(0) / as.getFirst()
 					// / as.removeFirst() / as.removeLast()
-					// / e.getValue() when e is a Map.Entry local
+					// / e.getValue() / e.setValue(v) when e is a Map.Entry local
 					// / Map.entry(k, new A()).getValue() / am.firstEntry().getValue()
+					// / am.firstEntry().setValue(v) / am.lastEntry().setValue(v)
 					// / am.pollFirstEntry().getValue() / am.ceilingEntry(k).getValue()
 					out[name] = true
 				} else if vt := javaEntryExprValueType(valN, content, elemOf, valOf, entryValOf); vt != "" {
 					// var ea = Map.entry(k, new A()) / am.firstEntry() /
 					// am.pollLastEntry() / am.floorEntry(k) — Entry of V;
-					// track value T for later ea.getValue().m() (entry is not A itself).
+					// track value T for later ea.getValue().m() / ea.setValue(v).m()
+					// (entry is not A itself).
 					entryValOf[name] = vt
 				} else if et := javaStreamPipelineElemType(valN, content, elemOf, valOf); et != "" {
 					// var list = as.stream().toList() / collect(Collectors.toList()/toSet()) /
@@ -3456,9 +3464,10 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	  (Optional<A>; also findFirst().orElse / findFirst().orElseThrow)
 //	Collections.min(as) / Collections.max(as[, cmp]) → elemOf[as]
 //	stream.reduce(identity, op[, combiner]) → stream element type (returns T/U)
-//	e.getValue()              → entryValOf[e] (Map.Entry local from entrySet)
+//	e.getValue() / e.setValue(v) → entryValOf[e] (Map.Entry; setValue returns previous V)
 //	Map.entry(k, new T()).getValue() → T
 //	am.firstEntry().getValue() / am.lastEntry().getValue() → valOf[am]
+//	am.firstEntry().setValue(v) / am.lastEntry().setValue(v) → valOf[am]
 //	am.pollFirstEntry()/pollLastEntry()/ceilingEntry(k)/… .getValue() → valOf[am]
 //
 // Optional.get() also works when Optional<A> is tracked in elemOf (single type arg).
@@ -3545,9 +3554,11 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 			}
 		}
 		return ""
-	case "getValue":
+	case "getValue", "setValue":
 		// e.getValue() — Map.Entry local (entrySet for-var / forEach / var ea = …).
-		// Map.entry(k, new T(...)).getValue() / am.firstEntry().getValue() — same V.
+		// e.setValue(v) — returns previous V (same value type leaf as getValue).
+		// Map.entry(k, new T(...)).getValue() / am.firstEntry().getValue() —
+		// am.firstEntry().setValue(v) / am.lastEntry().setValue(v) — same V.
 		return javaEntryExprValueType(obj, content, elemOf, valOf, entryValOf)
 	case "next", "previous", "nextElement":
 		// it.next() / as.iterator().next() — element of iterator or pipeline.
