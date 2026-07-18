@@ -3565,6 +3565,8 @@ func javaMapOfEntriesValueType(call *grammar.Node, content []byte) string {
 //	e                         → entryValOf[e] (Entry local from entrySet / var)
 //	(Map.Entry<K,V>) e        → V (generic Entry cast; single-arg casts peel value)
 //	Map.entry(k, new T(...))  → T (creation value; key ignored)
+//	new AbstractMap.SimpleEntry<>(k, new T(...)) → T (same V leaf as Map.entry)
+//	new AbstractMap.SimpleImmutableEntry<>(k, new T(...)) → T
 //	am.firstEntry()           → valOf[am] (NavigableMap entry endpoints)
 //	am.lastEntry()            → valOf[am]
 //	am.pollFirstEntry() / am.pollLastEntry() → valOf[am]
@@ -3574,8 +3576,8 @@ func javaMapOfEntriesValueType(call *grammar.Node, content []byte) string {
 //	Optional.of(entry).get() / ofNullable(entry).orElseThrow() → V of entry
 //
 // Used for e.getValue() / ((Map.Entry<K,A>) e).getValue() / var ea = Map.entry(...) /
-// var ea = (Map.Entry<K,A>) e / var ea = am.firstEntry() /
-// var ea = m.entrySet().iterator().next() /
+// var ea = new AbstractMap.SimpleEntry<>(...) / var ea = (Map.Entry<K,A>) e /
+// var ea = am.firstEntry() / var ea = m.entrySet().iterator().next() /
 // var ea = m.entrySet().stream().findFirst().get() so method rename hits value
 // call sites under foreign same-leaf methods.
 // Unknown shapes fail closed.
@@ -3615,6 +3617,11 @@ func javaEntryExprValueType(obj *grammar.Node, content []byte, elemOf, valOf, en
 			return javaEntryExprValueType(val, content, elemOf, valOf, entryValOf)
 		}
 		return ""
+	case "object_creation_expression":
+		// new AbstractMap.SimpleEntry<>(k, new T(...)) /
+		// new AbstractMap.SimpleImmutableEntry<>(k, new T(...)) —
+		// same V leaf as Map.entry (constructor value arg / declared type args).
+		return javaSimpleEntryCreationValueType(obj, content)
 	case "method_invocation":
 		nameN := ingest.ChildByField(obj, "name")
 		if nameN == nil {
@@ -3744,6 +3751,48 @@ func javaMapEntryCreationValueType(call *grammar.Node, content []byte) string {
 		return ""
 	}
 	return javaTypeName(typeN, content)
+}
+
+// javaSimpleEntryCreationValueType recovers V from
+// new AbstractMap.SimpleEntry<>(k, new T(...)) /
+// new AbstractMap.SimpleImmutableEntry<>(k, new T(...)) /
+// new SimpleEntry<>(k, new T(...)) (same-leaf Map.Entry implementations).
+// Prefers declared type args when present; diamond/raw recover V from the second
+// constructor arg when it is new T(...). Other types / arities / non-creation
+// values fail closed.
+func javaSimpleEntryCreationValueType(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "object_creation_expression" {
+		return ""
+	}
+	typeN := ingest.ChildByField(call, "type")
+	if typeN == nil {
+		return ""
+	}
+	// new AbstractMap.SimpleEntry<K,V>(...) — V from declared type args.
+	if vt := javaMapEntryDeclaredValueType(typeN, content); vt != "" {
+		return vt
+	}
+	// Diamond / raw: only SimpleEntry / SimpleImmutableEntry.
+	switch javaTypeName(typeN, content) {
+	case "SimpleEntry", "SimpleImmutableEntry":
+		// ok
+	default:
+		return ""
+	}
+	// Second constructor arg is the value (key first); same leaf as Map.entry.
+	args := javaCallArgs(call)
+	if len(args) != 2 {
+		return ""
+	}
+	arg := args[1]
+	if arg.Type() != "object_creation_expression" {
+		return ""
+	}
+	argType := ingest.ChildByField(arg, "type")
+	if argType == nil {
+		return ""
+	}
+	return javaTypeName(argType, content)
 }
 
 // javaMapCopyOfValueType recovers V from Map.copyOf(m): value type of the first
@@ -3922,13 +3971,18 @@ func javaEntrySetPipelineValueType(obj *grammar.Node, content []byte, elemOf, va
 	}
 }
 
-// javaMapEntryDeclaredValueType recovers V from Map.Entry<K,V> / Entry<K,V> type nodes.
-// Used for for (Map.Entry<K,A> e : …) and Map.Entry locals — value type for getValue().
+// javaMapEntryDeclaredValueType recovers V from Map.Entry<K,V> / Entry<K,V> /
+// AbstractMap.SimpleEntry<K,V> / SimpleImmutableEntry<K,V> type nodes.
+// Used for for (Map.Entry<K,A> e : …), Map.Entry locals, and SimpleEntry locals —
+// value type for getValue().
 func javaMapEntryDeclaredValueType(typeN *grammar.Node, content []byte) string {
 	if typeN == nil {
 		return ""
 	}
-	if javaTypeName(typeN, content) != "Entry" {
+	switch javaTypeName(typeN, content) {
+	case "Entry", "SimpleEntry", "SimpleImmutableEntry":
+		// ok — Map.Entry and its AbstractMap concrete same-leaf implementations.
+	default:
 		return ""
 	}
 	args := javaTypeArgNames(typeN, content)
@@ -4116,6 +4170,8 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	stream.reduce(identity, op[, combiner]) → stream element type (returns T/U)
 //	e.getValue() / e.setValue(v) → entryValOf[e] (Map.Entry; setValue returns previous V)
 //	Map.entry(k, new T()).getValue() → T
+//	new AbstractMap.SimpleEntry<>(k, new T()).getValue() → T
+//	new AbstractMap.SimpleImmutableEntry<>(k, new T()).getValue() → T
 //	am.firstEntry().getValue() / am.lastEntry().getValue() → valOf[am]
 //	am.firstEntry().setValue(v) / am.lastEntry().setValue(v) → valOf[am]
 //	am.pollFirstEntry()/pollLastEntry()/ceilingEntry(k)/… .getValue() → valOf[am]
