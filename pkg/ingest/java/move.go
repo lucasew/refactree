@@ -1980,6 +1980,8 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // Arrays.asList(as) / Arrays.asList(new A[]{...}) → "A" (List of first-arg array
 // elements; same first-arg peel as Arrays.stream when not homogeneous new T(...)),
 // Collections.singletonList(new A()) / Collections.singleton(new A()) → "A",
+// CompletableFuture.completedFuture(new A()) → "A" (CF of T; enables
+// completedFuture(new A()).join() / var f = completedFuture(new A()); f.join()),
 // Collections.nCopies(n, new A()) → "A",
 // Collections.unmodifiableList/Set/Collection(as) / synchronizedList/Set/Collection(as) /
 // checkedList/Set/Collection(as, …) → elemOf[as],
@@ -2248,12 +2250,17 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// Map view receivers (descendingMap/headMap/…) recover K via the key
 			// pipeline (dual of values → javaMapPipelineValueType).
 			return javaMapPipelineKeyType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
-		case "of", "asList", "ofNullable", "singletonList", "singleton":
+		case "of", "asList", "ofNullable", "singletonList", "singleton", "completedFuture":
 			// List.of(new A()) / Stream.of(new A(), new A()) / Arrays.asList(new A())
 			// / Set.of(new A()) / Optional.of(new A()) / Optional.ofNullable(new A())
 			// / Stream.ofNullable(new A())
 			// / Collections.singletonList(new A()) / Collections.singleton(new A())
+			// / CompletableFuture.completedFuture(new A())
 			// — element type from homogeneous new T(...) args.
+			// Enables completedFuture(new A()).join().m() / get() / getNow(d) /
+			// resultNow() and var f = completedFuture(new A()); f.join().m() under
+			// foreign same-leaf methods (javaStaticCollectionOfElemType already peels
+			// completedFuture; wire it into the pipeline switch).
 			// Arrays.asList(as) / Arrays.asList(new A[]{...}) — when args are not
 			// homogeneous creations, peel first-arg array element type (same path as
 			// Arrays.stream / copyOf). List/Set.of stay creation-only.
@@ -4576,6 +4583,8 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	ca.call() → elemOf[ca] (Callable<A>; zero-arg call returns V)
 //	fa.join() / fa.resultNow() → elemOf[fa] (CompletableFuture<A>; zero-arg)
 //	fa.getNow(d) → elemOf[fa] (CompletableFuture<A>; default does not change T)
+//	CompletableFuture.completedFuture(new A()).join() / get() / getNow(d) / resultNow() → A
+//	  (factory pipeline peel; same leaf as var f = completedFuture(new A()); f.join())
 //	fa.thenApply(a -> a).join() / getNow(d) / resultNow() → T (identity mapper only;
 //	  type-changing thenApply mappers fail closed — same shapes as Optional.map)
 //	fa.applyToEither(other, a -> a).join() / getNow(d) / resultNow() → T (identity
