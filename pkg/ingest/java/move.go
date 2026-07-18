@@ -3565,15 +3565,18 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 				return elemOf[id]
 			}
 		}
-		// Optional.get() (zero-arg) and List.get(i) on factory/pipeline receivers:
+		// Optional.get() (zero-arg) and List element accessors on factory/pipeline
+		// receivers:
 		//   as.stream().findFirst().get() / as.findAny().get() /
 		//   Optional.of(new A()).get() / Optional.ofNullable(new A()).get()
 		//   List.of(new A()).get(0) / Arrays.asList(new A()).get(0) /
 		//   Collections.singletonList(new A()).get(0) / as.stream().toList().get(0)
+		//   List.of(new A()).getFirst() / getLast() (Java 21 SequencedCollection)
 		// Pipeline typing already treats findFirst/findAny/Optional.of/List.of as T.
 		// Map.get(k) on non-list pipelines fails closed (Map.of not in static-collection
 		// of; toMap collect fails closed for element pipeline).
-		if method == "get" {
+		switch method {
+		case "get", "getFirst", "getLast":
 			return javaStreamPipelineElemType(obj, content, elemOf, valOf)
 		}
 		return ""

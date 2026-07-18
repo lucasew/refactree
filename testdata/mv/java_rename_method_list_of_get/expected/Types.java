@@ -23,6 +23,12 @@ class Uses {
     return xa.execute() + xb.run();
   }
 
+  public static int useListOfGetFirstLast() {
+    var xa = List.of(new A()).getFirst();
+    var xb = List.of(new B()).getLast();
+    return xa.execute() + xb.run();
+  }
+
   public static int useArraysAsListGet() {
     var xa = Arrays.asList(new A()).get(0);
     var xb = Arrays.asList(new B()).get(0);
@@ -44,6 +50,12 @@ class Uses {
   public static int useListOfMultiGet() {
     var xa = List.of(new A(), new A()).get(1);
     var xb = List.of(new B(), new B()).get(1);
+    return xa.execute() + xb.run();
+  }
+
+  public static int useListCopyOfGet(List<A> as, List<B> bs) {
+    var xa = List.copyOf(as).get(0);
+    var xb = List.copyOf(bs).get(0);
     return xa.execute() + xb.run();
   }
 }
