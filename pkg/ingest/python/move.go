@@ -1916,6 +1916,7 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `for a in set(items)` / `for a in frozenset(items)`,
 // `for a in filter(pred, items)` / `for a in map(A, names)`,
 // `for a in chain(xs, ys)` / `for a in itertools.chain(xs, ys)`,
+// `for a in merge(xs, ys)` / `for a in heapq.merge(xs, ys)` (key/reverse ignored),
 // `for a in islice(xs, n)` / `for a in itertools.islice(xs, n)`,
 // `for a in accumulate(xs)` / `for a in itertools.accumulate(xs)`,
 // `for a in cycle(xs)` / `for a in itertools.cycle(xs)`,
@@ -2315,6 +2316,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// for a in reversed/sorted/list/iter(items) /
 			// for a in filter(pred, items) / for a in map(A, names) /
 			// for a in chain/islice/accumulate/cycle / itertools.chain/islice/accumulate/cycle /
+			// for a in merge / heapq.merge (shared elem type; key/reverse ignored) /
 			// for a in repeat(item) / itertools.repeat(item) (object type, not iterable) /
 			// for a in starmap(A, pairs) / itertools.starmap(A, pairs) /
 			// for a in chain.from_iterable / itertools.chain.from_iterable /
@@ -2927,6 +2929,7 @@ func pythonSubscriptElemType(sub *grammar.Node, content []byte, elemOf, egElems,
 // filter (2nd arg iterable; pred does not change element type),
 // map when the first arg is a Class identifier (map(A, xs) → A),
 // chain / itertools.chain (all args agree on element type),
+// merge / heapq.merge (all args agree on element type; key/reverse ignored),
 // chain.from_iterable / itertools.chain.from_iterable (flatten one level;
 // arg is a list/tuple of iterables that agree on element type),
 // islice / itertools.islice (1st arg iterable; start/stop/step ignored),
@@ -3020,6 +3023,11 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 				// chain(*iterables) from itertools — shared element type when
 				// all args agree; any untyped or mismatched arg fails closed.
 				return pythonChainElemType(right, content, elemOf, egElems, typeOf)
+			case "merge":
+				// merge(*iterables[, key, reverse]) from heapq — shared element
+				// type when all positional args agree (same as chain); key/reverse
+				// kwargs ignored.
+				return pythonChainElemType(right, content, elemOf, egElems, typeOf)
 			case "islice", "accumulate", "cycle", "compress":
 				// islice(iterable, stop) / islice(iterable, start, stop[, step])
 				// accumulate(iterable[, func, *, initial])
@@ -3072,6 +3080,7 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		// itertools.cycle(...) / itertools.compress(...) /
 		// itertools.repeat(...) / itertools.starmap(...) /
 		// itertools.takewhile/dropwhile/filterfalse(...) — same as bare helpers.
+		// heapq.merge — same as bare merge (shared elem type across args).
 		// heapq.nlargest / heapq.nsmallest — same as bare nlargest/nsmallest.
 		// random.choices / random.sample — same as bare choices/sample.
 		// collections.deque(xs) / collections.Counter(xs) — same as bare forms.
@@ -3157,6 +3166,17 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 						return ""
 					}
 					return pythonIterableElemType(args[1], content, elemOf, egElems, typeOf)
+				case "merge":
+					// heapq.merge(*iterables[, key, reverse]) — shared element type
+					// when all positional args agree (same as chain); key/reverse ignored.
+					objN := ingest.ChildByField(fn, "object")
+					if objN == nil || objN.Type() != "identifier" {
+						return ""
+					}
+					if ingest.NodeText(objN, content) != "heapq" {
+						return ""
+					}
+					return pythonChainElemType(right, content, elemOf, egElems, typeOf)
 				case "nlargest", "nsmallest":
 					// heapq.nlargest(n, iterable[, key]) / heapq.nsmallest(...)
 					// — element type of 2nd positional arg (n/key ignored).
