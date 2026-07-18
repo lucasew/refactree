@@ -2193,12 +2193,13 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// element type (range views; bounds/inclusivity args do not change E).
 			// CompletableFuture.whenComplete / whenCompleteAsync / copy /
 			// toCompletableFuture / orTimeout / completeOnTimeout / exceptionally /
-			// exceptionallyCompose / minimalCompletionStage — always return the
-			// same result T by API signature (side-effect / timeout / recovery /
-			// Executor args do not change T). Enables whenComplete(...).join() /
-			// whenCompleteAsync(...).join() / copy().join() under foreign
-			// same-leaf methods. Type-changing stages (thenApply/handle/…) stay
-			// on their own identity/rewrap peels.
+			// exceptionallyAsync / exceptionallyCompose / exceptionallyComposeAsync /
+			// minimalCompletionStage — always return the same result T by API
+			// signature (side-effect / timeout / recovery / Executor args do not
+			// change T). Enables whenComplete(...).join() /
+			// whenCompleteAsync(...).join() / exceptionallyAsync(...).join() /
+			// copy().join() under foreign same-leaf methods. Type-changing stages
+			// (thenApply/handle/…) stay on their own identity/rewrap peels.
 			// Optional.or(Supplier) always returns Optional of the same T by API
 			// signature (alternative Optional supplier does not change T).
 			// Enables or(...).ifPresent / or(...).orElse / var o2 = or(...);
@@ -2207,7 +2208,9 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			"descendingSet", "headSet", "tailSet", "subSet",
 			"whenComplete", "whenCompleteAsync", "copy", "toCompletableFuture",
 			"orTimeout", "completeOnTimeout",
-			"exceptionally", "exceptionallyCompose", "minimalCompletionStage",
+			"exceptionally", "exceptionallyAsync",
+			"exceptionallyCompose", "exceptionallyComposeAsync",
+			"minimalCompletionStage",
 			"or":
 			recv := ingest.ChildByField(obj, "object")
 			// Arrays.stream(arr[, from, to]) — element type from first arg, not
