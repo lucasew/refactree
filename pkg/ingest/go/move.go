@@ -3160,7 +3160,7 @@ func compositeLiteralTypeName(n *grammar.Node, content []byte) string {
 
 // findComplexOperandSelectorEdits rewrites recv.Method when recv is not a bare
 // identifier: v.(T).M, (v.(T)).M, xs[i].M, Make().M, T{}.M / &T{}.M, (*T).M,
-// (<-ch).M (channel receive payload).
+// new(T).M, getA().M, (*pa).M, (<-ch).M (channel receive payload).
 //
 // When foreign same-leaf methods exist, only rewrite when the operand type is
 // known and not a foreign receiver (same filter as identifier selectors).
@@ -3179,6 +3179,9 @@ func findComplexOperandSelectorEdits(file string, content []byte, oldLeaf, newLe
 	// feed short-var / inline index too.
 	funcColl := sameFileFuncCollectionResults(pf.Root, content)
 	indexElemType := collectionIndexElemTypeFunc(pf.Root, content, funcColl)
+	// new(T).M / getA().M / (*pa).M under foreign same-leaf methods.
+	funcResults := sameFileFuncResultTypes(pf.Root, content)
+	valueType := goIdentTypeAtFunc(pf.Root, content, funcResults)
 
 	uniqueLeaf := len(foreignReceivers) == 0
 	var edits []ingest.Edit
@@ -3192,7 +3195,7 @@ func findComplexOperandSelectorEdits(file string, content []byte, oldLeaf, newLe
 			field := ingest.ChildByField(n, "field")
 			if field != nil && ingest.NodeText(field, content) == oldLeaf && operand != nil && !goOperandIsBareIdent(operand) {
 				ok := false
-				if typ := goComplexOperandType(operand, content, indexElemType, funcColl); typ != "" {
+				if typ := goComplexOperandType(operand, content, indexElemType, valueType, funcColl, funcResults); typ != "" {
 					typ = strings.TrimPrefix(typ, "*")
 					if ourReceivers[typ] {
 						ok = true
@@ -3219,6 +3222,73 @@ func findComplexOperandSelectorEdits(file string, content []byte, oldLeaf, newLe
 	}
 	walk(pf.Root)
 	return edits
+}
+
+// goIdentTypeAtFunc returns the concrete type of a named local/param/receiver
+// covering byte offset at (innermost scope wins). Same bindings as
+// selectorCallTargetTypeFunc; used for (*pa).M when pa is typed.
+func goIdentTypeAtFunc(root *grammar.Node, content []byte, funcResults map[string][]string) func(name string, at uint32) (string, bool) {
+	if root == nil {
+		return func(string, uint32) (string, bool) { return "", false }
+	}
+	var bindings []identTypeBinding
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil {
+			return
+		}
+		switch n.Type() {
+		case "method_declaration":
+			recvType := methodDeclReceiverType(n, content)
+			recvName := methodDeclReceiverName(n, content)
+			if recvType != "" && recvName != "" {
+				bindings = append(bindings, identTypeBinding{n.StartByte(), n.EndByte(), recvName, recvType})
+			}
+			rangeSrc := map[string]rangeSourceInfo{}
+			if params := ingest.ChildByField(n, "parameters"); params != nil {
+				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &bindings, rangeSrc)
+			}
+			collectResultParameterBindings(n, content, &bindings, rangeSrc)
+			if body := ingest.ChildByField(n, "body"); body != nil {
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults)
+			}
+		case "function_declaration", "func_literal":
+			rangeSrc := map[string]rangeSourceInfo{}
+			if params := ingest.ChildByField(n, "parameters"); params != nil {
+				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &bindings, rangeSrc)
+			}
+			collectResultParameterBindings(n, content, &bindings, rangeSrc)
+			if body := ingest.ChildByField(n, "body"); body != nil {
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults)
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	return func(name string, at uint32) (string, bool) {
+		if name == "" || name == "_" {
+			return "", false
+		}
+		var best *identTypeBinding
+		for i := range bindings {
+			b := &bindings[i]
+			if b.name != name {
+				continue
+			}
+			if at < b.start || at >= b.end {
+				continue
+			}
+			if best == nil || (b.end-b.start) < (best.end-best.start) {
+				best = b
+			}
+		}
+		if best == nil {
+			return "", false
+		}
+		return best.typ, true
+	}
 }
 
 // goOperandIsBareIdent reports whether n is a plain identifier. Parenthesized
@@ -3652,9 +3722,10 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 
 // goComplexOperandType returns a type name for operands we can resolve without
 // full type inference: type assert/convert, composite lit, &T{}, (*T), paren,
-// and index expressions (as[0] / m[k]) when indexElemType knows the collection.
-// indexElemType / funcColl may be nil when collection typing is unavailable.
-func goComplexOperandType(n *grammar.Node, content []byte, indexElemType func(name string, at uint32) (string, bool), funcColl map[string][]rangeSourceInfo) string {
+// new(T), same-file getA(), (*pa) via valueType, and index expressions
+// (as[0] / m[k]) when indexElemType knows the collection.
+// indexElemType / valueType / funcColl / funcResults may be nil when unavailable.
+func goComplexOperandType(n *grammar.Node, content []byte, indexElemType, valueType func(name string, at uint32) (string, bool), funcColl map[string][]rangeSourceInfo, funcResults map[string][]string) string {
 	if n == nil {
 		return ""
 	}
@@ -3673,11 +3744,43 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType func(na
 			if ch.Type() == "(" || ch.Type() == ")" {
 				continue
 			}
-			return goComplexOperandType(ch, content, indexElemType, funcColl)
+			return goComplexOperandType(ch, content, indexElemType, valueType, funcColl, funcResults)
 		}
 	case "type_assertion_expression", "type_conversion_expression":
 		if t := ingest.ChildByField(n, "type"); t != nil {
 			return typeNameFromTypeNode(t, content)
+		}
+	case "call_expression":
+		// new(T).M — allocated value is *T; methods promote, type name is T.
+		// Under foreign same-leaf methods, a := new(T); a.M already peels via
+		// typeNameFromRHS; inline new(T).M must recover T from the type arg.
+		fn := ingest.ChildByField(n, "function")
+		if fn != nil && ingest.NodeText(fn, content) == "new" {
+			if args := ingest.ChildByField(n, "arguments"); args != nil {
+				for i := uint32(0); i < args.ChildCount(); i++ {
+					c := args.Child(i)
+					if c == nil || c.Type() == "(" || c.Type() == ")" || c.Type() == "," {
+						continue
+					}
+					if t := concreteNamedType(c, content); t != "" {
+						return t
+					}
+					// new((*T)) / parenthesized type args.
+					if t := typeNameFromTypeNode(c, content); t != "" {
+						return t
+					}
+				}
+			}
+			return ""
+		}
+		// getA().M — same-file helper with a single concrete result (*A / A).
+		// Collection results (getA() []*A) are not method receivers here;
+		// those go through index (getA()[0].M). Multi-result calls cannot
+		// appear as a lone value (compile error).
+		if fn != nil && fn.Type() == "identifier" && len(funcResults) > 0 {
+			if types := funcResults[ingest.NodeText(fn, content)]; len(types) == 1 && types[0] != "" {
+				return types[0]
+			}
 		}
 	case "unary_expression":
 		// (<-ch).M — channel receive payload type (same leaf as a := <-ch).
@@ -3704,7 +3807,7 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType func(na
 			}
 			return ""
 		}
-		// (*T).M method expressions where the operand is not a composite.
+		// (*pa).M — typed local/param; (*T).M method expression when unbound.
 		var starIdent string
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			ch := n.Child(i)
@@ -3712,11 +3815,17 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType func(na
 				starIdent = ingest.NodeText(ch, content)
 				continue
 			}
-			if t := goComplexOperandType(ch, content, indexElemType, funcColl); t != "" {
+			if t := goComplexOperandType(ch, content, indexElemType, valueType, funcColl, funcResults); t != "" {
 				return t
 			}
 		}
 		if starIdent != "" {
+			if valueType != nil {
+				if t, ok := valueType(starIdent, n.StartByte()); ok {
+					return t
+				}
+			}
+			// (*T).M method expression — identifier is the type name.
 			return strings.TrimPrefix(starIdent, "*")
 		}
 	case "pointer_type", "type_identifier":
