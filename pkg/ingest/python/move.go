@@ -1902,10 +1902,16 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 		return len(foreignReceivers) == 0
 	}
 	// box["a"].run() — TypedDict/record string-key value (fieldOf).
+	// asdict(box)["a"].run() / vars(box)["a"].run() / box.__dict__["a"].run() —
+	// dict-view field keys of first arg / object (same leaf as d = asdict(box);
+	// d["a"].run()).
 	// items[0].run() / d["k"].run() / list(items)[0].run() — collection subscript
 	// element (same leaf as a = items[0]; a.run()). Slices fail closed.
 	if obj.Type() == "subscript" {
 		if ft := pythonRecordKeyAccessType(obj, content, fieldOf); ft != "" {
+			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
+		}
+		if ft := pythonDictViewKeyAccessType(obj, content, fieldOf); ft != "" {
 			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 		}
 		// box[0].run() — namedtuple positional field (fieldOf["box.#0"]).
@@ -2080,8 +2086,11 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `d = asdict(box)` / `dataclasses.asdict(box)` / walrus — field keys of the
 // first positional arg (fieldOf for `d["a"].run()` / `d.get("a").run()` under
 // foreign same-leaf methods; asdict yields a dict of field values),
+// plus direct chains `asdict(box)["a"].run()` / `xa = asdict(box)["a"]`,
 // `d = vars(box)` / walrus — same field-key binding (vars yields obj.__dict__),
+// plus direct `vars(box)["a"].run()` / `xa = vars(box)["a"]`,
 // `d = box.__dict__` / walrus — same field-key binding (instance attribute dict),
+// plus direct `box.__dict__["a"].run()` / `xa = box.__dict__["a"]`,
 // `t = astuple(box)` / `dataclasses.astuple(box)` / walrus — ordered index
 // slots of the first positional arg (fieldOf["t.#0"] for `t[0].run()`; astuple
 // yields a tuple of field values in declaration order, not named keys).
@@ -2425,12 +2434,20 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// pair = pairs[0] / pair = list(zip(...))[0] — index into pair-iter binds
 				// pairSlots (+ elemOf when slots share type, for nested for/next).
 				// xa = box["a"] — TypedDict/record string-key value (fieldOf).
+				// xa = asdict(box)["a"] / vars(box)["a"] / box.__dict__["a"] — dict-view
+				// field keys (same leaf as d = asdict(box); xa = d["a"]).
 				// Slices (items[1:3]) fail closed (sequence, not element).
 				if right != nil && right.Type() == "subscript" {
 					if types := pythonPairSlotsOf(right, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots); len(types) > 0 {
 						// Foreign slots too — shadow prior same-name pair locals.
 						pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 					} else if ft := pythonRecordKeyAccessType(right, content, fieldOf); ft != "" {
+						typeOf[lname] = ft
+						bindFields(lname, ft)
+						if ourReceivers[ft] {
+							out[lname] = true
+						}
+					} else if ft := pythonDictViewKeyAccessType(right, content, fieldOf); ft != "" {
 						typeOf[lname] = ft
 						bindFields(lname, ft)
 						if ourReceivers[ft] {
@@ -2763,10 +2780,17 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// a := pairs[0][0] — double subscript slot.
 			// xa := box["a"] — TypedDict/record string-key value (fieldOf).
 			// Slices fail closed (sequence, not element).
+			// xa := asdict(box)["a"] / vars(box)["a"] / box.__dict__["a"] — dict-view keys.
 			if valueN.Type() == "subscript" {
 				if types := pythonPairSlotsOf(valueN, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots); len(types) > 0 {
 					pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 				} else if ft := pythonRecordKeyAccessType(valueN, content, fieldOf); ft != "" {
+					typeOf[lname] = ft
+					bindFields(lname, ft)
+					if ourReceivers[ft] {
+						out[lname] = true
+					}
+				} else if ft := pythonDictViewKeyAccessType(valueN, content, fieldOf); ft != "" {
 					typeOf[lname] = ft
 					bindFields(lname, ft)
 					if ourReceivers[ft] {
@@ -3743,6 +3767,76 @@ func pythonDunderDictObjectType(attr *grammar.Node, content []byte, typeOf map[s
 		return ""
 	}
 	return pythonObjectExprType(obj, content, typeOf)
+}
+
+// pythonDictViewKeyAccessType recovers T from asdict(box)["a"] / vars(box)["a"] /
+// box.__dict__["a"] when box is a typed local with annotated field a of type T
+// (fieldOf; same leaf as d = asdict(box); d["a"] / box.a). First positional arg
+// / object must be an identifier local; non-string keys and other callees fail
+// closed. dataclasses.asdict accepted (leaf name asdict); vars is bare builtin
+// only.
+func pythonDictViewKeyAccessType(sub *grammar.Node, content []byte, fieldOf map[string]string) string {
+	if sub == nil || sub.Type() != "subscript" || fieldOf == nil {
+		return ""
+	}
+	val := ingest.ChildByField(sub, "value")
+	if val == nil {
+		val = ingest.ChildByField(sub, "object")
+	}
+	keyN := ingest.ChildByField(sub, "subscript")
+	if val == nil || keyN == nil || keyN.Type() != "string" {
+		return ""
+	}
+	_, key := pythonStringContent(keyN, content)
+	if key == "" {
+		return ""
+	}
+	objLocal := pythonDictViewObjectLocal(val, content)
+	if objLocal == "" {
+		return ""
+	}
+	return fieldOf[objLocal+"."+key]
+}
+
+// pythonDictViewObjectLocal recovers the identifier local whose field keys are
+// exposed by asdict(x) / dataclasses.asdict(x) / vars(x) / x.__dict__. Other
+// forms fail closed ("").
+func pythonDictViewObjectLocal(n *grammar.Node, content []byte) string {
+	if n == nil {
+		return ""
+	}
+	switch n.Type() {
+	case "call":
+		fn := ingest.ChildByField(n, "function")
+		name := pythonSimpleCalleeName(fn, content)
+		switch name {
+		case "asdict":
+			// bare asdict / dataclasses.asdict
+		case "vars":
+			// Bare builtin only (attribute forms are not the builtin).
+			if fn == nil || fn.Type() != "identifier" {
+				return ""
+			}
+		default:
+			return ""
+		}
+		args, ok := pythonCallPositionalArgNodes(n)
+		if !ok || len(args) == 0 || args[0].Type() != "identifier" {
+			return ""
+		}
+		return ingest.NodeText(args[0], content)
+	case "attribute":
+		field := ingest.ChildByField(n, "attribute")
+		obj := ingest.ChildByField(n, "object")
+		if field == nil || obj == nil || obj.Type() != "identifier" {
+			return ""
+		}
+		if ingest.NodeText(field, content) != "__dict__" {
+			return ""
+		}
+		return ingest.NodeText(obj, content)
+	}
+	return ""
 }
 
 // pythonReplaceFieldAccessType recovers T from replace(box).a /
