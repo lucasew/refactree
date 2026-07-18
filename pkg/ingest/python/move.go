@@ -1648,13 +1648,13 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 	// pairSlots maps pair locals → per-slot types (p = next(...items()); p[1].run()).
 	// factoryOf maps partial factory locals → class leaf (pa = partial(A); pa().run()).
 	// futureOf maps Future locals → result class leaf (fa.set_result(A()); fa.result().run()).
-	typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf := pythonTypedLocals(pf.Root, content, ourReceivers)
+	typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf, funcReturns := pythonTypedLocals(pf.Root, content, ourReceivers)
 
 	var edits []ingest.Edit
 	// mc = methodcaller("run"); mc(A()) — rename name string when all applications
 	// type as our receiver (foreign/unknown apps fail closed). Inline
 	// methodcaller("run")(A()) stays on pythonMethodcallerStringEdits below.
-	if mcStored := pythonStoredMethodcallerStringEdits(fileRel, pf.Root, content, oldLeaf, newLeaf, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf); len(mcStored) > 0 {
+	if mcStored := pythonStoredMethodcallerStringEdits(fileRel, pf.Root, content, oldLeaf, newLeaf, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf, funcReturns); len(mcStored) > 0 {
 		edits = append(edits, mcStored...)
 	}
 	var walk func(n *grammar.Node, enclosingClass string)
@@ -1673,7 +1673,7 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			obj := ingest.ChildByField(n, "object")
 			attr := ingest.ChildByField(n, "attribute")
 			if obj != nil && attr != nil && ingest.NodeText(attr, content) == oldLeaf {
-				if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf) {
+				if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf, funcReturns) {
 					edits = append(edits, ingest.Edit{
 						File:      fileRel,
 						StartByte: attr.StartByte(),
@@ -1691,7 +1691,7 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			sub := ingest.ChildByField(n, "subscript")
 			if obj != nil && sub != nil && sub.Type() == "string" {
 				if contentN, text := pythonStringContent(sub, content); contentN != nil && text == oldLeaf {
-					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf) {
+					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf, funcReturns) {
 						edits = append(edits, ingest.Edit{
 							File:      fileRel,
 							StartByte: contentN.StartByte(),
@@ -1709,7 +1709,7 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 				obj := ingest.ChildByField(fn, "object")
 				attr := ingest.ChildByField(fn, "attribute")
 				if obj != nil && attr != nil && ingest.NodeText(attr, content) == "get" {
-					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf) {
+					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf, funcReturns) {
 						if key := pythonFirstStringArg(args); key != nil {
 							if contentN, text := pythonStringContent(key, content); contentN != nil && text == oldLeaf {
 								edits = append(edits, ingest.Edit{
@@ -1731,12 +1731,12 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			// methodcaller("run")(A()) / operator.methodcaller("run")(A()) —
 			// method name string when the applied target is our receiver type.
 			// Foreign same-leaf applications keep the string (B.run preserved).
-			if mcEdits := pythonMethodcallerStringEdits(fileRel, n, content, oldLeaf, newLeaf, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf); len(mcEdits) > 0 {
+			if mcEdits := pythonMethodcallerStringEdits(fileRel, n, content, oldLeaf, newLeaf, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf, funcReturns); len(mcEdits) > 0 {
 				edits = append(edits, mcEdits...)
 			}
 			// getattr(A(), "run") / getattr(A(), "run")() — method name string when
 			// the object arg types as our receiver. Foreign same-leaf keeps "run".
-			if gaEdits := pythonGetattrMethodStringEdits(fileRel, n, content, oldLeaf, newLeaf, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf); len(gaEdits) > 0 {
+			if gaEdits := pythonGetattrMethodStringEdits(fileRel, n, content, oldLeaf, newLeaf, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf, funcReturns); len(gaEdits) > 0 {
 				edits = append(edits, gaEdits...)
 			}
 		}
@@ -1768,7 +1768,7 @@ func pythonFirstStringArg(args *grammar.Node) *grammar.Node {
 // same-leaf methods — getattr(B(), "run") keeps "run". Three-arg getattr
 // (default) still renames the name when the object is ours. Non-builtin getattr
 // / non-string names fail closed.
-func pythonGetattrMethodStringEdits(fileRel string, call *grammar.Node, content []byte, oldLeaf, newLeaf, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, fieldOf, elemOf, typeOf map[string]string, pairSlots map[string][]string, factoryOf, futureOf, getterOf map[string]string) []ingest.Edit {
+func pythonGetattrMethodStringEdits(fileRel string, call *grammar.Node, content []byte, oldLeaf, newLeaf, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, fieldOf, elemOf, typeOf map[string]string, pairSlots map[string][]string, factoryOf, futureOf, getterOf, funcReturns map[string]string) []ingest.Edit {
 	if call == nil || call.Type() != "call" {
 		return nil
 	}
@@ -1785,7 +1785,7 @@ func pythonGetattrMethodStringEdits(fileRel string, call *grammar.Node, content 
 		return nil
 	}
 	// Object arg must type as our receiver (same gate as methodcaller target).
-	if !pythonShouldRenameAttr(args[0], content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf) {
+	if !pythonShouldRenameAttr(args[0], content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf, funcReturns) {
 		return nil
 	}
 	return []ingest.Edit{{
@@ -1804,7 +1804,7 @@ func pythonGetattrMethodStringEdits(fileRel string, call *grammar.Node, content 
 // Multi-arg methodcaller (extra bound args) still renames the name string when
 // the applied target is ours. Stored getters (mc = methodcaller("run"); mc(a))
 // are handled by pythonStoredMethodcallerStringEdits (application-typed).
-func pythonMethodcallerStringEdits(fileRel string, call *grammar.Node, content []byte, oldLeaf, newLeaf, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, fieldOf, elemOf, typeOf map[string]string, pairSlots map[string][]string, factoryOf, futureOf, getterOf map[string]string) []ingest.Edit {
+func pythonMethodcallerStringEdits(fileRel string, call *grammar.Node, content []byte, oldLeaf, newLeaf, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, fieldOf, elemOf, typeOf map[string]string, pairSlots map[string][]string, factoryOf, futureOf, getterOf, funcReturns map[string]string) []ingest.Edit {
 	if call == nil || call.Type() != "call" {
 		return nil
 	}
@@ -1822,7 +1822,7 @@ func pythonMethodcallerStringEdits(fileRel string, call *grammar.Node, content [
 	if !ok || len(args) < 1 {
 		return nil
 	}
-	if !pythonShouldRenameAttr(args[0], content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf) {
+	if !pythonShouldRenameAttr(args[0], content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf, funcReturns) {
 		return nil
 	}
 	return []ingest.Edit{{
@@ -1879,7 +1879,7 @@ func pythonMethodcallerNameContent(call *grammar.Node, content []byte, oldLeaf s
 // preserved. Each function_definition is its own scope so same local names in
 // different functions do not clobber each other. Inline methodcaller("old")(A())
 // stays on pythonMethodcallerStringEdits.
-func pythonStoredMethodcallerStringEdits(fileRel string, root *grammar.Node, content []byte, oldLeaf, newLeaf string, ourReceivers, foreignReceivers, typedLocals map[string]bool, fieldOf, elemOf, typeOf map[string]string, pairSlots map[string][]string, factoryOf, futureOf, getterOf map[string]string) []ingest.Edit {
+func pythonStoredMethodcallerStringEdits(fileRel string, root *grammar.Node, content []byte, oldLeaf, newLeaf string, ourReceivers, foreignReceivers, typedLocals map[string]bool, fieldOf, elemOf, typeOf map[string]string, pairSlots map[string][]string, factoryOf, futureOf, getterOf, funcReturns map[string]string) []ingest.Edit {
 	if root == nil || oldLeaf == "" {
 		return nil
 	}
@@ -1929,7 +1929,7 @@ func pythonStoredMethodcallerStringEdits(fileRel string, root *grammar.Node, con
 						args, ok := pythonCallPositionalArgNodes(n)
 						if !ok || len(args) < 1 {
 							b.badApp = true
-						} else if pythonShouldRenameAttr(args[0], content, classNow, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf) {
+						} else if pythonShouldRenameAttr(args[0], content, classNow, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf, funcReturns) {
 							b.ourApp = true
 						} else {
 							b.badApp = true
@@ -2069,7 +2069,7 @@ func pythonRenameByTypeMaps(name string, ourReceivers, foreignReceivers, typedLo
 // and similar identity wrappers that need the arg's class leaf under foreign same-leaf.
 // factoryOf maps partial factory locals → class leaf (pa = partial(A); pa().run()).
 // futureOf maps Future locals → result class leaf (fa.set_result(A()); fa.result().run()).
-func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, fieldOf, elemOf, typeOf map[string]string, pairSlots map[string][]string, factoryOf, futureOf, getterOf map[string]string) bool {
+func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, fieldOf, elemOf, typeOf map[string]string, pairSlots map[string][]string, factoryOf, futureOf, getterOf, funcReturns map[string]string) bool {
 	if obj == nil {
 		return false
 	}
@@ -2216,6 +2216,11 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 					if et := pythonGetitemElemType(obj, content, elemOf, nil, typeOf); et != "" {
 						return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 					}
+				}
+				// make_a().run() after def make_a() -> A / @lru_cache def make_a() -> A —
+				// same-file annotated factory return (before Class() ctor path).
+				if rt := funcReturns[name]; rt != "" {
+					return pythonRenameByTypeMaps(rt, ourReceivers, foreignReceivers, nil)
 				}
 				return pythonRenameByTypeMaps(name, ourReceivers, foreignReceivers, nil)
 			}
@@ -2722,7 +2727,42 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // pa().run() peels under foreign same-leaf (local itself is not an A instance).
 // futureOf maps Future locals → result class leaf (fa.set_result(A()) → "A") so
 // fa.result().run() peels under foreign same-leaf.
-func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string, map[string]string, map[string]string, map[string][]string, map[string]string, map[string]string, map[string]string) {
+
+// pythonSameFileFuncReturnTypes maps same-file function names to concrete return
+// type leaves from annotations: def make_a() -> A / @lru_cache def make_a() -> A.
+// Decorated definitions (lru_cache / functools.lru_cache / cache / etc.) peel
+// through to the nested function_definition. Nested functions inside bodies are
+// included (same-file name → last wins). Missing / non-simple returns fail closed.
+func pythonSameFileFuncReturnTypes(root *grammar.Node, content []byte) map[string]string {
+	out := map[string]string{}
+	if root == nil {
+		return out
+	}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		switch n.Type() {
+		case "function_definition", "async_function_definition":
+			nameN := ingest.ChildByField(n, "name")
+			retN := ingest.ChildByField(n, "return_type")
+			if nameN != nil && nameN.Type() == "identifier" && retN != nil {
+				name := ingest.NodeText(nameN, content)
+				if tn := pythonTypeName(retN, content); name != "" && tn != "" {
+					out[name] = tn
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	return out
+}
+
+func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string, map[string]string, map[string]string, map[string][]string, map[string]string, map[string]string, map[string]string, map[string]string) {
 	out := map[string]bool{}
 	// Collection locals → element type leaf (list[A] / [A()] / dict value → "A").
 	elemOf := map[string]string{}
@@ -2748,9 +2788,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 	// Stored operator getters: ga = attrgetter("a") / gi = itemgetter(0) →
 	// "attrgetter:a" / "itemgetter:#" so ga(box).run() / gi(items).run() peel.
 	getterOf := map[string]string{}
+	funcReturns := map[string]string{}
 	if root == nil || len(ourReceivers) == 0 {
-		return out, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf
+		return out, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf, funcReturns
 	}
+	funcReturns = pythonSameFileFuncReturnTypes(root, content)
 	fieldIndex := pythonClassFieldIndex(root, content)
 	// Declaration order for positional match class patterns (case Box(xa, xb)).
 	fieldOrder := pythonClassFieldOrder(root, content)
@@ -2855,6 +2897,15 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							// receiver); bind fieldOf so box.a.run() / xa = box.a work.
 							typeOf[lname] = fname
 							bindFields(lname, fname)
+						}
+						// a = make_a() after def make_a() -> A / @lru_cache def make_a() -> A.
+						// Foreign returns too for shadowing (b = make_b() with -> B).
+						if rt := funcReturns[fname]; rt != "" {
+							typeOf[lname] = rt
+							bindFields(lname, rt)
+							if ourReceivers[rt] {
+								out[lname] = true
+							}
 						}
 						// a = cast(A, x) / cast("A", x)
 						if fname == "cast" {
@@ -3394,6 +3445,13 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						out[lname] = true
 						typeOf[lname] = fname
 					}
+					// a := make_a() after def make_a() -> A / @lru_cache …
+					if rt := funcReturns[fname]; rt != "" {
+						typeOf[lname] = rt
+						if ourReceivers[rt] {
+							out[lname] = true
+						}
+					}
 					// a := cast(A, x)
 					if fname == "cast" {
 						if tn := pythonCastTypeArg(valueN, content); ourReceivers[tn] {
@@ -3932,7 +3990,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 		}
 	}
 	walk(root)
-	return out, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf
+	return out, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf, funcReturns
 }
 
 // pythonBindIterableLambdaParams types untyped lambda parameters when the call
