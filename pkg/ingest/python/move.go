@@ -4748,10 +4748,13 @@ func pythonNextElemType(call *grammar.Node, content []byte, elemOf, egElems, typ
 
 // pythonAstupleNextFirstField recovers the first declaration-order field type from
 // next(astuple(box)) / next(iter(astuple(box))) / next(list(astuple(box))) /
-// next(tuple(astuple(box))) / dataclasses.astuple / astuple(replace(box)) forms.
-// next always yields the first tuple element — same leaf as astuple(box)[0].
+// next(tuple(astuple(box))) / dataclasses.astuple / astuple(replace(box)) forms,
+// and next(asdict(box).values()) / next(iter(asdict(box).values())) /
+// vars(box).values() / box.__dict__.values() (dict preserves declaration order;
+// first value is field 0 — same leaf as next(astuple(box))).
+// next always yields the first tuple/dict-view element — same leaf as astuple(box)[0].
 // Peels identity order-preserving wrappers iter/list/tuple only (not reversed).
-// Fails closed when the iterable is not an astuple chain or field 0 is unknown.
+// Fails closed when the iterable is not an astuple/dict-view chain or field 0 is unknown.
 // Intentionally not used for choice/min (not first-element semantics).
 func pythonAstupleNextFirstField(call *grammar.Node, content []byte, fieldOf map[string]string) string {
 	args, ok := pythonCallPositionalArgNodes(call)
@@ -4767,6 +4770,9 @@ func pythonAstupleNextFirstField(call *grammar.Node, content []byte, fieldOf map
 //     → fieldOf["@astuple.local.#0"]
 //   - t / list(t) / iter(t) when t = astuple(box) (or list/tuple(astuple(box)))
 //     → fieldOf["t.#0"] (index slots bound on assignment)
+//   - asdict(local).values() / vars(local).values() / local.__dict__.values()
+//     → fieldOf["@astuple.local.#0"] (dict preserves declaration order; first
+//     value is field 0 — same leaf as next(astuple(local)) / local.a)
 //   - order-preserving wrappers of those (iter/list/tuple)
 // Same leaf as astuple(local)[0] / t[0] / box.a for first field.
 func pythonAstupleFirstFieldType(n *grammar.Node, content []byte, fieldOf map[string]string) string {
@@ -4798,6 +4804,23 @@ func pythonAstupleFirstFieldType(n *grammar.Node, content []byte, fieldOf map[st
 			return ""
 		}
 		return pythonAstupleFirstFieldType(args[0], content, fieldOf)
+	case "values":
+		// asdict(box).values() / vars(box).values() / box.__dict__.values() —
+		// zero-arg values view; first yield is declaration-order field 0.
+		// Assigned d = asdict(box); d.values() fails closed (no dict-view peel).
+		if fn.Type() != "attribute" {
+			return ""
+		}
+		args, ok := pythonCallPositionalArgNodes(n)
+		if !ok || len(args) != 0 {
+			return ""
+		}
+		obj := ingest.ChildByField(fn, "object")
+		local := pythonDictViewObjectLocal(obj, content)
+		if local == "" {
+			return ""
+		}
+		return fieldOf["@astuple."+local+".#0"]
 	}
 	// astuple(box) / dataclasses.astuple(box) / list(astuple(box)) via ObjectLocal.
 	local := pythonAstupleObjectLocal(n, content)
