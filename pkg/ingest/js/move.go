@@ -1576,6 +1576,12 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 			// finally is identity for the resolved value under foreign same-leaf.
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
+		if t := jsPromiseCatchType(obj, content, typedLocals, factories); t != "" {
+			// Promise.resolve(new A()).catch(() => null) / await …catch —
+			// catch is identity for the fulfilled value under foreign same-leaf
+			// (rejection handler ignored for typing; same leaf as finally).
+			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
 	}
 	// (await Promise.all([new A()]))[0].run() / [new A()][0].run() /
 	// Array.from([new A()])[0].run() / Array.of(new A())[0].run() /
@@ -1813,6 +1819,9 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsPromiseFinallyType(valN, content, out, factories); ourReceivers[t] {
 						// const a = await Promise.resolve(new A()).finally(() => {})
+						out[ingest.NodeText(nameN, content)] = t
+					} else if t := jsPromiseCatchType(valN, content, out, factories); ourReceivers[t] {
+						// const a = await Promise.resolve(new A()).catch(() => null)
 						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsIteratorSourceYieldType(valN, content, generators, genLocals, arrayLocals, out, factories, mapLocals, entryArrayLocals, setLocals); ourReceivers[t] {
 						// const ga = genA() / const ia = [new A()].values() /
@@ -2312,6 +2321,13 @@ func jsBindPromiseThenParams(call *grammar.Node, content []byte, ourReceivers ma
 	// Promise.resolve(...).then(x => x) identity chain → scalar value type.
 	if resolveT == "" {
 		resolveT = jsPromiseThenIdentityType(obj, content, out, factories)
+	}
+	// Promise.resolve(...).finally(fn) / .catch(fn) identity stages → scalar value.
+	if resolveT == "" {
+		resolveT = jsPromiseFinallyType(obj, content, out, factories)
+	}
+	if resolveT == "" {
+		resolveT = jsPromiseCatchType(obj, content, out, factories)
 	}
 	// Promise.race/any([new T(), …]) → scalar value type when elems agree.
 	raceT := jsPromiseRaceValueType(obj, content, out, factories)
@@ -3033,6 +3049,11 @@ func jsArraySourceElemType(n *grammar.Node, content []byte, arrayLocals, typedLo
 	if t := jsObjectValuesElemType(n, content, typedLocals, factories); t != "" {
 		return t
 	}
+	if t := jsObjectGroupByGroupArrayType(n, content, arrayLocals, typedLocals, factories); t != "" {
+		// Object.groupBy(arr, fn)[key] / Object.values(Object.groupBy(arr, fn))[i]
+		// — group is array of T (element type of arr).
+		return t
+	}
 	if t := jsArrayIdentityElemType(n, content, arrayLocals, typedLocals, factories); t != "" {
 		return t
 	}
@@ -3040,6 +3061,158 @@ func jsArraySourceElemType(n *grammar.Node, content []byte, arrayLocals, typedLo
 		return t
 	}
 	return ""
+}
+
+// jsObjectGroupByGroupArrayType recovers T from a group-array expression whose
+// elements are the Object.groupBy iterable's element type:
+//
+//	Object.groupBy(arr, fn)[key] / Object.groupBy(arr, fn).key
+//	Object.values(Object.groupBy(arr, fn))[i]
+//
+// Key / index ignored (all groups are T[]). Callback ignored for typing.
+// Enables Object.groupBy([new A()], x => "k")["k"][0].run() and
+// Object.values(Object.groupBy([new A()], x => "k"))[0][0].run() under foreign
+// same-leaf methods. Unknown iterable / non-groupBy fail closed.
+func jsObjectGroupByGroupArrayType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil {
+		return ""
+	}
+	var obj *grammar.Node
+	switch n.Type() {
+	case "subscript_expression":
+		if ingest.ChildByField(n, "index") == nil {
+			return ""
+		}
+		obj = ingest.ChildByField(n, "object")
+	case "member_expression", "member_expression_optional", "optional_chain":
+		prop := ingest.ChildByField(n, "property")
+		if prop == nil || (prop.Type() != "property_identifier" && prop.Type() != "identifier") {
+			return ""
+		}
+		obj = ingest.ChildByField(n, "object")
+	default:
+		return ""
+	}
+	if obj == nil {
+		return ""
+	}
+	for obj != nil && obj.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < obj.ChildCount(); i++ {
+			ch := obj.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		obj = inner
+	}
+	if obj == nil {
+		return ""
+	}
+	// Object.groupBy(arr, fn)[key] / .key
+	if t := jsObjectGroupByElemType(obj, content, arrayLocals, typedLocals, factories); t != "" {
+		return t
+	}
+	// Object.values(Object.groupBy(arr, fn))[i]
+	return jsObjectValuesGroupByElemType(obj, content, arrayLocals, typedLocals, factories)
+}
+
+// jsObjectGroupByElemType recovers T from Object.groupBy(iterable, keyfn) when
+// iterable peels to uniform element type T. Keyfn ignored (not type-changing).
+// Result is Record of T[] — use jsObjectGroupByGroupArrayType for group access.
+func jsObjectGroupByElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string) string {
+	if n == nil || n.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	args := ingest.ChildByField(n, "arguments")
+	if fn == nil || args == nil {
+		return ""
+	}
+	if fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain" {
+		return ""
+	}
+	obj := ingest.ChildByField(fn, "object")
+	prop := ingest.ChildByField(fn, "property")
+	if obj == nil || prop == nil ||
+		obj.Type() != "identifier" || ingest.NodeText(obj, content) != "Object" ||
+		ingest.NodeText(prop, content) != "groupBy" {
+		return ""
+	}
+	// Object.groupBy(iterable, keyfn) — require ≥1 arg; keyfn optional for typing.
+	var first *grammar.Node
+	count := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		count++
+		if first == nil {
+			first = ch
+		}
+	}
+	if count < 1 || first == nil {
+		return ""
+	}
+	return jsArraySourceElemType(first, content, arrayLocals, typedLocals, factories)
+}
+
+// jsObjectValuesGroupByElemType recovers T from Object.values(Object.groupBy(…))
+// when the groupBy iterable peels to T. Object.values yields T[][] — callers
+// use [i] group access via jsObjectGroupByGroupArrayType.
+func jsObjectValuesGroupByElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string) string {
+	if n == nil || n.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	args := ingest.ChildByField(n, "arguments")
+	if fn == nil || args == nil {
+		return ""
+	}
+	if fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain" {
+		return ""
+	}
+	obj := ingest.ChildByField(fn, "object")
+	prop := ingest.ChildByField(fn, "property")
+	if obj == nil || prop == nil ||
+		obj.Type() != "identifier" || ingest.NodeText(obj, content) != "Object" ||
+		ingest.NodeText(prop, content) != "values" {
+		return ""
+	}
+	var first *grammar.Node
+	count := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		count++
+		if first == nil {
+			first = ch
+		}
+	}
+	if count != 1 || first == nil {
+		return ""
+	}
+	return jsObjectGroupByElemType(first, content, arrayLocals, typedLocals, factories)
 }
 
 // jsArraySpreadElemType recovers T from an array literal that includes spread
@@ -3414,7 +3587,9 @@ func jsNestedArrayFlatElemType(n *grammar.Node, content []byte, arrayLocals, typ
 }
 
 // jsArrayFromElemType recovers T from Array.from(arrLike) when the first arg
-// peels to uniform element type T and no mapfn is present (single-arg only).
+// peels to uniform element type T and either no mapfn is present (single-arg)
+// or mapfn is an identity callback (x => x / (x) => { return x }).
+// Non-identity mapfn / thisArg-only / unknown first arg fail closed.
 func jsArrayFromElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string) string {
 	if n == nil || n.Type() != "call_expression" {
 		return ""
@@ -3435,8 +3610,8 @@ func jsArrayFromElemType(n *grammar.Node, content []byte, arrayLocals, typedLoca
 		ingest.NodeText(prop, content) != "from" {
 		return ""
 	}
-	// Single positional arg only (no mapfn).
-	var first *grammar.Node
+	// 1-arg: Array.from(arr). 2-arg: Array.from(arr, x => x) identity mapfn only.
+	var first, second *grammar.Node
 	count := 0
 	for i := uint32(0); i < args.ChildCount(); i++ {
 		ch := args.Child(i)
@@ -3446,9 +3621,22 @@ func jsArrayFromElemType(n *grammar.Node, content []byte, arrayLocals, typedLoca
 		count++
 		if first == nil {
 			first = ch
+		} else if second == nil {
+			second = ch
 		}
 	}
-	if count != 1 || first == nil {
+	if first == nil {
+		return ""
+	}
+	switch count {
+	case 1:
+		// Array.from(arr) — no mapfn.
+	case 2:
+		// Array.from(arr, mapfn) — identity mapfn only (type-preserving).
+		if second == nil || !jsIsIdentityCallback(second, content) {
+			return ""
+		}
+	default:
 		return ""
 	}
 	return jsArraySourceElemType(first, content, arrayLocals, typedLocals, factories)
@@ -3503,7 +3691,8 @@ func jsArrayOfElemType(n *grammar.Node, content []byte, typedLocals, factories m
 
 // jsObjectValuesElemType recovers T from Object.values({…}) when every property
 // value peels to the same concrete type T. Also peels Object.values(
-// Object.fromEntries([[k, new T()]])) when fromEntries pairs agree on T.
+// Object.fromEntries([[k, new T()]])) when fromEntries pairs agree on T, and
+// Object.values(Object.assign(…)) when assign sources' property values agree.
 // Non-object-literal / mixed / empty / method / spread entries fail closed.
 func jsObjectValuesElemType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
 	if t := jsObjectStaticValuesCallType(n, content, typedLocals, factories, "values"); t != "" {
@@ -3511,7 +3700,162 @@ func jsObjectValuesElemType(n *grammar.Node, content []byte, typedLocals, factor
 	}
 	// Object.values(Object.fromEntries(...)) — values are fromEntries pair values.
 	// entryArrayLocals not available here; only inline fromEntries peels.
-	return jsObjectValuesFromEntriesType(n, content, typedLocals, factories, nil)
+	if t := jsObjectValuesFromEntriesType(n, content, typedLocals, factories, nil); t != "" {
+		return t
+	}
+	// Object.values(Object.assign({}, {k: new T()}, …)) — merged property values.
+	return jsObjectValuesAssignType(n, content, typedLocals, factories)
+}
+
+// jsObjectValuesAssignType recovers T from Object.values(Object.assign(…)) when
+// Object.assign's object-literal sources agree on uniform property value type T.
+func jsObjectValuesAssignType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	if n == nil || n.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	args := ingest.ChildByField(n, "arguments")
+	if fn == nil || args == nil {
+		return ""
+	}
+	if fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain" {
+		return ""
+	}
+	obj := ingest.ChildByField(fn, "object")
+	prop := ingest.ChildByField(fn, "property")
+	if obj == nil || prop == nil ||
+		obj.Type() != "identifier" || ingest.NodeText(obj, content) != "Object" ||
+		ingest.NodeText(prop, content) != "values" {
+		return ""
+	}
+	var first *grammar.Node
+	count := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		count++
+		if first == nil {
+			first = ch
+		}
+	}
+	if count != 1 || first == nil {
+		return ""
+	}
+	return jsObjectAssignValueType(first, content, typedLocals, factories)
+}
+
+// jsObjectAssignValueType recovers T from Object.assign(…sources) when every
+// property value across all object-literal arguments peels to the same concrete
+// type T. Empty object literals ({}) contribute nothing (common target). At
+// least one property value required. Non-object-literal args / mixed / method /
+// spread entries fail closed.
+// Enables Object.values(Object.assign({}, {k: new A()}))[0].run() under foreign
+// same-leaf methods. Object.assign(new A()) identity target peels stay in
+// jsIdentityCloneType (first-arg return).
+func jsObjectAssignValueType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	args := ingest.ChildByField(n, "arguments")
+	if fn == nil || args == nil {
+		return ""
+	}
+	if fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain" {
+		return ""
+	}
+	obj := ingest.ChildByField(fn, "object")
+	prop := ingest.ChildByField(fn, "property")
+	if obj == nil || prop == nil ||
+		obj.Type() != "identifier" || ingest.NodeText(obj, content) != "Object" ||
+		ingest.NodeText(prop, content) != "assign" {
+		return ""
+	}
+	found := ""
+	saw := false
+	argCount := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		argCount++
+		arg := ch
+		for arg != nil && arg.Type() == "parenthesized_expression" {
+			var inner *grammar.Node
+			for j := uint32(0); j < arg.ChildCount(); j++ {
+				c := arg.Child(j)
+				if c.Type() == "(" || c.Type() == ")" {
+					continue
+				}
+				inner = c
+				break
+			}
+			arg = inner
+		}
+		if arg == nil || arg.Type() != "object" {
+			// Non-object-literal source (ident / call / new) — fail closed for
+			// values peels (identity first-arg return is jsIdentityCloneType).
+			return ""
+		}
+		// Collect property values; empty {} is fine (no contribution).
+		for j := uint32(0); j < arg.ChildCount(); j++ {
+			propN := arg.Child(j)
+			if propN == nil || propN.Type() == "{" || propN.Type() == "}" || propN.Type() == "," {
+				continue
+			}
+			var val *grammar.Node
+			switch propN.Type() {
+			case "pair":
+				val = ingest.ChildByField(propN, "value")
+			case "shorthand_property_identifier":
+				val = propN
+			default:
+				return ""
+			}
+			if val == nil {
+				return ""
+			}
+			t := ""
+			if val.Type() == "shorthand_property_identifier" {
+				if typedLocals != nil {
+					t = typedLocals[ingest.NodeText(val, content)]
+				}
+			} else {
+				t = jsExprConcreteType(val, content, typedLocals, factories)
+			}
+			if t == "" {
+				return ""
+			}
+			if !saw {
+				found = t
+				saw = true
+			} else if found != t {
+				return ""
+			}
+		}
+	}
+	if argCount < 1 || !saw {
+		return ""
+	}
+	return found
 }
 
 // jsObjectValuesFromEntriesType recovers T from Object.values(Object.fromEntries(…))
@@ -5503,7 +5847,92 @@ func jsPromiseFinallyType(n *grammar.Node, content []byte, typedLocals, factorie
 	if t := jsPromiseThenIdentityType(obj, content, typedLocals, factories); t != "" {
 		return t
 	}
+	if t := jsPromiseCatchType(obj, content, typedLocals, factories); t != "" {
+		return t
+	}
 	if t := jsPromiseFinallyType(obj, content, typedLocals, factories); t != "" {
+		return t
+	}
+	return ""
+}
+
+// jsPromiseCatchType recovers T from p.catch(fn) / await p.catch(fn) when
+// p peels to a Promise of value T. catch is identity for the fulfilled value
+// (rejection handler ignored for typing). Enables
+// (await Promise.resolve(new A()).catch(() => null)).run() and
+// Promise.resolve(new A()).catch(() => null).then(a => a.run()) under foreign
+// same-leaf methods. Unknown receivers fail closed.
+func jsPromiseCatchType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	if n.Type() == "await_expression" {
+		var arg *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch == nil || ch.Type() == "await" {
+				continue
+			}
+			arg = ch
+			break
+		}
+		return jsPromiseCatchType(arg, content, typedLocals, factories)
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	args := ingest.ChildByField(n, "arguments")
+	if fn == nil {
+		return ""
+	}
+	if fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain" {
+		return ""
+	}
+	prop := ingest.ChildByField(fn, "property")
+	if prop == nil || ingest.NodeText(prop, content) != "catch" {
+		return ""
+	}
+	// Require ≥1 arg (handler present); body ignored (not type-changing for fulfill).
+	count := 0
+	if args != nil {
+		for i := uint32(0); i < args.ChildCount(); i++ {
+			ch := args.Child(i)
+			if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+				continue
+			}
+			count++
+		}
+	}
+	if count < 1 {
+		return ""
+	}
+	obj := ingest.ChildByField(fn, "object")
+	if t := jsPromiseResolveArgType(obj, content, typedLocals, factories); t != "" {
+		return t
+	}
+	if t := jsPromiseRaceValueType(obj, content, typedLocals, factories); t != "" {
+		return t
+	}
+	if t := jsPromiseThenIdentityType(obj, content, typedLocals, factories); t != "" {
+		return t
+	}
+	if t := jsPromiseFinallyType(obj, content, typedLocals, factories); t != "" {
+		return t
+	}
+	if t := jsPromiseCatchType(obj, content, typedLocals, factories); t != "" {
 		return t
 	}
 	return ""
@@ -5577,7 +6006,7 @@ func jsPromiseThenIdentityType(n *grammar.Node, content []byte, typedLocals, fac
 		return ""
 	}
 	obj := ingest.ChildByField(fn, "object")
-	// Peel Promise.resolve / race / any / further identity then / finally.
+	// Peel Promise.resolve / race / any / further identity then / finally / catch.
 	if t := jsPromiseResolveArgType(obj, content, typedLocals, factories); t != "" {
 		return t
 	}
@@ -5585,6 +6014,9 @@ func jsPromiseThenIdentityType(n *grammar.Node, content []byte, typedLocals, fac
 		return t
 	}
 	if t := jsPromiseFinallyType(obj, content, typedLocals, factories); t != "" {
+		return t
+	}
+	if t := jsPromiseCatchType(obj, content, typedLocals, factories); t != "" {
 		return t
 	}
 	if t := jsPromiseThenIdentityType(obj, content, typedLocals, factories); t != "" {

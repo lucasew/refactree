@@ -3142,9 +3142,9 @@ func javaMapMapperBodyElemType(body *grammar.Node, param string, recv *grammar.N
 //	fa.thenCompose(a -> other) when other is tracked in elemOf → elemOf[other]
 //	fa.thenCompose(a -> CompletableFuture.completedFuture(new A())) → A
 //
-// Expression-bodied lambdas and Optional::of / ofNullable /
-// CompletableFuture::completedFuture only; blocks and other mappers fail closed
-// so Stream.flatMap / type-changing thenCompose stay unbound.
+// Expression-bodied lambdas and Optional::of / ofNullable / Stream.of /
+// Stream.ofNullable / CompletableFuture::completedFuture only; blocks and
+// other mappers fail closed so type-changing flatMap / thenCompose stay unbound.
 func javaFlatMapResultElemType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	if call == nil || call.Type() != "method_invocation" {
 		return ""
@@ -3178,7 +3178,7 @@ func javaFlatMapResultElemType(call *grammar.Node, content []byte, elemOf, valOf
 	recv := ingest.ChildByField(call, "object")
 	switch first.Type() {
 	case "method_reference":
-		if javaIsOptionalOfMethodRef(first, content) || javaIsCompletedFutureMethodRef(first, content) {
+		if javaIsOptionalOfMethodRef(first, content) || javaIsStreamOfMethodRef(first, content) || javaIsCompletedFutureMethodRef(first, content) {
 			return javaStreamPipelineElemType(recv, content, elemOf, valOf)
 		}
 		return ""
@@ -3291,14 +3291,17 @@ func javaFlatMapMapperBodyElemType(body *grammar.Node, param string, recv *gramm
 			if obj == nil || (obj.Type() != "identifier" && obj.Type() != "type_identifier") {
 				return ""
 			}
-			if ingest.NodeText(obj, content) != "Optional" {
+			recvName := ingest.NodeText(obj, content)
+			// Optional.flatMap rewrap: a -> Optional.of(a) / ofNullable(a)
+			// Stream.flatMap rewrap: a -> Stream.of(a) / ofNullable(a)
+			if recvName != "Optional" && recvName != "Stream" {
 				return ""
 			}
-			// a -> Optional.of(a) / ofNullable(a) — same element as receiver.
+			// a -> Optional/Stream.of(a) / ofNullable(a) — same element as receiver.
 			if arg := javaFirstCallArg(body); arg != nil && arg.Type() == "identifier" && param != "" && ingest.NodeText(arg, content) == param {
 				return javaStreamPipelineElemType(recv, content, elemOf, valOf)
 			}
-			// a -> Optional.of(new A()) — element from creation args.
+			// a -> Optional/Stream.of(new A()) — element from creation args.
 			return javaStaticCollectionOfElemType(body, content, name)
 		case "completedFuture":
 			// CompletableFuture.thenCompose rewrap:
