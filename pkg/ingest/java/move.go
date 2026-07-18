@@ -1072,6 +1072,8 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // map.putFirst(k,v) / map.putLast(k,v) /
 // it.next() / list.iterator().next() /
 // listIterator.previous() / list.listIterator().next()/previous() /
+// enum.nextElement() / coll.elements().nextElement() /
+// Collections.enumeration(coll).nextElement() /
 // queue.poll()/peek() / queue.take() / deque.takeFirst()/takeLast() /
 // list.remove(i) / list.getFirst()/getLast() /
 // list.removeFirst()/removeLast() /
@@ -1528,6 +1530,9 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// listIterator() returns ListIterator<E> of the same element type
 			// (List; previous/next yield E like Iterator.next).
 			"listIterator",
+			// elements() returns Enumeration of the collection elements
+			// (Vector; Hashtable/Dictionary use value type via special case below).
+			"elements",
 			"filter", "peek", "sorted", "distinct", "limit", "skip",
 			"unordered", "sequential", "parallel", "onClose",
 			"takeWhile", "dropWhile",
@@ -1544,6 +1549,14 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// from receiver Arrays (unlike coll.stream() which uses elemOf[coll]).
 			if name == "stream" && javaIsArraysReceiver(recv, content) {
 				return javaArraysStreamElemType(obj, content, elemOf, valOf)
+			}
+			// Hashtable/Dictionary.elements() yields Enumeration of values (V),
+			// not keys — prefer valOf when the receiver is map-like (2 type args).
+			// Vector.elements() has only elemOf and falls through to pipeline.
+			if name == "elements" && recv != nil && recv.Type() == "identifier" && valOf != nil {
+				if vt := valOf[ingest.NodeText(recv, content)]; vt != "" {
+					return vt
+				}
 			}
 			return javaStreamPipelineElemType(recv, content, elemOf, valOf)
 		case "flatMap":
@@ -3436,6 +3449,9 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	as.iterator().next()      → elemOf[as]   (via type-preserving iterator())
 //	lia.previous()            → elemOf[lia]  (ListIterator<A>)
 //	as.listIterator().next()/previous() → elemOf[as] (type-preserving listIterator())
+//	ea.nextElement()          → elemOf[ea]   (Enumeration<A>)
+//	vs.elements().nextElement() → elemOf[vs] (Vector; Hashtable uses valOf)
+//	Collections.enumeration(as).nextElement() → elemOf[as]
 //	oa.orElse(d) / oa.orElseGet(s) / oa.orElseThrow([s]) → elemOf[oa]
 //	  (Optional<A>; also findFirst().orElse / findFirst().orElseThrow)
 //	Collections.min(as) / Collections.max(as[, cmp]) → elemOf[as]
@@ -3533,10 +3549,13 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// e.getValue() — Map.Entry local (entrySet for-var / forEach / var ea = …).
 		// Map.entry(k, new T(...)).getValue() / am.firstEntry().getValue() — same V.
 		return javaEntryExprValueType(obj, content, elemOf, valOf, entryValOf)
-	case "next", "previous":
+	case "next", "previous", "nextElement":
 		// it.next() / as.iterator().next() — element of iterator or pipeline.
 		// lia.previous() / as.listIterator().previous() — same E (ListIterator).
 		// listIterator() is type-preserving in javaStreamPipelineElemType.
+		// ea.nextElement() / vs.elements().nextElement() /
+		// Collections.enumeration(as).nextElement() — same E (Enumeration).
+		// elements()/enumeration() are type-preserving in javaStreamPipelineElemType.
 		return javaStreamPipelineElemType(obj, content, elemOf, valOf)
 	case "orElse", "orElseGet", "orElseThrow":
 		// Optional.orElse / orElseGet / orElseThrow return T; receiver may be
