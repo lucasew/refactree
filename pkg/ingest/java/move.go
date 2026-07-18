@@ -2112,6 +2112,13 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 		if et := javaFutureTaskCreationElemType(obj, content); et != "" {
 			return et
 		}
+		// new CompletableFuture<A>() / new CompletableFuture<A>(…) → A
+		// (empty/typed CF holder; enables completeAsync(...).join().m() /
+		// var f = new CompletableFuture<A>(); f.join().m() under foreign same-leaf).
+		// Diamond without a recoverable fill fails closed.
+		if et := javaCompletableFutureCreationElemType(obj, content); et != "" {
+			return et
+		}
 		// new ArrayList<>(List.of(new A())) / new LinkedList<>(as) / new HashSet<>(…)
 		// — Collection copy/view ctors: element from declared type arg or first-arg
 		// pipeline (List.of / typed local / stream.toList()). Enables .get(0).m() /
@@ -2192,12 +2199,13 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// headSet/tailSet/subSet(...) return SortedSet/NavigableSet of the same
 			// element type (range views; bounds/inclusivity args do not change E).
 			// CompletableFuture.whenComplete / whenCompleteAsync / copy /
-			// toCompletableFuture / orTimeout / completeOnTimeout / exceptionally /
-			// exceptionallyAsync / exceptionallyCompose / exceptionallyComposeAsync /
-			// minimalCompletionStage — always return the same result T by API
-			// signature (side-effect / timeout / recovery / Executor args do not
-			// change T). Enables whenComplete(...).join() /
-			// whenCompleteAsync(...).join() / exceptionallyAsync(...).join() /
+			// toCompletableFuture / orTimeout / completeOnTimeout / completeAsync /
+			// exceptionally / exceptionallyAsync / exceptionallyCompose /
+			// exceptionallyComposeAsync / minimalCompletionStage — always return
+			// the same result T by API signature (side-effect / timeout / recovery /
+			// Executor / supplier args do not change T; completeAsync fills this CF).
+			// Enables whenComplete(...).join() / whenCompleteAsync(...).join() /
+			// exceptionallyAsync(...).join() / completeAsync(() -> new A()).join() /
 			// copy().join() under foreign same-leaf methods. Type-changing stages
 			// (thenApply/handle/…) stay on their own identity/rewrap peels.
 			// Optional.or(Supplier) always returns Optional of the same T by API
@@ -2207,7 +2215,7 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			"findFirst", "findAny", "min", "max", "reduce", "toList", "toArray", "clone", "reversed", "subList",
 			"descendingSet", "headSet", "tailSet", "subSet",
 			"whenComplete", "whenCompleteAsync", "copy", "toCompletableFuture",
-			"orTimeout", "completeOnTimeout",
+			"orTimeout", "completeOnTimeout", "completeAsync",
 			"exceptionally", "exceptionallyAsync",
 			"exceptionallyCompose", "exceptionallyComposeAsync",
 			"minimalCompletionStage",
@@ -4606,6 +4614,29 @@ func javaFutureTaskCreationElemType(call *grammar.Node, content []byte) string {
 	default:
 		return ""
 	}
+}
+
+// javaCompletableFutureCreationElemType recovers T from
+// new CompletableFuture<T>() / new CompletableFuture<T>(…). Enables
+// new CompletableFuture<A>().completeAsync(...).join().m() and
+// var f = new CompletableFuture<A>(); f.join().m() under foreign same-leaf.
+// Diamond / raw / non-CF types fail closed (no T without a fill stage).
+func javaCompletableFutureCreationElemType(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "object_creation_expression" {
+		return ""
+	}
+	typeN := ingest.ChildByField(call, "type")
+	if typeN == nil {
+		return ""
+	}
+	if javaTypeName(typeN, content) != "CompletableFuture" {
+		return ""
+	}
+	args := javaTypeArgNames(typeN, content)
+	if len(args) >= 1 && args[0] != "" {
+		return args[0]
+	}
+	return ""
 }
 
 // javaReferenceHolderCreationElemType recovers V from
