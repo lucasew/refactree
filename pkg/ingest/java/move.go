@@ -1462,6 +1462,7 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // Collections.nCopies(n, new A()) → "A",
 // Collections.unmodifiableList/Set/Collection(as) / synchronizedList/Set/Collection(as) /
 // checkedList/Set/Collection(as, …) → elemOf[as],
+// Collections.list(Enumeration) / Collections.enumeration(coll) → enumeration/coll element type,
 // List.copyOf(as) / Set.copyOf(as) → elemOf[as] (Collection of first-arg elements),
 // Stream.concat(s1, s2) → element type when both stream args agree,
 // Stream.generate(() -> new A()) → "A",
@@ -1571,11 +1572,14 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			return javaCollectionsNCopiesElemType(obj, content)
 		case "unmodifiableList", "synchronizedList", "checkedList",
 			"unmodifiableSet", "synchronizedSet", "checkedSet",
-			"unmodifiableCollection", "synchronizedCollection", "checkedCollection":
+			"unmodifiableCollection", "synchronizedCollection", "checkedCollection",
+			"list", "enumeration":
 			// Collections.unmodifiableList/Set/Collection(as) /
 			// synchronizedList/Set/Collection(as) /
 			// checkedList/Set/Collection(as, A.class) — Collection of first-arg
 			// element type (Class arg on checked* ignored).
+			// Collections.list(Enumeration) — ArrayList of enumeration elements.
+			// Collections.enumeration(coll) — Enumeration of coll elements.
 			return javaCollectionsListWrapperElemType(obj, content, elemOf, valOf)
 		case "copyOf":
 			// List.copyOf(coll) / Set.copyOf(coll) — Collection of first-arg element type
@@ -1921,7 +1925,8 @@ func javaCollectionsNCopiesElemType(call *grammar.Node, content []byte) string {
 
 // javaCollectionsListWrapperElemType recovers the element type of
 // Collections.unmodifiableList/Set/Collection(coll) /
-// synchronizedList/Set/Collection(coll) / checkedList/Set/Collection(coll, type).
+// synchronizedList/Set/Collection(coll) / checkedList/Set/Collection(coll, type) /
+// Collections.list(enumeration) / Collections.enumeration(coll).
 // First arg's element type; the Class arg on checked* is ignored.
 // Non-Collections receivers fail closed.
 func javaCollectionsListWrapperElemType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
