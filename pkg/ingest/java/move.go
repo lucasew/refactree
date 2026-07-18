@@ -1734,12 +1734,16 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 				continue
 			}
 			// CompletableFuture.whenComplete(BiConsumer<? super T,? super Throwable>) /
-			// handle(BiFunction<? super T,Throwable,? extends U>) —
+			// whenCompleteAsync(BiConsumer[, Executor]) /
+			// handle(BiFunction<? super T,Throwable,? extends U>) /
+			// handleAsync(BiFunction[, Executor]) —
 			// first param is CF result T (same leaf as thenAccept/thenApply unary).
-			// Second is Throwable — leave unbound. Identity handle return pipelines
+			// Second is Throwable — leave unbound. Optional Executor is non-lambda.
+			// Identity handle / handleAsync return pipelines
 			// (handle((a,e)->a).join()) peel via javaStreamPipelineElemType /
 			// javaMapResultElemType (first-param identity only).
-			if method == "whenComplete" || method == "handle" {
+			if method == "whenComplete" || method == "whenCompleteAsync" ||
+				method == "handle" || method == "handleAsync" {
 				et := javaStreamPipelineElemType(obj, content, elemOf, valOf)
 				if et != "" && ourReceivers[et] {
 					out[params[0]] = true
@@ -1747,10 +1751,14 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 				continue
 			}
 			// CompletableFuture.thenCombine(other, BiFunction<? super T,? super U,? extends V>) /
-			// thenAcceptBoth(other, BiConsumer<? super T,? super U>) —
+			// thenCombineAsync(other, BiFunction[, Executor]) /
+			// thenAcceptBoth(other, BiConsumer<? super T,? super U>) /
+			// thenAcceptBothAsync(other, BiConsumer[, Executor]) —
 			// first param is this CF's T; second is other stage's U when recoverable.
+			// Optional Executor after the BiFunction is non-lambda.
 			// runAfterBoth takes Runnable (zero-arg) — not a bi-lambda.
-			if method == "thenCombine" || method == "thenAcceptBoth" {
+			if method == "thenCombine" || method == "thenCombineAsync" ||
+				method == "thenAcceptBoth" || method == "thenAcceptBothAsync" {
 				et := javaStreamPipelineElemType(obj, content, elemOf, valOf)
 				if et != "" && ourReceivers[et] {
 					out[params[0]] = true
@@ -1873,29 +1881,41 @@ func javaStreamElementLambdaMethod(method string) bool {
 		"anyMatch", "allMatch", "noneMatch",
 		"removeIf", "ifPresent", "ifPresentOrElse",
 		// CompletableFuture.thenAccept(Consumer<? super T>) /
+		// thenAcceptAsync(Consumer[, Executor]) /
 		// thenApply(Function<? super T,? extends U>) /
+		// thenApplyAsync(Function[, Executor]) /
 		// thenCompose(Function<? super T,? extends CompletionStage<U>>) /
+		// thenComposeAsync(Function[, Executor]) /
 		// applyToEither(other, Function<? super T,? extends U>) /
-		// acceptEither(other, Consumer<? super T>) —
+		// applyToEitherAsync(other, Function[, Executor]) /
+		// acceptEither(other, Consumer<? super T>) /
+		// acceptEitherAsync(other, Consumer[, Executor]) —
 		// unary functional arg applied to CF result T (same leaf as join/getNow).
 		// applyToEither/acceptEither take other stage first; the Function/Consumer
 		// is the second arg and still binds as the sole unary lambda (other is not
-		// a lambda). Identity thenApply return pipelines (thenApply(a -> a).join())
-		// peel via javaStreamPipelineElemType / javaMapResultElemType; thenCompose
-		// rewrap pipelines (thenCompose(a -> completedFuture(a)).join()) peel via
-		// javaFlatMapResultElemType. Type-changing mappers fail closed on the
-		// return path. Identity handle ((a,e)->a).join() peels the same way
-		// (first-param bi-lambda identity).
-		"thenAccept", "thenApply", "thenApplyAsync", "thenCompose",
-		"applyToEither", "acceptEither",
+		// a lambda; optional Executor is non-lambda too). Identity thenApply /
+		// thenApplyAsync return pipelines (thenApplyAsync(a -> a).join()) peel via
+		// javaStreamPipelineElemType / javaMapResultElemType; thenCompose /
+		// thenComposeAsync rewrap pipelines peel via javaFlatMapResultElemType.
+		// Type-changing mappers fail closed on the return path. Identity handle
+		// ((a,e)->a).join() peels the same way (first-param bi-lambda identity).
+		"thenAccept", "thenAcceptAsync",
+		"thenApply", "thenApplyAsync",
+		"thenCompose", "thenComposeAsync",
+		"applyToEither", "applyToEitherAsync",
+		"acceptEither", "acceptEitherAsync",
 		// CompletableFuture.whenComplete(BiConsumer<? super T,? super Throwable>) /
-		// handle(BiFunction<? super T,Throwable,? extends U>) —
+		// whenCompleteAsync(BiConsumer[, Executor]) /
+		// handle(BiFunction<? super T,Throwable,? extends U>) /
+		// handleAsync(BiFunction[, Executor]) —
 		// bi-lambda first param is CF result T (second is Throwable).
-		// Identity handle return pipelines peel via javaMapResultElemType.
-		"whenComplete", "handle",
-		// CompletableFuture.thenCombine/thenAcceptBoth —
+		// Identity handle / handleAsync return pipelines peel via javaMapResultElemType.
+		"whenComplete", "whenCompleteAsync", "handle", "handleAsync",
+		// CompletableFuture.thenCombine/thenAcceptBoth /
+		// thenCombineAsync/thenAcceptBothAsync —
 		// bi-lambda (T,U): first is this CF's T; second is other stage's U.
-		"thenCombine", "thenAcceptBoth",
+		// Optional Executor after the BiFunction is non-lambda.
+		"thenCombine", "thenCombineAsync", "thenAcceptBoth", "thenAcceptBothAsync",
 		// Map value bi-lambdas (see javaMapValueBiLambdaMethod).
 		"computeIfPresent", "compute", "replaceAll", "merge",
 		// ConcurrentHashMap.reduceValues — 2-arg BiFunction on V,V and 3-arg unary
@@ -2171,11 +2191,12 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// (NavigableSet reverse-order view; order only).
 			// headSet/tailSet/subSet(...) return SortedSet/NavigableSet of the same
 			// element type (range views; bounds/inclusivity args do not change E).
-			// CompletableFuture.whenComplete / copy / toCompletableFuture /
-			// orTimeout / completeOnTimeout / exceptionally / exceptionallyCompose /
-			// minimalCompletionStage — always return the same result T by API
-			// signature (side-effect / timeout / recovery args do not change T).
-			// Enables whenComplete(...).join() / copy().join() under foreign
+			// CompletableFuture.whenComplete / whenCompleteAsync / copy /
+			// toCompletableFuture / orTimeout / completeOnTimeout / exceptionally /
+			// exceptionallyCompose / minimalCompletionStage — always return the
+			// same result T by API signature (side-effect / timeout / recovery /
+			// Executor args do not change T). Enables whenComplete(...).join() /
+			// whenCompleteAsync(...).join() / copy().join() under foreign
 			// same-leaf methods. Type-changing stages (thenApply/handle/…) stay
 			// on their own identity/rewrap peels.
 			// Optional.or(Supplier) always returns Optional of the same T by API
@@ -2184,7 +2205,7 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// under foreign same-leaf methods. Stream has no or — Optional-only.
 			"findFirst", "findAny", "min", "max", "reduce", "toList", "toArray", "clone", "reversed", "subList",
 			"descendingSet", "headSet", "tailSet", "subSet",
-			"whenComplete", "copy", "toCompletableFuture",
+			"whenComplete", "whenCompleteAsync", "copy", "toCompletableFuture",
 			"orTimeout", "completeOnTimeout",
 			"exceptionally", "exceptionallyCompose", "minimalCompletionStage",
 			"or":
@@ -2213,13 +2234,15 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// recover U from mapper when clearly Optional.of/ofNullable rewrap
 			// or another tracked Optional/collection local. Unknown mappers fail closed.
 			return javaFlatMapResultElemType(obj, content, elemOf, valOf)
-		case "thenCompose":
-			// CompletableFuture.thenCompose(Function): recover U when mapper clearly
-			// rewraps T as CompletionStage — CompletableFuture.completedFuture(a) /
-			// completedFuture(new A()) / tracked CF local — same rewrap shapes as
-			// Optional.flatMap. Enables thenCompose(a -> completedFuture(a)).join()
-			// / var f2 = thenCompose(...); f2.join() under foreign same-leaf methods.
-			// Type-changing mappers fail closed. Async variants stay out of scope.
+		case "thenCompose", "thenComposeAsync":
+			// CompletableFuture.thenCompose / thenComposeAsync(Function[, Executor]):
+			// recover U when mapper clearly rewraps T as CompletionStage —
+			// CompletableFuture.completedFuture(a) / completedFuture(new A()) /
+			// tracked CF local — same rewrap shapes as Optional.flatMap. Executor
+			// arg ignored; javaFlatMapResultElemType picks the first lambda among
+			// args. Enables thenComposeAsync(a -> completedFuture(a)).join() /
+			// var f2 = thenComposeAsync(...); f2.join() under foreign same-leaf.
+			// Type-changing mappers fail closed.
 			return javaFlatMapResultElemType(obj, content, elemOf, valOf)
 		case "map":
 			// Optional.map / Stream.map: recover U from mapper when clearly
@@ -2239,31 +2262,32 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// var f2 = thenApplyAsync(a -> a); f2.join() under foreign same-leaf.
 			// Type-changing mappers fail closed.
 			return javaMapResultElemType(obj, content, elemOf, valOf)
-		case "applyToEither":
-			// CompletableFuture.applyToEither(other, Function): recover U when the
-			// Function (second arg) is identity (a -> a) or new T(...) — same shapes
-			// as thenApply. Other stage is a non-lambda first arg; javaMapResultElemType
-			// picks the first lambda among args. Enables applyToEither(other, a -> a).join()
-			// / var f2 = applyToEither(...); f2.join() under foreign same-leaf methods.
+		case "applyToEither", "applyToEitherAsync":
+			// CompletableFuture.applyToEither / applyToEitherAsync(other, Function[, Executor]):
+			// recover U when the Function is identity (a -> a) or new T(...) — same
+			// shapes as thenApply. Other stage is a non-lambda first arg; optional
+			// Executor is non-lambda; javaMapResultElemType picks the first lambda
+			// among args. Enables applyToEitherAsync(other, a -> a).join() /
+			// var f2 = applyToEitherAsync(...); f2.join() under foreign same-leaf.
 			// Type-changing mappers and acceptEither (Void) fail closed.
-			// Async variants stay out of scope.
 			return javaMapResultElemType(obj, content, elemOf, valOf)
-		case "handle":
-			// CompletableFuture.handle(BiFunction): recover U when bi-lambda is
-			// first-param identity ((a, e) -> a) or new T(...) — same shapes as
-			// thenApply identity, bi form. Enables handle((a,e)->a).join() /
-			// var f2 = handle((a,e)->a); f2.join() under foreign same-leaf methods.
-			// Type-changing mappers fail closed. whenComplete always returns T
-			// by signature and peels as a type-preserving stage (see peel list).
+		case "handle", "handleAsync":
+			// CompletableFuture.handle / handleAsync(BiFunction[, Executor]): recover U
+			// when bi-lambda is first-param identity ((a, e) -> a) or new T(...) —
+			// same shapes as thenApply identity, bi form. Executor arg ignored.
+			// Enables handleAsync((a,e)->a).join() / var f2 = handleAsync(...); f2.join()
+			// under foreign same-leaf methods. Type-changing mappers fail closed.
+			// whenComplete / whenCompleteAsync always return T by signature and peel
+			// as type-preserving stages (see peel list).
 			return javaMapResultElemType(obj, content, elemOf, valOf)
-		case "thenCombine":
-			// CompletableFuture.thenCombine(other, BiFunction): recover V when the
-			// BiFunction (second arg) is first-param identity ((a, b) -> a) or new T(...)
-			// — same shapes as handle, with other stage first like applyToEither.
-			// javaMapResultElemType picks the first lambda among args. Enables
-			// thenCombine(other, (a,b)->a).join() / var f2 = thenCombine(...); f2.join()
-			// under foreign same-leaf methods. Type-changing mappers and thenAcceptBoth
-			// (Void) fail closed. Async variants stay out of scope.
+		case "thenCombine", "thenCombineAsync":
+			// CompletableFuture.thenCombine / thenCombineAsync(other, BiFunction[, Executor]):
+			// recover V when the BiFunction is first-param identity ((a, b) -> a) or
+			// new T(...) — same shapes as handle, with other stage first like
+			// applyToEither. Executor arg ignored; javaMapResultElemType picks the
+			// first lambda among args. Enables thenCombineAsync(other, (a,b)->a).join()
+			// / var f2 = thenCombineAsync(...); f2.join() under foreign same-leaf.
+			// Type-changing mappers and thenAcceptBoth (Void) fail closed.
 			return javaMapResultElemType(obj, content, elemOf, valOf)
 		case "collect":
 			// Stream.collect(Collectors.toList()/toSet()/toUnmodifiableList()/
