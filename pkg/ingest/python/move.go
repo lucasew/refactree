@@ -2562,8 +2562,10 @@ func pythonCollectionMutationElemType(call *grammar.Node, content []byte) (local
 			return "", "", false
 		}
 		et = pythonClassCtorName(args[0], content)
-	case "extend":
+	case "extend", "update":
 		// xs.extend([A()]) / xs.extend((A(),)) — homogeneous Class() collection.
+		// ca.update([A()]) / s.update({A()}) — Counter/set keys from Class() elems
+		// (product dual-class Counter peels under foreign same-leaf).
 		if len(args) != 1 {
 			return "", "", false
 		}
@@ -4141,6 +4143,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					}
 				}
 				// xs = [A()] / (A(),) / [B()] — track element type for later for-loops.
+				// xs = xs + [A()] / xs = [*xs, A()] / zs = xs + ys — assign-concat /
+				// star-list peels (self-target untyped arms are wildcards).
 				// aa = [[A()]] / ((A(),),) / [{"k": A()}] — nested list/tuple/dict-row
 				// local of leaf A (@nested) so aa[0][0].run() / la[0]["k"].run() /
 				// match aa: case [[xa]]: peel under foreign same-leaf.
@@ -4152,7 +4156,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// for a in da["k"] / match da: case {"k": [xa]}: peel.
 				// da = {"k": A()} / dict(k=A()) / OrderedDict(k=A()) / ChainMap({"k": A()}) /
 				// {k: A() for k in ...} — scalar mapping values of A (elemOf).
-				// xs = list(items) / filter(...) — preserve element type via wrappers.
+				// xs = list(items) / UserList(items) / filter(...) — preserve element type.
 				// d = dict.fromkeys(keys, A()) — value leaf is A (for .values/.get).
 				// pairs = zip/enumerate/product/pairwise(...) /
 				// pairs = list/tuple/iter/reversed/sorted/filter(...zip...) —
@@ -4164,6 +4168,13 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					} else if et := pythonDictFromkeysValueType(right, content); et != "" {
 						elemOf[lname] = et
 					} else if et := pythonHomogeneousCtorElem(right, content); et != "" {
+						elemOf[lname] = et
+					} else if et := pythonListConcatElemType(right, content, elemOf, egElems, typeOf, lname); et != "" {
+						// xs = xs + [A()] / zs = xs + [A()] / xs = [] + [A()] —
+						// self-target untyped arms are wildcards (assign-concat).
+						elemOf[lname] = et
+					} else if et := pythonHomogeneousSplatListCtorElem(right, content, elemOf, egElems, typeOf, lname); et != "" {
+						// xs = [*xs, A()] / zs = [*xs, A()] — star-list peels.
 						elemOf[lname] = et
 					} else if nest := pythonNestedHomogeneousCtorElem(right, content); nest != "" {
 						// aa = [[A()]] / [{"k": A()}] — not a scalar list of A; store nested leaf.
@@ -4325,6 +4336,26 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							}
 						}
 					}
+				}
+			}
+		case "augmented_assignment":
+			// xs += [A()] / xs += (A(),) / xs += ys / xs += [*ys, A()] —
+			// mutation-via-assign peels under foreign same-leaf (same leaf as
+			// xs.append(A()) / xs.extend([A()])). Only += ; other ops fail closed.
+			left := ingest.ChildByField(n, "left")
+			right := ingest.ChildByField(n, "right")
+			op := ingest.ChildByField(n, "operator")
+			if left != nil && right != nil && left.Type() == "identifier" &&
+				op != nil && ingest.NodeText(op, content) == "+=" {
+				lname := ingest.NodeText(left, content)
+				if et := pythonHomogeneousCtorElem(right, content); et != "" {
+					elemOf[lname] = et
+				} else if et := pythonListConcatElemType(right, content, elemOf, egElems, typeOf, lname); et != "" {
+					elemOf[lname] = et
+				} else if et := pythonHomogeneousSplatListCtorElem(right, content, elemOf, egElems, typeOf, lname); et != "" {
+					elemOf[lname] = et
+				} else if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); et != "" {
+					elemOf[lname] = et
 				}
 			}
 		case "named_expression":
@@ -8465,6 +8496,10 @@ func pythonPairIterSlotsOf(right *grammar.Node, content []byte, elemOf, egElems,
 		if types := pythonCombBatchedPairSlots(right, content, elemOf, egElems, typeOf); len(types) > 0 {
 			return types
 		}
+		// ca.most_common() / ca.most_common(n) — (elem, count) pairs; count untyped.
+		if types := pythonMostCommonPairSlots(right, content, elemOf); len(types) > 0 {
+			return types
+		}
 		// list/tuple/iter/reversed/sorted(zip(...)) / filter(pred, zip(...)) —
 		// unwrap identity wrappers that re-yield the same pairs.
 		fn := ingest.ChildByField(right, "function")
@@ -8830,7 +8865,19 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		}
 		return elemOf[ingest.NodeText(right, content)]
 	case "list", "tuple", "set":
-		return pythonHomogeneousCtorElem(right, content)
+		if et := pythonHomogeneousCtorElem(right, content); et != "" {
+			return et
+		}
+		// [*xs, A()] / [*xs, *ys] — star-list peels (no self-target outside assign).
+		if right.Type() == "list" {
+			return pythonHomogeneousSplatListCtorElem(right, content, elemOf, egElems, typeOf, "")
+		}
+		return ""
+	case "binary_operator":
+		// xs + [A()] / [A()] + xs / xs + ys — list concat element type when sides
+		// agree; empty list/tuple is a wildcard. Self-target untyped arms only in
+		// assignment path (pythonListConcatElemType with target name).
+		return pythonListConcatElemType(right, content, elemOf, egElems, typeOf, "")
 	case "subscript":
 		// xs[:n] / xs[i:j] / xs[:] / xs[::step] — slice of a collection preserves
 		// element type (as_[:1][0].run() / sa = as_[:1]; sa[0].run()).
@@ -8875,8 +8922,10 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 				}
 			}
 			switch ingest.NodeText(fn, content) {
-			case "reversed", "sorted", "list", "tuple", "set", "frozenset", "iter", "deque", "Counter", "copy", "deepcopy":
+			case "reversed", "sorted", "list", "tuple", "set", "frozenset", "iter", "deque", "Counter", "UserList", "copy", "deepcopy":
 				// Counter(iterable) keys are the iterable elements (product case).
+				// UserList(iterable) / UserList([A()]) — element type of 1st arg
+				// (collections.UserList ABC; same leaf as list(...)).
 				// frozenset(iterable) same as set (immutable). Mapping/kwargs
 				// constructors fail closed when untyped / non-iterable.
 				// copy(xs) / deepcopy(xs) — from copy import copy, deepcopy; preserve
@@ -9155,9 +9204,10 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 						return ""
 					}
 					return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
-				case "deque", "Counter":
+				case "deque", "Counter", "UserList":
 					// collections.deque(iterable[, maxlen]) /
-					// collections.Counter(iterable) — element of 1st arg.
+					// collections.Counter(iterable) /
+					// collections.UserList(iterable) — element of 1st arg.
 					objN := ingest.ChildByField(fn, "object")
 					if objN == nil || objN.Type() != "identifier" {
 						return ""
@@ -9366,6 +9416,222 @@ func pythonIsEmptyCollectionLiteral(n *grammar.Node) bool {
 		}
 	}
 	return true
+}
+
+// pythonListConcatElemType recovers T from list-concat binary + expressions:
+//
+//	xs + [A()] / [A()] + xs / xs + ys / [] + [A()] / (xs + [A()]) + [A()]
+//
+// Arms must agree when typed. Empty list/tuple literals are wildcards. When
+// selfTarget is non-empty (assignment `xs = xs + [A()]` / `xs += …`), an untyped
+// identifier arm equal to selfTarget is also a wildcard. Non-+ operators and
+// mismatched leaves fail closed.
+func pythonListConcatElemType(n *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string, selfTarget string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		n = pythonParenInner(n)
+	}
+	if n == nil || n.Type() != "binary_operator" {
+		return ""
+	}
+	op := ingest.ChildByField(n, "operator")
+	if op == nil || ingest.NodeText(op, content) != "+" {
+		return ""
+	}
+	left := ingest.ChildByField(n, "left")
+	right := ingest.ChildByField(n, "right")
+	if left == nil || right == nil {
+		return ""
+	}
+	etL := pythonListConcatArmElemType(left, content, elemOf, egElems, typeOf, selfTarget)
+	etR := pythonListConcatArmElemType(right, content, elemOf, egElems, typeOf, selfTarget)
+	wildL := pythonListConcatArmWildcard(left, content, elemOf, selfTarget)
+	wildR := pythonListConcatArmWildcard(right, content, elemOf, selfTarget)
+	if etL != "" && etR != "" {
+		if etL == etR {
+			return etL
+		}
+		return ""
+	}
+	if etL != "" && wildR {
+		return etL
+	}
+	if etR != "" && wildL {
+		return etR
+	}
+	return ""
+}
+
+// pythonListConcatArmElemType types one + arm: nested +, homogeneous Class()
+// list/tuple, known iterable, or "".
+func pythonListConcatArmElemType(n *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string, selfTarget string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		n = pythonParenInner(n)
+	}
+	if n == nil {
+		return ""
+	}
+	if n.Type() == "binary_operator" {
+		return pythonListConcatElemType(n, content, elemOf, egElems, typeOf, selfTarget)
+	}
+	if et := pythonHomogeneousCtorElem(n, content); et != "" {
+		return et
+	}
+	if et := pythonHomogeneousSplatListCtorElem(n, content, elemOf, egElems, typeOf, selfTarget); et != "" {
+		return et
+	}
+	return pythonIterableElemType(n, content, elemOf, egElems, typeOf)
+}
+
+// pythonListConcatArmWildcard reports empty collection literals or untyped
+// selfTarget identifiers (xs = xs + [A()] before xs is typed).
+func pythonListConcatArmWildcard(n *grammar.Node, content []byte, elemOf map[string]string, selfTarget string) bool {
+	if n == nil {
+		return false
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		n = pythonParenInner(n)
+	}
+	if n == nil {
+		return false
+	}
+	if pythonIsEmptyCollectionLiteral(n) {
+		return true
+	}
+	if selfTarget != "" && n.Type() == "identifier" {
+		name := ingest.NodeText(n, content)
+		if name == selfTarget {
+			if elemOf == nil || elemOf[name] == "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// pythonHomogeneousSplatListCtorElem recovers T from star-lists of Class() and
+// typed splats:
+//
+//	[*xs, A()] / [A(), *xs] / [*xs, *ys] (same T) / [*xs, A(), A()]
+//
+// selfTarget untyped identifiers in splats are wildcards (xs = [*xs, A()]).
+// Pure Class()-only lists return "" (use pythonHomogeneousCtorElem). Mixed
+// leaves / unknown non-self splats fail closed.
+func pythonHomogeneousSplatListCtorElem(n *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string, selfTarget string) string {
+	if n == nil || n.Type() != "list" {
+		return ""
+	}
+	var elem string
+	saw := false
+	sawSplat := false
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		switch ch.Type() {
+		case "[", "]", ",", "comment":
+			continue
+		case "list_splat":
+			sawSplat = true
+			var val *grammar.Node
+			for j := uint32(0); j < ch.ChildCount(); j++ {
+				c := ch.Child(j)
+				if c.Type() == "*" {
+					continue
+				}
+				val = c
+				break
+			}
+			if val == nil {
+				return ""
+			}
+			for val != nil && val.Type() == "parenthesized_expression" {
+				val = pythonParenInner(val)
+			}
+			if val == nil {
+				return ""
+			}
+			if pythonIsEmptyCollectionLiteral(val) {
+				continue
+			}
+			et := ""
+			if val.Type() == "identifier" {
+				name := ingest.NodeText(val, content)
+				if elemOf != nil {
+					et = elemOf[name]
+				}
+				if et == "" && selfTarget != "" && name == selfTarget {
+					// xs = [*xs, A()] — untyped self splat is wildcard.
+					continue
+				}
+				if et == "" {
+					return ""
+				}
+			} else {
+				et = pythonIterableElemType(val, content, elemOf, egElems, typeOf)
+				if et == "" {
+					return ""
+				}
+			}
+			if !saw {
+				elem = et
+				saw = true
+				continue
+			}
+			if et != elem {
+				return ""
+			}
+		case "call":
+			et := pythonClassCtorName(ch, content)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				elem = et
+				saw = true
+				continue
+			}
+			if et != elem {
+				return ""
+			}
+		default:
+			return ""
+		}
+	}
+	if !sawSplat || !saw {
+		return ""
+	}
+	return elem
+}
+
+// pythonMostCommonPairSlots recovers (elem, count) slots from
+// ca.most_common() / ca.most_common(n) when ca has a known element type
+// (Counter keys). Count slot is untyped (""). Enables
+// `for a, _ in ca.most_common(): a.run()` under foreign same-leaf.
+func pythonMostCommonPairSlots(call *grammar.Node, content []byte, elemOf map[string]string) []string {
+	if call == nil || call.Type() != "call" || elemOf == nil {
+		return nil
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "attribute" {
+		return nil
+	}
+	attr := ingest.ChildByField(fn, "attribute")
+	if attr == nil || ingest.NodeText(attr, content) != "most_common" {
+		return nil
+	}
+	obj := ingest.ChildByField(fn, "object")
+	if obj == nil || obj.Type() != "identifier" {
+		return nil
+	}
+	et := elemOf[ingest.NodeText(obj, content)]
+	if et == "" {
+		return nil
+	}
+	return []string{et, ""}
 }
 
 // pythonAttrCall returns (objectIdent, methodName) for obj.method(...) calls.
