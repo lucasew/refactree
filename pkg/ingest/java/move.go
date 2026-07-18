@@ -3070,7 +3070,10 @@ func javaArraysStreamElemType(call *grammar.Node, content []byte, elemOf, valOf 
 // Map.of(k, new T(...), …) → T (homogeneous value creations),
 // Map.ofEntries(Map.entry(k, new T(...)), …) → T (homogeneous entry values),
 // Map.copyOf(m) → valOf[m],
-// m.reversed() → valOf[m] (SequencedMap view; order only).
+// m.reversed() → valOf[m] (SequencedMap view; order only),
+// m.descendingMap() → valOf[m] (NavigableMap reverse-order view),
+// m.headMap/tailMap/subMap(...) → valOf[m] (SortedMap/NavigableMap range views;
+// bounds/inclusivity args do not change the value type leaf).
 // Fail closed on other shapes (type-changing value mappers, groupingBy lists, …).
 func javaMapPipelineValueType(obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
@@ -3124,6 +3127,10 @@ func javaMapPipelineValueType(obj *grammar.Node, content []byte, elemOf, valOf m
 		case "reversed":
 			// SequencedMap.reversed() — same value type (order only; Java 21).
 			// List/SequencedCollection.reversed stay on the element pipeline.
+			return javaMapPipelineValueType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
+		case "descendingMap", "headMap", "tailMap", "subMap":
+			// NavigableMap.descendingMap / SortedMap|NavigableMap headMap/tailMap/subMap
+			// — same value type (order/bounds only; inclusivity args ignored).
 			return javaMapPipelineValueType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
 		default:
 			return ""
