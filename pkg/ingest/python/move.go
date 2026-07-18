@@ -2263,6 +2263,8 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `nlargest/nsmallest(n, items, key=lambda x: x.m())` /
 // `nlargest/nsmallest(n, items, lambda x: x.m())` (positional key) / `heapq.nlargest(...)` /
 // `merge(xs, ys, key=lambda x: x.m())` / `heapq.merge(..., key=lambda x: x.m())` /
+// `bisect_left/bisect_right/bisect/insort_*(a, x, key=lambda e: e.m())` /
+// `bisect.bisect_left(...)` — untyped unary key=lambda from list element type /
 // `map/filter/takewhile/dropwhile/filterfalse(lambda x: x.m(), items)` /
 // `itertools.takewhile/groupby/...` — untyped unary lambda params from the iterable
 // element type (under foreign same-leaf).
@@ -3352,7 +3354,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				}
 			}
 		case "call":
-			// sorted/min/max/groupby/nlargest/nsmallest/merge(..., key=lambda x: x.m()) /
+			// sorted/min/max/groupby/nlargest/nsmallest/merge/bisect*(..., key=lambda x: x.m()) /
 			// nlargest/nsmallest(n, items, lambda x: x.m()) (positional key) /
 			// items.sort(key=lambda x: x.m()) /
 			// map/filter/takewhile/dropwhile/filterfalse(lambda x: x.m(), items) —
@@ -3423,12 +3425,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 }
 
 // pythonBindIterableLambdaParams types untyped lambda parameters when the call
-// is sorted/min/max/groupby/nlargest/nsmallest/merge with key=lambda (keyword or
-// nlargest/nsmallest positional 3rd arg), collection.sort(key=lambda),
+// is sorted/min/max/groupby/nlargest/nsmallest/merge/bisect* with key=lambda
+// (keyword or nlargest/nsmallest positional 3rd arg), collection.sort(key=lambda),
 // map/filter/takewhile/dropwhile/filterfalse with a unary lambda, or
 // reduce/accumulate with a bi-lambda, over a known iterable element type of
-// ourReceivers. Bare and module-qualified forms (itertools./heapq./functools.)
-// use the leaf callee name.
+// ourReceivers. Bare and module-qualified forms
+// (itertools./heapq./functools./bisect.) use the leaf callee name.
 // Wrong-arity lambdas and non-lambda callables fail closed.
 // Foreign element types are not bound (same as for-loop targets).
 func pythonBindIterableLambdaParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, elemOf, egElems, typeOf map[string]string, out map[string]bool) {
@@ -3441,7 +3443,8 @@ func pythonBindIterableLambdaParams(call *grammar.Node, content []byte, ourRecei
 	}
 	// items.sort(key=lambda x: ...) — element type of the receiver collection.
 	// Method form only (not a free function); other attributes fall through to
-	// leaf-name matching (itertools.takewhile / heapq.nlargest / heapq.merge).
+	// leaf-name matching (itertools.takewhile / heapq.nlargest / heapq.merge /
+	// bisect.bisect_left).
 	if fn.Type() == "attribute" {
 		if attr := ingest.ChildByField(fn, "attribute"); attr != nil && ingest.NodeText(attr, content) == "sort" {
 			obj := ingest.ChildByField(fn, "object")
@@ -3477,6 +3480,21 @@ func pythonBindIterableLambdaParams(call *grammar.Node, content []byte, ourRecei
 		// targets via pythonChainElemType); key= lambda param is that element
 		// type. reverse ignored. Non-lambda key callables fail closed.
 		et := pythonChainElemType(call, content, elemOf, egElems, typeOf)
+		if !ourReceivers[et] {
+			return
+		}
+		if lam := pythonKeywordArgValue(call, content, "key"); lam != nil {
+			pythonBindUnaryLambdaParam(lam, content, out)
+		}
+	case "bisect_left", "bisect_right", "bisect", "insort_left", "insort_right", "insort":
+		// bisect_left(a, x, *, key=lambda e: ...) / bisect.bisect_left(...) /
+		// insort_* — 1st positional is the sorted list; key= lambda param is
+		// that element type (needle/lo/hi ignored). Non-lambda key fails closed.
+		args, ok := pythonCallPositionalArgNodes(call)
+		if !ok || len(args) == 0 {
+			return
+		}
+		et := pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
 		if !ourReceivers[et] {
 			return
 		}
