@@ -1920,6 +1920,7 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `for combo in permutations/combinations_with_replacement(...)` (combo → elemOf),
 // `for combo in product(xs, ys): for a in combo` /
 // `for combo in itertools.product(...)` (combo → elemOf when all args share type),
+// `for pair in zip/zip_longest/pairwise(...): for a in pair` (pair → elemOf when shared),
 // `for k, g in groupby(xs)` / `for k, g in itertools.groupby(xs)` —
 // group g is an iterable of xs elements (key untyped; key= ignored),
 // `for a in reversed/sorted/list/iter(items)`,
@@ -2331,7 +2332,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// for a, b in zip_longest / itertools.zip_longest /
 			// for a, b in pairwise / itertools.pairwise /
 			// for a, b in product / itertools.product /
-			// for combo in product / itertools.product (combo → elemOf when shared) /
+			// for combo/pair in zip/zip_longest/product/pairwise (→ elemOf when shared) /
 			// for a, b in combinations/permutations / itertools.* /
 			// for combo in combinations/permutations / itertools.* (combo → elemOf) /
 			// for a, b in batched / itertools.batched (each slot → elem; n ignored) /
@@ -2371,10 +2372,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					elemOf[ingest.NodeText(left, content)] = et
 					break
 				}
-				// for combo in product(xs, ys) / itertools.product(...) —
-				// combo is a tuple of elements; bind elemOf when all args share type
-				// so nested `for a in combo` / next(combo) type.
-				if et := pythonProductSharedElemType(right, content, elemOf, egElems, typeOf); et != "" {
+				// for pair/combo in zip/zip_longest/product/pairwise —
+				// pair is a tuple of slot elements; bind elemOf when all slots
+				// share type so nested `for a in pair` / next(pair) type.
+				// zip(*[xs, ys]) splat form included via pythonEnumerateZipTargetTypes.
+				if et := pythonPairIterSharedElemType(right, content, elemOf, egElems, typeOf); et != "" {
 					elemOf[ingest.NodeText(left, content)] = et
 					break
 				}
@@ -3808,41 +3810,33 @@ func pythonCombPermElemType(right *grammar.Node, content []byte, elemOf, egElems
 	return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
 }
 
-// pythonProductSharedElemType recovers the shared element type for
-// product(*iterables[, repeat]) / itertools.product(...) when every positional
-// iterable resolves to the same non-empty element leaf. Used to bind
-// `for combo in product(...):` into elemOf so nested `for a in combo` /
-// next(combo) type. Heterogeneous or untyped args fail closed; repeat= kwargs
-// are ignored (via positional-arg parsing).
-func pythonProductSharedElemType(right *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
-	if right == nil || right.Type() != "call" {
+// pythonPairIterSharedElemType recovers the shared element type for single-
+// target loops over zip / zip_longest / product / pairwise (bare or
+// itertools.*; zip(*[xs, ys]) splat included). Every unpack slot from
+// pythonEnumerateZipTargetTypes must be the same non-empty leaf — used to bind
+// `for pair in zip(...):` into elemOf so nested `for a in pair` / next(pair)
+// type. Heterogeneous or untyped slots (incl. enumerate's untyped index) fail
+// closed. Not used for bare `for x in zip(...)` element typing — the loop var
+// is a tuple, not an element.
+func pythonPairIterSharedElemType(right *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
+	types := pythonEnumerateZipTargetTypes(right, content, elemOf, egElems, typeOf)
+	if len(types) == 0 {
 		return ""
 	}
-	fn := ingest.ChildByField(right, "function")
-	if fn == nil {
-		return ""
+	var et string
+	for _, t := range types {
+		if t == "" {
+			return ""
+		}
+		if et == "" {
+			et = t
+			continue
+		}
+		if et != t {
+			return ""
+		}
 	}
-	switch fn.Type() {
-	case "identifier":
-		if ingest.NodeText(fn, content) != "product" {
-			return ""
-		}
-	case "attribute":
-		objN := ingest.ChildByField(fn, "object")
-		attrN := ingest.ChildByField(fn, "attribute")
-		if objN == nil || attrN == nil || objN.Type() != "identifier" {
-			return ""
-		}
-		if ingest.NodeText(objN, content) != "itertools" {
-			return ""
-		}
-		if ingest.NodeText(attrN, content) != "product" {
-			return ""
-		}
-	default:
-		return ""
-	}
-	return pythonChainElemType(right, content, elemOf, egElems, typeOf)
+	return et
 }
 
 // pythonExpandSingleListTupleSplat returns the elements of a sole *list/*tuple
