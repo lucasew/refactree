@@ -3215,7 +3215,8 @@ func compositeLiteralTypeName(n *grammar.Node, content []byte) string {
 
 // findComplexOperandSelectorEdits rewrites recv.Method when recv is not a bare
 // identifier: v.(T).M, (v.(T)).M, xs[i].M, Make().M, T{}.M / &T{}.M, (*T).M,
-// new(T).M, getA().M, (*pa).M, (<-ch).M (channel receive payload).
+// new(T).M, getA().M, (*pa).M, (<-ch).M (channel receive payload),
+// A(x).M / (*A)(p).M (type conversion call forms under foreign same-leaf).
 //
 // When foreign same-leaf methods exist, only rewrite when the operand type is
 // known and not a foreign receiver (same filter as identifier selectors).
@@ -3838,6 +3839,10 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType, valueT
 				if types := funcResults[name]; len(types) == 1 && types[0] != "" {
 					return types[0]
 				}
+				// Multi-result / empty-concrete same-file func: not a conversion.
+				if _, isFunc := funcResults[name]; isFunc {
+					return ""
+				}
 			}
 			// f().M — local func var f := func() *A { … } bound via valueType
 			// (func-literal result leaf). Enables f().Run under foreign same-leaf.
@@ -3845,6 +3850,22 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType, valueT
 				if t, ok := valueType(name, n.StartByte()); ok && t != "" {
 					return t
 				}
+			}
+			// A(x).M — type conversion parsed as call_expression by tree-sitter-go
+			// (not type_conversion_expression). When the callee is not a same-file
+			// function / typed func var, treat the identifier as the conversion
+			// type name. Under foreign same-leaf methods, caller filters via
+			// ourReceivers so B(x).Run is preserved when renaming A.Run.
+			if name != "" {
+				return name
+			}
+		}
+		// (*A)(p).M / (A)(p).M — parenthesized conversion type as call callee.
+		// tree-sitter-go parses these as call_expression too; peel the type from
+		// the parenthesized operand (unary *A / type_identifier A).
+		if fn != nil && fn.Type() == "parenthesized_expression" {
+			if t := goComplexOperandType(fn, content, indexElemType, valueType, funcColl, funcResults); t != "" {
+				return t
 			}
 		}
 	case "unary_expression":
