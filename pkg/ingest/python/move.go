@@ -1902,6 +1902,7 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `for a in items.copy()` / `for a in items or []`,
 // `for a in d.values()` / `for k, a in d.items()` with `d: dict[K, A]`,
 // `for i, a in enumerate(items)` / `for a, b in zip(xs, ys)`,
+// `for a, b in zip(*[xs, ys])` / `for a, b in zip(*(xs, ys))`,
 // `for a, b in zip_longest(xs, ys)` / `for a, b in itertools.zip_longest(xs, ys)`,
 // `for a in reversed/sorted/list/iter(items)`,
 // `for a in filter(pred, items)` / `for a in map(A, names)`,
@@ -1909,7 +1910,8 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `for a in islice(xs, n)` / `for a in itertools.islice(xs, n)`,
 // `for a in accumulate(xs)` / `for a in itertools.accumulate(xs)`,
 // `for a in Counter(items)` / `for a in collections.Counter(items)`,
-// `for a in Counter(items).elements()`),
+// `for a in Counter(items).elements()`,
+// `for a in dict.fromkeys(items)` / `d = dict.fromkeys(keys, A()); d.values()`),
 // tuple/list unpack (`a, b = A(), B()`, `[a, b] = [A(), B()]`,
 // `a, *rest = items` / `*rest, a = items` / `a, = items` from list[A],
 // `for a, b in [(A(), B())]`), and
@@ -2069,8 +2071,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				}
 				// xs = [A()] / (A(),) / [B()] — track element type for later for-loops.
 				// xs = list(items) / filter(...) — preserve element type via wrappers.
+				// d = dict.fromkeys(keys, A()) — value leaf is A (for .values/.get).
 				if right != nil {
-					if et := pythonHomogeneousCtorElem(right, content); et != "" {
+					if et := pythonDictFromkeysValueType(right, content); et != "" {
+						elemOf[lname] = et
+					} else if et := pythonHomogeneousCtorElem(right, content); et != "" {
 						elemOf[lname] = et
 					} else if et := pythonIterableElemType(right, content, elemOf, egElems); et != "" {
 						elemOf[lname] = et
@@ -2234,10 +2239,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// for a in items / for a in [A()] / for a in d.values() /
 			// for k, a in d.items() / for a, b in [(A(), B())] /
 			// for i, a in enumerate(items) / for a, b in zip(xs, ys) /
+			// for a, b in zip(*[xs, ys]) / zip(*(xs, ys)) /
 			// for a, b in zip_longest / itertools.zip_longest /
 			// for a in reversed/sorted/list/iter(items) /
 			// for a in filter(pred, items) / for a in map(A, names) /
 			// for a in chain/islice/accumulate / itertools.chain/islice/accumulate /
+			// for a in dict.fromkeys(items) /
 			// [a.m() for a in xs] / for a in e.exceptions
 			left := ingest.ChildByField(n, "left")
 			right := ingest.ChildByField(n, "right")
@@ -2262,6 +2269,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					break
 				}
 				// for i, a in enumerate(xs) / for a, b in zip(xs, ys) /
+				// for a, b in zip(*[xs, ys]) / zip(*(xs, ys)) /
 				// for a, b in zip_longest(xs, ys) / itertools.zip_longest(...)
 				if types := pythonEnumerateZipTargetTypes(right, content, elemOf, egElems); len(types) > 0 {
 					for i, name := range targets {
@@ -2776,6 +2784,7 @@ func pythonSubscriptElemType(sub *grammar.Node, content []byte, elemOf, egElems 
 // islice / itertools.islice (1st arg iterable; start/stop/step ignored),
 // accumulate / itertools.accumulate (1st arg iterable; func/initial ignored),
 // Counter / collections.Counter (keys = iterable elements; .elements() same),
+// dict.fromkeys(iterable[, value]) (keys = 1st-arg elements; value ignored here),
 // items.copy() (zero-arg; same element type as receiver),
 // items or [] / items or [A()] (boolean or/and when both sides agree; empty
 // list/tuple/set is a wildcard), parenthesized forms, d.values() when d's dict
@@ -2863,6 +2872,7 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		// Counter(...).elements() / c.elements() — yields Counter keys (same
 		// element type as iterating the Counter). Zero-arg only.
 		// d.values() — dict value type stored in elemOf[d].
+		// dict.fromkeys(iterable[, value]) — iteration yields keys (1st arg elements).
 		// itertools.chain(...) / itertools.islice(...) / itertools.accumulate(...)
 		// — same as bare helpers.
 		// collections.deque(xs) / collections.Counter(xs) — same as bare forms.
@@ -2883,6 +2893,21 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 						return ""
 					}
 					return elemOf[obj]
+				case "fromkeys":
+					// dict.fromkeys(iterable[, value]) — keys are iterable elements.
+					// value arg ignored for key iteration (value leaf handled on assign).
+					objN := ingest.ChildByField(fn, "object")
+					if objN == nil || objN.Type() != "identifier" {
+						return ""
+					}
+					if ingest.NodeText(objN, content) != "dict" {
+						return ""
+					}
+					args, ok := pythonCallPositionalArgNodes(right)
+					if !ok || len(args) == 0 {
+						return ""
+					}
+					return pythonIterableElemType(args[0], content, elemOf, egElems)
 				case "chain", "islice", "accumulate":
 					objN := ingest.ChildByField(fn, "object")
 					if objN == nil || objN.Type() != "identifier" {
@@ -3058,6 +3083,8 @@ func pythonDictItemsValueType(right *grammar.Node, content []byte, elemOf map[st
 // pythonEnumerateZipTargetTypes returns per-unpack-target element types for
 // enumerate(xs) → ["", elem(xs)] (index untyped; value is the iterable element)
 // and zip / zip_longest(a, b, ...) → [elem(a), elem(b), ...].
+// Also zip(*[a, b]) / zip(*(a, b)) — single list/tuple-literal splat expands
+// to the same per-slot typing (kwargs like strict= still ignored).
 // zip_longest is accepted bare (from itertools import zip_longest) or as
 // itertools.zip_longest; fillvalue kwargs are ignored (same as zip strict=).
 // Unknown args yield "" slots; fails closed when the call is not a resolvable
@@ -3093,7 +3120,14 @@ func pythonEnumerateZipTargetTypes(right *grammar.Node, content []byte, elemOf, 
 	}
 	args, ok := pythonCallPositionalArgNodes(right)
 	if !ok {
-		return nil
+		// zip(*[xs, ys]) / zip(*(xs, ys)) — expand single list/tuple splat.
+		if fname != "zip" && fname != "zip_longest" {
+			return nil
+		}
+		args = pythonExpandSingleListTupleSplat(right)
+		if len(args) == 0 {
+			return nil
+		}
 	}
 	switch fname {
 	case "enumerate":
@@ -3126,6 +3160,128 @@ func pythonEnumerateZipTargetTypes(right *grammar.Node, content []byte, elemOf, 
 	default:
 		return nil
 	}
+}
+
+// pythonExpandSingleListTupleSplat returns the elements of a sole *list/*tuple
+// splat argument: zip(*[xs, ys]) / zip(*(xs, ys), strict=True). Mixed
+// positionals+splat, multi-splat, non-literal splat, or **kwargs fail closed.
+func pythonExpandSingleListTupleSplat(call *grammar.Node) []*grammar.Node {
+	if call == nil || call.Type() != "call" {
+		return nil
+	}
+	argList := ingest.ChildByField(call, "arguments")
+	if argList == nil || argList.Type() != "argument_list" {
+		return nil
+	}
+	var splat *grammar.Node
+	for i := uint32(0); i < argList.ChildCount(); i++ {
+		ch := argList.Child(i)
+		switch ch.Type() {
+		case "(", ")", ",", "comment", "keyword_argument":
+			continue
+		case "list_splat", "parenthesized_list_splat":
+			if splat != nil {
+				return nil
+			}
+			splat = ch
+		default:
+			// Mixed positional + splat — fail closed.
+			return nil
+		}
+	}
+	if splat == nil {
+		return nil
+	}
+	var inner *grammar.Node
+	for i := uint32(0); i < splat.ChildCount(); i++ {
+		ch := splat.Child(i)
+		if ch.Type() == "*" || ch.Type() == "comment" {
+			continue
+		}
+		inner = ch
+		break
+	}
+	if inner == nil {
+		return nil
+	}
+	switch inner.Type() {
+	case "list", "tuple":
+		// ok
+	default:
+		return nil
+	}
+	var out []*grammar.Node
+	for i := uint32(0); i < inner.ChildCount(); i++ {
+		ch := inner.Child(i)
+		switch ch.Type() {
+		case "[", "]", "(", ")", ",", "comment":
+			continue
+		default:
+			out = append(out, ch)
+		}
+	}
+	return out
+}
+
+// pythonDictFromkeysValueType returns the Class name of dict.fromkeys's value
+// argument when it is a Class() call: dict.fromkeys(keys, A()) or
+// dict.fromkeys(keys, value=A()). Used to seed elemOf for later .values/.get.
+// Missing/non-Class value fails closed ("").
+func pythonDictFromkeysValueType(right *grammar.Node, content []byte) string {
+	if right == nil || right.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(right, "function")
+	if fn == nil || fn.Type() != "attribute" {
+		return ""
+	}
+	objN := ingest.ChildByField(fn, "object")
+	attrN := ingest.ChildByField(fn, "attribute")
+	if objN == nil || attrN == nil || objN.Type() != "identifier" {
+		return ""
+	}
+	if ingest.NodeText(objN, content) != "dict" || ingest.NodeText(attrN, content) != "fromkeys" {
+		return ""
+	}
+	// 2nd positional Class() — dict.fromkeys(keys, A())
+	if args, ok := pythonCallPositionalArgNodes(right); ok && len(args) >= 2 {
+		if name := pythonClassCtorName(args[1], content); name != "" {
+			return name
+		}
+	}
+	// keyword value=Class() — dict.fromkeys(keys, value=A())
+	argList := ingest.ChildByField(right, "arguments")
+	if argList == nil {
+		return ""
+	}
+	for i := uint32(0); i < argList.ChildCount(); i++ {
+		ch := argList.Child(i)
+		if ch.Type() != "keyword_argument" {
+			continue
+		}
+		nameN := ingest.ChildByField(ch, "name")
+		valN := ingest.ChildByField(ch, "value")
+		if nameN == nil || valN == nil {
+			continue
+		}
+		if ingest.NodeText(nameN, content) != "value" {
+			continue
+		}
+		return pythonClassCtorName(valN, content)
+	}
+	return ""
+}
+
+// pythonClassCtorName returns T for a T() call (identifier callee only).
+func pythonClassCtorName(n *grammar.Node, content []byte) string {
+	if n == nil || n.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil || fn.Type() != "identifier" {
+		return ""
+	}
+	return ingest.NodeText(fn, content)
 }
 
 // pythonCallPositionalArgNodes returns positional argument nodes of a call.
