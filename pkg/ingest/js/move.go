@@ -1539,8 +1539,9 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 		if t := jsIdentityCloneType(obj, content, typedLocals, factories); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
-		if t := jsMapGetValueType(obj, content, typedLocals, factories, mapLocals); t != "" {
-			// new Map([[k, new A()]]).get(k) / ma.get(k) — uniform value type.
+		if t := jsMapGetValueType(obj, content, typedLocals, factories, mapLocals, entryArrayLocals); t != "" {
+			// new Map([[k, new A()]]).get(k) / ma.get(k) / new Map(pa).get(k) —
+			// uniform value type (pa is pair-array local).
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 		if t := jsArrayAtElemType(obj, content, arrayLocals, typedLocals, factories); t != "" {
@@ -1578,7 +1579,7 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 		if t := jsPromiseAllSettledValueType(obj, content, typedLocals, settledOf, factories); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
-		if t := jsGeneratorNextValueType(obj, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals); t != "" {
+		if t := jsGeneratorNextValueType(obj, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 	}
@@ -1715,15 +1716,20 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// entries-iterator of pairs of value T; ia.next().value[1] peels.
 						// Bind foreign too so dual-class B rebinds fail closed.
 						entryArrayLocals[ingest.NodeText(nameN, content)] = t
-					} else if t := jsMapEntriesValueType(valN, content, out, factories, mapLocals); t != "" {
+					} else if t := jsMapEntriesValueType(valN, content, out, factories, mapLocals, entryArrayLocals); t != "" {
 						// const ie = new Map([[k, new A()]]).entries() / ma.entries()
 						entryArrayLocals[ingest.NodeText(nameN, content)] = t
-					} else if t := jsMapValueType(valN, content, out, factories); t != "" {
-						// const ma = new Map([[k, new A()]]) — Map of value T.
-						// Bind foreign too so dual-class B rebinds fail closed.
+					} else if t := jsMapValueType(valN, content, out, factories, entryArrayLocals); t != "" {
+						// const ma = new Map([[k, new A()]]) / new Map(pa) —
+						// Map of value T. Bind foreign too so dual-class B rebinds fail closed.
 						mapLocals[ingest.NodeText(nameN, content)] = t
-					} else if t := jsMapGetValueType(valN, content, out, factories, mapLocals); ourReceivers[t] {
-						// const a = new Map([[k, new A()]]).get(k) / ma.get(k)
+					} else if t := jsPairArrayValueType(valN, content, out, factories); t != "" {
+						// const pa = [["k", new A()]] — pair-array local of value T;
+						// new Map(pa).get(k) peels via entryArrayLocals.
+						// Bind foreign too so dual-class B rebinds fail closed.
+						entryArrayLocals[ingest.NodeText(nameN, content)] = t
+					} else if t := jsMapGetValueType(valN, content, out, factories, mapLocals, entryArrayLocals); ourReceivers[t] {
+						// const a = new Map([[k, new A()]]).get(k) / ma.get(k) / new Map(pa).get(k)
 						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsArrayElemSubscriptType(valN, content, arrayLocals, out, factories); ourReceivers[t] {
 						// const a = [new A()][0] / Array.from([new A()])[0] /
@@ -1733,15 +1739,15 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// const a = [new A()].at(0) / as.at(-1) /
 						// Array.from([new A()]).at(0) / Object.values({k: new A()}).at(0)
 						out[ingest.NodeText(nameN, content)] = t
-					} else if t := jsIteratorSourceYieldType(valN, content, generators, genLocals, arrayLocals, out, factories, mapLocals); ourReceivers[t] {
+					} else if t := jsIteratorSourceYieldType(valN, content, generators, genLocals, arrayLocals, out, factories, mapLocals, entryArrayLocals); ourReceivers[t] {
 						// const ga = genA() / const ia = [new A()].values() /
 						// const ia = [new A()][Symbol.iterator]() — iterator of A.
 						genLocals[ingest.NodeText(nameN, content)] = t
-					} else if t := jsGeneratorNextResultType(valN, content, generators, genLocals, arrayLocals, out, factories, mapLocals); ourReceivers[t] {
+					} else if t := jsGeneratorNextResultType(valN, content, generators, genLocals, arrayLocals, out, factories, mapLocals, entryArrayLocals); ourReceivers[t] {
 						// const ra = genA().next() / [new A()].values().next() /
 						// ia.next() — IteratorResult; ra.value peels via settledOf.
 						settledOf[ingest.NodeText(nameN, content)] = t
-					} else if t := jsGeneratorNextValueType(valN, content, generators, genLocals, arrayLocals, out, factories, mapLocals); ourReceivers[t] {
+					} else if t := jsGeneratorNextValueType(valN, content, generators, genLocals, arrayLocals, out, factories, mapLocals, entryArrayLocals); ourReceivers[t] {
 						// const a = genA().next().value / [new A()].values().next().value
 						out[ingest.NodeText(nameN, content)] = t
 					}
@@ -1789,7 +1795,7 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 				break
 			}
 			if left.Type() == "identifier" {
-				if t := jsForOfElemType(right, content, generators, genLocals, arrayLocals, out, factories, mapLocals); ourReceivers[t] {
+				if t := jsForOfElemType(right, content, generators, genLocals, arrayLocals, out, factories, mapLocals, entryArrayLocals); ourReceivers[t] {
 					out[ingest.NodeText(left, content)] = t
 				} else if t := jsEntriesIterableValueType(right, content, out, factories, arrayLocals, entryArrayLocals, mapLocals); t != "" {
 					// for (const e of Object.entries({k: new A()})) /
@@ -3076,7 +3082,11 @@ func jsObjectEntriesArraySourceType(n *grammar.Node, content []byte, typedLocals
 	if t := jsArrayEntriesValueType(n, content, arrayLocals, typedLocals, factories); t != "" {
 		return t
 	}
-	if t := jsMapEntriesValueType(n, content, typedLocals, factories, mapLocals); t != "" {
+	if t := jsMapEntriesValueType(n, content, typedLocals, factories, mapLocals, entryArrayLocals); t != "" {
+		return t
+	}
+	if t := jsPairArrayValueType(n, content, typedLocals, factories); t != "" {
+		// [[k, new T()], …] — inline pair-array of value T.
 		return t
 	}
 	if n.Type() == "identifier" && entryArrayLocals != nil {
@@ -3129,7 +3139,7 @@ func jsEntriesIterableValueType(n *grammar.Node, content []byte, typedLocals, fa
 	if t := jsObjectEntriesArraySourceType(n, content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals); t != "" {
 		return t
 	}
-	return jsMapSourceValueType(n, content, typedLocals, factories, mapLocals)
+	return jsMapSourceValueType(n, content, typedLocals, factories, mapLocals, entryArrayLocals)
 }
 
 // jsArrayEntriesValueType recovers T from arr.entries() when arr peels to a
@@ -3173,11 +3183,112 @@ func jsArrayEntriesValueType(n *grammar.Node, content []byte, arrayLocals, typed
 	return jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories)
 }
 
-// jsMapValueType recovers T from new Map([[k, v], …]) / new WeakMap([[k, v], …])
-// when every pair value peels to the same concrete type T. Single array-literal
-// arg of 2-element pair arrays only; empty / mixed / non-pair elems / other
-// ctors fail closed. WeakMap shares the same pair-value peel as Map.
-func jsMapValueType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+// jsPairArrayValueType recovers T from [[k, v], …] when every element is a
+// 2-slot pair array whose value peels to the same concrete type T. Empty /
+// mixed / non-pair elems fail closed. Enables const pa = [["k", new A()]] and
+// new Map([[k, new A()]]) pair peels under foreign same-leaf methods.
+func jsPairArrayValueType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "array" {
+		return ""
+	}
+	found := ""
+	saw := false
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		el := n.Child(i)
+		if el == nil || el.Type() == "[" || el.Type() == "]" || el.Type() == "," {
+			continue
+		}
+		// Each element must be a 2-slot pair array [key, value].
+		if el.Type() != "array" {
+			return ""
+		}
+		var slots []*grammar.Node
+		for j := uint32(0); j < el.ChildCount(); j++ {
+			ch := el.Child(j)
+			if ch == nil || ch.Type() == "[" || ch.Type() == "]" || ch.Type() == "," {
+				continue
+			}
+			slots = append(slots, ch)
+		}
+		if len(slots) != 2 {
+			return ""
+		}
+		t := jsExprConcreteType(slots[1], content, typedLocals, factories)
+		if t == "" {
+			return ""
+		}
+		if !saw {
+			found = t
+			saw = true
+		} else if found != t {
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return found
+}
+
+// jsMapIterableValueType recovers T from a Map/WeakMap constructor iterable:
+// pair-array literal [[k, v], …], pair-array local (entryArrayLocals), or
+// Object.entries({…}) when property values agree.
+func jsMapIterableValueType(n *grammar.Node, content []byte, typedLocals, factories, entryArrayLocals map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil {
+		return ""
+	}
+	if t := jsPairArrayValueType(n, content, typedLocals, factories); t != "" {
+		return t
+	}
+	if t := jsObjectEntriesValueType(n, content, typedLocals, factories); t != "" {
+		// new Map(Object.entries({k: new A()}))
+		return t
+	}
+	if n.Type() == "identifier" && entryArrayLocals != nil {
+		if t := entryArrayLocals[ingest.NodeText(n, content)]; t != "" {
+			// new Map(pa) after const pa = [["k", new A()]] /
+			// const pa = Object.entries({k: new A()})
+			return t
+		}
+	}
+	return ""
+}
+
+// jsMapValueType recovers T from new Map(iterable) / new WeakMap(iterable) when
+// the iterable peels to pairs of uniform value type T. Iterable may be a pair-
+// array literal, pair-array/entries local, or Object.entries({…}). Empty /
+// mixed / other ctors fail closed. WeakMap shares the same pair-value peel.
+func jsMapValueType(n *grammar.Node, content []byte, typedLocals, factories, entryArrayLocals map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -3234,63 +3345,12 @@ func jsMapValueType(n *grammar.Node, content []byte, typedLocals, factories map[
 	if count != 1 || first == nil {
 		return ""
 	}
-	for first != nil && first.Type() == "parenthesized_expression" {
-		var inner *grammar.Node
-		for i := uint32(0); i < first.ChildCount(); i++ {
-			ch := first.Child(i)
-			if ch.Type() == "(" || ch.Type() == ")" {
-				continue
-			}
-			inner = ch
-			break
-		}
-		first = inner
-	}
-	if first == nil || first.Type() != "array" {
-		return ""
-	}
-	found := ""
-	saw := false
-	for i := uint32(0); i < first.ChildCount(); i++ {
-		el := first.Child(i)
-		if el == nil || el.Type() == "[" || el.Type() == "]" || el.Type() == "," {
-			continue
-		}
-		// Each element must be a 2-slot pair array [key, value].
-		if el.Type() != "array" {
-			return ""
-		}
-		var slots []*grammar.Node
-		for j := uint32(0); j < el.ChildCount(); j++ {
-			ch := el.Child(j)
-			if ch == nil || ch.Type() == "[" || ch.Type() == "]" || ch.Type() == "," {
-				continue
-			}
-			slots = append(slots, ch)
-		}
-		if len(slots) != 2 {
-			return ""
-		}
-		t := jsExprConcreteType(slots[1], content, typedLocals, factories)
-		if t == "" {
-			return ""
-		}
-		if !saw {
-			found = t
-			saw = true
-		} else if found != t {
-			return ""
-		}
-	}
-	if !saw {
-		return ""
-	}
-	return found
+	return jsMapIterableValueType(first, content, typedLocals, factories, entryArrayLocals)
 }
 
-// jsMapSourceValueType recovers T from new Map([[k, new T()]]) or a map local
-// bound to uniform value type T.
-func jsMapSourceValueType(n *grammar.Node, content []byte, typedLocals, factories, mapLocals map[string]string) string {
+// jsMapSourceValueType recovers T from new Map([[k, new T()]]) / new Map(pa) or
+// a map local bound to uniform value type T.
+func jsMapSourceValueType(n *grammar.Node, content []byte, typedLocals, factories, mapLocals, entryArrayLocals map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -3309,7 +3369,7 @@ func jsMapSourceValueType(n *grammar.Node, content []byte, typedLocals, factorie
 	if n == nil {
 		return ""
 	}
-	if t := jsMapValueType(n, content, typedLocals, factories); t != "" {
+	if t := jsMapValueType(n, content, typedLocals, factories, entryArrayLocals); t != "" {
 		return t
 	}
 	if n.Type() == "identifier" && mapLocals != nil {
@@ -3322,7 +3382,7 @@ func jsMapSourceValueType(n *grammar.Node, content []byte, typedLocals, factorie
 
 // jsMapEntriesValueType recovers T from map.entries() when map peels to a Map
 // of uniform value type T (pairs are [key, T]). Zero-arg only.
-func jsMapEntriesValueType(n *grammar.Node, content []byte, typedLocals, factories, mapLocals map[string]string) string {
+func jsMapEntriesValueType(n *grammar.Node, content []byte, typedLocals, factories, mapLocals, entryArrayLocals map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -3357,12 +3417,12 @@ func jsMapEntriesValueType(n *grammar.Node, content []byte, typedLocals, factori
 	if obj != nil && obj.Type() == "identifier" && ingest.NodeText(obj, content) == "Object" {
 		return ""
 	}
-	return jsMapSourceValueType(obj, content, typedLocals, factories, mapLocals)
+	return jsMapSourceValueType(obj, content, typedLocals, factories, mapLocals, entryArrayLocals)
 }
 
 // jsMapValuesYieldType recovers T from map.values() when map peels to a Map of
 // uniform value type T. Zero-arg only. Yields T directly (not pairs).
-func jsMapValuesYieldType(n *grammar.Node, content []byte, typedLocals, factories, mapLocals map[string]string) string {
+func jsMapValuesYieldType(n *grammar.Node, content []byte, typedLocals, factories, mapLocals, entryArrayLocals map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -3397,12 +3457,12 @@ func jsMapValuesYieldType(n *grammar.Node, content []byte, typedLocals, factorie
 	if obj != nil && obj.Type() == "identifier" && ingest.NodeText(obj, content) == "Object" {
 		return ""
 	}
-	return jsMapSourceValueType(obj, content, typedLocals, factories, mapLocals)
+	return jsMapSourceValueType(obj, content, typedLocals, factories, mapLocals, entryArrayLocals)
 }
 
 // jsMapGetValueType recovers T from map.get(key) when map peels to a Map of
 // uniform value type T. Requires exactly one positional arg (any key expression).
-func jsMapGetValueType(n *grammar.Node, content []byte, typedLocals, factories, mapLocals map[string]string) string {
+func jsMapGetValueType(n *grammar.Node, content []byte, typedLocals, factories, mapLocals, entryArrayLocals map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -3445,7 +3505,7 @@ func jsMapGetValueType(n *grammar.Node, content []byte, typedLocals, factories, 
 	if count != 1 {
 		return ""
 	}
-	return jsMapSourceValueType(ingest.ChildByField(fn, "object"), content, typedLocals, factories, mapLocals)
+	return jsMapSourceValueType(ingest.ChildByField(fn, "object"), content, typedLocals, factories, mapLocals, entryArrayLocals)
 }
 
 // jsEntriesIteratorSourceType recovers T from an entries-iterator expression
@@ -3473,7 +3533,7 @@ func jsEntriesIteratorSourceType(n *grammar.Node, content []byte, typedLocals, f
 	if t := jsArrayEntriesValueType(n, content, arrayLocals, typedLocals, factories); t != "" {
 		return t
 	}
-	if t := jsMapEntriesValueType(n, content, typedLocals, factories, mapLocals); t != "" {
+	if t := jsMapEntriesValueType(n, content, typedLocals, factories, mapLocals, entryArrayLocals); t != "" {
 		return t
 	}
 	if n.Type() == "identifier" && entryArrayLocals != nil {
@@ -3815,24 +3875,24 @@ func jsArrayIteratorYieldType(n *grammar.Node, content []byte, arrayLocals, type
 // jsIteratorSourceYieldType recovers T from a generator call/local or an array
 // iterator call (arr.values() / arr[Symbol.iterator]()) / array-iterator local /
 // map.values() when map peels to uniform value type T.
-func jsIteratorSourceYieldType(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals map[string]string) string {
+func jsIteratorSourceYieldType(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals map[string]string) string {
 	if t := jsGeneratorCallYieldType(n, content, generators, genLocals); t != "" {
 		return t
 	}
 	if t := jsArrayIteratorYieldType(n, content, arrayLocals, typedLocals, factories); t != "" {
 		return t
 	}
-	return jsMapValuesYieldType(n, content, typedLocals, factories, mapLocals)
+	return jsMapValuesYieldType(n, content, typedLocals, factories, mapLocals, entryArrayLocals)
 }
 
 // jsForOfElemType recovers T from the right-hand side of for…of / for await…of:
 // generator call/local, array literal, array local, array iterator call, or
 // map.values() when map peels to uniform value type T.
-func jsForOfElemType(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals map[string]string) string {
+func jsForOfElemType(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals map[string]string) string {
 	if t := jsArraySourceElemType(n, content, arrayLocals, typedLocals, factories); t != "" {
 		return t
 	}
-	return jsIteratorSourceYieldType(n, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals)
+	return jsIteratorSourceYieldType(n, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals)
 }
 
 // jsGeneratorNextResultType recovers T from genA().next() / ga.next() /
@@ -3840,7 +3900,7 @@ func jsForOfElemType(n *grammar.Node, content []byte, generators, genLocals, arr
 // [new A()][Symbol.iterator]().next() / ia.next() /
 // map.values().next() when the receiver peels to an iterator yielding T.
 // Only zero-arg .next() peels (fail closed on arguments).
-func jsGeneratorNextResultType(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals map[string]string) string {
+func jsGeneratorNextResultType(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -3891,7 +3951,7 @@ func jsGeneratorNextResultType(n *grammar.Node, content []byte, generators, genL
 		return ""
 	}
 	obj := ingest.ChildByField(fn, "object")
-	return jsIteratorSourceYieldType(obj, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals)
+	return jsIteratorSourceYieldType(obj, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals)
 }
 
 // jsGeneratorNextValueType recovers T from genA().next().value /
@@ -3900,7 +3960,7 @@ func jsGeneratorNextResultType(n *grammar.Node, content []byte, generators, genL
 // map.values().next().value.
 // ra.value is handled via settledOf in jsPromiseAllSettledValueType.
 // Property must be bare "value".
-func jsGeneratorNextValueType(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals map[string]string) string {
+func jsGeneratorNextValueType(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -3915,7 +3975,7 @@ func jsGeneratorNextValueType(n *grammar.Node, content []byte, generators, genLo
 		return ""
 	}
 	obj := ingest.ChildByField(n, "object")
-	return jsGeneratorNextResultType(obj, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals)
+	return jsGeneratorNextResultType(obj, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals)
 }
 
 // jsIdentityCloneType recovers T from structuredClone(x) / Object.assign(x[, …])
