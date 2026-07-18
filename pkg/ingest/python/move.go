@@ -3898,6 +3898,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					}
 				}
 				// xs = [A()] / (A(),) / [B()] — track element type for later for-loops.
+				// aa = [[A()]] / ((A(),),) — nested list/tuple local of leaf A (@nested)
+				// so aa[0][0].run() / match aa: case [[xa]]: peel under foreign same-leaf.
 				// xs = list(items) / filter(...) — preserve element type via wrappers.
 				// d = dict.fromkeys(keys, A()) — value leaf is A (for .values/.get).
 				// pairs = zip/enumerate/product/pairwise(...) /
@@ -3911,6 +3913,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						elemOf[lname] = et
 					} else if et := pythonHomogeneousCtorElem(right, content); et != "" {
 						elemOf[lname] = et
+					} else if nest := pythonNestedHomogeneousCtorElem(right, content); nest != "" {
+						// aa = [[A()]] — not a scalar list of A; store nested leaf.
+						// Foreign too for shadowing (bb = [[B()]] after aa = [[A()]]).
+						elemOf["@nested."+lname] = nest
 					} else if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); et != "" {
 						elemOf[lname] = et
 					} else if et := pythonDictViewValuesHomogeneousType(right, content, fieldOf); et != "" {
@@ -9582,6 +9588,57 @@ func pythonHomogeneousCtorElem(collection *grammar.Node, content []byte) string 
 		return ""
 	}
 	return elem
+}
+
+// pythonNestedHomogeneousCtorElem recovers T from one-level nested list/tuple
+// literals of homogeneous Class() rows:
+//
+//	[[A()]] / [[A()], [A()]] / ((A(),),) / ([A()],) → "A"
+//
+// Stored as elemOf["@nested."+name] so aa = [[A()]]; aa[0][0].run() /
+// match aa: case [[xa]]: / case [row]: row[0].run() peel under foreign same-leaf
+// (same leaf as annotated list[list[A]]). Mixed row leaves / deeper nests /
+// sets of lists / non-list rows fail closed.
+func pythonNestedHomogeneousCtorElem(collection *grammar.Node, content []byte) string {
+	if collection == nil {
+		return ""
+	}
+	switch collection.Type() {
+	case "list", "tuple":
+		// ok — one-level nest of rows (not set of lists; product fails closed).
+	default:
+		return ""
+	}
+	var nest string
+	saw := false
+	for i := uint32(0); i < collection.ChildCount(); i++ {
+		ch := collection.Child(i)
+		switch ch.Type() {
+		case "[", "]", "(", ")", ",", "comment":
+			continue
+		case "list", "tuple":
+			// Row must itself be a homogeneous Class() list/tuple of T.
+			et := pythonHomogeneousCtorElem(ch, content)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				nest = et
+				saw = true
+				continue
+			}
+			if et != nest {
+				return ""
+			}
+		default:
+			// Nested non-list / Class() at outer level → not a nest of rows.
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return nest
 }
 
 

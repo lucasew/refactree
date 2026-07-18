@@ -2785,6 +2785,25 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// Map view receivers (descendingMap/headMap/…) recover K via the key
 			// pipeline (dual of values → javaMapPipelineValueType).
 			return javaMapPipelineKeyType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
+		case "get", "orElseThrow", "orElse", "orElseGet":
+			// Optional.of(Set.of(new A())).get().iterator().next() /
+			// Optional.of(Set.of(new A())).get().stream() / .forEach /
+			// Optional.ofNullable(List.of(new A())).orElseThrow().get(0) /
+			// Optional.of(Collections.singleton(new A())).get().iterator().next() —
+			// Optional wrapping a collection factory of T: zero-arg get / orElse*
+			// yield the Collection of T, so subsequent iterator/stream/forEach/get
+			// peels T under foreign same-leaf (same leaf as javaNestedCollectionGet
+			// for double-get List forms). Scalar Optional.of(new A()).get() stays
+			// on the static-factory peel below via collection-access (not pipeline
+			// of get). List.get(i) with args fails closed here (not Optional unwrap).
+			recv := ingest.ChildByField(obj, "object")
+			if name == "get" && !javaCallIsZeroArg(obj) {
+				return ""
+			}
+			if nest := javaOptionalOfCollectionFactoryElemType(recv, content); nest != "" {
+				return nest
+			}
+			return ""
 		case "of", "asList", "ofNullable", "singletonList", "singleton", "completedFuture", "completedStage":
 			// List.of(new A()) / Stream.of(new A(), new A()) / Arrays.asList(new A())
 			// / Set.of(new A()) / Optional.of(new A()) / Optional.ofNullable(new A())

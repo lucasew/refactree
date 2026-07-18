@@ -1746,6 +1746,12 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// Stored under @nested so aa[0][0].run() / aa.flat()[0].run() peel
 						// without treating aa[0] as scalar A. Bind foreign too for shadowing.
 						arrayLocals["@nested."+ingest.NodeText(nameN, content)] = t
+					} else if t := jsNestedIdentityMapThenFlatElemType(valN, content, arrayLocals, out, factories, extra); t != "" {
+						// const ma = aa.map(xs => xs) / aa.map(xs => xs.map(x => x)) when
+						// aa is [[new A()]] — identity map preserves nested shape; store
+						// @nested so ma.flat()[0].run() peels under foreign same-leaf.
+						// Bind foreign too for shadowing (mb after ma).
+						arrayLocals["@nested."+ingest.NodeText(nameN, content)] = t
 					} else if t := jsArraySourceElemType(valN, content, arrayLocals, out, factories, extra); ourReceivers[t] {
 						// const as = [new A()] / Array.from([new A()]) /
 						// Array.of(new A()) / Object.values({k: new A()}) —
@@ -4358,7 +4364,71 @@ func jsArrayFlatElemType(n *grammar.Node, content []byte, arrayLocals, typedLoca
 			return t
 		}
 	}
+	// Nested identity map then flat:
+	//   aa.map(xs => xs).flat()[0]
+	//   aa.map(xs => xs.map(x => x)).flat()[0]
+	//   [[new A()]].map(xs => xs).flat()[0]
+	// Same leaf as aa.flat()[0] under foreign same-leaf. Non-identity map fails closed.
+	if t := jsNestedIdentityMapThenFlatElemType(obj, content, arrayLocals, typedLocals, factories, extra); t != "" {
+		return t
+	}
 	// One-level nest: [[new T()], …] / [as, …] when every element peels to array of T.
+	return jsNestedArrayFlatElemType(obj, content, arrayLocals, typedLocals, factories, extra)
+}
+
+// jsNestedIdentityMapThenFlatElemType recovers T from arr.map(cb) when:
+//   - cb is identity (xs => xs) or nested identity-map (xs => xs.map(x => x)), and
+//   - arr is a one-level nested array of T (const aa = [[new A()]] / [[new A()]]).
+//
+// Identity map preserves the nested shape; callers (flat) peel one level to T.
+// Enables aa.map(xs => xs).flat()[0].run() under foreign same-leaf methods.
+// Type-changing map / non-nested receivers fail closed.
+func jsNestedIdentityMapThenFlatElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals) string {
+	if n == nil || n.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	args := ingest.ChildByField(n, "arguments")
+	if fn == nil || args == nil {
+		return ""
+	}
+	if fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain" {
+		return ""
+	}
+	prop := ingest.ChildByField(fn, "property")
+	if prop == nil || ingest.NodeText(prop, content) != "map" {
+		return ""
+	}
+	var cb *grammar.Node
+	count := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		count++
+		if cb == nil {
+			cb = ch
+		}
+	}
+	// Sole identity / nested-identity-map callback. thisArg / multi-arg fail closed.
+	if count != 1 || cb == nil {
+		return ""
+	}
+	if !jsIsIdentityCallback(cb, content) && !jsIsNestedIdentityMapCallback(cb, content) {
+		return ""
+	}
+	obj := ingest.ChildByField(fn, "object")
+	if obj == nil {
+		return ""
+	}
+	// Nested local: const aa = [[new A()]].
+	if obj.Type() == "identifier" && arrayLocals != nil {
+		if t := arrayLocals["@nested."+ingest.NodeText(obj, content)]; t != "" {
+			return t
+		}
+	}
+	// Inline nest: [[new A()]].map(...).
 	return jsNestedArrayFlatElemType(obj, content, arrayLocals, typedLocals, factories, extra)
 }
 
