@@ -1072,6 +1072,8 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // stream.reduce(identity, op) / reduce(op).orElse(d) / reduce(op).ifPresent(...) /
 // stream.toList() / collect(toList()/toSet()) chained forEach / for (var a : …) and
 // var list = stream.toList()/toSet() element tracking for later forEach / enhanced-for).
+// collect(groupingBy) → Map of List<T> groups: var m = stream.collect(groupingBy);
+// m.values() / m.forEach / m.get → group lists with element T for nested forEach / for-var.
 // entryValOf maps Map.Entry locals → value type leaf for e.getValue().m()
 // (for (var e : m.entrySet()) / m.entrySet().forEach(e -> …) / Map.Entry<K,A> e).
 func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string) {
@@ -1084,6 +1086,8 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 	elemOf := map[string]string{}
 	// Map-like locals: name → value type leaf (Map<K,A> m → "A").
 	valOf := map[string]string{}
+	// groupingBy maps: name → element type of each value list (Map<K,List<T>> → "T").
+	groupValOf := map[string]string{}
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
 		if n == nil || n.IsNull() {
@@ -1156,6 +1160,13 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// track collection/stream/Optional element type for later
 					// list.forEach / for (var a : list) / opt.ifPresent (not a scalar A).
 					elemOf[name] = et
+				} else if et := javaGroupingByCollectElemType(valN, content, elemOf, valOf); et != "" {
+					// var m = as.stream().collect(Collectors.groupingBy(...)) —
+					// Map<K,List<T>>; track group element T for values/forEach/get.
+					groupValOf[name] = et
+				} else if et := javaGroupingByMapGetElemType(valN, content, groupValOf); et != "" {
+					// var g = m.get(k) when m is a groupingBy map — g is List<T>.
+					elemOf[name] = et
 				}
 			}
 		case "enhanced_for_statement":
@@ -1163,6 +1174,7 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 			// Without var→elem binding, a.run() is skipped when foreign same-leaf methods exist.
 			// for (var e : m.entrySet()) / for (Map.Entry<K,A> e : m.entrySet()) —
 			// entry is not A; bind entryValOf for e.getValue().m().
+			// for (var g : m.values()) when m is groupingBy → g is List<T> (elemOf).
 			typeN := ingest.ChildByField(n, "type")
 			nameN := ingest.ChildByField(n, "name")
 			if typeN != nil && nameN != nil {
@@ -1177,6 +1189,9 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					}
 					if vt := javaEntrySetPipelineValueType(valN, content, valOf); vt != "" {
 						entryValOf[name] = vt
+					}
+					if et := javaGroupingByValuesGroupElemType(valN, content, elemOf, valOf, groupValOf); et != "" {
+						elemOf[name] = et
 					}
 				} else if vt := javaMapEntryDeclaredValueType(typeN, content); vt != "" {
 					entryValOf[name] = vt
@@ -1217,9 +1232,10 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 		case "method_invocation":
 			// as.stream().map(a -> a.m()) / as.forEach(a -> a.m()) /
 			// m.forEach((k,v) -> v.m()) / m.computeIfPresent((k,v) -> v.m()) /
-			// m.merge((v1,v2) -> v1.m()) / m.entrySet().forEach(e -> e.getValue().m()) —
-			// untyped lambda params (and entryValOf for entrySet).
-			javaBindStreamLambdaParams(n, content, ourReceivers, elemOf, valOf, entryValOf, out)
+			// m.merge((v1,v2) -> v1.m()) / m.entrySet().forEach(e -> e.getValue().m()) /
+			// collect(groupingBy).values().forEach(g -> g.forEach(a -> a.m())) —
+			// untyped lambda params (and entryValOf for entrySet / elemOf for groups).
+			javaBindStreamLambdaParams(n, content, ourReceivers, elemOf, valOf, entryValOf, groupValOf, out)
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
@@ -1295,8 +1311,9 @@ func javaTypeArgNames(typeN *grammar.Node, content []byte) []string {
 // call is a stream/collection element consumer/mapper and the pipeline element is ours,
 // or Map bi-lambdas (forEach/computeIfPresent/compute/replaceAll/merge) when the map
 // value type is ours. entrySet pipelines bind entryValOf for e.getValue().m().
+// groupingBy maps bind elemOf for value-list params (List<T> groups).
 // Typed (A a) -> params are already handled via formal_parameter.
-func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, elemOf, valOf, entryValOf map[string]string, out map[string]bool) {
+func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, elemOf, valOf, entryValOf, groupValOf map[string]string, out map[string]bool) {
 	if call == nil || call.Type() != "method_invocation" || out == nil {
 		return
 	}
@@ -1331,6 +1348,12 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 			et := javaStreamPipelineElemType(obj, content, elemOf, valOf)
 			if et != "" && ourReceivers[et] {
 				out[params[0]] = true
+			} else if et := javaGroupingByValuesGroupElemType(obj, content, elemOf, valOf, groupValOf); et != "" {
+				// m.values().forEach(g -> …) / collect(groupingBy).values().forEach —
+				// param is List<T>, not T; track for nested forEach / for-var.
+				if elemOf != nil {
+					elemOf[params[0]] = et
+				}
 			}
 			// m.entrySet().forEach(e -> e.getValue().m()) — param is Entry, not V.
 			if entryValOf != nil {
@@ -1342,18 +1365,28 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 			// Map bi-lambdas — value type from valOf[map].
 			// forEach/computeIfPresent/compute/replaceAll: (K,V) → second is V.
 			// merge: (V,V) → both params are V (BiFunction remapping).
+			// groupingBy maps: value is List<T> — bind elemOf on the value param.
 			if !javaMapValueBiLambdaMethod(method) {
 				continue
 			}
 			vt := javaMapPipelineValueType(obj, content, valOf)
-			if vt == "" || !ourReceivers[vt] {
+			if vt != "" && ourReceivers[vt] {
+				if method == "merge" {
+					out[params[0]] = true
+					out[params[1]] = true
+				} else {
+					out[params[1]] = true
+				}
 				continue
 			}
-			if method == "merge" {
-				out[params[0]] = true
-				out[params[1]] = true
-			} else {
-				out[params[1]] = true
+			if et := javaGroupingByMapGroupElemType(obj, content, elemOf, valOf, groupValOf); et != "" && elemOf != nil {
+				// m.forEach((k,g) -> g.forEach(...)) / collect(groupingBy).forEach —
+				// value param is List<T>.
+				if method == "merge" {
+					// merge values would be List — fail closed (not a product case).
+					continue
+				}
+				elemOf[params[1]] = et
 			}
 		}
 	}
@@ -1665,29 +1698,7 @@ func javaIsToListOrSetCollector(collectCall *grammar.Node, content []byte) bool 
 	if collectCall == nil {
 		return false
 	}
-	var args *grammar.Node
-	for i := uint32(0); i < collectCall.ChildCount(); i++ {
-		if collectCall.Child(i).Type() == "argument_list" {
-			args = collectCall.Child(i)
-			break
-		}
-	}
-	if args == nil {
-		return false
-	}
-	var first *grammar.Node
-	for i := uint32(0); i < args.ChildCount(); i++ {
-		ch := args.Child(i)
-		switch ch.Type() {
-		case "(", ")", ",", "comment":
-			continue
-		default:
-			first = ch
-		}
-		if first != nil {
-			break
-		}
-	}
+	first := javaCollectFirstArg(collectCall)
 	if first == nil {
 		return false
 	}
@@ -1755,6 +1766,198 @@ func javaIsToListOrSetCollector(collectCall *grammar.Node, content []byte) bool 
 	default:
 		return false
 	}
+}
+
+// javaCollectFirstArg returns the first non-punctuation argument of a collect(...) call.
+func javaCollectFirstArg(collectCall *grammar.Node) *grammar.Node {
+	if collectCall == nil {
+		return nil
+	}
+	var args *grammar.Node
+	for i := uint32(0); i < collectCall.ChildCount(); i++ {
+		if collectCall.Child(i).Type() == "argument_list" {
+			args = collectCall.Child(i)
+			break
+		}
+	}
+	if args == nil {
+		return nil
+	}
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		switch ch.Type() {
+		case "(", ")", ",", "comment":
+			continue
+		default:
+			return ch
+		}
+	}
+	return nil
+}
+
+// javaIsGroupingByCollector reports Stream.collect(Collectors.groupingBy(classifier))
+// / collect(groupingBy(classifier)) — one-arg form only (Map<K, List<T>>).
+// Multi-arg forms (downstream collectors like counting) fail closed.
+func javaIsGroupingByCollector(collectCall *grammar.Node, content []byte) bool {
+	first := javaCollectFirstArg(collectCall)
+	if first == nil || first.Type() != "method_invocation" {
+		return false
+	}
+	nameN := ingest.ChildByField(first, "name")
+	if nameN == nil || ingest.NodeText(nameN, content) != "groupingBy" {
+		return false
+	}
+	if obj := ingest.ChildByField(first, "object"); obj != nil {
+		if obj.Type() != "identifier" && obj.Type() != "type_identifier" {
+			return false
+		}
+		if ingest.NodeText(obj, content) != "Collectors" {
+			return false
+		}
+	}
+	// Exactly one real arg (the classifier). Extra downstream collector → fail closed.
+	nReal := 0
+	for i := uint32(0); i < first.ChildCount(); i++ {
+		if first.Child(i).Type() != "argument_list" {
+			continue
+		}
+		al := first.Child(i)
+		for j := uint32(0); j < al.ChildCount(); j++ {
+			switch al.Child(j).Type() {
+			case "(", ")", ",", "comment":
+				continue
+			default:
+				nReal++
+			}
+		}
+	}
+	return nReal == 1
+}
+
+// javaGroupingByCollectElemType recovers T from stream.collect(groupingBy(classifier)).
+// Result is Map<K, List<T>>; T is the stream element type.
+func javaGroupingByCollectElemType(val *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	for val != nil && !val.IsNull() && val.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(val, "expression")
+		if inner == nil {
+			for i := uint32(0); i < val.ChildCount(); i++ {
+				ch := val.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		val = inner
+	}
+	if val == nil || val.IsNull() || val.Type() != "method_invocation" {
+		return ""
+	}
+	nameN := ingest.ChildByField(val, "name")
+	if nameN == nil || ingest.NodeText(nameN, content) != "collect" {
+		return ""
+	}
+	if !javaIsGroupingByCollector(val, content) {
+		return ""
+	}
+	return javaStreamPipelineElemType(ingest.ChildByField(val, "object"), content, elemOf, valOf)
+}
+
+// javaGroupingByMapGroupElemType recovers T when obj is a groupingBy map expression:
+// m (tracked in groupValOf) or stream.collect(groupingBy(...)).
+func javaGroupingByMapGroupElemType(obj *grammar.Node, content []byte, elemOf, valOf, groupValOf map[string]string) string {
+	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(obj, "expression")
+		if inner == nil {
+			for i := uint32(0); i < obj.ChildCount(); i++ {
+				ch := obj.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		obj = inner
+	}
+	if obj == nil || obj.IsNull() {
+		return ""
+	}
+	switch obj.Type() {
+	case "identifier":
+		if groupValOf == nil {
+			return ""
+		}
+		return groupValOf[ingest.NodeText(obj, content)]
+	case "method_invocation":
+		return javaGroupingByCollectElemType(obj, content, elemOf, valOf)
+	default:
+		return ""
+	}
+}
+
+// javaGroupingByValuesGroupElemType recovers T from groupingBy map .values():
+// m.values() / collect(groupingBy).values() → T (element of each value List).
+func javaGroupingByValuesGroupElemType(obj *grammar.Node, content []byte, elemOf, valOf, groupValOf map[string]string) string {
+	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(obj, "expression")
+		if inner == nil {
+			for i := uint32(0); i < obj.ChildCount(); i++ {
+				ch := obj.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		obj = inner
+	}
+	if obj == nil || obj.IsNull() || obj.Type() != "method_invocation" {
+		return ""
+	}
+	nameN := ingest.ChildByField(obj, "name")
+	if nameN == nil || ingest.NodeText(nameN, content) != "values" {
+		return ""
+	}
+	return javaGroupingByMapGroupElemType(ingest.ChildByField(obj, "object"), content, elemOf, valOf, groupValOf)
+}
+
+// javaGroupingByMapGetElemType recovers T from m.get(k) / m.getOrDefault when m is
+// a groupingBy map (value is List<T>).
+func javaGroupingByMapGetElemType(val *grammar.Node, content []byte, groupValOf map[string]string) string {
+	for val != nil && !val.IsNull() && val.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(val, "expression")
+		if inner == nil {
+			for i := uint32(0); i < val.ChildCount(); i++ {
+				ch := val.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		val = inner
+	}
+	if val == nil || val.IsNull() || val.Type() != "method_invocation" || groupValOf == nil {
+		return ""
+	}
+	nameN := ingest.ChildByField(val, "name")
+	if nameN == nil {
+		return ""
+	}
+	switch ingest.NodeText(nameN, content) {
+	case "get", "getOrDefault":
+	default:
+		return ""
+	}
+	obj := ingest.ChildByField(val, "object")
+	if obj == nil || obj.Type() != "identifier" {
+		return ""
+	}
+	return groupValOf[ingest.NodeText(obj, content)]
 }
 
 // javaIsArraysReceiver reports whether obj is the Arrays type name (static call site).
