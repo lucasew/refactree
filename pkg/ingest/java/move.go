@@ -1620,8 +1620,9 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 		params := javaInferredLambdaParamNames(ch, content)
 		switch len(params) {
 		case 1:
-			// ConcurrentHashMap.searchValues(threshold, Function<? super V, ? extends U>)
-			// — unary Function applies to map values V (not keys / not stream elems).
+			// ConcurrentHashMap.searchValues(threshold, Function<? super V, ? extends U>) /
+			// forEachValue(threshold, Consumer<? super V>) — unary Function/Consumer
+			// applies to map values V (not keys / not stream elems).
 			if javaMapValueUnaryLambdaMethod(method) {
 				if vt := javaMapPipelineValueType(obj, content, elemOf, valOf); vt != "" && ourReceivers[vt] {
 					out[params[0]] = true
@@ -1690,8 +1691,9 @@ func javaStreamElementLambdaMethod(method string) bool {
 		"removeIf", "ifPresent", "ifPresentOrElse",
 		// Map value bi-lambdas (see javaMapValueBiLambdaMethod).
 		"computeIfPresent", "compute", "replaceAll", "merge",
-		// ConcurrentHashMap searchValues — unary Function on V (see javaMapValueUnaryLambdaMethod).
-		"searchValues":
+		// ConcurrentHashMap searchValues / forEachValue — unary Function/Consumer on V
+		// (see javaMapValueUnaryLambdaMethod).
+		"searchValues", "forEachValue":
 		return true
 	default:
 		return false
@@ -1700,10 +1702,11 @@ func javaStreamElementLambdaMethod(method string) bool {
 
 // javaMapValueUnaryLambdaMethod reports ConcurrentHashMap-style methods whose
 // unary functional arg is applied to map values V (not keys / not stream elems):
-// searchValues(threshold, Function<? super V, ? extends U>).
+// searchValues(threshold, Function<? super V, ? extends U>),
+// forEachValue(threshold, Consumer<? super V>).
 func javaMapValueUnaryLambdaMethod(method string) bool {
 	switch method {
-	case "searchValues":
+	case "searchValues", "forEachValue":
 		return true
 	default:
 		return false
