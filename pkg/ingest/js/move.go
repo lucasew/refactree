@@ -3091,6 +3091,11 @@ func jsArraySourceElemType(n *grammar.Node, content []byte, arrayLocals, typedLo
 		// Map.groupBy(arr, fn).get(k) / ma.get(k) — group is array of T.
 		return t
 	}
+	if t := jsGroupByEntriesPairGroupArrayType(n, content, arrayLocals, typedLocals, factories, extra); t != "" {
+		// Object.entries(groupBy)[i][1] / [...Map.groupBy.entries()][i][1] —
+		// pair value is group array of T (not scalar T).
+		return t
+	}
 	if t := jsArrayIdentityElemType(n, content, arrayLocals, typedLocals, factories, extra); t != "" {
 		return t
 	}
@@ -3323,6 +3328,169 @@ func jsMapGroupByGroupArrayType(n *grammar.Node, content []byte, arrayLocals, ty
 		if t := extra.groupMap[ingest.NodeText(obj, content)]; t != "" {
 			return t
 		}
+	}
+	return ""
+}
+
+// jsGroupByEntriesPairGroupArrayType recovers T from a group-array expression
+// that is the value slot of an entries pair over Object.groupBy / Map.groupBy
+// results (pair values are T[], not T):
+//
+//	Object.entries(Object.groupBy(arr, fn))[i][1]
+//	Object.entries(ga)[i][1] after const ga = Object.groupBy(...)
+//	[...Map.groupBy(arr, fn).entries()][i][1]
+//	[...ma.entries()][i][1] after const ma = Map.groupBy(...)
+//
+// Enables Object.entries(ga)[0][1][0].run() and [...ma.entries()][0][1][0].run()
+// under foreign same-leaf methods. Scalar Object.entries / Map.entries (value T)
+// stay on the pair-value path; this path is group arrays only. Unknown /
+// non-groupBy fail closed.
+func jsGroupByEntriesPairGroupArrayType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "subscript_expression" {
+		return ""
+	}
+	idx := ingest.ChildByField(n, "index")
+	if idx == nil || idx.Type() != "number" || ingest.NodeText(idx, content) != "1" {
+		return ""
+	}
+	pair := ingest.ChildByField(n, "object")
+	for pair != nil && pair.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < pair.ChildCount(); i++ {
+			ch := pair.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		pair = inner
+	}
+	if pair == nil || pair.Type() != "subscript_expression" {
+		return ""
+	}
+	pidx := ingest.ChildByField(pair, "index")
+	if pidx == nil || pidx.Type() != "number" {
+		return ""
+	}
+	return jsGroupByEntriesSourceElemType(ingest.ChildByField(pair, "object"), content, arrayLocals, typedLocals, factories, extra)
+}
+
+// jsGroupByEntriesSourceElemType recovers T from an expression that yields
+// [key, T[]] pairs over a groupBy result: Object.entries(groupBy),
+// Map.groupBy(...).entries() / ma.entries(), or a single-spread copy
+// [...Object.entries(groupBy)] / [...ma.entries()].
+func jsGroupByEntriesSourceElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil {
+		return ""
+	}
+	// Object.entries(Object.groupBy(...)) / Object.entries(ga)
+	if first := jsObjectStaticCallSingleArg(n, content, "entries"); first != nil {
+		if t := jsObjectGroupByElemType(first, content, arrayLocals, typedLocals, factories, extra); t != "" {
+			return t
+		}
+		if first.Type() == "identifier" && extra.groupBy != nil {
+			if t := extra.groupBy[ingest.NodeText(first, content)]; t != "" {
+				return t
+			}
+		}
+		return ""
+	}
+	// Map.groupBy(...).entries() / ma.entries() — zero-arg only.
+	if n.Type() == "call_expression" && jsCallIsZeroArg(n) {
+		fn := ingest.ChildByField(n, "function")
+		if fn != nil && (fn.Type() == "member_expression" || fn.Type() == "member_expression_optional" || fn.Type() == "optional_chain") {
+			prop := ingest.ChildByField(fn, "property")
+			if prop != nil && ingest.NodeText(prop, content) == "entries" {
+				obj := ingest.ChildByField(fn, "object")
+				// Object.entries handled above — fail closed here.
+				if obj != nil && obj.Type() == "identifier" && ingest.NodeText(obj, content) == "Object" {
+					return ""
+				}
+				for obj != nil && obj.Type() == "parenthesized_expression" {
+					var inner *grammar.Node
+					for i := uint32(0); i < obj.ChildCount(); i++ {
+						ch := obj.Child(i)
+						if ch.Type() == "(" || ch.Type() == ")" {
+							continue
+						}
+						inner = ch
+						break
+					}
+					obj = inner
+				}
+				if t := jsMapGroupByElemType(obj, content, arrayLocals, typedLocals, factories, extra); t != "" {
+					return t
+				}
+				if obj != nil && obj.Type() == "identifier" && extra.groupMap != nil {
+					if t := extra.groupMap[ingest.NodeText(obj, content)]; t != "" {
+						return t
+					}
+				}
+			}
+		}
+	}
+	// [...Object.entries(groupBy)] / [...ma.entries()] — single spread.
+	if n.Type() == "array" {
+		var spreadArg *grammar.Node
+		count := 0
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch == nil || ch.Type() == "[" || ch.Type() == "]" || ch.Type() == "," {
+				continue
+			}
+			count++
+			if ch.Type() != "spread_element" {
+				return ""
+			}
+			var arg *grammar.Node
+			for j := uint32(0); j < ch.ChildCount(); j++ {
+				c := ch.Child(j)
+				if c == nil || c.Type() == "..." {
+					continue
+				}
+				arg = c
+				break
+			}
+			if arg == nil {
+				return ""
+			}
+			spreadArg = arg
+		}
+		if count != 1 || spreadArg == nil {
+			return ""
+		}
+		return jsGroupByEntriesSourceElemType(spreadArg, content, arrayLocals, typedLocals, factories, extra)
 	}
 	return ""
 }

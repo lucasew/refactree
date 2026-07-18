@@ -4290,12 +4290,79 @@ func javaCollectFirstArg(collectCall *grammar.Node) *grammar.Node {
 	return nil
 }
 
-// javaIsGroupingByCollector reports Stream.collect(Collectors.groupingBy(classifier))
-// / collect(groupingBy(classifier)) and the one-arg partitioningBy(predicate) twin
-// (Map<Boolean, List<T>> with the same List-group shape). Multi-arg forms
-// (downstream collectors like counting) fail closed.
+// javaIsGroupingByCollector reports Stream.collect args that yield Map of
+// List/Collection groups of the stream element type:
+//
+//	Collectors.groupingBy(classifier) / groupingBy(classifier)
+//	groupingBy(classifier, toList()/toSet()/toUnmodifiable…/toCollection(…))
+//	groupingBy(classifier, mapFactory, toList()/…)
+//	partitioningBy(predicate) / partitioningBy(pred, toList()/…) /
+//	partitioningBy(pred, mapFactory, toList()/…)
+//	collectingAndThen(groupingBy(…)/partitioningBy(…), finisher)
+//
+// Downstream must preserve Collection of T (toList/toSet/toUnmodifiable/
+// toCollection); counting/mapping/reducing/… fail closed. Finisher of
+// collectingAndThen is not inspected (same fail-open as toList collectingAndThen).
 func javaIsGroupingByCollector(collectCall *grammar.Node, content []byte) bool {
 	first := javaCollectFirstArg(collectCall)
+	if first == nil {
+		return false
+	}
+	if javaIsGroupingByCollectorExpr(first, content) {
+		return true
+	}
+	// collectingAndThen(groupingBy|partitioningBy(…), finisher) — finisher
+	// treated as map-preserving (unmodifiableMap / identity / …).
+	return javaIsCollectingAndThenGroupingBy(first, content)
+}
+
+// javaIsCollectingAndThenGroupingBy reports
+// Collectors.collectingAndThen(groupingBy|partitioningBy(…), finisher) /
+// collectingAndThen(...) (static import) when the downstream is a groupingBy/
+// partitioningBy collector of Collection groups of T.
+func javaIsCollectingAndThenGroupingBy(n *grammar.Node, content []byte) bool {
+	if n == nil || n.Type() != "method_invocation" {
+		return false
+	}
+	nameN := ingest.ChildByField(n, "name")
+	if nameN == nil || ingest.NodeText(nameN, content) != "collectingAndThen" {
+		return false
+	}
+	if obj := ingest.ChildByField(n, "object"); obj != nil {
+		if obj.Type() != "identifier" && obj.Type() != "type_identifier" {
+			return false
+		}
+		if ingest.NodeText(obj, content) != "Collectors" {
+			return false
+		}
+	}
+	// collectingAndThen(downstream, finisher) — require exactly two real args.
+	var args []*grammar.Node
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		if n.Child(i).Type() != "argument_list" {
+			continue
+		}
+		al := n.Child(i)
+		for j := uint32(0); j < al.ChildCount(); j++ {
+			ch := al.Child(j)
+			switch ch.Type() {
+			case "(", ")", ",", "comment":
+				continue
+			default:
+				args = append(args, ch)
+			}
+		}
+	}
+	if len(args) != 2 {
+		return false
+	}
+	return javaIsGroupingByCollectorExpr(args[0], content)
+}
+
+// javaIsGroupingByCollectorExpr reports a groupingBy/partitioningBy collector
+// expression (not the outer collect call) whose value groups are Collection of
+// the stream element type. See javaIsGroupingByCollector.
+func javaIsGroupingByCollectorExpr(first *grammar.Node, content []byte) bool {
 	if first == nil || first.Type() != "method_invocation" {
 		return false
 	}
@@ -4316,23 +4383,60 @@ func javaIsGroupingByCollector(collectCall *grammar.Node, content []byte) bool {
 			return false
 		}
 	}
-	// Exactly one real arg (the classifier). Extra downstream collector → fail closed.
-	nReal := 0
+	// Real args: classifier[/predicate] [, mapFactory] [, downstream].
+	var args []*grammar.Node
 	for i := uint32(0); i < first.ChildCount(); i++ {
 		if first.Child(i).Type() != "argument_list" {
 			continue
 		}
 		al := first.Child(i)
 		for j := uint32(0); j < al.ChildCount(); j++ {
-			switch al.Child(j).Type() {
+			ch := al.Child(j)
+			switch ch.Type() {
 			case "(", ")", ",", "comment":
 				continue
 			default:
-				nReal++
+				args = append(args, ch)
 			}
 		}
 	}
-	return nReal == 1
+	switch len(args) {
+	case 1:
+		// Default downstream is toList() — Map of List<T>.
+		return true
+	case 2:
+		// classifier/predicate + downstream (or 2-arg with non-list fails closed).
+		return javaIsListGroupDownstream(args[1], content)
+	case 3:
+		// classifier/predicate + mapFactory + downstream.
+		return javaIsListGroupDownstream(args[2], content)
+	default:
+		return false
+	}
+}
+
+// javaIsListGroupDownstream reports a groupingBy/partitioningBy downstream
+// collector that yields Collection of the stream element type: toList/toSet/
+// toUnmodifiable/toCollection, plus identity-preserving wrappers
+// (collectingAndThen / filtering / mapping / flatMapping Stream.of) that the
+// toList collect path already accepts. counting / reducing / summing fail closed.
+func javaIsListGroupDownstream(n *grammar.Node, content []byte) bool {
+	if n == nil {
+		return false
+	}
+	if javaIsToListOrSetCollectorExpr(n, content) {
+		return true
+	}
+	if javaIsCollectingAndThenToListOrSet(n, content) {
+		return true
+	}
+	if javaIsFilteringToListOrSet(n, content) {
+		return true
+	}
+	if javaIsMappingIdentityToListOrSet(n, content) {
+		return true
+	}
+	return javaIsFlatMappingStreamOfToListOrSet(n, content)
 }
 
 // javaGroupingByCollectElemType recovers T from stream.collect(groupingBy(classifier))
