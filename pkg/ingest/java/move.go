@@ -2089,7 +2089,14 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 		}
 		// new FutureTask<>(() -> new A()) / FutureTask<>(runnable, new A()) → A
 		// (Future/Callable holder; enables .get().m() and var ft = new FutureTask<>(…)).
-		return javaFutureTaskCreationElemType(obj, content)
+		if et := javaFutureTaskCreationElemType(obj, content); et != "" {
+			return et
+		}
+		// new ArrayList<>(List.of(new A())) / new LinkedList<>(as) / new HashSet<>(…)
+		// — Collection copy/view ctors: element from declared type arg or first-arg
+		// pipeline (List.of / typed local / stream.toList()). Enables .get(0).m() /
+		// .forEach(a -> a.m()) / var al = new ArrayList<>(as) under foreign same-leaf.
+		return javaCollectionCopyCreationElemType(obj, content, elemOf, valOf)
 	case "cast_expression":
 		// (ArrayList<A>) as.clone() / (List<A>) x / (A[]) arr.clone() —
 		// recover E from a single type-arg generic cast or array cast type.
@@ -2374,6 +2381,19 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// Executor arg ignored; blocks / method refs / non-creation bodies fail closed.
 			// runAsync (Void) is not wired.
 			return javaCompletableFutureSupplyAsyncElemType(obj, content)
+		case "withInitial":
+			// ThreadLocal.withInitial(() -> new A()) — T from supplier body.
+			// Enables withInitial(() -> new A()).get().m() and
+			// var tl = withInitial(() -> new A()); tl.get().m() under foreign
+			// same-leaf methods (same supplier peel as Stream.generate).
+			return javaThreadLocalWithInitialElemType(obj, content)
+		case "submit":
+			// ExecutorService.submit(() -> new A()) / submit(Callable) —
+			// Future result T from zero-arg lambda body new T(...).
+			// Enables submit(() -> new A()).get().m() and var f = submit(...); f.get()
+			// under foreign same-leaf methods. Runnable submit (no result) and
+			// non-creation bodies fail closed.
+			return javaExecutorSubmitCallableElemType(obj, content)
 		case "iterate":
 			// Stream.iterate(new A(), a -> a) / iterate(new A(), pred, a -> a) —
 			// element type from seed creation.
@@ -2937,6 +2957,104 @@ func javaStreamGenerateElemType(call *grammar.Node, content []byte) string {
 // bodies fail closed (same shapes as Stream.generate).
 func javaCompletableFutureSupplyAsyncElemType(call *grammar.Node, content []byte) string {
 	return javaStaticSupplierCreationElemType(call, content, "CompletableFuture", 2)
+}
+
+// javaThreadLocalWithInitialElemType recovers T from
+// ThreadLocal.withInitial(() -> new T(...)).
+// Same supplier-body shapes as Stream.generate (expression-bodied zero-arg
+// lambda with object-creation body only).
+func javaThreadLocalWithInitialElemType(call *grammar.Node, content []byte) string {
+	return javaStaticSupplierCreationElemType(call, content, "ThreadLocal", 1)
+}
+
+// javaExecutorSubmitCallableElemType recovers V from
+// executor.submit(() -> new T(...)) when the first arg is an expression-bodied
+// zero-arg lambda whose body is object creation (Callable shape).
+// Runnable submit / multi-arg forms / blocks / method refs fail closed.
+// Enables submit(() -> new A()).get().m() under foreign same-leaf methods.
+func javaExecutorSubmitCallableElemType(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	args := javaCallArgs(call)
+	if len(args) != 1 || args[0].Type() != "lambda_expression" {
+		return ""
+	}
+	// Zero-arg Callable only (inferred/formal params empty).
+	if n := javaInferredLambdaParamNames(args[0], content); len(n) != 0 {
+		return ""
+	}
+	body := ingest.ChildByField(args[0], "body")
+	for body != nil && !body.IsNull() && body.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(body, "expression")
+		if inner == nil {
+			for i := uint32(0); i < body.ChildCount(); i++ {
+				ch := body.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		body = inner
+	}
+	if body == nil || body.Type() != "object_creation_expression" {
+		return ""
+	}
+	typeN := ingest.ChildByField(body, "type")
+	if typeN == nil {
+		return ""
+	}
+	return javaTypeName(typeN, content)
+}
+
+// javaCollectionCopyCreationElemType recovers E from Collection copy constructors:
+//
+//	new ArrayList<>(List.of(new A())) / new LinkedList<>(as) / new HashSet<>(coll)
+//	new ArrayList<A>(…) / new LinkedList<A>(…)
+//
+// Prefers declared single type arg; diamond peels the first constructor arg as a
+// stream/collection pipeline element (javaStreamPipelineElemType). Map/multi-arg
+// ctors and unknown types fail closed so new A() stays on the direct rename path.
+func javaCollectionCopyCreationElemType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	if call == nil || call.Type() != "object_creation_expression" {
+		return ""
+	}
+	typeN := ingest.ChildByField(call, "type")
+	if typeN == nil {
+		return ""
+	}
+	leaf := javaTypeName(typeN, content)
+	if !javaIsCollectionCopyCtorType(leaf) {
+		return ""
+	}
+	if args := javaTypeArgNames(typeN, content); len(args) == 1 && args[0] != "" {
+		return args[0]
+	}
+	ctorArgs := javaCallArgs(call)
+	if len(ctorArgs) < 1 {
+		return ""
+	}
+	// First arg is the source collection (capacity-int overloads fail closed when
+	// the arg is not a typed pipeline).
+	return javaStreamPipelineElemType(ctorArgs[0], content, elemOf, valOf)
+}
+
+// javaIsCollectionCopyCtorType reports concrete Collection types whose single-arg
+// copy constructor preserves element type E (not Map; not raw Object).
+func javaIsCollectionCopyCtorType(leaf string) bool {
+	switch leaf {
+	case "ArrayList", "LinkedList", "Vector", "Stack",
+		"HashSet", "LinkedHashSet", "TreeSet", "ConcurrentSkipListSet",
+		"ArrayDeque", "PriorityQueue", "ConcurrentLinkedQueue", "ConcurrentLinkedDeque",
+		"CopyOnWriteArrayList", "CopyOnWriteArraySet",
+		"LinkedBlockingQueue", "LinkedBlockingDeque", "ArrayBlockingQueue",
+		"PriorityBlockingQueue", "DelayQueue", "SynchronousQueue":
+		return true
+	default:
+		return false
+	}
 }
 
 // javaStaticSupplierCreationElemType recovers T from a static factory whose first
