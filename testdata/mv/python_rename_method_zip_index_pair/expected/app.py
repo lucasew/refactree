@@ -87,3 +87,25 @@ def use_list_zip_index_preserves_b(xs: list[B], ys: list[B]):
     pair = pairs[0]
     x, y = pair
     x.run()
+
+
+def use_pair_from_index_nested(xs: list[A], ys: list[A]):
+    pairs = list(zip(xs, ys))
+    pair = pairs[0]
+    for a in pair:
+        a.execute()
+    b = next(iter(pair))
+    b.execute()
+
+
+def use_walrus_index_nested(xs: list[A], ys: list[A]):
+    if (pair := list(zip(xs, ys))[0]):
+        for a in pair:
+            a.execute()
+
+
+def use_pair_from_index_nested_b(xs: list[B], ys: list[B]):
+    pairs = list(zip(xs, ys))
+    pair = pairs[0]
+    for x in pair:
+        x.run()

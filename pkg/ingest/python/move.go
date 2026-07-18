@@ -2051,10 +2051,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// next(reversed(items)) — result type is the element type of
 						// the iterable arg (identity genexp preserves that type).
 						// pair = next(pairs) when pairs = zip/enumerate(...) — pair is a
-						// tuple (pairSlots), not an element; use pair[i] / unpack.
+						// tuple (pairSlots + shared elemOf), not an element; use pair[i] /
+						// unpack / nested for a in pair.
 						if fname == "next" {
 							if types := pythonNextPairSlots(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
-								pairSlots[lname] = types
+								pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 							} else if et := pythonNextElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
 							}
@@ -2149,12 +2150,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// a = item[1] when item from enumerate/zip pair (pairSlots).
 				// a = pairs[0][0] / a = list(zip(...))[0][0] — double subscript slot.
 				// pair = pairs[0] / pair = list(zip(...))[0] — index into pair-iter binds
-				// pairSlots (not an element; use pair[i] / unpack).
+				// pairSlots (+ elemOf when slots share type, for nested for/next).
 				// Slices (items[1:3]) fail closed (sequence, not element).
 				if right != nil && right.Type() == "subscript" {
 					if types := pythonPairSlotsOf(right, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots); len(types) > 0 {
 						// Foreign slots too — shadow prior same-name pair locals.
-						pairSlots[lname] = types
+						pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 					} else if et := pythonSubscriptElemType(right, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots); ourReceivers[et] {
 						out[lname] = true
 					}
@@ -2271,10 +2272,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					}
 					// a := next(iter(items)) / next(items) / next(x for x in items) /
 					// next(reversed(items)) /
-					// pair := next(pairs) when pairs is a pair-iter (pairSlots).
+					// pair := next(pairs) when pairs is a pair-iter (pairSlots + shared elemOf).
 					if fname == "next" {
 						if types := pythonNextPairSlots(valueN, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
-							pairSlots[lname] = types
+							pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 						} else if et := pythonNextElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 							out[lname] = true
 						}
@@ -2351,12 +2352,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				}
 			}
 			// a := items[0] / a := d[k] — element/value of known collection.
-			// pair := pairs[0] / pair := list(zip(...))[0] — pairSlots.
+			// pair := pairs[0] / pair := list(zip(...))[0] — pairSlots (+ shared elemOf).
 			// a := pairs[0][0] — double subscript slot.
 			// Slices fail closed (sequence, not element).
 			if valueN.Type() == "subscript" {
 				if types := pythonPairSlotsOf(valueN, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots); len(types) > 0 {
-					pairSlots[lname] = types
+					pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 				} else if et := pythonSubscriptElemType(valueN, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots); ourReceivers[et] {
 					out[lname] = true
 				}
