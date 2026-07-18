@@ -3452,7 +3452,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						}
 						// Mapping of list/set of T: defaultdict[str, list[A]] → nested A
 						// so da["k"][0].run() / for a in da["k"] peel under foreign same-leaf.
+						// Collection of list/set: list[list[A]] / deque[list[A]] → nested A
+						// so aa[0][0].run() / for row in aa; for a in row peel.
 						if nest := pythonMappingNestedListElemType(typeN, content); nest != "" {
+							elemOf["@nested."+lname] = nest
+						} else if nest := pythonCollectionNestedListElemType(typeN, content); nest != "" {
 							elemOf["@nested."+lname] = nest
 						}
 					}
@@ -3478,7 +3482,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						elemOf[lname] = et
 					}
 					// Mapping of list/set of T (same as typed_parameter path).
+					// Collection of list/set: list[list[A]] (same as typed_parameter path).
 					if nest := pythonMappingNestedListElemType(typeN, content); nest != "" {
+						elemOf["@nested."+lname] = nest
+					} else if nest := pythonCollectionNestedListElemType(typeN, content); nest != "" {
 						elemOf["@nested."+lname] = nest
 					}
 				}
@@ -4469,6 +4476,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					elemOf[ingest.NodeText(left, content)] = et
 					break
 				}
+				// for row in aa when aa: list[list[A]] — rows are list of A (not A);
+				// bind elemOf so for a in row / row[0].run() peels under foreign same-leaf.
+				if et := pythonNestedCollectionIdentElemType(right, content, elemOf); et != "" {
+					elemOf[ingest.NodeText(left, content)] = et
+					break
+				}
 				if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 					out[ingest.NodeText(left, content)] = true
 				} else if et := pythonDictViewValuesHomogeneousType(right, content, fieldOf); ourReceivers[et] {
@@ -4483,6 +4496,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			case "pattern_list", "tuple_pattern":
 				targets := pythonPatternIdents(left, content)
 				if len(targets) == 0 {
+					break
+				}
+				// for k, ga in da.items() when da: dict[str, list[A]] — value is list of A
+				// (not A); bind elemOf so ga[0].run() peels (same as values() nested).
+				if et := pythonNestedMappingItemsElemType(right, content, elemOf); et != "" {
+					if len(targets) >= 2 {
+						elemOf[targets[1]] = et
+					}
 					break
 				}
 				// for k, v in d.items() — value type is elemOf[d] (dict value leaf).
@@ -9293,6 +9314,164 @@ func pythonHomogeneousCtorElem(collection *grammar.Node, content []byte) string 
 	return elem
 }
 
+
+// pythonCollectionNestedListElemType recovers T from collection annotations whose
+// element is itself a list/set/sequence of T:
+//
+//	list[list[A]] / List[List[A]] / deque[list[A]] / tuple[list[A], ...] /
+//	Sequence[set[A]] / Iterable[list[A]] → "A"
+//
+// Stored as elemOf["@nested."+name] so aa[0][0].run() / ra = aa[0]; ra[0].run() /
+// for row in aa; for a in row peel under foreign same-leaf. Scalar list[A] stays
+// on pythonContainerElemType. Mapping-of-list uses pythonMappingNestedListElemType.
+// Unknown / multi-arg fail closed.
+func pythonCollectionNestedListElemType(typeN *grammar.Node, content []byte) string {
+	if typeN == nil {
+		return ""
+	}
+	if typeN.Type() == "type" && typeN.ChildCount() > 0 {
+		typeN = typeN.Child(0)
+	}
+	if typeN.Type() == "string" {
+		s := strings.Trim(ingest.NodeText(typeN, content), `"'`)
+		return pythonParseCollectionNestedListElemString(s)
+	}
+	if typeN.Type() != "generic_type" {
+		return ""
+	}
+	var contName string
+	var typeParam *grammar.Node
+	for i := uint32(0); i < typeN.ChildCount(); i++ {
+		ch := typeN.Child(i)
+		switch ch.Type() {
+		case "identifier":
+			if contName == "" {
+				contName = ingest.NodeText(ch, content)
+			}
+		case "attribute":
+			if contName == "" {
+				if attr := ingest.ChildByField(ch, "attribute"); attr != nil {
+					contName = ingest.NodeText(attr, content)
+				}
+			}
+		case "type_parameter":
+			typeParam = ch
+		}
+	}
+	switch contName {
+	case "list", "List", "set", "Set", "frozenset", "FrozenSet",
+		"tuple", "Tuple", "Iterable", "Iterator", "Sequence", "MutableSequence",
+		"Collection", "Container", "deque", "Deque",
+		"AbstractSet", "MutableSet":
+		// ok
+	default:
+		// Unknown single-arg containers (CustomList[list[A]]) fail closed.
+		return ""
+	}
+	if typeParam == nil {
+		return ""
+	}
+	// First (only) type arg must itself be a collection of T.
+	var elemType *grammar.Node
+	for i := uint32(0); i < typeParam.ChildCount(); i++ {
+		ch := typeParam.Child(i)
+		if ch.Type() != "type" {
+			continue
+		}
+		// Skip ellipsis in tuple[list[A], ...]
+		inner := ch
+		if ch.ChildCount() > 0 {
+			inner = ch.Child(0)
+		}
+		if inner != nil && inner.Type() == "ellipsis" {
+			continue
+		}
+		if ch.ChildCount() == 1 && ch.Child(0).Type() == "ellipsis" {
+			continue
+		}
+		elemType = ch
+		break
+	}
+	if elemType == nil {
+		return ""
+	}
+	return pythonContainerElemType(elemType, content)
+}
+
+// pythonParseCollectionNestedListElemString handles quoted annotations like
+// "list[list[A]]" / "deque[list[A]]".
+func pythonParseCollectionNestedListElemString(s string) string {
+	s = strings.TrimSpace(s)
+	lb := strings.IndexByte(s, '[')
+	rb := strings.LastIndexByte(s, ']')
+	if lb <= 0 || rb <= lb {
+		return ""
+	}
+	contName := strings.TrimSpace(s[:lb])
+	if i := strings.LastIndexByte(contName, '.'); i >= 0 {
+		contName = contName[i+1:]
+	}
+	switch contName {
+	case "list", "List", "set", "Set", "frozenset", "FrozenSet",
+		"tuple", "Tuple", "Iterable", "Iterator", "Sequence", "MutableSequence",
+		"Collection", "Container", "deque", "Deque",
+		"AbstractSet", "MutableSet":
+		// ok
+	default:
+		return ""
+	}
+	inner := strings.TrimSpace(s[lb+1 : rb])
+	// Strip trailing ", ..." for tuple[list[A], ...]
+	// Take first type arg at top-level comma.
+	depth := 0
+	end := len(inner)
+	for i, c := range inner {
+		switch c {
+		case '[', '(', '{':
+			depth++
+		case ']', ')', '}':
+			depth--
+		case ',':
+			if depth == 0 {
+				end = i
+				break
+			}
+		}
+		if end != len(inner) {
+			break
+		}
+	}
+	elemAnn := strings.TrimSpace(inner[:end])
+	if elemAnn == "..." {
+		return ""
+	}
+	return pythonParseContainerElemString(elemAnn)
+}
+
+// pythonNestedCollectionIdentElemType recovers T from a bare identifier that is a
+// collection-of-list local (elemOf["@nested."+name]). Used for for row in aa when
+// aa: list[list[A]] — rows are list-of-T, not T.
+func pythonNestedCollectionIdentElemType(right *grammar.Node, content []byte, elemOf map[string]string) string {
+	if right == nil || right.Type() != "identifier" || elemOf == nil {
+		return ""
+	}
+	return elemOf["@nested."+ingest.NodeText(right, content)]
+}
+
+// pythonNestedMappingItemsElemType recovers T from da.items() when da is a
+// mapping of list/set of T. Item values are list-of-T (not T); callers bind
+// elemOf[ga] = T for for k, ga in da.items(); ga[0].run().
+func pythonNestedMappingItemsElemType(right *grammar.Node, content []byte, elemOf map[string]string) string {
+	if right == nil || right.Type() != "call" || elemOf == nil {
+		return ""
+	}
+	obj, method := pythonAttrCall(right, content)
+	if obj == "" || method != "items" {
+		return ""
+	}
+	return elemOf["@nested."+obj]
+}
+
 // pythonMappingNestedListElemType recovers T from mapping annotations whose value
 // is a list/set/sequence of T:
 //
@@ -9336,7 +9515,7 @@ func pythonMappingNestedListElemType(typeN *grammar.Node, content []byte) string
 	}
 	switch contName {
 	case "dict", "Dict", "Mapping", "MutableMapping", "OrderedDict", "defaultdict", "DefaultDict",
-		"ChainMap":
+		"ChainMap", "UserDict":
 		// ok
 	default:
 		return ""
@@ -9380,7 +9559,7 @@ func pythonParseMappingNestedListElemString(s string) string {
 	}
 	switch contName {
 	case "dict", "Dict", "Mapping", "MutableMapping", "OrderedDict", "defaultdict", "DefaultDict",
-		"ChainMap":
+		"ChainMap", "UserDict":
 		// ok
 	default:
 		return ""

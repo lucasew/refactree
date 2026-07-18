@@ -1741,6 +1741,11 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 					} else if t := jsIdentityCloneType(valN, content, out, factories); ourReceivers[t] {
 						// const a = structuredClone(new A()) / Object.assign(new A()[, …])
 						out[ingest.NodeText(nameN, content)] = t
+					} else if t := jsNestedArrayFlatElemType(valN, content, arrayLocals, out, factories, extra); t != "" {
+						// const aa = [[new A()]] — nested array local of element type A.
+						// Stored under @nested so aa[0][0].run() / aa.flat()[0].run() peel
+						// without treating aa[0] as scalar A. Bind foreign too for shadowing.
+						arrayLocals["@nested."+ingest.NodeText(nameN, content)] = t
 					} else if t := jsArraySourceElemType(valN, content, arrayLocals, out, factories, extra); ourReceivers[t] {
 						// const as = [new A()] / Array.from([new A()]) /
 						// Array.of(new A()) / Object.values({k: new A()}) —
@@ -3148,6 +3153,11 @@ func jsArraySourceElemType(n *grammar.Node, content []byte, arrayLocals, typedLo
 			return t
 		}
 	}
+	// aa[0] when aa: [[new A()]] (@nested) — expression is array of A (not A).
+	// Enables aa[0][0].run() / [[new A()]][0][0].run() under foreign same-leaf.
+	if t := jsNestedArrayIndexSourceElemType(n, content, arrayLocals, typedLocals, factories, extra); t != "" {
+		return t
+	}
 	if t := jsArrayFromElemType(n, content, arrayLocals, typedLocals, factories, extra); t != "" {
 		return t
 	}
@@ -4253,7 +4263,55 @@ func jsArrayFlatElemType(n *grammar.Node, content []byte, arrayLocals, typedLoca
 	if t := jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories, extra); t != "" {
 		return t
 	}
+	// Nested local: const aa = [[new A()]]; aa.flat()[0].run() — @nested peels A.
+	if obj != nil && obj.Type() == "identifier" && arrayLocals != nil {
+		if t := arrayLocals["@nested."+ingest.NodeText(obj, content)]; t != "" {
+			return t
+		}
+	}
 	// One-level nest: [[new T()], …] / [as, …] when every element peels to array of T.
+	return jsNestedArrayFlatElemType(obj, content, arrayLocals, typedLocals, factories, extra)
+}
+
+
+// jsNestedArrayIndexSourceElemType recovers T from aa[i] / [[new A()]][i] when the
+// receiver is a one-level nested array of T (elements are arrays of T). The
+// subscript expression is itself an array of T (not T), so further [j] / .at(j)
+// peels T. Numeric index only. Unknown / non-nested fail closed.
+func jsNestedArrayIndexSourceElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals) string {
+	if n == nil || n.Type() != "subscript_expression" {
+		return ""
+	}
+	idx := ingest.ChildByField(n, "index")
+	if idx == nil || idx.Type() != "number" {
+		return ""
+	}
+	obj := ingest.ChildByField(n, "object")
+	if obj == nil {
+		return ""
+	}
+	for obj != nil && obj.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < obj.ChildCount(); i++ {
+			ch := obj.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		obj = inner
+	}
+	if obj == nil {
+		return ""
+	}
+	// Nested local: const aa = [[new A()]].
+	if obj.Type() == "identifier" && arrayLocals != nil {
+		if t := arrayLocals["@nested."+ingest.NodeText(obj, content)]; t != "" {
+			return t
+		}
+	}
+	// Inline nest: [[new A()]][0] — array-of-arrays literal.
 	return jsNestedArrayFlatElemType(obj, content, arrayLocals, typedLocals, factories, extra)
 }
 

@@ -1338,6 +1338,7 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 		case "enhanced_for_statement":
 			// for (A a : as) — explicit type. for (var a : as) — element of collection.
 			// Without var→elem binding, a.run() is skipped when foreign same-leaf methods exist.
+			// for (List<A> ga : ma.values()) — explicit List type; track elemOf for ga.get(0).
 			// for (var e : m.entrySet()) / for (Map.Entry<K,A> e : m.entrySet()) —
 			// entry is not A; bind entryValOf for e.getValue().m().
 			// for (var e : m.entrySet()) when m is groupingBy/partitioningBy —
@@ -1349,6 +1350,8 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 			if typeN != nil && nameN != nil {
 				name := ingest.NodeText(nameN, content)
 				tn := javaTypeName(typeN, content)
+				// List<A> ga / Map.Entry<K,A> e — track elem/value even when outer is not ours.
+				javaRecordCollectionElem(typeN, name, content, elemOf, valOf)
 				if ourReceivers[tn] {
 					out[name] = true
 				} else if tn == "var" {
@@ -1602,8 +1605,13 @@ func javaRecordCollectionElem(typeN *grammar.Node, name string, content []byte, 
 		if elemOf != nil {
 			elemOf[name] = args[0]
 			// Collection-of-collection: List<List<A>> / Collection<List<A>> → nested A
-			// for flatMap(Collection::stream) / flatMap(List::stream) peels.
+			// for flatMap(Collection::stream) / flatMap(List::stream) peels
+			// and aa.get(0).get(0).m() under foreign same-leaf.
 			if nest := javaCollectionOfCollectionElemType(typeN, content); nest != "" {
+				elemOf["@nested."+name] = nest
+			}
+			// Map of collection: Map<K, List<A>> → nested A for ma.get(k).get(0).m().
+			if nest := javaMapOfCollectionElemType(typeN, content); nest != "" {
 				elemOf["@nested."+name] = nest
 			}
 		}
@@ -1644,6 +1652,124 @@ func javaCollectionOfCollectionElemType(typeN *grammar.Node, content []byte) str
 		return ""
 	}
 	return args[0]
+}
+
+
+// javaMapOfCollectionElemType recovers T from Map/HashMap of List/Collection/Set of T
+// (one nesting level only). Map<K, List<A>> → "A"; Map<K,A> / List fail closed.
+func javaMapOfCollectionElemType(typeN *grammar.Node, content []byte) string {
+	if typeN == nil || typeN.Type() != "generic_type" {
+		return ""
+	}
+	outer := javaTypeName(typeN, content)
+	switch outer {
+	case "Map", "HashMap", "LinkedHashMap", "TreeMap", "ConcurrentHashMap",
+		"NavigableMap", "SortedMap", "SequencedMap", "WeakHashMap", "IdentityHashMap",
+		"EnumMap", "Hashtable":
+		// ok
+	default:
+		return ""
+	}
+	// Second type argument node (value type).
+	targs := ingest.ChildByField(typeN, "type_arguments")
+	if targs == nil {
+		for i := uint32(0); i < typeN.ChildCount(); i++ {
+			if typeN.Child(i).Type() == "type_arguments" {
+				targs = typeN.Child(i)
+				break
+			}
+		}
+	}
+	if targs == nil {
+		return ""
+	}
+	var valueType *grammar.Node
+	argIdx := 0
+	for i := uint32(0); i < targs.ChildCount(); i++ {
+		ch := targs.Child(i)
+		switch ch.Type() {
+		case "type_identifier", "generic_type", "scoped_type_identifier", "array_type":
+			argIdx++
+			if argIdx == 2 {
+				valueType = ch
+			}
+		}
+	}
+	if valueType == nil || valueType.Type() != "generic_type" {
+		return ""
+	}
+	if !javaIsCollectionTypeName(javaTypeName(valueType, content)) {
+		return ""
+	}
+	args := javaTypeArgNames(valueType, content)
+	if len(args) != 1 || args[0] == "" {
+		return ""
+	}
+	return args[0]
+}
+
+// javaNestedCollectionGetElemType recovers T from aa.get(i) / ma.get(k) when the
+// receiver is a collection/map of list-of-T (elemOf["@nested."+src]). Used as the
+// outer get in aa.get(0).get(0).m() / ma.get(k).get(0).m() under foreign same-leaf.
+// Unknown / non-nested sources fail closed.
+func javaNestedCollectionGetElemType(val *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	if elemOf == nil {
+		return ""
+	}
+	for val != nil && !val.IsNull() && val.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(val, "expression")
+		if inner == nil {
+			for i := uint32(0); i < val.ChildCount(); i++ {
+				ch := val.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		val = inner
+	}
+	if val == nil || val.IsNull() || val.Type() != "method_invocation" {
+		return ""
+	}
+	nameN := ingest.ChildByField(val, "name")
+	if nameN == nil {
+		return ""
+	}
+	switch ingest.NodeText(nameN, content) {
+	case "get", "getOrDefault", "getFirst", "getLast",
+		"remove", "removeFirst", "removeLast", "set",
+		"poll", "peek", "element", "take",
+		"pollFirst", "pollLast", "peekFirst", "peekLast", "pop",
+		"takeFirst", "takeLast":
+		// ok — collection/map accessors that yield the nested list value
+	default:
+		return ""
+	}
+	obj := ingest.ChildByField(val, "object")
+	if obj == nil {
+		return ""
+	}
+	// Bare identifier: aa.get(0) / ma.get(k) with @nested.
+	if obj.Type() == "identifier" {
+		return elemOf["@nested."+ingest.NodeText(obj, content)]
+	}
+	return ""
+}
+
+// javaStreamNestedCollectionElemType recovers T from nestedA.stream() / … when
+// nestedA is List<List<A>> (elemOf["@nested."+src]). Stream elements are List of T
+// (not T); callers bind elemOf[row] = T for row.get(0).m() under foreign same-leaf.
+func javaStreamNestedCollectionElemType(obj *grammar.Node, content []byte, elemOf map[string]string) string {
+	if elemOf == nil {
+		return ""
+	}
+	src := javaStreamSourceIdent(obj, content)
+	if src == "" {
+		return ""
+	}
+	return elemOf["@nested."+src]
 }
 
 // javaIsCollectionTypeName reports List/Collection/Set/Iterable and common impls
@@ -1836,6 +1962,12 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 			et := javaStreamPipelineElemType(obj, content, elemOf, valOf)
 			if et != "" && ourReceivers[et] {
 				out[params[0]] = true
+			} else if nest := javaStreamNestedCollectionElemType(obj, content, elemOf); nest != "" {
+				// nestedA.stream().map(row -> row.get(0).m()) when nestedA: List<List<A>> —
+				// param is List of nest (not nest); track for row.get(0).m().
+				if elemOf != nil {
+					elemOf[params[0]] = nest
+				}
 			} else if et := javaWindowGatherStreamElemType(obj, content, elemOf, valOf, windowStreamOf); et != "" {
 				// stream.gather(windowFixed|windowSliding).forEach(w -> …) /
 				// s.forEach(w -> …) after var s = gather(window*) —
@@ -6369,6 +6501,15 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 				method == "remove" || method == "removeFirst" || method == "removeLast" ||
 				method == "set" {
 				if et := javaGroupingByEntryGetValueElemType(obj, content, elemOf, valOf, entryGroupOf, groupValOf); et != "" {
+					return et
+				}
+			}
+			// aa.get(0).get(0) / ma.get(k).get(0) when aa: List<List<A>> /
+			// ma: Map<K, List<A>> — outer get peels nested element T.
+			if method == "get" || method == "getFirst" || method == "getLast" ||
+				method == "remove" || method == "removeFirst" || method == "removeLast" ||
+				method == "set" {
+				if et := javaNestedCollectionGetElemType(obj, content, elemOf, valOf); et != "" {
 					return et
 				}
 			}
