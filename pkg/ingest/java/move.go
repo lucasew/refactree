@@ -1428,7 +1428,9 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // as.stream().findFirst() / findAny() / min() / max() / reduce(op) → same element
 // (Optional wraps T; ifPresent / orElse use T),
 // as.stream().toList() / collect(Collectors.toList()/toSet()) / collect(toList()/toSet()) /
-// collect(Collectors::toList / Collectors::toSet) → same element (Collection<T> for forEach / enhanced-for),
+// collect(Collectors::toList / Collectors::toSet) /
+// collect(collectingAndThen(toList()/toSet(), …)) /
+// collect(teeing(toList()/…, …, (list, …) -> list)) → same element (Collection<T> for forEach / enhanced-for),
 // m.values() → valOf[m],
 // List.of(new A()) / Stream.of(new A()) / Arrays.asList(new A()) → "A",
 // Arrays.stream(as) / Arrays.stream(new A[]{...}) → "A",
@@ -1498,7 +1500,8 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 		case "collect":
 			// Stream.collect(Collectors.toList()/toSet()) / collect(toList()/toSet()) /
 			// collect(Collectors::toList / Collectors::toSet) /
-			// collect(Collectors.collectingAndThen(toList()/toSet(), finisher)) —
+			// collect(Collectors.collectingAndThen(toList()/toSet(), finisher)) /
+			// collect(Collectors.teeing(toList()/…, …, (list, …) -> list)) —
 			// Collection of the stream element type. Other collectors
 			// (groupingBy, mapping, …) fail closed.
 			if !javaIsToListOrSetCollector(obj, content) {
@@ -1697,9 +1700,11 @@ func javaFirstCallArg(call *grammar.Node) *grammar.Node {
 // javaIsToListOrSetCollector reports Stream.collect args that produce a
 // Collection of the stream element type: Collectors.toList()/toSet(),
 // toList()/toSet() (static import), Collectors::toList / Collectors::toSet,
-// and Collectors.collectingAndThen(toList()/toSet(), finisher) (finisher is
+// Collectors.collectingAndThen(toList()/toSet(), finisher) (finisher is
 // treated as preserving Collection of the same element type — identity,
-// Collections::unmodifiableList, …). Other collectors fail closed.
+// Collections::unmodifiableList, …), and Collectors.teeing(d1, d2, merger)
+// when the merger clearly returns a toList/toSet downstream result.
+// Other collectors fail closed.
 func javaIsToListOrSetCollector(collectCall *grammar.Node, content []byte) bool {
 	if collectCall == nil {
 		return false
@@ -1712,7 +1717,11 @@ func javaIsToListOrSetCollector(collectCall *grammar.Node, content []byte) bool 
 		return true
 	}
 	// collectingAndThen(downstream, finisher) when downstream is toList/toSet.
-	return javaIsCollectingAndThenToListOrSet(first, content)
+	if javaIsCollectingAndThenToListOrSet(first, content) {
+		return true
+	}
+	// teeing(d1, d2, merger) when merger returns a toList/toSet downstream.
+	return javaIsTeeingToListOrSet(first, content)
 }
 
 // javaIsToListOrSetCollectorExpr reports a collector expression that yields a
@@ -1810,6 +1819,98 @@ func javaIsCollectingAndThenToListOrSet(n *grammar.Node, content []byte) bool {
 		}
 	}
 	return javaIsToListOrSetCollectorExpr(javaFirstCallArg(n), content)
+}
+
+// javaIsTeeingToListOrSet reports Collectors.teeing(d1, d2, merger) /
+// teeing(...) (static import) when merger is an expression-bodied bi-lambda
+// that returns one of its parameters and that parameter's downstream is a
+// toList/toSet collector:
+//
+//	teeing(toList(), counting(), (list, n) -> list) → List<T>
+//	teeing(toList(), toList(), (a, b) -> a) → List<T>
+//	teeing(counting(), toList(), (n, list) -> list) → List<T>
+//
+// Method-ref mergers and non-identity bodies fail closed (result type is the
+// merger's R, not automatically a Collection of the stream element).
+func javaIsTeeingToListOrSet(n *grammar.Node, content []byte) bool {
+	if n == nil || n.Type() != "method_invocation" {
+		return false
+	}
+	nameN := ingest.ChildByField(n, "name")
+	if nameN == nil || ingest.NodeText(nameN, content) != "teeing" {
+		return false
+	}
+	if obj := ingest.ChildByField(n, "object"); obj != nil {
+		if obj.Type() != "identifier" && obj.Type() != "type_identifier" {
+			return false
+		}
+		if ingest.NodeText(obj, content) != "Collectors" {
+			return false
+		}
+	}
+	args := javaCallArgs(n)
+	if len(args) != 3 {
+		return false
+	}
+	d1, d2, merger := args[0], args[1], args[2]
+	if merger.Type() != "lambda_expression" {
+		return false
+	}
+	params := javaInferredLambdaParamNames(merger, content)
+	if len(params) != 2 {
+		return false
+	}
+	body := ingest.ChildByField(merger, "body")
+	for body != nil && !body.IsNull() && body.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(body, "expression")
+		if inner == nil {
+			for i := uint32(0); i < body.ChildCount(); i++ {
+				ch := body.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		body = inner
+	}
+	if body == nil || body.IsNull() || body.Type() != "identifier" {
+		return false
+	}
+	ret := ingest.NodeText(body, content)
+	switch ret {
+	case params[0]:
+		return javaIsToListOrSetCollectorExpr(d1, content)
+	case params[1]:
+		return javaIsToListOrSetCollectorExpr(d2, content)
+	default:
+		return false
+	}
+}
+
+// javaCallArgs returns non-punctuation arguments of a method_invocation.
+func javaCallArgs(call *grammar.Node) []*grammar.Node {
+	if call == nil {
+		return nil
+	}
+	var out []*grammar.Node
+	for i := uint32(0); i < call.ChildCount(); i++ {
+		if call.Child(i).Type() != "argument_list" {
+			continue
+		}
+		al := call.Child(i)
+		for j := uint32(0); j < al.ChildCount(); j++ {
+			ch := al.Child(j)
+			switch ch.Type() {
+			case "(", ")", ",", "comment":
+				continue
+			default:
+				out = append(out, ch)
+			}
+		}
+	}
+	return out
 }
 
 // javaCollectFirstArg returns the first non-punctuation argument of a collect(...) call.
