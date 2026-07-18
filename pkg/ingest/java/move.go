@@ -1732,6 +1732,23 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 				}
 				continue
 			}
+			// CompletableFuture.thenCombine(other, BiFunction<? super T,? super U,? extends V>) /
+			// thenAcceptBoth(other, BiConsumer<? super T,? super U>) —
+			// first param is this CF's T; second is other stage's U when recoverable.
+			// runAfterBoth takes Runnable (zero-arg) — not a bi-lambda.
+			if method == "thenCombine" || method == "thenAcceptBoth" {
+				et := javaStreamPipelineElemType(obj, content, elemOf, valOf)
+				if et != "" && ourReceivers[et] {
+					out[params[0]] = true
+				}
+				callArgs := javaCallArgs(call)
+				if len(callArgs) >= 1 {
+					if ut := javaStreamPipelineElemType(callArgs[0], content, elemOf, valOf); ut != "" && ourReceivers[ut] {
+						out[params[1]] = true
+					}
+				}
+				continue
+			}
 			// ConcurrentHashMap.reduceEntries(threshold, BiFunction on Entry,Entry) —
 			// 2-arg form: bind entryValOf for e.getValue().m() on both params.
 			// 3-arg form's BiFunction is on U; getValue transformer (e -> e.getValue())
@@ -1852,6 +1869,9 @@ func javaStreamElementLambdaMethod(method string) bool {
 		// bi-lambda first param is CF result T (second is Throwable).
 		// Identity handle return pipelines peel via javaMapResultElemType.
 		"whenComplete", "handle",
+		// CompletableFuture.thenCombine/thenAcceptBoth —
+		// bi-lambda (T,U): first is this CF's T; second is other stage's U.
+		"thenCombine", "thenAcceptBoth",
 		// Map value bi-lambdas (see javaMapValueBiLambdaMethod).
 		"computeIfPresent", "compute", "replaceAll", "merge",
 		// ConcurrentHashMap.reduceValues — 2-arg BiFunction on V,V and 3-arg unary
