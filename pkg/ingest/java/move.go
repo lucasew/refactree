@@ -3475,6 +3475,9 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	  (Optional<A>; also findFirst().orElse / findFirst().orElseThrow)
 //	oa.get() / as.stream().findFirst().get() / Optional.of(new A()).get() → T
 //	  (zero-arg Optional.get; also List.of(new A()).get(i) / toList().get(i) via pipeline)
+//	Map.of(k, new A()).get(k) / Map.ofEntries(...).get(k) /
+//	  Collections.singletonMap(k, new A()).get(k) / Map.copyOf(m).get(k) → A
+//	  (map factory/pipeline value type; getOrDefault/remove/put/compute same V)
 //	Collections.min(as) / Collections.max(as[, cmp]) → elemOf[as]
 //	stream.reduce(identity, op[, combiner]) → stream element type (returns T/U)
 //	e.getValue() / e.setValue(v) → entryValOf[e] (Map.Entry; setValue returns previous V)
@@ -3580,10 +3583,10 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		//   as.stream().toList().remove(0) / as.reversed().removeFirst() /
 		//   List.copyOf(as).removeFirst() / Arrays.asList(new A()).set(0, x)
 		// Pipeline typing already treats findFirst/findAny/Optional.of/List.of/
-		// toList/reversed/copyOf as T. Map value mutators (put/compute/…) stay
-		// identifier-only above; non-id Map.of(...).get fails closed here
-		// (Map.of not in static-collection of; toMap collect fails closed for
-		// element pipeline).
+		// toList/reversed/copyOf as T. Map factories (Map.of / ofEntries /
+		// singletonMap / copyOf / unmodifiableMap / collect(toMap)) are not
+		// element pipelines — fall through to javaMapPipelineValueType for
+		// value-returning accessors (Map.of(k, new A()).get(k)).
 		switch method {
 		case "get", "getFirst", "getLast",
 			"remove", "removeFirst", "removeLast", "set",
@@ -3592,7 +3595,25 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 			"push", "takeFirst", "takeLast",
 			"elementAt", "firstElement", "lastElement",
 			"first", "last", "ceiling", "floor", "higher", "lower":
-			return javaStreamPipelineElemType(obj, content, elemOf, valOf)
+			if et := javaStreamPipelineElemType(obj, content, elemOf, valOf); et != "" {
+				return et
+			}
+			// Map.of(k, new A()).get(k) / Map.ofEntries(...).get(k) /
+			// Collections.singletonMap(k, new A()).get(k) /
+			// Map.copyOf(m).get(k) / Collections.unmodifiableMap(m).get(k) /
+			// stream.collect(toMap(...)).get(k) — and remove(k) → V.
+			// getFirst/getLast/set/queue endpoints stay list/deque-only.
+			if method == "get" || method == "remove" {
+				return javaMapPipelineValueType(obj, content, elemOf, valOf)
+			}
+			return ""
+		}
+		// Map-only value mutators on non-id factories/pipelines (same V leaf).
+		switch method {
+		case "getOrDefault",
+			"computeIfAbsent", "putIfAbsent", "compute", "computeIfPresent",
+			"put", "replace", "merge", "putFirst", "putLast":
+			return javaMapPipelineValueType(obj, content, elemOf, valOf)
 		}
 		return ""
 	case "getValue", "setValue":
