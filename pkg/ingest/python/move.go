@@ -2258,7 +2258,10 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // bare `box[0]` stays unbound for non-indexable dataclasses),
 // plus assignment `xs = list(astuple(box)); xs[0]` (index slots on xs),
 // plus unpack `xa, xb = astuple(box)` / `xa, xb = list(astuple(box))` /
-// `xa, *rest = astuple(box)` (per-slot field types; *rest of mixed tuple fails closed).
+// `xa, *rest = astuple(box)` (per-slot field types; *rest of mixed tuple fails closed),
+// `sorted/min/max(items, key=lambda x: x.m())` / `items.sort(key=lambda x: x.m())` /
+// `map(lambda x: x.m(), items)` / `filter(lambda x: x.m(), items)` — untyped
+// unary lambda params from the iterable element type (under foreign same-leaf).
 // fieldOf maps "local.field" → field type leaf for class field access.
 // elemOf maps collection locals → element type leaf (list[A] / deque[A] /
 // dict value / Queue[A] → "A") for direct access chains under foreign same-leaf.
@@ -3341,6 +3344,13 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					}
 				}
 			}
+		case "call":
+			// sorted/min/max(items, key=lambda x: x.m()) /
+			// items.sort(key=lambda x: x.m()) /
+			// map(lambda x: x.m(), items) / filter(lambda x: x.m(), items) —
+			// untyped unary lambda params from the iterable element type.
+			// Without this, x.m() is skipped when a foreign same-leaf method exists.
+			pythonBindIterableLambdaParams(n, content, ourReceivers, elemOf, egElems, typeOf, out)
 		case "as_pattern":
 			// match `case A() as a`, with `with A() as a`, except `except A as e`.
 			// except* is handled above (e is ExceptionGroup, not A).
@@ -3402,6 +3412,128 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 	}
 	walk(root)
 	return out, fieldOf, elemOf, typeOf, pairSlots
+}
+
+// pythonBindIterableLambdaParams types untyped unary lambda parameters when the
+// call is sorted/min/max with key=lambda, collection.sort(key=lambda), or
+// map/filter with a lambda over a known iterable element type of ourReceivers.
+// Multi-param lambdas and non-lambda callables fail closed. Foreign element
+// types are not bound (same as for-loop targets).
+func pythonBindIterableLambdaParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, elemOf, egElems, typeOf map[string]string, out map[string]bool) {
+	if call == nil || call.Type() != "call" || out == nil {
+		return
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil {
+		return
+	}
+	// items.sort(key=lambda x: ...) — element type of the receiver collection.
+	if fn.Type() == "attribute" {
+		attr := ingest.ChildByField(fn, "attribute")
+		if attr == nil || ingest.NodeText(attr, content) != "sort" {
+			return
+		}
+		obj := ingest.ChildByField(fn, "object")
+		et := pythonIterableElemType(obj, content, elemOf, egElems, typeOf)
+		if !ourReceivers[et] {
+			return
+		}
+		if lam := pythonKeywordArgValue(call, content, "key"); lam != nil {
+			pythonBindUnaryLambdaParam(lam, content, out)
+		}
+		return
+	}
+	if fn.Type() != "identifier" {
+		return
+	}
+	switch ingest.NodeText(fn, content) {
+	case "sorted", "min", "max":
+		// sorted/min/max(iterable, key=lambda x: ...) — 1st positional is iterable;
+		// key= lambda param is that element type (kwargs like reverse= ignored).
+		args, ok := pythonCallPositionalArgNodes(call)
+		if !ok || len(args) == 0 {
+			return
+		}
+		et := pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
+		if !ourReceivers[et] {
+			return
+		}
+		if lam := pythonKeywordArgValue(call, content, "key"); lam != nil {
+			pythonBindUnaryLambdaParam(lam, content, out)
+		}
+	case "map", "filter":
+		// map(lambda x: ..., iterable) / filter(lambda x: ..., iterable) —
+		// unary lambda param is the 2nd-arg element type. Class-as-callable map
+		// and filter(None, ...) have no lambda to bind.
+		args, ok := pythonCallPositionalArgNodes(call)
+		if !ok || len(args) < 2 || args[0].Type() != "lambda" {
+			return
+		}
+		et := pythonIterableElemType(args[1], content, elemOf, egElems, typeOf)
+		if !ourReceivers[et] {
+			return
+		}
+		pythonBindUnaryLambdaParam(args[0], content, out)
+	}
+}
+
+// pythonBindUnaryLambdaParam records the sole untyped lambda parameter as a
+// typed local of ourReceivers. Multi-param / defaulted / typed forms fail closed.
+func pythonBindUnaryLambdaParam(lam *grammar.Node, content []byte, out map[string]bool) {
+	names := pythonLambdaParamNames(lam, content)
+	if len(names) != 1 {
+		return
+	}
+	out[names[0]] = true
+}
+
+// pythonLambdaParamNames returns bare identifier parameters of a lambda.
+// Typed / defaulted / starred params fail closed (nil).
+func pythonLambdaParamNames(lam *grammar.Node, content []byte) []string {
+	if lam == nil || lam.Type() != "lambda" {
+		return nil
+	}
+	params := ingest.ChildByField(lam, "parameters")
+	if params == nil {
+		return nil
+	}
+	var names []string
+	for i := uint32(0); i < params.ChildCount(); i++ {
+		ch := params.Child(i)
+		switch ch.Type() {
+		case ",", "comment":
+			continue
+		case "identifier":
+			names = append(names, ingest.NodeText(ch, content))
+		default:
+			// default_parameter / typed_parameter / list_splat / dictionary_splat —
+			// fail closed (unknown binding shape).
+			return nil
+		}
+	}
+	return names
+}
+
+// pythonKeywordArgValue returns the value node of keyword_argument name= in a call.
+func pythonKeywordArgValue(call *grammar.Node, content []byte, key string) *grammar.Node {
+	if call == nil || call.Type() != "call" {
+		return nil
+	}
+	args := ingest.ChildByField(call, "arguments")
+	if args == nil {
+		return nil
+	}
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch.Type() != "keyword_argument" {
+			continue
+		}
+		nameN := ingest.ChildByField(ch, "name")
+		if nameN != nil && ingest.NodeText(nameN, content) == key {
+			return ingest.ChildByField(ch, "value")
+		}
+	}
+	return nil
 }
 
 // pythonClassFieldIndex maps class type name → field name → field type leaf
