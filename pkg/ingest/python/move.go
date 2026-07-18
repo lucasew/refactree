@@ -3450,6 +3450,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						if et := pythonContainerElemType(typeN, content); et != "" {
 							elemOf[lname] = et
 						}
+						// Mapping of list/set of T: defaultdict[str, list[A]] → nested A
+						// so da["k"][0].run() / for a in da["k"] peel under foreign same-leaf.
+						if nest := pythonMappingNestedListElemType(typeN, content); nest != "" {
+							elemOf["@nested."+lname] = nest
+						}
 					}
 				}
 			}
@@ -3471,6 +3476,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					// Foreign element types too — shadow prior same-name collections.
 					if et := pythonContainerElemType(typeN, content); et != "" {
 						elemOf[lname] = et
+					}
+					// Mapping of list/set of T (same as typed_parameter path).
+					if nest := pythonMappingNestedListElemType(typeN, content); nest != "" {
+						elemOf["@nested."+lname] = nest
 					}
 				}
 				if right != nil && right.Type() == "call" {
@@ -4454,6 +4463,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					pythonBindPairLoopTarget(ingest.NodeText(left, content), types, pairSlots, elemOf)
 					break
 				}
+				// for ga in da.values() when da: defaultdict[str, list[A]] —
+				// values are list of A (not A); bind elemOf so ga[0].run() peels.
+				if et := pythonNestedMappingValuesElemType(right, content, elemOf); et != "" {
+					elemOf[ingest.NodeText(left, content)] = et
+					break
+				}
 				if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 					out[ingest.NodeText(left, content)] = true
 				} else if et := pythonDictViewValuesHomogeneousType(right, content, fieldOf); ourReceivers[et] {
@@ -4581,17 +4596,23 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// subject's dict value leaf (d: dict[K, A] / …).
 			// match box: case {"a": xa}: — TypedDict/record key-specific value
 			// captures via fieldOf (box: Box with a: A; not homogeneous elemOf).
+			// match a: case x as xa: / case _ as xa: — bind captures from subject
+			// typeOf (a: A typed local / a = A()) under foreign same-leaf.
 			// Without this, a.m() is skipped under foreign same-leaf; *rest loops
 			// also stay untyped. as_pattern cases still handled above when walked.
 			subject := ingest.ChildByField(n, "subject")
 			if subject != nil {
 				et := pythonIterableElemType(subject, content, elemOf, egElems, typeOf)
 				subjLocal := ""
+				subjType := ""
 				if subject.Type() == "identifier" {
 					subjLocal = ingest.NodeText(subject, content)
+					if typeOf != nil {
+						subjType = typeOf[subjLocal]
+					}
 				}
 				// Homogeneous dict/list path and TypedDict key path are independent.
-				if et != "" || subjLocal != "" {
+				if et != "" || subjLocal != "" || subjType != "" {
 					body := ingest.ChildByField(n, "body")
 					if body != nil {
 						for i := uint32(0); i < body.ChildCount(); i++ {
@@ -4610,6 +4631,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								}
 								if subjLocal != "" {
 									pythonBindMatchRecordKeyPatterns(p, content, subjLocal, fieldOf, ourReceivers, out)
+								}
+								if subjType != "" {
+									pythonBindMatchSubjectTypeCaptures(p, content, subjType, ourReceivers, out)
 								}
 							}
 						}
@@ -8012,12 +8036,17 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 	case "subscript":
 		// xs[:n] / xs[i:j] / xs[:] / xs[::step] — slice of a collection preserves
 		// element type (as_[:1][0].run() / sa = as_[:1]; sa[0].run()).
-		// Integer / non-slice subscripts are elements, not collections — fail closed.
 		idx := ingest.ChildByField(right, "subscript")
-		if idx == nil || idx.Type() != "slice" {
-			return ""
+		if idx != nil && idx.Type() == "slice" {
+			return pythonIterableElemType(ingest.ChildByField(right, "value"), content, elemOf, egElems, typeOf)
 		}
-		return pythonIterableElemType(ingest.ChildByField(right, "value"), content, elemOf, egElems, typeOf)
+		// da["k"] when da: defaultdict[str, list[A]] — value is list of A;
+		// iterating / further [0] peels A (elemOf["@nested."+da]).
+		if nest := pythonNestedMappingSubscriptElemType(right, content, elemOf); nest != "" {
+			return nest
+		}
+		// Other non-slice subscripts are elements, not collections — fail closed.
+		return ""
 	case "parenthesized_expression":
 		// (items or []) / (xs.copy()) — unwrap and re-type the inner expression.
 		return pythonIterableElemType(pythonParenInner(right), content, elemOf, egElems, typeOf)
@@ -8189,7 +8218,24 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 					if obj == "" || method != "values" || elemOf == nil {
 						return ""
 					}
+					// Scalar mapping values (dict[str, A]) stay on elemOf[obj].
+					// Nested list values (defaultdict[str, list[A]]) are not scalar —
+					// for ga in da.values() binds via pythonNestedMappingValuesElemType.
 					return elemOf[obj]
+				case "get", "setdefault", "pop":
+					// da.get("k") / da.pop("k") when da: defaultdict[str, list[A]] —
+					// value is list of A; da.get("k")[0].run() peels via subscript.
+					// Scalar dict[str, A] get stays on assignment/collection-access
+					// (elemOf leaf) — not an iterable of A here.
+					obj, method := pythonAttrCall(right, content)
+					if obj == "" || elemOf == nil {
+						return ""
+					}
+					_ = method
+					if nest := elemOf["@nested."+obj]; nest != "" {
+						return nest
+					}
+					return ""
 				case "fromkeys":
 					// dict.fromkeys(iterable[, value]) — keys are iterable elements.
 					// value arg ignored for key iteration (value leaf handled on assign).
@@ -9245,6 +9291,235 @@ func pythonHomogeneousCtorElem(collection *grammar.Node, content []byte) string 
 		return ""
 	}
 	return elem
+}
+
+// pythonMappingNestedListElemType recovers T from mapping annotations whose value
+// is a list/set/sequence of T:
+//
+//	defaultdict[str, list[A]] / dict[K, List[A]] / Mapping[K, set[A]] → "A"
+//
+// Stored as elemOf["@nested."+name] so da["k"][0].run() / for a in da["k"] /
+// ga = da["k"]; ga[0].run() peel under foreign same-leaf. Scalar mapping values
+// (dict[str, A]) stay on pythonContainerElemType. Unknown / multi-arg fail closed.
+func pythonMappingNestedListElemType(typeN *grammar.Node, content []byte) string {
+	if typeN == nil {
+		return ""
+	}
+	if typeN.Type() == "type" && typeN.ChildCount() > 0 {
+		typeN = typeN.Child(0)
+	}
+	if typeN.Type() == "string" {
+		s := strings.Trim(ingest.NodeText(typeN, content), `"'`)
+		return pythonParseMappingNestedListElemString(s)
+	}
+	if typeN.Type() != "generic_type" {
+		return ""
+	}
+	var contName string
+	var typeParam *grammar.Node
+	for i := uint32(0); i < typeN.ChildCount(); i++ {
+		ch := typeN.Child(i)
+		switch ch.Type() {
+		case "identifier":
+			if contName == "" {
+				contName = ingest.NodeText(ch, content)
+			}
+		case "attribute":
+			if contName == "" {
+				if attr := ingest.ChildByField(ch, "attribute"); attr != nil {
+					contName = ingest.NodeText(attr, content)
+				}
+			}
+		case "type_parameter":
+			typeParam = ch
+		}
+	}
+	switch contName {
+	case "dict", "Dict", "Mapping", "MutableMapping", "OrderedDict", "defaultdict", "DefaultDict",
+		"ChainMap":
+		// ok
+	default:
+		return ""
+	}
+	if typeParam == nil {
+		return ""
+	}
+	// Value type is the second type arg.
+	var valueType *grammar.Node
+	argIdx := 0
+	for i := uint32(0); i < typeParam.ChildCount(); i++ {
+		ch := typeParam.Child(i)
+		if ch.Type() != "type" {
+			continue
+		}
+		argIdx++
+		if argIdx == 2 {
+			valueType = ch
+			break
+		}
+	}
+	if valueType == nil {
+		return ""
+	}
+	// value must itself be a collection of T (list[A] / List[A] / …).
+	return pythonContainerElemType(valueType, content)
+}
+
+// pythonParseMappingNestedListElemString handles quoted annotations like
+// "defaultdict[str, list[A]]".
+func pythonParseMappingNestedListElemString(s string) string {
+	s = strings.TrimSpace(s)
+	lb := strings.IndexByte(s, '[')
+	rb := strings.LastIndexByte(s, ']')
+	if lb <= 0 || rb <= lb {
+		return ""
+	}
+	contName := strings.TrimSpace(s[:lb])
+	if i := strings.LastIndexByte(contName, '.'); i >= 0 {
+		contName = contName[i+1:]
+	}
+	switch contName {
+	case "dict", "Dict", "Mapping", "MutableMapping", "OrderedDict", "defaultdict", "DefaultDict",
+		"ChainMap":
+		// ok
+	default:
+		return ""
+	}
+	inner := strings.TrimSpace(s[lb+1 : rb])
+	// Split on top-level comma: K, list[A]
+	depth := 0
+	comma := -1
+	for i, c := range inner {
+		switch c {
+		case '[', '(', '{':
+			depth++
+		case ']', ')', '}':
+			depth--
+		case ',':
+			if depth == 0 {
+				comma = i
+				break
+			}
+		}
+		if comma >= 0 {
+			break
+		}
+	}
+	if comma < 0 {
+		return ""
+	}
+	valueAnn := strings.TrimSpace(inner[comma+1:])
+	return pythonParseContainerElemString(valueAnn)
+}
+
+// pythonNestedMappingSubscriptElemType recovers T from da["k"] when da is a
+// mapping of list/set of T (elemOf["@nested."+da]). The subscript expression
+// is a collection of T (not T itself).
+func pythonNestedMappingSubscriptElemType(sub *grammar.Node, content []byte, elemOf map[string]string) string {
+	if sub == nil || sub.Type() != "subscript" || elemOf == nil {
+		return ""
+	}
+	// Non-slice only (slice of nested list values is not product-solid).
+	for i := uint32(0); i < sub.ChildCount(); i++ {
+		if sub.Child(i).Type() == "slice" {
+			return ""
+		}
+	}
+	val := ingest.ChildByField(sub, "value")
+	if val == nil || val.Type() != "identifier" {
+		return ""
+	}
+	return elemOf["@nested."+ingest.NodeText(val, content)]
+}
+
+// pythonNestedMappingValuesElemType recovers T from da.values() when da is a
+// mapping of list/set of T. Values yield list-of-T (not T); callers bind
+// elemOf[ga] = T for for ga in da.values(); ga[0].run().
+func pythonNestedMappingValuesElemType(right *grammar.Node, content []byte, elemOf map[string]string) string {
+	if right == nil || right.Type() != "call" || elemOf == nil {
+		return ""
+	}
+	obj, method := pythonAttrCall(right, content)
+	if obj == "" || method != "values" {
+		return ""
+	}
+	return elemOf["@nested."+obj]
+}
+
+// pythonBindMatchSubjectTypeCaptures binds match patterns that capture the whole
+// subject value when the subject is a typed local of type tn:
+//
+//	match a: case x: / case x as xa: / case _ as xa:
+//
+// Class patterns (case A() as a) stay on pythonAsPatternBinding. Nested
+// sequence/mapping/class patterns fail closed here.
+func pythonBindMatchSubjectTypeCaptures(n *grammar.Node, content []byte, tn string, ourReceivers, out map[string]bool) {
+	if n == nil || n.IsNull() || tn == "" || !ourReceivers[tn] {
+		return
+	}
+	// Unwrap case_pattern/pattern wrappers to the payload.
+	for n != nil && (n.Type() == "case_pattern" || n.Type() == "pattern") {
+		inner := pythonMatchPatternInner(n)
+		if inner == nil {
+			return
+		}
+		n = inner
+	}
+	if n == nil || n.IsNull() {
+		return
+	}
+	switch n.Type() {
+	case "identifier", "dotted_name":
+		name := pythonMatchCaptureName(n, content)
+		if name != "" && name != "_" {
+			out[name] = true
+		}
+	case "as_pattern":
+		var left *grammar.Node
+		var alias string
+		seenAs := false
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "as" {
+				seenAs = true
+				continue
+			}
+			if !seenAs {
+				left = ch
+				continue
+			}
+			switch ch.Type() {
+			case "identifier":
+				alias = ingest.NodeText(ch, content)
+			case "as_pattern_target":
+				if id := ingest.ChildByType(ch, "identifier"); id != nil {
+					alias = ingest.NodeText(id, content)
+				}
+			}
+		}
+		if alias != "" && alias != "_" {
+			out[alias] = true
+		}
+		// Left capture (x as xa) also binds; wildcard `_` does not.
+		if left != nil {
+			// Unwrap left pattern wrappers.
+			for left != nil && (left.Type() == "case_pattern" || left.Type() == "pattern") {
+				inner := pythonMatchPatternInner(left)
+				if inner == nil {
+					break
+				}
+				left = inner
+			}
+			if left != nil && (left.Type() == "identifier" || left.Type() == "dotted_name") {
+				name := pythonMatchCaptureName(left, content)
+				if name != "" && name != "_" {
+					out[name] = true
+				}
+			}
+		}
+	default:
+		// class_pattern / list_pattern / value patterns — fail closed here.
+	}
 }
 
 // pythonContainerElemType extracts the element type leaf from container annotations:

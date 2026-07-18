@@ -1578,6 +1578,8 @@ func javaFieldAccessMemberType(obj *grammar.Node, content []byte, compOf map[str
 // javaRecordCollectionElem records name → element/value types for arrays and generics
 // (List<A> as → elem "A", A[] xs → elem "A", Stream<A> s → elem "A",
 // Map<K,A> m → elem "K" (first arg) and val "A" (second arg)).
+// List<List<A>> nested → elem "List" and elemOf["@nested."+name] = "A" so
+// nested.stream().flatMap(Collection::stream) peels to A under foreign same-leaf.
 func javaRecordCollectionElem(typeN *grammar.Node, name string, content []byte, elemOf, valOf map[string]string) {
 	if typeN == nil || name == "" {
 		return
@@ -1599,6 +1601,11 @@ func javaRecordCollectionElem(typeN *grammar.Node, name string, content []byte, 
 		}
 		if elemOf != nil {
 			elemOf[name] = args[0]
+			// Collection-of-collection: List<List<A>> / Collection<List<A>> → nested A
+			// for flatMap(Collection::stream) / flatMap(List::stream) peels.
+			if nest := javaCollectionOfCollectionElemType(typeN, content); nest != "" {
+				elemOf["@nested."+name] = nest
+			}
 		}
 		// Map<K,V> / HashMap<K,V> — second type arg is the value type.
 		// Function<T,R> — second type arg is the apply result R.
@@ -1611,6 +1618,73 @@ func javaRecordCollectionElem(typeN *grammar.Node, name string, content []byte, 
 			valOf[name] = args[2]
 		}
 	}
+}
+
+// javaCollectionOfCollectionElemType recovers T from List/Collection/Set of
+// List/Collection/Set/Iterable of T (one nesting level only).
+// List<List<A>> → "A"; List<A> / Map / multi-arg fail closed.
+func javaCollectionOfCollectionElemType(typeN *grammar.Node, content []byte) string {
+	if typeN == nil || typeN.Type() != "generic_type" {
+		return ""
+	}
+	outer := javaTypeName(typeN, content)
+	if !javaIsCollectionTypeName(outer) {
+		return ""
+	}
+	// First type argument node (not just leaf name).
+	inner := javaFirstTypeArgNode(typeN)
+	if inner == nil || inner.Type() != "generic_type" {
+		return ""
+	}
+	if !javaIsCollectionTypeName(javaTypeName(inner, content)) {
+		return ""
+	}
+	args := javaTypeArgNames(inner, content)
+	if len(args) != 1 || args[0] == "" {
+		return ""
+	}
+	return args[0]
+}
+
+// javaIsCollectionTypeName reports List/Collection/Set/Iterable and common impls
+// used as outer/inner containers for flatMap(Collection::stream) peels.
+func javaIsCollectionTypeName(name string) bool {
+	switch name {
+	case "List", "Collection", "Set", "Iterable", "Queue", "Deque",
+		"ArrayList", "LinkedList", "HashSet", "TreeSet", "LinkedHashSet",
+		"ArrayDeque", "Vector", "Stack", "NavigableSet", "SortedSet",
+		"SequencedCollection", "SequencedSet":
+		return true
+	default:
+		return false
+	}
+}
+
+// javaFirstTypeArgNode returns the first type argument node of a generic_type.
+func javaFirstTypeArgNode(typeN *grammar.Node) *grammar.Node {
+	if typeN == nil || typeN.Type() != "generic_type" {
+		return nil
+	}
+	targs := ingest.ChildByField(typeN, "type_arguments")
+	if targs == nil {
+		for i := uint32(0); i < typeN.ChildCount(); i++ {
+			if typeN.Child(i).Type() == "type_arguments" {
+				targs = typeN.Child(i)
+				break
+			}
+		}
+	}
+	if targs == nil {
+		return nil
+	}
+	for i := uint32(0); i < targs.ChildCount(); i++ {
+		ch := targs.Child(i)
+		switch ch.Type() {
+		case "type_identifier", "generic_type", "scoped_type_identifier", "array_type":
+			return ch
+		}
+	}
+	return nil
 }
 
 // javaTypeArgNames returns simple type-arg leaves of a generic_type in order.
@@ -3177,8 +3251,9 @@ func javaMapMapperBodyElemType(body *grammar.Node, param string, recv *grammar.N
 //	fa.thenCompose(a -> CompletableFuture.completedFuture(new A())) → A
 //
 // Expression-bodied lambdas and Optional::of / ofNullable / Stream.of /
-// Stream.ofNullable / CompletableFuture::completedFuture only; blocks and
-// other mappers fail closed so type-changing flatMap / thenCompose stay unbound.
+// Stream.ofNullable / Collection::stream / List::stream /
+// CompletableFuture::completedFuture only; blocks and other mappers fail closed
+// so type-changing flatMap / thenCompose stay unbound.
 func javaFlatMapResultElemType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	if call == nil || call.Type() != "method_invocation" {
 		return ""
@@ -3215,6 +3290,11 @@ func javaFlatMapResultElemType(call *grammar.Node, content []byte, elemOf, valOf
 		if javaIsOptionalOfMethodRef(first, content) || javaIsStreamOfMethodRef(first, content) || javaIsCompletedFutureMethodRef(first, content) {
 			return javaStreamPipelineElemType(recv, content, elemOf, valOf)
 		}
+		// nestedA.stream().flatMap(Collection::stream) / List::stream —
+		// peel one collection nesting level (List<List<A>> → A).
+		if javaIsCollectionStreamMethodRef(first, content) {
+			return javaFlatMapCollectionStreamElemType(recv, content, elemOf)
+		}
 		return ""
 	case "lambda_expression":
 		body := ingest.ChildByField(first, "body")
@@ -3227,6 +3307,91 @@ func javaFlatMapResultElemType(call *grammar.Node, content []byte, elemOf, valOf
 			param = params[0]
 		}
 		return javaFlatMapMapperBodyElemType(body, param, recv, content, elemOf, valOf)
+	default:
+		return ""
+	}
+}
+
+// javaIsCollectionStreamMethodRef reports Collection::stream / List::stream /
+// Iterable::stream / Set::stream (and common impl type names).
+func javaIsCollectionStreamMethodRef(ref *grammar.Node, content []byte) bool {
+	if ref == nil || ref.Type() != "method_reference" {
+		return false
+	}
+	var parts []*grammar.Node
+	for i := uint32(0); i < ref.ChildCount(); i++ {
+		ch := ref.Child(i)
+		if ch.Type() == "::" {
+			continue
+		}
+		parts = append(parts, ch)
+	}
+	if len(parts) < 2 {
+		return false
+	}
+	obj, name := parts[0], parts[len(parts)-1]
+	if (obj.Type() != "identifier" && obj.Type() != "type_identifier") || name.Type() != "identifier" {
+		return false
+	}
+	if ingest.NodeText(name, content) != "stream" {
+		return false
+	}
+	return javaIsCollectionTypeName(ingest.NodeText(obj, content))
+}
+
+// javaFlatMapCollectionStreamElemType recovers T after stream.flatMap(Collection::stream)
+// when the stream source is a collection-of-collection of T
+// (List<List<A>> nestedA → nestedA.stream().flatMap(Collection::stream) → A).
+// Stored as elemOf["@nested."+src]. Unknown / non-nested sources fail closed.
+func javaFlatMapCollectionStreamElemType(recv *grammar.Node, content []byte, elemOf map[string]string) string {
+	if elemOf == nil {
+		return ""
+	}
+	src := javaStreamSourceIdent(recv, content)
+	if src == "" {
+		return ""
+	}
+	return elemOf["@nested."+src]
+}
+
+// javaStreamSourceIdent peels a type-preserving stream pipeline down to the
+// root collection/stream identifier (nestedA.stream().filter(...).sorted() → nestedA).
+// Non-identifier sources fail closed.
+func javaStreamSourceIdent(obj *grammar.Node, content []byte) string {
+	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(obj, "expression")
+		if inner == nil {
+			for i := uint32(0); i < obj.ChildCount(); i++ {
+				ch := obj.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		obj = inner
+	}
+	if obj == nil || obj.IsNull() {
+		return ""
+	}
+	switch obj.Type() {
+	case "identifier":
+		return ingest.NodeText(obj, content)
+	case "method_invocation":
+		nameN := ingest.ChildByField(obj, "name")
+		if nameN == nil {
+			return ""
+		}
+		// Type-preserving stages only — same set as pipeline peels that keep elem type.
+		switch ingest.NodeText(nameN, content) {
+		case "stream", "parallelStream", "filter", "peek", "sorted", "distinct",
+			"limit", "skip", "unordered", "sequential", "parallel", "onClose",
+			"takeWhile", "dropWhile":
+			return javaStreamSourceIdent(ingest.ChildByField(obj, "object"), content)
+		default:
+			return ""
+		}
 	default:
 		return ""
 	}
@@ -3353,6 +3518,21 @@ func javaFlatMapMapperBodyElemType(body *grammar.Node, param string, recv *gramm
 			}
 			// a -> CompletableFuture.completedFuture(new A()) — element from creation.
 			return javaStaticCollectionOfElemType(body, content, name)
+		case "stream":
+			// xs -> xs.stream() — collection-of-collection flatMap peel
+			// (nestedA.stream().flatMap(xs -> xs.stream()) → nested A).
+			// Zero-arg only; receiver must be the lambda param.
+			obj := ingest.ChildByField(body, "object")
+			if obj == nil || obj.Type() != "identifier" || param == "" {
+				return ""
+			}
+			if ingest.NodeText(obj, content) != param {
+				return ""
+			}
+			if !javaCallIsZeroArg(body) {
+				return ""
+			}
+			return javaFlatMapCollectionStreamElemType(recv, content, elemOf)
 		default:
 			return ""
 		}

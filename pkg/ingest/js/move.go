@@ -1817,6 +1817,12 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// ga[k][0].run() peels via groupByLocals.
 						// Bind foreign too so dual-class B rebinds fail closed.
 						groupByLocals[ingest.NodeText(nameN, content)] = t
+					} else if t := jsObjectValuesGroupByElemType(valN, content, arrayLocals, out, factories, extra); t != "" {
+						// const va = Object.values(ga) / Object.values(Object.groupBy(...)) —
+						// array of group arrays T[]; va[i][0].run() peels via
+						// groupByLocals["@values."+va] (not arrayLocals — elements are
+						// T[], not T). Bind foreign too so dual-class B rebinds fail closed.
+						groupByLocals["@values."+ingest.NodeText(nameN, content)] = t
 					} else if t := jsObjectFromEntriesGroupByElemType(valN, content, arrayLocals, out, factories, extra); t != "" {
 						// const oa = Object.fromEntries(Object.entries(ga)) /
 						// Object.fromEntries(Object.entries(Object.groupBy(...))) —
@@ -3095,9 +3101,11 @@ func jsUniformArrayElemType(n *grammar.Node, content []byte, typedLocals, factor
 // jsExtraLocals carries object/group peel maps threaded through array-source peels.
 // Nil maps fail closed. Used for Object.values(assignLocal), Object.groupBy locals,
 // and Map.groupBy peels under foreign same-leaf methods.
+// groupBy also stores Object.values(groupBy) locals under "@values.<name>" so
+// va[i][0].run() peels after const va = Object.values(ga) (va[i] is T[]).
 type jsExtraLocals struct {
 	objValue         map[string]string // Object.fromEntries / Object.assign → value T
-	groupBy          map[string]string // Object.groupBy result → element T
+	groupBy          map[string]string // Object.groupBy result → element T; @values.name → T
 	groupMap         map[string]string // Map.groupBy result → element T
 	groupEntry       map[string]string // [key, T[]] pair local from groupBy entries → T
 	groupEntryArray  map[string]string // Object.entries(groupBy) / ma.entries() local → T
@@ -3249,6 +3257,11 @@ func jsObjectGroupByGroupArrayType(n *grammar.Node, content []byte, arrayLocals,
 	// after const ga = Object.fromEntries(Object.entries(groupBy))
 	if obj.Type() == "identifier" && extra.groupBy != nil {
 		if t := extra.groupBy[ingest.NodeText(obj, content)]; t != "" {
+			return t
+		}
+		// va[i] after const va = Object.values(ga) / Object.values(Object.groupBy(...))
+		// — va[i] is group array of T (same as Object.values(ga)[i]).
+		if t := extra.groupBy["@values."+ingest.NodeText(obj, content)]; t != "" {
 			return t
 		}
 	}
