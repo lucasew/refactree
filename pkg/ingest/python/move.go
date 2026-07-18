@@ -3079,6 +3079,232 @@ func pythonFuncBodyReturnCtor(fn *grammar.Node, content []byte) string {
 	return found
 }
 
+// pythonSameFileContextManagerYields maps same-file @contextmanager /
+// @asynccontextmanager factory names to the concrete yield type leaf:
+//
+//	@contextmanager
+//	def make_a():
+//	    yield A()
+//
+//	@contextlib.contextmanager
+//	def make_a2():
+//	    a = A()
+//	    yield a
+//
+// Enables `with make_a() as a: a.run()` under foreign same-leaf methods.
+// Mixed/non-ctor yields and non-CM decorators fail closed.
+func pythonSameFileContextManagerYields(root *grammar.Node, content []byte) map[string]string {
+	out := map[string]string{}
+	if root == nil {
+		return out
+	}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		if n.Type() == "decorated_definition" {
+			if pythonIsContextManagerDecorated(n, content) {
+				var fn *grammar.Node
+				for i := uint32(0); i < n.ChildCount(); i++ {
+					ch := n.Child(i)
+					if ch != nil && (ch.Type() == "function_definition" || ch.Type() == "async_function_definition") {
+						fn = ch
+						break
+					}
+				}
+				if fn != nil {
+					nameN := ingest.ChildByField(fn, "name")
+					if nameN != nil && nameN.Type() == "identifier" {
+						name := ingest.NodeText(nameN, content)
+						if name != "" {
+							if tn := pythonFuncBodyYieldCtor(fn, content); tn != "" {
+								out[name] = tn
+							}
+						}
+					}
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	return out
+}
+
+// pythonIsContextManagerDecorated reports whether decorated has a
+// contextmanager / asynccontextmanager decorator (bare or contextlib.*).
+func pythonIsContextManagerDecorated(decorated *grammar.Node, content []byte) bool {
+	if decorated == nil || decorated.Type() != "decorated_definition" {
+		return false
+	}
+	for i := uint32(0); i < decorated.ChildCount(); i++ {
+		ch := decorated.Child(i)
+		if ch == nil || ch.Type() != "decorator" {
+			continue
+		}
+		// @contextmanager / @asynccontextmanager / @contextlib.contextmanager
+		for j := uint32(0); j < ch.ChildCount(); j++ {
+			c := ch.Child(j)
+			if c == nil {
+				continue
+			}
+			switch c.Type() {
+			case "identifier":
+				switch ingest.NodeText(c, content) {
+				case "contextmanager", "asynccontextmanager":
+					return true
+				}
+			case "attribute":
+				// contextlib.contextmanager / contextlib.asynccontextmanager
+				attr := ingest.ChildByField(c, "attribute")
+				if attr != nil && attr.Type() == "identifier" {
+					switch ingest.NodeText(attr, content) {
+					case "contextmanager", "asynccontextmanager":
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+// pythonFuncBodyYieldCtor recovers T when every yield in fn's body is
+// `yield T(...)` or `yield x` after a local `x = T()` assignment. Nested
+// scopes and `yield from` fail closed. Zero/mixed/non-ctor yields fail closed.
+func pythonFuncBodyYieldCtor(fn *grammar.Node, content []byte) string {
+	if fn == nil {
+		return ""
+	}
+	body := ingest.ChildByField(fn, "body")
+	if body == nil {
+		return ""
+	}
+	localCtor := map[string]string{}
+	const fail = "-"
+	found := ""
+	saw := false
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() || found == fail {
+			return
+		}
+		switch n.Type() {
+		case "function_definition", "async_function_definition", "class_definition", "lambda":
+			return
+		case "assignment":
+			left := ingest.ChildByField(n, "left")
+			right := ingest.ChildByField(n, "right")
+			if left != nil && left.Type() == "identifier" && right != nil && right.Type() == "call" {
+				if f := ingest.ChildByField(right, "function"); f != nil && f.Type() == "identifier" {
+					name := ingest.NodeText(left, content)
+					ctor := ingest.NodeText(f, content)
+					if name != "" && ctor != "" {
+						localCtor[name] = ctor
+					}
+				}
+			}
+		case "yield":
+			// yield T() / yield x — reject yield from.
+			var expr *grammar.Node
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch == nil {
+					continue
+				}
+				switch ch.Type() {
+				case "yield":
+					continue
+				case "from":
+					found = fail
+					return
+				default:
+					if expr == nil {
+						expr = ch
+					}
+				}
+			}
+			t := ""
+			if expr != nil && expr.Type() == "call" {
+				if f := ingest.ChildByField(expr, "function"); f != nil && f.Type() == "identifier" {
+					t = ingest.NodeText(f, content)
+				}
+			} else if expr != nil && expr.Type() == "identifier" {
+				t = localCtor[ingest.NodeText(expr, content)]
+			}
+			if t == "" {
+				found = fail
+				return
+			}
+			if !saw {
+				found = t
+				saw = true
+			} else if found != t {
+				found = fail
+			}
+			return
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(body)
+	if !saw || found == fail {
+		return ""
+	}
+	return found
+}
+
+// pythonAsPatternCMYieldBinding recovers (alias, yieldType) from
+// `with make_a() as a` when make_a is a same-file contextmanager factory
+// recorded in cmYieldOf. Other shapes fail closed.
+func pythonAsPatternCMYieldBinding(n *grammar.Node, content []byte, cmYieldOf map[string]string) (name, typ string) {
+	if n == nil || n.Type() != "as_pattern" || cmYieldOf == nil {
+		return "", ""
+	}
+	var left *grammar.Node
+	var alias *grammar.Node
+	seenAs := false
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		if ch.Type() == "as" {
+			seenAs = true
+			continue
+		}
+		if !seenAs {
+			left = ch
+			continue
+		}
+		switch ch.Type() {
+		case "as_pattern_target":
+			if id := ingest.ChildByType(ch, "identifier"); id != nil {
+				alias = id
+			}
+		case "identifier":
+			alias = ch
+		}
+	}
+	if left == nil || alias == nil || left.Type() != "call" {
+		return "", ""
+	}
+	fn := ingest.ChildByField(left, "function")
+	if fn == nil || fn.Type() != "identifier" {
+		return "", ""
+	}
+	fname := ingest.NodeText(fn, content)
+	if fname == "" {
+		return "", ""
+	}
+	tn := cmYieldOf[fname]
+	if tn == "" {
+		return "", ""
+	}
+	return ingest.NodeText(alias, content), tn
+}
+
 func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool) (map[string]bool, map[string]string, map[string]string, map[string]string, map[string][]string, map[string]string, map[string]string, map[string]string, map[string]string) {
 	out := map[string]bool{}
 	// Collection locals → element type leaf (list[A] / [A()] / dict value → "A").
@@ -3106,10 +3332,13 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 	// "attrgetter:a" / "itemgetter:#" so ga(box).run() / gi(items).run() peel.
 	getterOf := map[string]string{}
 	funcReturns := map[string]string{}
+	// @contextmanager factories → yield type leaf (with make_a() as a → a is A).
+	cmYieldOf := map[string]string{}
 	if root == nil || len(ourReceivers) == 0 {
 		return out, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf, funcReturns
 	}
 	funcReturns = pythonSameFileFuncReturnTypes(root, content)
+	cmYieldOf = pythonSameFileContextManagerYields(root, content)
 	fieldIndex := pythonClassFieldIndex(root, content)
 	// Declaration order for positional match class patterns (case Box(xa, xb)).
 	fieldOrder := pythonClassFieldOrder(root, content)
@@ -4275,6 +4504,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// Without this, a.m() is skipped when a foreign same-leaf method exists.
 			if name, typ := pythonAsPatternBinding(n, content); name != "" && ourReceivers[typ] {
 				out[name] = true
+			}
+			// with make_a() as a after @contextmanager def make_a(): yield A() —
+			// alias is the yielded instance, not the CM object.
+			if name, typ := pythonAsPatternCMYieldBinding(n, content, cmYieldOf); name != "" {
+				typeOf[name] = typ
+				if ourReceivers[typ] {
+					out[name] = true
+				}
 			}
 		case "class_pattern":
 			// match case Box(a=xa, b=xb) / Box(xa, xb): keyword and positional
