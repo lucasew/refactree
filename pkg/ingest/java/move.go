@@ -1623,6 +1623,23 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 		params := javaInferredLambdaParamNames(ch, content)
 		switch len(params) {
 		case 1:
+			// ConcurrentHashMap.forEach(threshold, BiFunction<? super K,? super V,? extends U>,
+			//                          Consumer<? super U>) — 3-arg form's sole unary is the
+			// Consumer on U (transformer is the bi-lambda, handled in case 2).
+			// Value-identity transformer ((k,v) -> v) yields U=V so the consumer param is V.
+			// 1-arg Map.forEach / 2-arg CHM forEach are bi-lambdas only (case 2); stream
+			// forEach is unary on the pipeline element (fall through when not 3-arg).
+			if method == "forEach" {
+				callArgs := javaCallArgs(call)
+				if len(callArgs) == 3 {
+					if javaIsValueIdentityBiLambda(callArgs[1], content) {
+						if vt := javaMapPipelineValueType(obj, content, elemOf, valOf); vt != "" && ourReceivers[vt] {
+							out[params[0]] = true
+						}
+					}
+					continue
+				}
+			}
 			// ConcurrentHashMap.searchValues(threshold, Function<? super V, ? extends U>) /
 			// forEachValue(threshold, Consumer<? super V>) /
 			// reduceValues(threshold, Function<? super V, ? extends U>, BiFunction) —
