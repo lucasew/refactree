@@ -2262,6 +2262,7 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `sorted/min/max/groupby(items, key=lambda x: x.m())` / `items.sort(key=lambda x: x.m())` /
 // `nlargest/nsmallest(n, items, key=lambda x: x.m())` /
 // `nlargest/nsmallest(n, items, lambda x: x.m())` (positional key) / `heapq.nlargest(...)` /
+// `merge(xs, ys, key=lambda x: x.m())` / `heapq.merge(..., key=lambda x: x.m())` /
 // `map/filter/takewhile/dropwhile/filterfalse(lambda x: x.m(), items)` /
 // `itertools.takewhile/groupby/...` — untyped unary lambda params from the iterable
 // element type (under foreign same-leaf).
@@ -3351,7 +3352,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				}
 			}
 		case "call":
-			// sorted/min/max/groupby/nlargest/nsmallest(..., key=lambda x: x.m()) /
+			// sorted/min/max/groupby/nlargest/nsmallest/merge(..., key=lambda x: x.m()) /
 			// nlargest/nsmallest(n, items, lambda x: x.m()) (positional key) /
 			// items.sort(key=lambda x: x.m()) /
 			// map/filter/takewhile/dropwhile/filterfalse(lambda x: x.m(), items) —
@@ -3422,7 +3423,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 }
 
 // pythonBindIterableLambdaParams types untyped lambda parameters when the call
-// is sorted/min/max/groupby/nlargest/nsmallest with key=lambda (keyword or
+// is sorted/min/max/groupby/nlargest/nsmallest/merge with key=lambda (keyword or
 // nlargest/nsmallest positional 3rd arg), collection.sort(key=lambda),
 // map/filter/takewhile/dropwhile/filterfalse with a unary lambda, or
 // reduce/accumulate with a bi-lambda, over a known iterable element type of
@@ -3440,7 +3441,7 @@ func pythonBindIterableLambdaParams(call *grammar.Node, content []byte, ourRecei
 	}
 	// items.sort(key=lambda x: ...) — element type of the receiver collection.
 	// Method form only (not a free function); other attributes fall through to
-	// leaf-name matching (itertools.takewhile / heapq.nlargest).
+	// leaf-name matching (itertools.takewhile / heapq.nlargest / heapq.merge).
 	if fn.Type() == "attribute" {
 		if attr := ingest.ChildByField(fn, "attribute"); attr != nil && ingest.NodeText(attr, content) == "sort" {
 			obj := ingest.ChildByField(fn, "object")
@@ -3464,6 +3465,18 @@ func pythonBindIterableLambdaParams(call *grammar.Node, content []byte, ourRecei
 			return
 		}
 		et := pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
+		if !ourReceivers[et] {
+			return
+		}
+		if lam := pythonKeywordArgValue(call, content, "key"); lam != nil {
+			pythonBindUnaryLambdaParam(lam, content, out)
+		}
+	case "merge":
+		// merge(*iterables, key=lambda x: ..., reverse=...) / heapq.merge(...) —
+		// shared element type across positional iterables (same as for-loop
+		// targets via pythonChainElemType); key= lambda param is that element
+		// type. reverse ignored. Non-lambda key callables fail closed.
+		et := pythonChainElemType(call, content, elemOf, egElems, typeOf)
 		if !ourReceivers[et] {
 			return
 		}
