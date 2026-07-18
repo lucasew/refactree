@@ -1817,6 +1817,11 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// uniform property values T; Object.values(o) peels via objValueLocals.
 						// Bind foreign too so dual-class B rebinds fail closed.
 						objValueLocals[ingest.NodeText(nameN, content)] = t
+					} else if t := jsObjectLiteralNestedArrayElemType(valN, content, arrayLocals, out, factories, extra); t != "" {
+						// const oa = {k: [new A()]} — property values are arrays of T
+						// (groupBy-like shape); oa[k][0] / Object.values(oa)[0][0] peel
+						// via groupByLocals. Bind foreign too for dual-class shadowing.
+						groupByLocals[ingest.NodeText(nameN, content)] = t
 					} else if t := jsObjectGroupByElemType(valN, content, arrayLocals, out, factories, extra); t != "" {
 						// const ga = Object.groupBy([new A()], fn) — groups of T;
 						// ga[k][0].run() peels via groupByLocals.
@@ -3890,9 +3895,11 @@ func jsMapGroupByValuesElemType(n *grammar.Node, content []byte, arrayLocals, ty
 }
 
 // jsObjectValuesGroupByElemType recovers T from Object.values(Object.groupBy(…))
-// / Object.values(ga) after const ga = Object.groupBy(...) when the groupBy
-// iterable peels to T. Object.values yields T[][] — callers use [i] group
-// access via jsObjectGroupByGroupArrayType, or for-of binding of group arrays.
+// / Object.values(ga) after const ga = Object.groupBy(...) /
+// Object.values({k: [new A()]}) / Object.values(oa) after const oa = {k: [new A()]}
+// when group property values are arrays of T. Object.values yields T[][] —
+// callers use [i] group access via jsObjectGroupByGroupArrayType, or for-of
+// binding of group arrays.
 func jsObjectValuesGroupByElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals) string {
 	if n == nil || n.Type() != "call_expression" {
 		return ""
@@ -3931,14 +3938,79 @@ func jsObjectValuesGroupByElemType(n *grammar.Node, content []byte, arrayLocals,
 	if t := jsObjectGroupByElemType(first, content, arrayLocals, typedLocals, factories, extra); t != "" {
 		return t
 	}
+	// Object.values({k: [new A()], …}) — property values are arrays of T.
+	if t := jsObjectLiteralNestedArrayElemType(first, content, arrayLocals, typedLocals, factories, extra); t != "" {
+		return t
+	}
 	// Object.values(ga) after const ga = Object.groupBy(...) /
-	// after const ga = Object.fromEntries(Object.entries(groupBy))
+	// after const ga = Object.fromEntries(Object.entries(groupBy)) /
+	// after const oa = {k: [new A()]} (groupByLocals nested-array object).
 	if first.Type() == "identifier" && extra.groupBy != nil {
 		if t := extra.groupBy[ingest.NodeText(first, content)]; t != "" {
 			return t
 		}
 	}
 	return ""
+}
+
+// jsObjectLiteralNestedArrayElemType recovers T from an object literal whose every
+// property value is an array of uniform element type T:
+//
+//	{k: [new A()]} / {k: [new A()], j: [new A()]} → "A"
+//
+// Enables Object.values({k: [new A()]})[0][0].run() and const oa = {k: [new A()]};
+// Object.values(oa)[0][0].run() under foreign same-leaf (groupBy-like peels).
+// Scalar property values / mixed / empty / methods / spreads fail closed.
+func jsObjectLiteralNestedArrayElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "object" {
+		return ""
+	}
+	found := ""
+	saw := false
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		if ch == nil || ch.Type() == "{" || ch.Type() == "}" || ch.Type() == "," {
+			continue
+		}
+		if ch.Type() != "pair" {
+			// method / spread / shorthand — fail closed (not array-of-T groups).
+			return ""
+		}
+		val := ingest.ChildByField(ch, "value")
+		if val == nil {
+			return ""
+		}
+		// Property value must be an array source of T (literal [new A()] / as local).
+		t := jsArraySourceElemType(val, content, arrayLocals, typedLocals, factories, extra)
+		if t == "" {
+			return ""
+		}
+		if !saw {
+			found = t
+			saw = true
+		} else if found != t {
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return found
 }
 
 // jsArraySpreadElemType recovers T from an array literal that includes spread
@@ -4088,8 +4160,11 @@ func jsArrayIdentityElemType(n *grammar.Node, content []byte, arrayLocals, typed
 		}
 		return jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories, extra)
 	case "flatMap":
-		// arr.flatMap(fn) only when fn is identity-array of its first param
-		// (x => [x]). One-level flatten of [T] yields T. Non-identity fail closed.
+		// arr.flatMap(fn):
+		//   - x => [x] on array of T — one-level flatten of [T] yields T
+		//   - xs => xs on nested array of T (const aa = [[new A()]]) — identity
+		//     flatten one level (same leaf as aa.flat()[0])
+		// Non-identity / unknown receivers fail closed.
 		if args == nil {
 			return ""
 		}
@@ -4105,10 +4180,22 @@ func jsArrayIdentityElemType(n *grammar.Node, content []byte, arrayLocals, typed
 				cb = ch
 			}
 		}
-		if count < 1 || cb == nil || !jsIsIdentityArrayCallback(cb, content) {
+		if count < 1 || cb == nil {
 			return ""
 		}
-		return jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories, extra)
+		if jsIsIdentityArrayCallback(cb, content) {
+			return jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories, extra)
+		}
+		// Nested identity: aa.flatMap(xs => xs) when aa is [[new A()], …].
+		if !jsIsIdentityCallback(cb, content) {
+			return ""
+		}
+		if obj != nil && obj.Type() == "identifier" && arrayLocals != nil {
+			if t := arrayLocals["@nested."+ingest.NodeText(obj, content)]; t != "" {
+				return t
+			}
+		}
+		return jsNestedArrayFlatElemType(obj, content, arrayLocals, typedLocals, factories, extra)
 	case "fill":
 		// arr.fill(val[, start[, end]]) — receiver elems T and val peels to T.
 		t := jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories, extra)

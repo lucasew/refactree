@@ -3447,16 +3447,19 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						}
 						// Record even foreign element types so a later `items: list[B]`
 						// shadows a prior `items: list[A]` (file-global map).
-						if et := pythonContainerElemType(typeN, content); et != "" {
+						// Optional[list[A]] / list[A] | None unwrap to the collection ann.
+						ann := pythonUnwrapOptionalTypeNode(typeN, content)
+						if et := pythonContainerElemType(ann, content); et != "" {
 							elemOf[lname] = et
 						}
 						// Mapping of list/set of T: defaultdict[str, list[A]] → nested A
 						// so da["k"][0].run() / for a in da["k"] peel under foreign same-leaf.
 						// Collection of list/set: list[list[A]] / deque[list[A]] → nested A
 						// so aa[0][0].run() / for row in aa; for a in row peel.
-						if nest := pythonMappingNestedListElemType(typeN, content); nest != "" {
+						// Optional[list[A]] / Optional[dict[str, list[A]]] unwrap first.
+						if nest := pythonMappingNestedListElemType(ann, content); nest != "" {
 							elemOf["@nested."+lname] = nest
-						} else if nest := pythonCollectionNestedListElemType(typeN, content); nest != "" {
+						} else if nest := pythonCollectionNestedListElemType(ann, content); nest != "" {
 							elemOf["@nested."+lname] = nest
 						}
 					}
@@ -3478,14 +3481,17 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						}
 					}
 					// Foreign element types too — shadow prior same-name collections.
-					if et := pythonContainerElemType(typeN, content); et != "" {
+					// Optional[list[A]] / list[A] | None unwrap to the collection ann.
+					ann := pythonUnwrapOptionalTypeNode(typeN, content)
+					if et := pythonContainerElemType(ann, content); et != "" {
 						elemOf[lname] = et
 					}
 					// Mapping of list/set of T (same as typed_parameter path).
 					// Collection of list/set: list[list[A]] (same as typed_parameter path).
-					if nest := pythonMappingNestedListElemType(typeN, content); nest != "" {
+					// Optional[list[A]] / Optional[dict[str, list[A]]] unwrap first.
+					if nest := pythonMappingNestedListElemType(ann, content); nest != "" {
 						elemOf["@nested."+lname] = nest
-					} else if nest := pythonCollectionNestedListElemType(typeN, content); nest != "" {
+					} else if nest := pythonCollectionNestedListElemType(ann, content); nest != "" {
 						elemOf["@nested."+lname] = nest
 					}
 				}
@@ -8235,14 +8241,29 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 					}
 					return pythonIterableElemType(obj, content, elemOf, egElems, typeOf)
 				case "values":
-					obj, method := pythonAttrCall(right, content)
-					if obj == "" || method != "values" || elemOf == nil {
+					objN := ingest.ChildByField(fn, "object")
+					if objN == nil || elemOf == nil {
 						return ""
 					}
-					// Scalar mapping values (dict[str, A]) stay on elemOf[obj].
+					// d.values() when d is a bare mapping local.
+					// Scalar mapping values (dict[str, A]) stay on elemOf[d].
 					// Nested list values (defaultdict[str, list[A]]) are not scalar —
 					// for ga in da.values() binds via pythonNestedMappingValuesElemType.
-					return elemOf[obj]
+					if objN.Type() == "identifier" {
+						obj := ingest.NodeText(objN, content)
+						if nest := elemOf["@nested."+obj]; nest != "" {
+							// Nested list values are not scalar A — fail closed here.
+							return ""
+						}
+						return elemOf[obj]
+					}
+					// la[0].values() when la: list[dict[str, A]] — la[0] peels as a
+					// mapping/container of A via @nested; values yield A under foreign
+					// same-leaf. Non-subscript receivers fail closed (no list.values).
+					if objN.Type() == "subscript" {
+						return pythonIterableElemType(objN, content, elemOf, egElems, typeOf)
+					}
+					return ""
 				case "get", "setdefault", "pop":
 					// da.get("k") / da.pop("k") when da: defaultdict[str, list[A]] —
 					// value is list of A; da.get("k")[0].run() peels via subscript.
@@ -9957,6 +9978,150 @@ func pythonDottedNameLeaf(n *grammar.Node, content []byte) string {
 	}
 	walk(n)
 	return last
+}
+
+// pythonUnwrapOptionalTypeNode peels Optional[T] / Union[T, None] / T | None to the
+// non-None arm type node so container peels see list[A] under Optional[list[A]] and
+// list[A] | None. Multi non-None arms fail closed (returns nil). Non-optional
+// annotations return typeN unchanged (after a single type wrapper peel).
+// Used for elemOf / @nested recording; pythonTypeName still unwraps scalar leaves.
+func pythonUnwrapOptionalTypeNode(typeN *grammar.Node, content []byte) *grammar.Node {
+	if typeN == nil {
+		return nil
+	}
+	if typeN.Type() == "type" && typeN.ChildCount() > 0 {
+		typeN = typeN.Child(0)
+	}
+	if typeN == nil {
+		return nil
+	}
+	switch typeN.Type() {
+	case "generic_type":
+		var contName string
+		var typeParam *grammar.Node
+		for i := uint32(0); i < typeN.ChildCount(); i++ {
+			ch := typeN.Child(i)
+			switch ch.Type() {
+			case "identifier":
+				if contName == "" {
+					contName = ingest.NodeText(ch, content)
+				}
+			case "attribute":
+				if contName == "" {
+					if attr := ingest.ChildByField(ch, "attribute"); attr != nil {
+						contName = ingest.NodeText(attr, content)
+					}
+				}
+			case "type_parameter":
+				typeParam = ch
+			}
+		}
+		if typeParam == nil {
+			return typeN
+		}
+		switch contName {
+		case "Optional":
+			// Optional[T] — single type arg (None is implicit).
+			var only *grammar.Node
+			count := 0
+			for i := uint32(0); i < typeParam.ChildCount(); i++ {
+				ch := typeParam.Child(i)
+				if ch.Type() != "type" {
+					continue
+				}
+				if pythonIsNoneTypeNode(ch, content) {
+					continue
+				}
+				count++
+				only = ch
+			}
+			if count == 1 && only != nil {
+				return pythonUnwrapOptionalTypeNode(only, content)
+			}
+			return nil
+		case "Union":
+			// Union[T, None] / Union[None, T] → T; multi non-None fails closed.
+			var only *grammar.Node
+			count := 0
+			for i := uint32(0); i < typeParam.ChildCount(); i++ {
+				ch := typeParam.Child(i)
+				if ch.Type() != "type" {
+					continue
+				}
+				if pythonIsNoneTypeNode(ch, content) {
+					continue
+				}
+				count++
+				only = ch
+			}
+			if count == 1 && only != nil {
+				return pythonUnwrapOptionalTypeNode(only, content)
+			}
+			return nil
+		default:
+			return typeN
+		}
+	case "binary_operator":
+		// T | None / None | T — exactly one non-None arm.
+		arms := pythonPipeUnionArmNodes(typeN, content)
+		if arms == nil {
+			return nil
+		}
+		var only *grammar.Node
+		count := 0
+		for _, a := range arms {
+			if a == nil || pythonIsNoneTypeNode(a, content) {
+				continue
+			}
+			count++
+			only = a
+		}
+		if count == 1 && only != nil {
+			return pythonUnwrapOptionalTypeNode(only, content)
+		}
+		return nil
+	default:
+		return typeN
+	}
+}
+
+// pythonPipeUnionArmNodes flattens a | chain into type nodes (including None arms).
+// Returns nil if any arm is not a resolvable type position (fail closed).
+func pythonPipeUnionArmNodes(n *grammar.Node, content []byte) []*grammar.Node {
+	if n == nil {
+		return nil
+	}
+	if n.Type() != "binary_operator" {
+		return []*grammar.Node{n}
+	}
+	// Only | unions (PEP 604); other binary ops fail closed.
+	op := ingest.ChildByField(n, "operator")
+	if op == nil {
+		// Some grammars put "|" as a bare child.
+		sawPipe := false
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			if ingest.NodeText(n.Child(i), content) == "|" {
+				sawPipe = true
+				break
+			}
+		}
+		if !sawPipe {
+			return nil
+		}
+	} else if ingest.NodeText(op, content) != "|" {
+		return nil
+	}
+	left := ingest.ChildByField(n, "left")
+	right := ingest.ChildByField(n, "right")
+	if left == nil || right == nil {
+		return nil
+	}
+	la := pythonPipeUnionArmNodes(left, content)
+	ra := pythonPipeUnionArmNodes(right, content)
+	if la == nil || ra == nil {
+		return nil
+	}
+	return append(la, ra...)
 }
 
 // pythonTypeName extracts a simple class name from a type annotation node.

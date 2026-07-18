@@ -1261,6 +1261,12 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// var w = oa.get() after var oa = s.findFirst() —
 					// List of stream element T (not scalar T); track for w.get(0).m().
 					elemOf[name] = et
+				} else if et := javaNestedCollectionGetElemType(valN, content, elemOf, valOf); et != "" {
+					// var ga = oa.get() when oa: Optional<List<A>> /
+					// var row = aa.get(0) when aa: List<List<A>> /
+					// var ga = ma.get(k) when ma: Map<K, List<A>> —
+					// List of T (not scalar T); track for ga.get(0).m().
+					elemOf[name] = et
 				} else if et := javaCollectionAccessElemType(valN, content, elemOf, valOf, entryValOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf); ourReceivers[et] {
 					// var xa = as.get(0) / am.get("k") / as.iterator().next() / ia.next()
 					// / qa.poll() / qa.peek() / qa.take() / da.takeFirst()/takeLast()
@@ -1358,6 +1364,11 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					valN := ingest.ChildByField(n, "value")
 					if et := javaStreamPipelineElemType(valN, content, elemOf, valOf); ourReceivers[et] {
 						out[name] = true
+					}
+					// for (var ga : sa) when sa: Set<List<A>> / List<List<A>> —
+					// ga is List of A (elemOf), not scalar A.
+					if et := javaNestedCollectionIdentElemType(valN, content, elemOf); et != "" {
+						elemOf[name] = et
 					}
 					if vt := javaEntrySetPipelineValueType(valN, content, elemOf, valOf); vt != "" {
 						entryValOf[name] = vt
@@ -1614,6 +1625,11 @@ func javaRecordCollectionElem(typeN *grammar.Node, name string, content []byte, 
 			if nest := javaMapOfCollectionElemType(typeN, content); nest != "" {
 				elemOf["@nested."+name] = nest
 			}
+			// Optional of collection: Optional<List<A>> → nested A for
+			// oa.get().get(0).m() / var ga = oa.get(); ga.get(0).m().
+			if nest := javaOptionalOfCollectionElemType(typeN, content); nest != "" {
+				elemOf["@nested."+name] = nest
+			}
 		}
 		// Map<K,V> / HashMap<K,V> — second type arg is the value type.
 		// Function<T,R> — second type arg is the apply result R.
@@ -1708,10 +1724,33 @@ func javaMapOfCollectionElemType(typeN *grammar.Node, content []byte) string {
 	return args[0]
 }
 
-// javaNestedCollectionGetElemType recovers T from aa.get(i) / ma.get(k) when the
-// receiver is a collection/map of list-of-T (elemOf["@nested."+src]). Used as the
-// outer get in aa.get(0).get(0).m() / ma.get(k).get(0).m() under foreign same-leaf.
-// Unknown / non-nested sources fail closed.
+// javaOptionalOfCollectionElemType recovers T from Optional of List/Collection/Set of T
+// (one nesting level only). Optional<List<A>> → "A"; Optional<A> / List fail closed.
+func javaOptionalOfCollectionElemType(typeN *grammar.Node, content []byte) string {
+	if typeN == nil || typeN.Type() != "generic_type" {
+		return ""
+	}
+	if javaTypeName(typeN, content) != "Optional" {
+		return ""
+	}
+	inner := javaFirstTypeArgNode(typeN)
+	if inner == nil || inner.Type() != "generic_type" {
+		return ""
+	}
+	if !javaIsCollectionTypeName(javaTypeName(inner, content)) {
+		return ""
+	}
+	args := javaTypeArgNames(inner, content)
+	if len(args) != 1 || args[0] == "" {
+		return ""
+	}
+	return args[0]
+}
+
+// javaNestedCollectionGetElemType recovers T from aa.get(i) / ma.get(k) / oa.get() when the
+// receiver is a collection/map/Optional of list-of-T (elemOf["@nested."+src]). Used as the
+// outer get in aa.get(0).get(0).m() / ma.get(k).get(0).m() / oa.get().get(0).m() under
+// foreign same-leaf. Unknown / non-nested sources fail closed.
 func javaNestedCollectionGetElemType(val *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	if elemOf == nil {
 		return ""
@@ -1742,8 +1781,10 @@ func javaNestedCollectionGetElemType(val *grammar.Node, content []byte, elemOf, 
 		"remove", "removeFirst", "removeLast", "set",
 		"poll", "peek", "element", "take",
 		"pollFirst", "pollLast", "peekFirst", "peekLast", "pop",
-		"takeFirst", "takeLast":
-		// ok — collection/map accessors that yield the nested list value
+		"takeFirst", "takeLast",
+		// Optional unwraps that yield the nested List value (same leaf as window opts).
+		"orElse", "orElseGet", "orElseThrow":
+		// ok — collection/map/Optional accessors that yield the nested list value
 	default:
 		return ""
 	}
@@ -1751,11 +1792,38 @@ func javaNestedCollectionGetElemType(val *grammar.Node, content []byte, elemOf, 
 	if obj == nil {
 		return ""
 	}
-	// Bare identifier: aa.get(0) / ma.get(k) with @nested.
+	// Bare identifier: aa.get(0) / ma.get(k) / oa.get() with @nested.
 	if obj.Type() == "identifier" {
 		return elemOf["@nested."+ingest.NodeText(obj, content)]
 	}
 	return ""
+}
+
+// javaNestedCollectionIdentElemType recovers T from a bare identifier that is a
+// collection/Optional of list-of-T (elemOf["@nested."+name]). Used for
+// for (var ga : sa) when sa: Set<List<A>> — ga is List of A (elemOf), not A.
+func javaNestedCollectionIdentElemType(val *grammar.Node, content []byte, elemOf map[string]string) string {
+	if val == nil || val.IsNull() || elemOf == nil {
+		return ""
+	}
+	for val != nil && !val.IsNull() && val.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(val, "expression")
+		if inner == nil {
+			for i := uint32(0); i < val.ChildCount(); i++ {
+				ch := val.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		val = inner
+	}
+	if val == nil || val.IsNull() || val.Type() != "identifier" {
+		return ""
+	}
+	return elemOf["@nested."+ingest.NodeText(val, content)]
 }
 
 // javaStreamNestedCollectionElemType recovers T from nestedA.stream() / … when
