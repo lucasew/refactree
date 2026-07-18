@@ -2732,10 +2732,11 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // type leaves from annotations: def make_a() -> A / @lru_cache def make_a() -> A.
 // When no return annotation is present, recovers T from body-only `return T()`
 // when every return in the function body is a call of the same bare identifier
-// (def make_a(): return A()). Decorated definitions (lru_cache / functools.lru_cache
-// / cache / etc.) peel through to the nested function_definition. Nested functions
-// inside bodies are included (same-file name → last wins). Missing / mixed /
-// non-simple returns fail closed.
+// (def make_a(): return A()) or `return x` after a local `x = T()` assignment
+// (def make_a(): a = A(); return a). Decorated definitions (lru_cache /
+// functools.lru_cache / cache / etc.) peel through to the nested
+// function_definition. Nested functions inside bodies are included (same-file
+// name → last wins). Missing / mixed / non-simple returns fail closed.
 func pythonSameFileFuncReturnTypes(root *grammar.Node, content []byte) map[string]string {
 	out := map[string]string{}
 	if root == nil {
@@ -2773,7 +2774,9 @@ func pythonSameFileFuncReturnTypes(root *grammar.Node, content []byte) map[strin
 }
 
 // pythonFuncBodyReturnCtor recovers T when every return in fn's body is
-// `return T(...)` (call of a bare identifier). Nested function/class/lambda
+// `return T(...)` (call of a bare identifier) or `return x` after a local
+// assignment `x = T()` / `x = T(...)` of that same bare identifier in the
+// function body (def make_a(): a = A(); return a). Nested function/class/lambda
 // bodies are skipped. Zero, mixed, or non-ctor returns fail closed ("").
 func pythonFuncBodyReturnCtor(fn *grammar.Node, content []byte) string {
 	if fn == nil {
@@ -2783,6 +2786,8 @@ func pythonFuncBodyReturnCtor(fn *grammar.Node, content []byte) string {
 	if body == nil {
 		return ""
 	}
+	// Local name → ctor type from simple assignments x = T() in this body.
+	localCtor := map[string]string{}
 	const fail = "-"
 	found := ""
 	saw := false
@@ -2795,6 +2800,19 @@ func pythonFuncBodyReturnCtor(fn *grammar.Node, content []byte) string {
 		case "function_definition", "async_function_definition", "class_definition", "lambda":
 			// Nested scopes: do not harvest their returns for the outer factory.
 			return
+		case "assignment":
+			// x = T() / x = T(...) — track local → ctor for return x peels.
+			left := ingest.ChildByField(n, "left")
+			right := ingest.ChildByField(n, "right")
+			if left != nil && left.Type() == "identifier" && right != nil && right.Type() == "call" {
+				if f := ingest.ChildByField(right, "function"); f != nil && f.Type() == "identifier" {
+					name := ingest.NodeText(left, content)
+					ctor := ingest.NodeText(f, content)
+					if name != "" && ctor != "" {
+						localCtor[name] = ctor
+					}
+				}
+			}
 		case "return_statement":
 			var expr *grammar.Node
 			for i := uint32(0); i < n.ChildCount(); i++ {
@@ -2810,6 +2828,9 @@ func pythonFuncBodyReturnCtor(fn *grammar.Node, content []byte) string {
 				if f := ingest.ChildByField(expr, "function"); f != nil && f.Type() == "identifier" {
 					t = ingest.NodeText(f, content)
 				}
+			} else if expr != nil && expr.Type() == "identifier" {
+				// return a after a = A()
+				t = localCtor[ingest.NodeText(expr, content)]
 			}
 			if t == "" {
 				found = fail
