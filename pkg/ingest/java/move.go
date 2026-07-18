@@ -3558,14 +3558,16 @@ func javaMapOfEntriesValueType(call *grammar.Node, content []byte) string {
 // javaEntryExprValueType recovers V from a Map.Entry-producing expression:
 //
 //	e                         → entryValOf[e] (Entry local from entrySet / var)
+//	(Map.Entry<K,V>) e        → V (generic Entry cast; single-arg casts peel value)
 //	Map.entry(k, new T(...))  → T (creation value; key ignored)
 //	am.firstEntry()           → valOf[am] (NavigableMap entry endpoints)
 //	am.lastEntry()            → valOf[am]
 //	am.pollFirstEntry() / am.pollLastEntry() → valOf[am]
 //	am.ceilingEntry(k) / am.floorEntry(k) / am.higherEntry(k) / am.lowerEntry(k) → valOf[am]
 //
-// Used for e.getValue() / var ea = Map.entry(...) / var ea = am.firstEntry() so
-// method rename hits value call sites under foreign same-leaf methods.
+// Used for e.getValue() / ((Map.Entry<K,A>) e).getValue() / var ea = Map.entry(...) /
+// var ea = (Map.Entry<K,A>) e / var ea = am.firstEntry() so method rename hits value
+// call sites under foreign same-leaf methods.
 // Unknown shapes fail closed.
 func javaEntryExprValueType(obj *grammar.Node, content []byte, elemOf, valOf, entryValOf map[string]string) string {
 	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
@@ -3591,6 +3593,18 @@ func javaEntryExprValueType(obj *grammar.Node, content []byte, elemOf, valOf, en
 			return ""
 		}
 		return entryValOf[ingest.NodeText(obj, content)]
+	case "cast_expression":
+		// (Map.Entry<K,V>) e / (Entry<K,V>) e — recover V from the cast type.
+		// Non-Entry casts peel the value so entry pipelines under a cast still bind.
+		if typeN := ingest.ChildByField(obj, "type"); typeN != nil {
+			if vt := javaMapEntryDeclaredValueType(typeN, content); vt != "" {
+				return vt
+			}
+		}
+		if val := ingest.ChildByField(obj, "value"); val != nil {
+			return javaEntryExprValueType(val, content, elemOf, valOf, entryValOf)
+		}
+		return ""
 	case "method_invocation":
 		nameN := ingest.ChildByField(obj, "name")
 		if nameN == nil {
