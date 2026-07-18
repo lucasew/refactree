@@ -1463,6 +1463,9 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // checkedList/Set/Collection(as, …) → elemOf[as],
 // List.copyOf(as) / Set.copyOf(as) → elemOf[as] (Collection of first-arg elements),
 // Stream.concat(s1, s2) → element type when both stream args agree,
+// Stream.generate(() -> new A()) → "A",
+// Stream.iterate(new A(), …) / iterate(new A(), pred, …) → "A" (seed creation type),
+// Stream.ofNullable(new A()) → "A",
 // Arrays.stream(as) / Arrays.stream(new A[]{...}) → "A",
 // Optional.of(new A()) / Optional.ofNullable(new A()) → "A",
 // Optional.flatMap(a -> Optional.of(a)) / ofNullable(a) / Optional::of → same element
@@ -1558,6 +1561,7 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 		case "of", "asList", "ofNullable", "singletonList", "singleton":
 			// List.of(new A()) / Stream.of(new A(), new A()) / Arrays.asList(new A())
 			// / Set.of(new A()) / Optional.of(new A()) / Optional.ofNullable(new A())
+			// / Stream.ofNullable(new A())
 			// / Collections.singletonList(new A()) / Collections.singleton(new A())
 			// — element type from homogeneous new T(...) args.
 			return javaStaticCollectionOfElemType(obj, content, name)
@@ -1579,6 +1583,13 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 		case "concat":
 			// Stream.concat(s1, s2) — Stream of both args' element type when they agree.
 			return javaStreamConcatElemType(obj, content, elemOf, valOf)
+		case "generate":
+			// Stream.generate(() -> new A()) — element type from supplier body.
+			return javaStreamGenerateElemType(obj, content)
+		case "iterate":
+			// Stream.iterate(new A(), a -> a) / iterate(new A(), pred, a -> a) —
+			// element type from seed creation.
+			return javaStreamIterateElemType(obj, content)
 		default:
 			// flatMapTo*/mapTo*/… change the element type — fail closed.
 			return ""
@@ -1964,6 +1975,88 @@ func javaStreamConcatElemType(call *grammar.Node, content []byte, elemOf, valOf 
 		return ""
 	}
 	return et1
+}
+
+// javaStreamGenerateElemType recovers T from Stream.generate(() -> new T(...)).
+// Supplier must be an expression-bodied lambda whose body is object creation.
+// Blocks, method refs, and non-creation bodies fail closed.
+func javaStreamGenerateElemType(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	recvN := ingest.ChildByField(call, "object")
+	if recvN == nil {
+		return ""
+	}
+	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
+		return ""
+	}
+	if ingest.NodeText(recvN, content) != "Stream" {
+		return ""
+	}
+	args := javaCallArgs(call)
+	if len(args) != 1 || args[0].Type() != "lambda_expression" {
+		return ""
+	}
+	body := ingest.ChildByField(args[0], "body")
+	for body != nil && !body.IsNull() && body.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(body, "expression")
+		if inner == nil {
+			for i := uint32(0); i < body.ChildCount(); i++ {
+				ch := body.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		body = inner
+	}
+	if body == nil || body.Type() != "object_creation_expression" {
+		return ""
+	}
+	typeN := ingest.ChildByField(body, "type")
+	if typeN == nil {
+		return ""
+	}
+	return javaTypeName(typeN, content)
+}
+
+// javaStreamIterateElemType recovers T from
+// Stream.iterate(new T(...), UnaryOperator) /
+// Stream.iterate(new T(...), Predicate, UnaryOperator).
+// Seed must be object creation; operator/predicate args are not inspected
+// (common identity / same-type product case). Non-Stream receivers, wrong arity,
+// or non-creation seeds fail closed.
+func javaStreamIterateElemType(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	recvN := ingest.ChildByField(call, "object")
+	if recvN == nil {
+		return ""
+	}
+	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
+		return ""
+	}
+	if ingest.NodeText(recvN, content) != "Stream" {
+		return ""
+	}
+	args := javaCallArgs(call)
+	// iterate(seed, f) or iterate(seed, hasNext, next) — 2 or 3 args.
+	if len(args) < 2 || len(args) > 3 {
+		return ""
+	}
+	seed := args[0]
+	if seed.Type() != "object_creation_expression" {
+		return ""
+	}
+	typeN := ingest.ChildByField(seed, "type")
+	if typeN == nil {
+		return ""
+	}
+	return javaTypeName(typeN, content)
 }
 
 // javaIsToListOrSetCollector reports Stream.collect args that produce a
@@ -3003,9 +3096,10 @@ func javaMapEntryDeclaredValueType(typeN *grammar.Node, content []byte) string {
 }
 
 // javaStaticCollectionOfElemType recovers the element type of List/Stream/Set.of(...)
-// Arrays.asList(...), Optional.of/ofNullable(...), Collections.singletonList(...),
-// and Collections.singleton(...) when every argument is `new T(...)` with the same T.
-// Non-creation args and mixed types fail closed.
+// Arrays.asList(...), Optional.of/ofNullable(...), Stream.ofNullable(...),
+// Collections.singletonList(...), and Collections.singleton(...) when every
+// argument is `new T(...)` with the same T. Non-creation args and mixed types
+// fail closed.
 func javaStaticCollectionOfElemType(call *grammar.Node, content []byte, method string) string {
 	if call == nil || call.Type() != "method_invocation" {
 		return ""
@@ -3027,7 +3121,8 @@ func javaStaticCollectionOfElemType(call *grammar.Node, content []byte, method s
 			return ""
 		}
 	case "ofNullable":
-		if recv != "Optional" {
+		// Optional.ofNullable(new T(...)) / Stream.ofNullable(new T(...)).
+		if recv != "Optional" && recv != "Stream" {
 			return ""
 		}
 	case "asList":
