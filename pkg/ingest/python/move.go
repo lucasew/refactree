@@ -1911,8 +1911,9 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	// asdict(box)["a"].run() / vars(box)["a"].run() / box.__dict__["a"].run() —
 	// dict-view field keys of first arg / object (same leaf as d = asdict(box);
 	// d["a"].run()).
-	// astuple(box)[0].run() / dataclasses.astuple(box)[0].run() — declaration-order
-	// index slots of first arg (same leaf as t = astuple(box); t[0].run(); not box[0]).
+	// astuple(box)[0].run() / dataclasses.astuple(box)[0].run() /
+	// astuple(replace(box))[0].run() — declaration-order index slots of first arg
+	// (same leaf as t = astuple(box); t[0].run(); not box[0]).
 	// items[0].run() / d["k"].run() / list(items)[0].run() — collection subscript
 	// element (same leaf as a = items[0]; a.run()). Slices fail closed.
 	if obj.Type() == "subscript" {
@@ -2105,12 +2106,13 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `d = box.__dict__` / walrus — same field-key binding (instance attribute dict),
 // plus direct `box.__dict__["a"].run()` / `box.__dict__.get("a").run()` /
 // `xa = box.__dict__["a"]`,
-// `t = astuple(box)` / `dataclasses.astuple(box)` / walrus — ordered index
-// slots of the first positional arg (fieldOf["t.#0"] for `t[0].run()`; astuple
-// yields a tuple of field values in declaration order, not named keys),
-// plus direct chains `astuple(box)[0].run()` / `xa = astuple(box)[0]` (synthetic
-// `@astuple.box.#i` slots — not `box.#i`, so bare `box[0]` stays unbound for
-// non-indexable dataclasses),
+// `t = astuple(box)` / `dataclasses.astuple(box)` / `t = astuple(replace(box))` /
+// walrus — ordered index slots of the first positional arg (fieldOf["t.#0"] for
+// `t[0].run()`; astuple yields a tuple of field values in declaration order, not
+// named keys; replace peels to the same dataclass),
+// plus direct chains `astuple(box)[0].run()` / `astuple(replace(box))[0].run()` /
+// `xa = astuple(box)[0]` (synthetic `@astuple.box.#i` slots — not `box.#i`, so
+// bare `box[0]` stays unbound for non-indexable dataclasses),
 // plus unpack `xa, xb = astuple(box)` / `xa, *rest = astuple(box)` (per-slot
 // field types; *rest of mixed tuple fails closed).
 // fieldOf maps "local.field" → field type leaf for class field access.
@@ -3798,7 +3800,9 @@ func pythonAsdictCallObjectType(call *grammar.Node, content []byte, typeOf map[s
 }
 
 // pythonAstupleCallObjectType recovers T from astuple(x) / dataclasses.astuple(x)
-// when the first positional arg is a typed object local or Class() ctor.
+// when the first positional arg is a typed object local, Class() ctor, or
+// replace(x) / dataclasses.replace(x) of those (return type of replace is the
+// dataclass of its first arg — same leaf as astuple(box)).
 // astuple returns a tuple of field values in declaration order (index slots via
 // pythonBindNamedtupleIndexFields + fieldOrder); not the object itself.
 // Keywords (tuple_factory=) ignored for typing. Other callees / missing first
@@ -3814,6 +3818,11 @@ func pythonAstupleCallObjectType(call *grammar.Node, content []byte, typeOf map[
 	args, ok := pythonCallPositionalArgNodes(call)
 	if !ok || len(args) == 0 {
 		return ""
+	}
+	// replace(box) before Class() ctor peel: bare replace(x) is an identifier
+	// call and would otherwise look like a ctor named "replace".
+	if tn := pythonReplaceCallObjectType(args[0], content, typeOf); tn != "" {
+		return tn
 	}
 	return pythonObjectExprType(args[0], content, typeOf)
 }
@@ -3874,11 +3883,12 @@ func pythonDunderDictObjectType(attr *grammar.Node, content []byte, typeOf map[s
 }
 
 // pythonAstupleIndexAccessType recovers T from astuple(box)[0] /
-// dataclasses.astuple(box)[0] when box is a typed local with declaration-order
-// field 0 of type T (fieldOf["@astuple.box.#0"]; same leaf as t = astuple(box);
-// t[0] / box.a). First positional arg must be an identifier local; non-decimal
-// integer indices and other callees fail closed. Does not treat bare box[0] as
-// valid (synthetic @astuple. prefix — dataclasses are not indexable).
+// dataclasses.astuple(box)[0] / astuple(replace(box))[0] when box is a typed
+// local with declaration-order field 0 of type T (fieldOf["@astuple.box.#0"];
+// same leaf as t = astuple(box); t[0] / box.a). First positional arg must be an
+// identifier local or replace(local); non-decimal integer indices and other
+// callees fail closed. Does not treat bare box[0] as valid (synthetic @astuple.
+// prefix — dataclasses are not indexable).
 func pythonAstupleIndexAccessType(sub *grammar.Node, content []byte, fieldOf map[string]string) string {
 	if sub == nil || sub.Type() != "subscript" || fieldOf == nil {
 		return ""
@@ -3908,8 +3918,9 @@ func pythonAstupleIndexAccessType(sub *grammar.Node, content []byte, fieldOf map
 }
 
 // pythonAstupleObjectLocal recovers the identifier local whose declaration-order
-// field values are exposed by astuple(x) / dataclasses.astuple(x). Other forms
-// fail closed ("").
+// field values are exposed by astuple(x) / dataclasses.astuple(x). Accepts bare
+// identifier locals and replace(local) / dataclasses.replace(local) (same object
+// type as local). Other forms fail closed ("").
 func pythonAstupleObjectLocal(n *grammar.Node, content []byte) string {
 	if n == nil || n.Type() != "call" {
 		return ""
@@ -3919,10 +3930,37 @@ func pythonAstupleObjectLocal(n *grammar.Node, content []byte) string {
 		return ""
 	}
 	args, ok := pythonCallPositionalArgNodes(n)
-	if !ok || len(args) == 0 || args[0].Type() != "identifier" {
+	if !ok || len(args) == 0 {
 		return ""
 	}
-	return ingest.NodeText(args[0], content)
+	return pythonReplacePeeledObjectLocal(args[0], content)
+}
+
+// pythonReplacePeeledObjectLocal recovers an identifier local from box or
+// replace(box) / dataclasses.replace(box) (return type of replace is the same
+// dataclass as its first positional arg). Parenthesized forms peel. Other
+// shapes fail closed ("").
+func pythonReplacePeeledObjectLocal(n *grammar.Node, content []byte) string {
+	if n == nil {
+		return ""
+	}
+	switch n.Type() {
+	case "identifier":
+		return ingest.NodeText(n, content)
+	case "parenthesized_expression":
+		return pythonReplacePeeledObjectLocal(pythonParenInner(n), content)
+	case "call":
+		fn := ingest.ChildByField(n, "function")
+		if fn == nil || pythonSimpleCalleeName(fn, content) != "replace" {
+			return ""
+		}
+		args, ok := pythonCallPositionalArgNodes(n)
+		if !ok || len(args) == 0 || args[0].Type() != "identifier" {
+			return ""
+		}
+		return ingest.NodeText(args[0], content)
+	}
+	return ""
 }
 
 // pythonDictViewKeyAccessType recovers T from asdict(box)["a"] / vars(box)["a"] /
