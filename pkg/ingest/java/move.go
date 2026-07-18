@@ -1105,6 +1105,7 @@ func javaFieldAccessRoot(obj *grammar.Node, content []byte) string {
 // map.putFirst(k,v) / map.putLast(k,v) /
 // it.next() / list.iterator().next() /
 // listIterator.previous() / list.listIterator().next()/previous() /
+// deque.descendingIterator().next() / navSet.descendingIterator().next() /
 // enum.nextElement() / coll.elements().nextElement() /
 // Collections.enumeration(coll).nextElement() /
 // queue.poll()/peek() / queue.take() / deque.takeFirst()/takeLast() /
@@ -1772,6 +1773,9 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// listIterator() returns ListIterator<E> of the same element type
 			// (List; previous/next yield E like Iterator.next).
 			"listIterator",
+			// descendingIterator() returns Iterator<E> of the same element type
+			// (Deque / NavigableSet / NavigableMap key views; reverse order only).
+			"descendingIterator",
 			// spliterator() returns Spliterator<E> of the same element type
 			// (Collection/Stream; tryAdvance/forEachRemaining yield E).
 			"spliterator",
@@ -3933,6 +3937,8 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// it.next() / as.iterator().next() — element of iterator or pipeline.
 		// lia.previous() / as.listIterator().previous() — same E (ListIterator).
 		// listIterator() is type-preserving in javaStreamPipelineElemType.
+		// as.descendingIterator().next() — same E (Deque/NavigableSet reverse iter).
+		// descendingIterator() is type-preserving in javaStreamPipelineElemType.
 		// ea.nextElement() / vs.elements().nextElement() /
 		// Collections.enumeration(as).nextElement() — same E (Enumeration).
 		// elements()/enumeration() are type-preserving in javaStreamPipelineElemType.
