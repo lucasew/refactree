@@ -1035,6 +1035,8 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 	//   as.get(i).m() / List.of(new A()).get(i).m() — list element
 	//   oa.get().m() / oa.orElse(d).m() / findFirst().get().m() — Optional element
 	//   sa.get().m() — Supplier element (generic type arg)
+	//   aa.getAndSet(v).m() / aa.updateAndGet(f).m() / aa.getPlain().m() —
+	//     AtomicReference value (same V leaf as get)
 	//   ca.call().m() — Callable element (generic type arg)
 	//   fa.join().m() / fa.getNow(d).m() / fa.resultNow().m() — CompletableFuture
 	//   fn.apply(x).m() — Function/UnaryOperator/BiFunction result (R / T)
@@ -3700,6 +3702,10 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	  (Optional<A>; also findFirst().orElse / findFirst().orElseThrow)
 //	oa.get() / as.stream().findFirst().get() / Optional.of(new A()).get() → T
 //	  (zero-arg Optional.get; also List.of(new A()).get(i) / toList().get(i) via pipeline)
+//	aa.getAndSet(v) / aa.getAndUpdate(f) / aa.updateAndGet(f) /
+//	  aa.accumulateAndGet(x, f) / aa.compareAndExchange(e, u) /
+//	  aa.getPlain() / aa.getAcquire() / aa.getOpaque() → elemOf[aa]
+//	  (AtomicReference<V> and friends; return V like get; args do not change T)
 //	ca.call() → elemOf[ca] (Callable<A>; zero-arg call returns V)
 //	fa.join() / fa.resultNow() → elemOf[fa] (CompletableFuture<A>; zero-arg)
 //	fa.getNow(d) → elemOf[fa] (CompletableFuture<A>; default does not change T)
@@ -3723,6 +3729,9 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 // pipelines (findFirst/findAny/min/max/Optional.of) via zero-arg get + pipeline.
 // Callable.call / CompletableFuture.join|getNow|resultNow use the same elemOf path
 // as Supplier.get / Future.get (generic type arg → T).
+// AtomicReference getAndSet/getAndUpdate/updateAndGet/accumulateAndGet/
+// compareAndExchange/getPlain/getAcquire/getOpaque share get's elemOf path
+// (return V; updater/expected args do not change the type leaf).
 // Function.apply prefers valOf (R) then elemOf (UnaryOperator/BinaryOperator T);
 // BiFunction stores R in valOf at bind time (see javaRecordCollectionElem).
 // Fail closed on other methods / unknown receivers.
@@ -3809,6 +3818,13 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// getNow(defaultValue) returns T (default does not change the type leaf).
 		// Future.get / CF.get already covered by "get" above.
 		"join", "getNow", "resultNow",
+		// AtomicReference (and similar V holders): accessors that return V like get.
+		// getAndSet / getAndUpdate return the previous V; updateAndGet /
+		// accumulateAndGet return the updated V; compareAndExchange returns the
+		// witness V; getPlain/getAcquire/getOpaque are memory-ordering variants of get.
+		// Updater/expected/update args do not change the value type leaf.
+		"getAndSet", "getAndUpdate", "updateAndGet", "accumulateAndGet",
+		"compareAndExchange", "getPlain", "getAcquire", "getOpaque",
 		// Function.apply / UnaryOperator.apply / BiFunction.apply return R (or T when
 		// UnaryOperator/BinaryOperator). Function<T,R> stores R in valOf; UnaryOperator
 		// stores T in elemOf; BiFunction stores R in valOf (third type arg at bind).
