@@ -1239,6 +1239,10 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// var xa = box.a / var xa = ba.a — class/record field access when
 					// box/ba is a typed local with member type A.
 					out[name] = true
+				} else if et := javaWindowListExprElemType(valN, content, elemOf, valOf); et != "" {
+					// var w = stream.gather(Gatherers.windowFixed(n)).findFirst().get() —
+					// List of stream element T (not scalar T); track for w.get(0).m().
+					elemOf[name] = et
 				} else if et := javaCollectionAccessElemType(valN, content, elemOf, valOf, entryValOf, compOf); ourReceivers[et] {
 					// var xa = as.get(0) / am.get("k") / as.iterator().next() / ia.next()
 					// / qa.poll() / qa.peek() / qa.take() / da.takeFirst()/takeLast()
@@ -1254,6 +1258,7 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// / Objects.requireNonNull(new A()) / Objects.requireNonNull(as.get(0))
 					// / Objects.requireNonNullElse(new A(), d) / requireNonNullElseGet(...)
 					// / as[0] / (as)[0] when as is A[] (array element via elemOf)
+					// / stream.gather(windowFixed).findFirst().get().get(0) — window list elem
 					out[name] = true
 				} else if id := javaObjectsRequireNonNullArgIdent(valN, content); id != "" && out[id] {
 					// var xa = Objects.requireNonNull(a) / requireNonNullElse(a, d) /
@@ -1708,6 +1713,12 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 			et := javaStreamPipelineElemType(obj, content, elemOf, valOf)
 			if et != "" && ourReceivers[et] {
 				out[params[0]] = true
+			} else if et := javaWindowGatherStreamElemType(obj, content, elemOf, valOf); et != "" {
+				// stream.gather(windowFixed|windowSliding).forEach(w -> …) —
+				// param is List<T>, not T; track for w.get(0).m().
+				if elemOf != nil {
+					elemOf[params[0]] = et
+				}
 			} else if et := javaGroupingByValuesGroupElemType(obj, content, elemOf, valOf, groupValOf); et != "" {
 				// m.values().forEach(g -> …) / collect(groupingBy|partitioningBy).values().forEach —
 				// param is List<T>, not T; track for nested forEach / for-var.
@@ -2284,10 +2295,13 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			return javaMapMultiResultElemType(obj, content, elemOf, valOf)
 		case "gather":
 			// Stream.gather(Gatherer): recover R when the gatherer clearly preserves
-			// or constructs a known element type. Currently only
+			// or constructs a known element type:
 			// Gatherers.mapConcurrent(n, a -> a) / mapConcurrent(n, a -> new T())
-			// (identity / new). Other gatherers (window*, fold, scan, custom) fail
-			// closed. Enables gather(Gatherers.mapConcurrent(1, a -> a)).findFirst()
+			// (identity / new), fold/scan with () -> new T() + identity integrator.
+			// windowFixed/windowSliding yield Stream of List<T> — not a scalar T
+			// pipeline (see javaWindowGatherStreamElemType / javaWindowListExprElemType
+			// for List-window + get(0) peels). Custom gatherers fail closed.
+			// Enables gather(Gatherers.mapConcurrent(1, a -> a)).findFirst()
 			// .get().m() / var s = gather(...); s.findFirst().get().m() under foreign
 			// same-leaf methods.
 			return javaGatherResultElemType(obj, content, elemOf, valOf)
@@ -2551,52 +2565,14 @@ func javaMapResultElemType(call *grammar.Node, content []byte, elemOf, valOf map
 //
 // mapConcurrent with expression-bodied identity/new mapper, and fold/scan with
 // expression-bodied `() -> new T()` initializer plus identity integrator
-// `(r, t) -> r`, are recognized. windowFixed/windowSliding/custom fail closed.
+// `(r, t) -> r`, are recognized. windowFixed/windowSliding yield List windows
+// (not scalar R) — see javaWindowGatherStreamElemType. Custom fail closed.
 func javaGatherResultElemType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	if call == nil || call.Type() != "method_invocation" {
 		return ""
 	}
-	var args *grammar.Node
-	for i := uint32(0); i < call.ChildCount(); i++ {
-		if call.Child(i).Type() == "argument_list" {
-			args = call.Child(i)
-			break
-		}
-	}
-	if args == nil {
-		return ""
-	}
-	// First non-punctuation arg is the Gatherer.
-	var first *grammar.Node
-	for i := uint32(0); i < args.ChildCount(); i++ {
-		ch := args.Child(i)
-		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
-			continue
-		}
-		first = ch
-		break
-	}
-	if first == nil || first.Type() != "method_invocation" {
-		return ""
-	}
-	// Gatherers.mapConcurrent/fold/scan / java.util.stream.Gatherers.*
-	nameN := ingest.ChildByField(first, "name")
-	if nameN == nil {
-		return ""
-	}
-	gName := ingest.NodeText(nameN, content)
-	recv := ingest.ChildByField(first, "object")
-	if !javaIsGatherersReceiver(recv, content) {
-		return ""
-	}
-	var gArgs *grammar.Node
-	for i := uint32(0); i < first.ChildCount(); i++ {
-		if first.Child(i).Type() == "argument_list" {
-			gArgs = first.Child(i)
-			break
-		}
-	}
-	if gArgs == nil {
+	first, gName, gArgs := javaGathererCallParts(call, content)
+	if first == nil || gArgs == nil {
 		return ""
 	}
 	switch gName {
@@ -2607,6 +2583,180 @@ func javaGatherResultElemType(call *grammar.Node, content []byte, elemOf, valOf 
 	default:
 		return ""
 	}
+}
+
+// javaGathererCallParts extracts the Gatherers.* invocation from stream.gather(…).
+// Returns (gathererCall, gathererName, gathererArgs) or nils when not a Gatherers
+// static call (windowFixed/mapConcurrent/fold/…).
+func javaGathererCallParts(gatherCall *grammar.Node, content []byte) (*grammar.Node, string, *grammar.Node) {
+	if gatherCall == nil || gatherCall.Type() != "method_invocation" {
+		return nil, "", nil
+	}
+	var args *grammar.Node
+	for i := uint32(0); i < gatherCall.ChildCount(); i++ {
+		if gatherCall.Child(i).Type() == "argument_list" {
+			args = gatherCall.Child(i)
+			break
+		}
+	}
+	if args == nil {
+		return nil, "", nil
+	}
+	var first *grammar.Node
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		first = ch
+		break
+	}
+	if first == nil || first.Type() != "method_invocation" {
+		return nil, "", nil
+	}
+	nameN := ingest.ChildByField(first, "name")
+	if nameN == nil {
+		return nil, "", nil
+	}
+	gName := ingest.NodeText(nameN, content)
+	recv := ingest.ChildByField(first, "object")
+	if !javaIsGatherersReceiver(recv, content) {
+		return nil, "", nil
+	}
+	var gArgs *grammar.Node
+	for i := uint32(0); i < first.ChildCount(); i++ {
+		if first.Child(i).Type() == "argument_list" {
+			gArgs = first.Child(i)
+			break
+		}
+	}
+	return first, gName, gArgs
+}
+
+// javaWindowGatherStreamElemType recovers T from stream.gather(Gatherers.windowFixed(n))
+// / windowSliding(n) (and FQ Gatherers). The gather stream yields List<T> windows;
+// T is the upstream stream element type. Custom / non-window gatherers fail closed.
+// Enables gather(windowFixed(1)).forEach(w -> w.get(0).m()) under foreign same-leaf
+// (param tracked as List of T via elemOf).
+func javaWindowGatherStreamElemType(obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(obj, "expression")
+		if inner == nil {
+			for i := uint32(0); i < obj.ChildCount(); i++ {
+				ch := obj.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		obj = inner
+	}
+	if obj == nil || obj.IsNull() || obj.Type() != "method_invocation" {
+		return ""
+	}
+	nameN := ingest.ChildByField(obj, "name")
+	if nameN == nil || ingest.NodeText(nameN, content) != "gather" {
+		return ""
+	}
+	_, gName, gArgs := javaGathererCallParts(obj, content)
+	if gArgs == nil {
+		return ""
+	}
+	switch gName {
+	case "windowFixed", "windowSliding":
+		return javaStreamPipelineElemType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
+	default:
+		return ""
+	}
+}
+
+// javaWindowListExprElemType recovers T from an Optional unwrap of a window-gather
+// stream: gather(window*).findFirst().get() / findAny().get() /
+// findFirst().orElseThrow([…]) → List of T's element type T for subsequent
+// .get(0).m() / var w = …; w.get(0).m(). Other unwraps fail closed.
+func javaWindowListExprElemType(obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(obj, "expression")
+		if inner == nil {
+			for i := uint32(0); i < obj.ChildCount(); i++ {
+				ch := obj.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		obj = inner
+	}
+	if obj == nil || obj.IsNull() || obj.Type() != "method_invocation" {
+		return ""
+	}
+	nameN := ingest.ChildByField(obj, "name")
+	if nameN == nil {
+		return ""
+	}
+	switch ingest.NodeText(nameN, content) {
+	case "get", "orElseThrow":
+	default:
+		return ""
+	}
+	// get must be zero-arg (Optional.get); orElseThrow may have a supplier arg.
+	if ingest.NodeText(nameN, content) == "get" && !javaCallIsZeroArg(obj) {
+		return ""
+	}
+	recv := ingest.ChildByField(obj, "object")
+	for recv != nil && !recv.IsNull() && recv.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(recv, "expression")
+		if inner == nil {
+			for i := uint32(0); i < recv.ChildCount(); i++ {
+				ch := recv.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		recv = inner
+	}
+	if recv == nil || recv.IsNull() || recv.Type() != "method_invocation" {
+		return ""
+	}
+	rName := ingest.ChildByField(recv, "name")
+	if rName == nil {
+		return ""
+	}
+	switch ingest.NodeText(rName, content) {
+	case "findFirst", "findAny":
+	default:
+		return ""
+	}
+	return javaWindowGatherStreamElemType(ingest.ChildByField(recv, "object"), content, elemOf, valOf)
+}
+
+// javaCallIsZeroArg reports whether a method_invocation has no positional args.
+func javaCallIsZeroArg(n *grammar.Node) bool {
+	if n == nil || n.Type() != "method_invocation" {
+		return false
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		if ch == nil || ch.Type() != "argument_list" {
+			continue
+		}
+		for j := uint32(0); j < ch.ChildCount(); j++ {
+			a := ch.Child(j)
+			if a == nil || a.Type() == "(" || a.Type() == ")" || a.Type() == "," {
+				continue
+			}
+			return false
+		}
+		return true
+	}
+	return true
 }
 
 // javaGatherMapConcurrentElemType recovers R from Gatherers.mapConcurrent(n, mapper)
@@ -5605,6 +5755,15 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 			"join", "getNow", "resultNow":
 			if et := javaStreamPipelineElemType(obj, content, elemOf, valOf); et != "" {
 				return et
+			}
+			// stream.gather(windowFixed|windowSliding).findFirst().get().get(0) /
+			// .getFirst() / .getLast() — window list element T (List-window + get).
+			if method == "get" || method == "getFirst" || method == "getLast" ||
+				method == "remove" || method == "removeFirst" || method == "removeLast" ||
+				method == "set" {
+				if et := javaWindowListExprElemType(obj, content, elemOf, valOf); et != "" {
+					return et
+				}
 			}
 			// Map.of(k, new A()).get(k) / Map.ofEntries(...).get(k) /
 			// Collections.singletonMap(k, new A()).get(k) /
