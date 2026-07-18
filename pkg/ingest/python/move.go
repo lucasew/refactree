@@ -2076,7 +2076,10 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // string keys of the same annotated fields (fieldOf),
 // `new = replace(box)` / `dataclasses.replace(box)` / walrus — same object type
 // as box (fieldOf for `new.a.run()`), plus direct chains `replace(box).a.run()`
-// and `xa = replace(box).a` (field leaf of first positional arg).
+// and `xa = replace(box).a` (field leaf of first positional arg),
+// `d = asdict(box)` / `dataclasses.asdict(box)` / walrus — field keys of the
+// first positional arg (fieldOf for `d["a"].run()` / `d.get("a").run()` under
+// foreign same-leaf methods; asdict yields a dict of field values).
 // fieldOf maps "local.field" → field type leaf for class field access.
 // elemOf maps collection locals → element type leaf (list[A] / deque[A] /
 // dict value / Queue[A] → "A") for direct access chains under foreign same-leaf.
@@ -2393,6 +2396,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						if ourReceivers[tn] {
 							out[lname] = true
 						}
+					}
+					// d = asdict(box) / dataclasses.asdict(box) — dict of field values
+					// (fieldOf for d["a"].run() under foreign same-leaf methods).
+					// Not an object of the dataclass type (no typeOf / out).
+					if tn := pythonAsdictCallObjectType(right, content, typeOf); tn != "" {
+						bindFields(lname, tn)
 					}
 				}
 				// a = items[0] / a = d[k] / a = list(items)[0] — element/value of collection.
@@ -2715,6 +2724,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					if ourReceivers[tn] {
 						out[lname] = true
 					}
+				}
+				// d := asdict(box) / dataclasses.asdict(box) — dict of field values
+				// (fieldOf for d["a"].run()).
+				if tn := pythonAsdictCallObjectType(valueN, content, typeOf); tn != "" {
+					bindFields(lname, tn)
 				}
 			}
 			// a := items[0] / a := d[k] — element/value of known collection.
@@ -3617,6 +3631,26 @@ func pythonReplaceCallObjectType(call *grammar.Node, content []byte, typeOf map[
 	}
 	fn := ingest.ChildByField(call, "function")
 	if fn == nil || pythonSimpleCalleeName(fn, content) != "replace" {
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) == 0 {
+		return ""
+	}
+	return pythonObjectExprType(args[0], content, typeOf)
+}
+
+// pythonAsdictCallObjectType recovers T from asdict(x) / dataclasses.asdict(x)
+// when the first positional arg is a typed object local or Class() ctor.
+// asdict returns a dict of field values of that object (field keys via
+// bindFields); not the object itself. Keywords (dict_factory=) ignored for
+// typing. Other callees / missing first arg fail closed.
+func pythonAsdictCallObjectType(call *grammar.Node, content []byte, typeOf map[string]string) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || pythonSimpleCalleeName(fn, content) != "asdict" {
 		return ""
 	}
 	args, ok := pythonCallPositionalArgNodes(call)
