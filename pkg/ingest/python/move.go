@@ -1916,6 +1916,9 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `for a in islice(xs, n)` / `for a in itertools.islice(xs, n)`,
 // `for a in accumulate(xs)` / `for a in itertools.accumulate(xs)`,
 // `for a in cycle(xs)` / `for a in itertools.cycle(xs)`,
+// `for a in repeat(item)` / `for a in itertools.repeat(item[, times])`
+// (object type of 1st arg — typed local / Class(); times ignored),
+// `for a in starmap(A, pairs)` / `for a in itertools.starmap(A, pairs)`,
 // `for a in takewhile/dropwhile/filterfalse(pred, xs)` /
 // `for a in itertools.takewhile/dropwhile/filterfalse(pred, xs)`,
 // `for a in compress(xs, selectors)` / `for a in itertools.compress(xs, selectors)`,
@@ -1934,6 +1937,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 	elemOf := map[string]string{}
 	// except* Type as name → ExceptionGroup local; .exceptions elements are Type.
 	egElems := map[string]string{}
+	// Class-typed object locals → type leaf (item: A / x = A() → "A").
+	// Includes foreign types so repeat(item) can shadow same-leaf B correctly.
+	typeOf := map[string]string{}
 	if root == nil || len(ourReceivers) == 0 {
 		return out
 	}
@@ -1957,8 +1963,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					}
 					if nameN != nil && typeN != nil {
 						lname := ingest.NodeText(nameN, content)
-						if tn := pythonTypeName(typeN, content); ourReceivers[tn] {
-							out[lname] = true
+						if tn := pythonTypeName(typeN, content); tn != "" {
+							// Object annotation (item: A / item: B) — foreign too for shadowing.
+							typeOf[lname] = tn
+							if ourReceivers[tn] {
+								out[lname] = true
+							}
 						}
 						// Record even foreign element types so a later `items: list[B]`
 						// shadows a prior `items: list[A]` (file-global map).
@@ -1975,8 +1985,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			if left != nil && left.Type() == "identifier" {
 				lname := ingest.NodeText(left, content)
 				if typeN != nil {
-					if tn := pythonTypeName(typeN, content); ourReceivers[tn] {
-						out[lname] = true
+					if tn := pythonTypeName(typeN, content); tn != "" {
+						// x: A / x: B = ... — foreign too for shadowing.
+						typeOf[lname] = tn
+						if ourReceivers[tn] {
+							out[lname] = true
+						}
 					}
 					// Foreign element types too — shadow prior same-name collections.
 					if et := pythonContainerElemType(typeN, content); et != "" {
@@ -1988,7 +2002,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					if fn != nil && fn.Type() == "identifier" {
 						fname := ingest.NodeText(fn, content)
 						if ourReceivers[fname] {
+							// x = A() — Class() ctor of our receiver.
 							out[lname] = true
+							typeOf[lname] = fname
 						}
 						// a = cast(A, x) / cast("A", x)
 						if fname == "cast" {
@@ -2000,7 +2016,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// next(reversed(items)) — result type is the element type of
 						// the iterable arg (identity genexp preserves that type).
 						if fname == "next" {
-							if et := pythonNextElemType(right, content, elemOf, egElems); ourReceivers[et] {
+							if et := pythonNextElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
 							}
 						}
@@ -2008,19 +2024,19 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// single-iterable form yields an element of that iterable.
 						// Multi-arg min(a, b, ...) fails closed (not an iterable fold).
 						if fname == "min" || fname == "max" {
-							if et := pythonMinMaxElemType(right, content, elemOf, egElems); ourReceivers[et] {
+							if et := pythonMinMaxElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
 							}
 						}
 						// a = choice(items) — from random import choice; element of seq.
 						if fname == "choice" {
-							if et := pythonRandomChoiceElemType(right, content, elemOf, egElems); ourReceivers[et] {
+							if et := pythonRandomChoiceElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
 							}
 						}
 						// a = heappop(items) — from heapq import heappop; element of heap.
 						if fname == "heappop" {
-							if et := pythonHeappopElemType(right, content, elemOf, egElems); ourReceivers[et] {
+							if et := pythonHeappopElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
 							}
 						}
@@ -2028,7 +2044,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// import reduce; result type is the iterable element (fold of same
 						// leaf). Multi-arg without iterable fails closed inside helper.
 						if fname == "reduce" {
-							if et := pythonReduceElemType(right, content, elemOf, egElems); ourReceivers[et] {
+							if et := pythonReduceElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
 							}
 						}
@@ -2049,22 +2065,22 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								// Default arg on get/setdefault is ignored (same as next's default).
 								// popitem() and other methods are not handled (fail closed).
 								obj := ingest.ChildByField(fn, "object")
-								if et := pythonIterableElemType(obj, content, elemOf, egElems); ourReceivers[et] {
+								if et := pythonIterableElemType(obj, content, elemOf, egElems, typeOf); ourReceivers[et] {
 									out[lname] = true
 								}
 							case "heappop":
 								// a = heapq.heappop(items) — module-qualified; element of 1st arg.
-								if et := pythonHeappopElemType(right, content, elemOf, egElems); ourReceivers[et] {
+								if et := pythonHeappopElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 									out[lname] = true
 								}
 							case "choice":
 								// a = random.choice(items) — module-qualified; element of seq.
-								if et := pythonRandomChoiceElemType(right, content, elemOf, egElems); ourReceivers[et] {
+								if et := pythonRandomChoiceElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 									out[lname] = true
 								}
 							case "reduce":
 								// a = functools.reduce(fn, items[, init]) — module-qualified.
-								if et := pythonReduceElemType(right, content, elemOf, egElems); ourReceivers[et] {
+								if et := pythonReduceElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 									out[lname] = true
 								}
 							case "__next__":
@@ -2072,7 +2088,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								// receiver (it = iter(items) preserves items' element type).
 								// Other methods fail closed.
 								obj := ingest.ChildByField(fn, "object")
-								if et := pythonIterableElemType(obj, content, elemOf, egElems); ourReceivers[et] {
+								if et := pythonIterableElemType(obj, content, elemOf, egElems, typeOf); ourReceivers[et] {
 									out[lname] = true
 								}
 							}
@@ -2081,14 +2097,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					// a = itemgetter(0)(items) / operator.itemgetter(0)(items) —
 					// single-index getter applied to a collection yields an element
 					// (same as items[0]). Multi-index / other callables fail closed.
-					if et := pythonItemgetterElemType(right, content, elemOf, egElems); ourReceivers[et] {
+					if et := pythonItemgetterElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 						out[lname] = true
 					}
 				}
 				// a = items[0] / a = d[k] / a = list(items)[0] — element/value of collection.
 				// Slices (items[1:3]) fail closed (sequence, not element).
 				if right != nil && right.Type() == "subscript" {
-					if et := pythonSubscriptElemType(right, content, elemOf, egElems); ourReceivers[et] {
+					if et := pythonSubscriptElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 						out[lname] = true
 					}
 				}
@@ -2100,7 +2116,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						elemOf[lname] = et
 					} else if et := pythonHomogeneousCtorElem(right, content); et != "" {
 						elemOf[lname] = et
-					} else if et := pythonIterableElemType(right, content, elemOf, egElems); et != "" {
+					} else if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); et != "" {
 						elemOf[lname] = et
 					}
 				}
@@ -2116,7 +2132,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								out[name] = true
 							}
 						}
-					} else if et := pythonIterableElemType(right, content, elemOf, egElems); et != "" {
+					} else if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); et != "" {
 						// a, b = items / a, = items — homogeneous collection elements.
 						for _, name := range targets {
 							if ourReceivers[et] {
@@ -2127,7 +2143,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				} else if fixed, star, ok := pythonUnpackFixedAndStar(left, content); ok {
 					// a, *rest = items / *rest, a = items — fixed slots are elements;
 					// *rest is a sequence of the same element type (elemOf[rest]).
-					if et := pythonIterableElemType(right, content, elemOf, egElems); et != "" {
+					if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); et != "" {
 						for _, name := range fixed {
 							if ourReceivers[et] {
 								out[name] = true
@@ -2158,7 +2174,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				if fn != nil && fn.Type() == "identifier" {
 					fname := ingest.NodeText(fn, content)
 					if ourReceivers[fname] {
+						// a := A() — Class() ctor of our receiver.
 						out[lname] = true
+						typeOf[lname] = fname
 					}
 					// a := cast(A, x)
 					if fname == "cast" {
@@ -2169,31 +2187,31 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					// a := next(iter(items)) / next(items) / next(x for x in items) /
 					// next(reversed(items))
 					if fname == "next" {
-						if et := pythonNextElemType(valueN, content, elemOf, egElems); ourReceivers[et] {
+						if et := pythonNextElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 							out[lname] = true
 						}
 					}
 					// a := min(items) / max(items) / min(items, key=...)
 					if fname == "min" || fname == "max" {
-						if et := pythonMinMaxElemType(valueN, content, elemOf, egElems); ourReceivers[et] {
+						if et := pythonMinMaxElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 							out[lname] = true
 						}
 					}
 					// a := choice(items) — from random import choice
 					if fname == "choice" {
-						if et := pythonRandomChoiceElemType(valueN, content, elemOf, egElems); ourReceivers[et] {
+						if et := pythonRandomChoiceElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 							out[lname] = true
 						}
 					}
 					// a := heappop(items)
 					if fname == "heappop" {
-						if et := pythonHeappopElemType(valueN, content, elemOf, egElems); ourReceivers[et] {
+						if et := pythonHeappopElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 							out[lname] = true
 						}
 					}
 					// a := reduce(fn, items) / reduce(fn, items, init)
 					if fname == "reduce" {
-						if et := pythonReduceElemType(valueN, content, elemOf, egElems); ourReceivers[et] {
+						if et := pythonReduceElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 							out[lname] = true
 						}
 					}
@@ -2211,42 +2229,42 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							// a := d.get(k) / d.get(k, default)
 							// a := d.setdefault(k) / d.setdefault(k, default)
 							obj := ingest.ChildByField(fn, "object")
-							if et := pythonIterableElemType(obj, content, elemOf, egElems); ourReceivers[et] {
+							if et := pythonIterableElemType(obj, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
 							}
 						case "heappop":
 							// a := heapq.heappop(items)
-							if et := pythonHeappopElemType(valueN, content, elemOf, egElems); ourReceivers[et] {
+							if et := pythonHeappopElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
 							}
 						case "choice":
 							// a := random.choice(items)
-							if et := pythonRandomChoiceElemType(valueN, content, elemOf, egElems); ourReceivers[et] {
+							if et := pythonRandomChoiceElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
 							}
 						case "reduce":
 							// a := functools.reduce(fn, items[, init])
-							if et := pythonReduceElemType(valueN, content, elemOf, egElems); ourReceivers[et] {
+							if et := pythonReduceElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
 							}
 						case "__next__":
 							// a := it.__next__() — element type of iterator receiver
 							obj := ingest.ChildByField(fn, "object")
-							if et := pythonIterableElemType(obj, content, elemOf, egElems); ourReceivers[et] {
+							if et := pythonIterableElemType(obj, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
 							}
 						}
 					}
 				}
 				// a := itemgetter(0)(items) / operator.itemgetter(0)(items)
-				if et := pythonItemgetterElemType(valueN, content, elemOf, egElems); ourReceivers[et] {
+				if et := pythonItemgetterElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 					out[lname] = true
 				}
 			}
 			// a := items[0] / a := d[k] — element/value of known collection.
 			// Slices fail closed (sequence, not element).
 			if valueN.Type() == "subscript" {
-				if et := pythonSubscriptElemType(valueN, content, elemOf, egElems); ourReceivers[et] {
+				if et := pythonSubscriptElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 					out[lname] = true
 				}
 			}
@@ -2282,6 +2300,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// for a in reversed/sorted/list/iter(items) /
 			// for a in filter(pred, items) / for a in map(A, names) /
 			// for a in chain/islice/accumulate/cycle / itertools.chain/islice/accumulate/cycle /
+			// for a in repeat(item) / itertools.repeat(item) (object type, not iterable) /
+			// for a in starmap(A, pairs) / itertools.starmap(A, pairs) /
 			// for a in chain.from_iterable / itertools.chain.from_iterable /
 			// for a in takewhile/dropwhile/filterfalse / itertools.takewhile/dropwhile/filterfalse /
 			// for a in compress / itertools.compress /
@@ -2296,7 +2316,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			}
 			switch left.Type() {
 			case "identifier":
-				if et := pythonIterableElemType(right, content, elemOf, egElems); ourReceivers[et] {
+				if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 					out[ingest.NodeText(left, content)] = true
 				}
 			case "pattern_list", "tuple_pattern":
@@ -2316,7 +2336,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// for a, b in zip_longest(xs, ys) / itertools.zip_longest(...) /
 				// for a, b in product(xs, ys) / itertools.product(...) /
 				// for a, b in pairwise(xs) / itertools.pairwise(xs)
-				if types := pythonEnumerateZipTargetTypes(right, content, elemOf, egElems); len(types) > 0 {
+				if types := pythonEnumerateZipTargetTypes(right, content, elemOf, egElems, typeOf); len(types) > 0 {
 					for i, name := range targets {
 						if i < len(types) && ourReceivers[types[i]] {
 							out[name] = true
@@ -2327,7 +2347,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// for a, b in combinations(items, r) / permutations(items, r) /
 				// combinations_with_replacement(items, r) / itertools.* —
 				// every unpack slot is an element of the iterable (r ignored).
-				if et := pythonCombPermElemType(right, content, elemOf, egElems); et != "" {
+				if et := pythonCombPermElemType(right, content, elemOf, egElems, typeOf); et != "" {
 					for _, name := range targets {
 						if ourReceivers[et] {
 							out[name] = true
@@ -2339,7 +2359,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// group g is an iterable of xs elements (key untyped; key= ignored).
 				// Bind g into elemOf so nested `for a in g` / next(g) / list(g) type.
 				// Do not put g itself into out (group is not an element of ourReceivers).
-				if et := pythonGroupbyGroupElemType(right, content, elemOf, egElems); et != "" {
+				if et := pythonGroupbyGroupElemType(right, content, elemOf, egElems, typeOf); et != "" {
 					if len(targets) >= 2 {
 						// Foreign element types too — shadow prior same-name collections.
 						elemOf[targets[1]] = et
@@ -2371,7 +2391,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// untyped. as_pattern cases still handled above when walked.
 			subject := ingest.ChildByField(n, "subject")
 			if subject != nil {
-				if et := pythonIterableElemType(subject, content, elemOf, egElems); et != "" {
+				if et := pythonIterableElemType(subject, content, elemOf, egElems, typeOf); et != "" {
 					body := ingest.ChildByField(n, "body")
 					if body != nil {
 						for i := uint32(0); i < body.ChildCount(); i++ {
@@ -2684,23 +2704,23 @@ func pythonExceptClauseIsStar(n *grammar.Node) bool {
 // items: list[A]; next(x for x in items) → A for identity genexps). Fails closed on
 // splat args or empty call. Default arg is ignored (result may be union with default
 // at runtime; we still bind the element type).
-func pythonNextElemType(call *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
+func pythonNextElemType(call *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
 	args, ok := pythonCallPositionalArgNodes(call)
 	if !ok || len(args) == 0 {
 		return ""
 	}
-	return pythonIterableElemType(args[0], content, elemOf, egElems)
+	return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
 }
 
 // pythonMinMaxElemType recovers the element type of min(iterable) / max(iterable)
 // (optional key=/default= kwargs ignored). Only the single-positional-arg form is
 // handled — min(a, b) / max(x, y, z) compare discrete values and fail closed.
-func pythonMinMaxElemType(call *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
+func pythonMinMaxElemType(call *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
 	args, ok := pythonCallPositionalArgNodes(call)
 	if !ok || len(args) != 1 {
 		return ""
 	}
-	return pythonIterableElemType(args[0], content, elemOf, egElems)
+	return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
 }
 
 // pythonRandomChoiceElemType recovers the element type of choice(seq) /
@@ -2708,7 +2728,7 @@ func pythonMinMaxElemType(call *grammar.Node, content []byte, elemOf, egElems ma
 // typing as next(iterable)). Bare choice (from random import choice) and
 // module-qualified random.choice are accepted; other receivers fail closed.
 // choices/sample yield lists — see pythonIterableElemType.
-func pythonRandomChoiceElemType(call *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
+func pythonRandomChoiceElemType(call *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
 	if call == nil || call.Type() != "call" {
 		return ""
 	}
@@ -2733,7 +2753,7 @@ func pythonRandomChoiceElemType(call *grammar.Node, content []byte, elemOf, egEl
 	default:
 		return ""
 	}
-	return pythonNextElemType(call, content, elemOf, egElems)
+	return pythonNextElemType(call, content, elemOf, egElems, typeOf)
 }
 
 // pythonHeappopElemType recovers the element type of heappop(heap) /
@@ -2742,7 +2762,7 @@ func pythonRandomChoiceElemType(call *grammar.Node, content []byte, elemOf, egEl
 // qualified heapq.heappop are accepted; other receivers fail closed.
 // heappushpop / heapreplace are not handled (nlargest/nsmallest yield lists —
 // see pythonIterableElemType).
-func pythonHeappopElemType(call *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
+func pythonHeappopElemType(call *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
 	if call == nil || call.Type() != "call" {
 		return ""
 	}
@@ -2767,7 +2787,7 @@ func pythonHeappopElemType(call *grammar.Node, content []byte, elemOf, egElems m
 	default:
 		return ""
 	}
-	return pythonNextElemType(call, content, elemOf, egElems)
+	return pythonNextElemType(call, content, elemOf, egElems, typeOf)
 }
 
 // pythonReduceElemType recovers the element type of reduce(function, iterable)
@@ -2776,7 +2796,7 @@ func pythonHeappopElemType(call *grammar.Node, content []byte, elemOf, egElems m
 // for same-leaf accumulators (common product case). Bare reduce (from functools
 // import reduce) and module-qualified functools.reduce are accepted; other
 // receivers fail closed. Fewer than 2 positional args fails closed.
-func pythonReduceElemType(call *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
+func pythonReduceElemType(call *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
 	if call == nil || call.Type() != "call" {
 		return ""
 	}
@@ -2806,7 +2826,7 @@ func pythonReduceElemType(call *grammar.Node, content []byte, elemOf, egElems ma
 		return ""
 	}
 	// reduce(function, iterable[, initializer]) — element type of the iterable.
-	return pythonIterableElemType(args[1], content, elemOf, egElems)
+	return pythonIterableElemType(args[1], content, elemOf, egElems, typeOf)
 }
 
 // pythonItemgetterElemType recovers the element type of
@@ -2816,7 +2836,7 @@ func pythonReduceElemType(call *grammar.Node, content []byte, elemOf, egElems ma
 // and fails closed. Bare itemgetter (from operator import itemgetter) and
 // module-qualified operator.itemgetter are accepted; other receivers fail closed.
 // Stored getters (g = itemgetter(0); a = g(items)) are not tracked.
-func pythonItemgetterElemType(call *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
+func pythonItemgetterElemType(call *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
 	if call == nil || call.Type() != "call" {
 		return ""
 	}
@@ -2856,13 +2876,13 @@ func pythonItemgetterElemType(call *grammar.Node, content []byte, elemOf, egElem
 	if !ok || len(collArgs) != 1 {
 		return ""
 	}
-	return pythonIterableElemType(collArgs[0], content, elemOf, egElems)
+	return pythonIterableElemType(collArgs[0], content, elemOf, egElems, typeOf)
 }
 
 // pythonSubscriptElemType recovers the element type of items[i] / d[k] when the
 // subscripted value is a known collection (elemOf / wrappers / literals).
 // Fails closed on slices (items[a:b] / items[:]) — those yield sequences, not elements.
-func pythonSubscriptElemType(sub *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
+func pythonSubscriptElemType(sub *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
 	if sub == nil || sub.Type() != "subscript" {
 		return ""
 	}
@@ -2872,7 +2892,7 @@ func pythonSubscriptElemType(sub *grammar.Node, content []byte, elemOf, egElems 
 		}
 	}
 	val := ingest.ChildByField(sub, "value")
-	return pythonIterableElemType(val, content, elemOf, egElems)
+	return pythonIterableElemType(val, content, elemOf, egElems, typeOf)
 }
 
 // pythonIterableElemType recovers the element type of a for/comprehension iterable.
@@ -2887,6 +2907,8 @@ func pythonSubscriptElemType(sub *grammar.Node, content []byte, elemOf, egElems 
 // islice / itertools.islice (1st arg iterable; start/stop/step ignored),
 // accumulate / itertools.accumulate (1st arg iterable; func/initial ignored),
 // cycle / itertools.cycle (1st arg iterable; repeats forever),
+// repeat / itertools.repeat (1st arg object type; times ignored — yields the object),
+// starmap / itertools.starmap when 1st arg is a Class identifier (like map),
 // takewhile / dropwhile / filterfalse / itertools.* (2nd arg iterable; pred ignored),
 // compress / itertools.compress (1st arg data; selectors ignored),
 // nlargest / nsmallest / heapq.nlargest / heapq.nsmallest (2nd arg iterable; n/key ignored),
@@ -2898,7 +2920,7 @@ func pythonSubscriptElemType(sub *grammar.Node, content []byte, elemOf, egElems 
 // list/tuple/set is a wildcard), parenthesized forms, d.values() when d's dict
 // value type is in elemOf, or e.exceptions when e was bound by except* Type as e
 // (egElems). Does not type d.items() pairs (use unpack).
-func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
+func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
 	if right == nil {
 		return ""
 	}
@@ -2912,17 +2934,17 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		return pythonHomogeneousCtorElem(right, content)
 	case "parenthesized_expression":
 		// (items or []) / (xs.copy()) — unwrap and re-type the inner expression.
-		return pythonIterableElemType(pythonParenInner(right), content, elemOf, egElems)
+		return pythonIterableElemType(pythonParenInner(right), content, elemOf, egElems, typeOf)
 	case "boolean_operator":
 		// items or [] / items or [A()] / xs and ys — element type when sides agree.
 		// Empty list/tuple/set is a wildcard (does not introduce a type).
 		// Mismatched leaves (list[A] or [B()]) fail closed.
 		left := ingest.ChildByField(right, "left")
 		rightN := ingest.ChildByField(right, "right")
-		return pythonBoolOpElemType(left, rightN, content, elemOf, egElems)
+		return pythonBoolOpElemType(left, rightN, content, elemOf, egElems, typeOf)
 	case "generator_expression", "list_comprehension", "set_comprehension":
 		// next(x for x in items) / for a in [x for x in items] — identity body only.
-		return pythonComprehensionElemType(right, content, elemOf, egElems)
+		return pythonComprehensionElemType(right, content, elemOf, egElems, typeOf)
 	case "call":
 		// reversed(xs) / sorted(xs) / list(xs) / tuple(xs) / set(xs) /
 		// frozenset(xs) / iter(xs) / deque(xs) / Counter(xs) — element type
@@ -2941,16 +2963,17 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 				if !ok || len(args) == 0 {
 					return ""
 				}
-				return pythonIterableElemType(args[0], content, elemOf, egElems)
+				return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
 			case "filter":
 				// filter(function, iterable) — keep iterable's element type.
 				args, ok := pythonCallPositionalArgNodes(right)
 				if !ok || len(args) < 2 {
 					return ""
 				}
-				return pythonIterableElemType(args[1], content, elemOf, egElems)
-			case "map":
-				// map(A, iterable) / map(A, ...) — Class-as-callable yields A.
+				return pythonIterableElemType(args[1], content, elemOf, egElems, typeOf)
+			case "map", "starmap":
+				// map(A, iterable) / starmap(A, pairs) — Class-as-callable yields A.
+				// Other callables fail closed (unknown result type).
 				args, ok := pythonCallPositionalArgNodes(right)
 				if !ok || len(args) == 0 {
 					return ""
@@ -2959,10 +2982,19 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 					return ingest.NodeText(args[0], content)
 				}
 				return ""
+			case "repeat":
+				// repeat(object[, times]) from itertools — yields object forever/times.
+				// Element type is the object expression type (typed local / Class()).
+				// times (2nd arg / kwargs) ignored.
+				args, ok := pythonCallPositionalArgNodes(right)
+				if !ok || len(args) == 0 {
+					return ""
+				}
+				return pythonObjectExprType(args[0], content, typeOf)
 			case "chain":
 				// chain(*iterables) from itertools — shared element type when
 				// all args agree; any untyped or mismatched arg fails closed.
-				return pythonChainElemType(right, content, elemOf, egElems)
+				return pythonChainElemType(right, content, elemOf, egElems, typeOf)
 			case "islice", "accumulate", "cycle", "compress":
 				// islice(iterable, stop) / islice(iterable, start, stop[, step])
 				// accumulate(iterable[, func, *, initial])
@@ -2977,7 +3009,7 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 				if !ok || len(args) == 0 {
 					return ""
 				}
-				return pythonIterableElemType(args[0], content, elemOf, egElems)
+				return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
 			case "takewhile", "dropwhile", "filterfalse":
 				// takewhile(pred, iterable) / dropwhile(pred, iterable) /
 				// filterfalse(pred, iterable) — keep iterable's element type
@@ -2986,7 +3018,7 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 				if !ok || len(args) < 2 {
 					return ""
 				}
-				return pythonIterableElemType(args[1], content, elemOf, egElems)
+				return pythonIterableElemType(args[1], content, elemOf, egElems, typeOf)
 			case "nlargest", "nsmallest":
 				// nlargest(n, iterable[, key]) / nsmallest(n, iterable[, key])
 				// from heapq — yields elements of iterable (2nd arg); n/key ignored.
@@ -2994,7 +3026,7 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 				if !ok || len(args) < 2 {
 					return ""
 				}
-				return pythonIterableElemType(args[1], content, elemOf, egElems)
+				return pythonIterableElemType(args[1], content, elemOf, egElems, typeOf)
 			case "choices", "sample":
 				// choices(population, ...[, k=]) / sample(population, k) from random —
 				// yield elements of population (1st arg); weights/k ignored.
@@ -3002,7 +3034,7 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 				if !ok || len(args) == 0 {
 					return ""
 				}
-				return pythonIterableElemType(args[0], content, elemOf, egElems)
+				return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
 			}
 		}
 		// items.copy() / list(items).copy() — zero-arg shallow copy preserves
@@ -3013,6 +3045,7 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		// dict.fromkeys(iterable[, value]) — iteration yields keys (1st arg elements).
 		// itertools.chain(...) / itertools.islice(...) / itertools.accumulate(...) /
 		// itertools.cycle(...) / itertools.compress(...) /
+		// itertools.repeat(...) / itertools.starmap(...) /
 		// itertools.takewhile/dropwhile/filterfalse(...) — same as bare helpers.
 		// heapq.nlargest / heapq.nsmallest — same as bare nlargest/nsmallest.
 		// random.choices / random.sample — same as bare choices/sample.
@@ -3027,7 +3060,7 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 						return ""
 					}
 					obj := ingest.ChildByField(fn, "object")
-					return pythonIterableElemType(obj, content, elemOf, egElems)
+					return pythonIterableElemType(obj, content, elemOf, egElems, typeOf)
 				case "values":
 					obj, method := pythonAttrCall(right, content)
 					if obj == "" || method != "values" || elemOf == nil {
@@ -3048,8 +3081,8 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 					if !ok || len(args) == 0 {
 						return ""
 					}
-					return pythonIterableElemType(args[0], content, elemOf, egElems)
-				case "chain", "islice", "accumulate", "cycle", "compress":
+					return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
+				case "chain", "islice", "accumulate", "cycle", "compress", "repeat", "starmap":
 					objN := ingest.ChildByField(fn, "object")
 					if objN == nil || objN.Type() != "identifier" {
 						return ""
@@ -3057,15 +3090,33 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 					if ingest.NodeText(objN, content) != "itertools" {
 						return ""
 					}
-					if ingest.NodeText(attr, content) == "chain" {
-						return pythonChainElemType(right, content, elemOf, egElems)
+					switch ingest.NodeText(attr, content) {
+					case "chain":
+						return pythonChainElemType(right, content, elemOf, egElems, typeOf)
+					case "repeat":
+						// itertools.repeat(object[, times]) — object expression type.
+						args, ok := pythonCallPositionalArgNodes(right)
+						if !ok || len(args) == 0 {
+							return ""
+						}
+						return pythonObjectExprType(args[0], content, typeOf)
+					case "starmap":
+						// itertools.starmap(A, pairs) — Class-as-callable yields A.
+						args, ok := pythonCallPositionalArgNodes(right)
+						if !ok || len(args) == 0 {
+							return ""
+						}
+						if args[0].Type() == "identifier" {
+							return ingest.NodeText(args[0], content)
+						}
+						return ""
 					}
 					// islice / accumulate / cycle / compress — element type of 1st arg.
 					args, ok := pythonCallPositionalArgNodes(right)
 					if !ok || len(args) == 0 {
 						return ""
 					}
-					return pythonIterableElemType(args[0], content, elemOf, egElems)
+					return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
 				case "takewhile", "dropwhile", "filterfalse":
 					// itertools.takewhile/dropwhile/filterfalse(pred, iterable)
 					// — element type of 2nd positional arg (same as filter).
@@ -3080,7 +3131,7 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 					if !ok || len(args) < 2 {
 						return ""
 					}
-					return pythonIterableElemType(args[1], content, elemOf, egElems)
+					return pythonIterableElemType(args[1], content, elemOf, egElems, typeOf)
 				case "nlargest", "nsmallest":
 					// heapq.nlargest(n, iterable[, key]) / heapq.nsmallest(...)
 					// — element type of 2nd positional arg (n/key ignored).
@@ -3095,7 +3146,7 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 					if !ok || len(args) < 2 {
 						return ""
 					}
-					return pythonIterableElemType(args[1], content, elemOf, egElems)
+					return pythonIterableElemType(args[1], content, elemOf, egElems, typeOf)
 				case "choices", "sample":
 					// random.choices(population, ...[, k=]) / random.sample(population, k)
 					// — element type of 1st positional arg (weights/k ignored).
@@ -3110,7 +3161,7 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 					if !ok || len(args) == 0 {
 						return ""
 					}
-					return pythonIterableElemType(args[0], content, elemOf, egElems)
+					return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
 				case "deque", "Counter":
 					// collections.deque(iterable[, maxlen]) /
 					// collections.Counter(iterable) — element of 1st arg.
@@ -3125,7 +3176,7 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 					if !ok || len(args) == 0 {
 						return ""
 					}
-					return pythonIterableElemType(args[0], content, elemOf, egElems)
+					return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
 				case "from_iterable":
 					// chain.from_iterable(iterables) /
 					// itertools.chain.from_iterable(iterables) — flatten one level.
@@ -3138,7 +3189,7 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 					if !ok || len(args) != 1 {
 						return ""
 					}
-					return pythonChainFromIterableElemType(args[0], content, elemOf, egElems)
+					return pythonChainFromIterableElemType(args[0], content, elemOf, egElems, typeOf)
 				}
 			}
 		}
@@ -3182,14 +3233,14 @@ func pythonParenInner(n *grammar.Node) *grammar.Node {
 // non-empty element leaf; any untyped arg or mismatched leaves fails closed.
 // chain.from_iterable is handled separately (pythonChainFromIterableElemType);
 // *splat args fail closed (via call-arg parsing).
-func pythonChainElemType(call *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
+func pythonChainElemType(call *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
 	args, ok := pythonCallPositionalArgNodes(call)
 	if !ok || len(args) == 0 {
 		return ""
 	}
 	var et string
 	for _, arg := range args {
-		t := pythonIterableElemType(arg, content, elemOf, egElems)
+		t := pythonIterableElemType(arg, content, elemOf, egElems, typeOf)
 		if t == "" {
 			return ""
 		}
@@ -3231,7 +3282,7 @@ func pythonIsChainReceiver(n *grammar.Node, content []byte) bool {
 // iterables that share a non-empty element leaf (e.g. [items, more] with
 // items: list[A], or [[A()], [A()]]). Bare identifiers fail closed (no
 // nested container map for list[list[A]] params).
-func pythonChainFromIterableElemType(arg *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
+func pythonChainFromIterableElemType(arg *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
 	if arg == nil {
 		return ""
 	}
@@ -3255,7 +3306,7 @@ func pythonChainFromIterableElemType(arg *grammar.Node, content []byte, elemOf, 
 		case "[", "]", "(", ")", ",", "comment":
 			continue
 		default:
-			t := pythonIterableElemType(ch, content, elemOf, egElems)
+			t := pythonIterableElemType(ch, content, elemOf, egElems, typeOf)
 			if t == "" {
 				return ""
 			}
@@ -3278,9 +3329,9 @@ func pythonChainFromIterableElemType(arg *grammar.Node, content []byte, elemOf, 
 // pythonBoolOpElemType recovers a shared element type for `a or b` / `a and b`.
 // Both sides must agree when typed; empty list/tuple/set literals are wildcards.
 // Unknown non-empty sides fail closed (result can be either operand).
-func pythonBoolOpElemType(left, right *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
-	etL := pythonIterableElemType(left, content, elemOf, egElems)
-	etR := pythonIterableElemType(right, content, elemOf, egElems)
+func pythonBoolOpElemType(left, right *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
+	etL := pythonIterableElemType(left, content, elemOf, egElems, typeOf)
+	etR := pythonIterableElemType(right, content, elemOf, egElems, typeOf)
 	emptyL := pythonIsEmptyCollectionLiteral(left)
 	emptyR := pythonIsEmptyCollectionLiteral(right)
 	if etL != "" && etR != "" {
@@ -3357,7 +3408,7 @@ func pythonDictItemsValueType(right *grammar.Node, content []byte, elemOf map[st
 // (key function ignored). Bare or itertools-qualified only; other forms fail closed.
 // Not registered in pythonIterableElemType — bare `for x in groupby(xs)` yields
 // pairs, not elements.
-func pythonGroupbyGroupElemType(right *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
+func pythonGroupbyGroupElemType(right *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
 	if right == nil || right.Type() != "call" {
 		return ""
 	}
@@ -3389,7 +3440,7 @@ func pythonGroupbyGroupElemType(right *grammar.Node, content []byte, elemOf, egE
 	if !ok || len(args) == 0 {
 		return ""
 	}
-	return pythonIterableElemType(args[0], content, elemOf, egElems)
+	return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
 }
 
 // pythonEnumerateZipTargetTypes returns per-unpack-target element types for
@@ -3403,7 +3454,7 @@ func pythonGroupbyGroupElemType(right *grammar.Node, content []byte, elemOf, egE
 // overlapping pairs; both slots share the iterable's element type).
 // Unknown args yield "" slots; fails closed when the call is not a resolvable
 // enumerate/zip/zip_longest/product/pairwise form.
-func pythonEnumerateZipTargetTypes(right *grammar.Node, content []byte, elemOf, egElems map[string]string) []string {
+func pythonEnumerateZipTargetTypes(right *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) []string {
 	if right == nil || right.Type() != "call" {
 		return nil
 	}
@@ -3451,7 +3502,7 @@ func pythonEnumerateZipTargetTypes(right *grammar.Node, content []byte, elemOf, 
 		if len(args) == 0 {
 			return nil
 		}
-		et := pythonIterableElemType(args[0], content, elemOf, egElems)
+		et := pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
 		if et == "" {
 			return nil
 		}
@@ -3467,7 +3518,7 @@ func pythonEnumerateZipTargetTypes(right *grammar.Node, content []byte, elemOf, 
 		out := make([]string, len(args))
 		any := false
 		for i, a := range args {
-			et := pythonIterableElemType(a, content, elemOf, egElems)
+			et := pythonIterableElemType(a, content, elemOf, egElems, typeOf)
 			out[i] = et
 			if et != "" {
 				any = true
@@ -3483,7 +3534,7 @@ func pythonEnumerateZipTargetTypes(right *grammar.Node, content []byte, elemOf, 
 		if len(args) == 0 {
 			return nil
 		}
-		et := pythonIterableElemType(args[0], content, elemOf, egElems)
+		et := pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
 		if et == "" {
 			return nil
 		}
@@ -3497,7 +3548,7 @@ func pythonEnumerateZipTargetTypes(right *grammar.Node, content []byte, elemOf, 
 // combinations/permutations/combinations_with_replacement unpack targets.
 // Bare (from itertools import …) or itertools.*; 1st positional arg is the
 // iterable; r and other args are ignored. Returns "" when not a resolvable form.
-func pythonCombPermElemType(right *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
+func pythonCombPermElemType(right *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
 	if right == nil || right.Type() != "call" {
 		return ""
 	}
@@ -3532,7 +3583,7 @@ func pythonCombPermElemType(right *grammar.Node, content []byte, elemOf, egElems
 	if !ok || len(args) == 0 {
 		return ""
 	}
-	return pythonIterableElemType(args[0], content, elemOf, egElems)
+	return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
 }
 
 // pythonExpandSingleListTupleSplat returns the elements of a sole *list/*tuple
@@ -3657,6 +3708,27 @@ func pythonClassCtorName(n *grammar.Node, content []byte) string {
 	return ingest.NodeText(fn, content)
 }
 
+// pythonObjectExprType recovers the Class leaf of an object expression used as a
+// value (not an iterable): typed local identifier (item: A → "A"), Class() call
+// (A() → "A"), or parenthesized form. Other shapes fail closed.
+func pythonObjectExprType(n *grammar.Node, content []byte, typeOf map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	switch n.Type() {
+	case "identifier":
+		if typeOf == nil {
+			return ""
+		}
+		return typeOf[ingest.NodeText(n, content)]
+	case "call":
+		return pythonClassCtorName(n, content)
+	case "parenthesized_expression":
+		return pythonObjectExprType(pythonParenInner(n), content, typeOf)
+	}
+	return ""
+}
+
 // pythonCallPositionalArgNodes returns positional argument nodes of a call.
 // Keyword arguments are skipped. Splat (*args / **kwargs) fails closed (ok=false).
 // Bare generator expressions (`next(x for x in items)`) attach as the arguments
@@ -3697,7 +3769,7 @@ func pythonCallPositionalArgNodes(call *grammar.Node) (args []*grammar.Node, ok 
 // Body must be the same identifier as the single for-target; nested fors and
 // transforming bodies (`f(x) for x in items`) fail closed. if_clause is ignored
 // (filter does not change element type).
-func pythonComprehensionElemType(comp *grammar.Node, content []byte, elemOf, egElems map[string]string) string {
+func pythonComprehensionElemType(comp *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
 	if comp == nil {
 		return ""
 	}
@@ -3734,7 +3806,7 @@ func pythonComprehensionElemType(comp *grammar.Node, content []byte, elemOf, egE
 	if ingest.NodeText(body, content) != ingest.NodeText(left, content) {
 		return ""
 	}
-	return pythonIterableElemType(right, content, elemOf, egElems)
+	return pythonIterableElemType(right, content, elemOf, egElems, typeOf)
 }
 
 // pythonPatternIdents returns simple identifier targets from pattern_list /
