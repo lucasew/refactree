@@ -1733,6 +1733,8 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // Collections.newSetFromMap(m) → elemOf[m] (Set of map keys K; Map stores K in elemOf),
 // Collections.list(Enumeration) / Collections.enumeration(coll) → enumeration/coll element type,
 // List.copyOf(as) / Set.copyOf(as) → elemOf[as] (Collection of first-arg elements),
+// Arrays.copyOf(as, n) / Arrays.copyOfRange(as, from, to) → "A" (T[] of first-arg elements;
+// length/range bounds only; Class-typed overloads fail closed via first-arg peel only),
 // Stream.concat(s1, s2) → element type when both stream args agree,
 // Stream.generate(() -> new A()) → "A",
 // Stream.iterate(new A(), …) / iterate(new A(), pred, …) → "A" (seed creation type),
@@ -1913,10 +1915,19 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// Collections.list(Enumeration) — ArrayList of enumeration elements.
 			// Collections.enumeration(coll) — Enumeration of coll elements.
 			return javaCollectionsListWrapperElemType(obj, content, elemOf, valOf)
-		case "copyOf":
+		case "copyOf", "copyOfRange":
+			// Arrays.copyOf(arr, n) / Arrays.copyOfRange(arr, from, to) — T[] of first-arg
+			// element type (length/range bounds only; same first-arg peel as Arrays.stream).
 			// List.copyOf(coll) / Set.copyOf(coll) — Collection of first-arg element type
-			// (unlike of/asList which take new T(...) args).
-			return javaListSetCopyOfElemType(obj, content, elemOf, valOf)
+			// (copyOf only; unlike of/asList which take new T(...) args).
+			recv := ingest.ChildByField(obj, "object")
+			if javaIsArraysReceiver(recv, content) {
+				return javaArraysStreamElemType(obj, content, elemOf, valOf)
+			}
+			if name == "copyOf" {
+				return javaListSetCopyOfElemType(obj, content, elemOf, valOf)
+			}
+			return ""
 		case "concat":
 			// Stream.concat(s1, s2) — Stream of both args' element type when they agree.
 			return javaStreamConcatElemType(obj, content, elemOf, valOf)
@@ -3080,9 +3091,10 @@ func javaIsArraysReceiver(obj *grammar.Node, content []byte) bool {
 	return ingest.NodeText(obj, content) == "Arrays"
 }
 
-// javaArraysStreamElemType recovers T from Arrays.stream(T[] arr[, from, to]).
+// javaArraysStreamElemType recovers T from Arrays.stream(T[] arr[, from, to]),
+// Arrays.copyOf(T[] arr, n), and Arrays.copyOfRange(T[] arr, from, to).
 // First argument is the array (identifier with elemOf, or new T[]{...}).
-// Range bounds do not change the element type.
+// Length / range bounds do not change the element type.
 func javaArraysStreamElemType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	if call == nil {
 		return ""
@@ -3104,6 +3116,7 @@ func javaArraysStreamElemType(call *grammar.Node, content []byte, elemOf, valOf 
 			continue
 		default:
 			// Arrays.stream(as) / Arrays.stream(new A[]{...}) / Arrays.stream(as, 0, 1)
+			// / Arrays.copyOf(as, n) / Arrays.copyOfRange(as, from, to)
 			return javaStreamPipelineElemType(ch, content, elemOf, valOf)
 		}
 	}
@@ -3906,6 +3919,8 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 //	  (A[] as / A[][] matrix; new A[]{...}[i] via array creation type)
 //	as.stream().toArray()[i] / as.stream().toArray(new A[0])[i] / as.toArray(new A[0])[i]
 //	  → stream/collection element type (toArray preserves T for index access)
+//	Arrays.copyOf(as, n)[i] / Arrays.copyOfRange(as, from, to)[i]
+//	  → first-arg array element type (length/range only)
 //	aa.getAndSet(v) / aa.getAndUpdate(f) / aa.updateAndGet(f) /
 //	  aa.accumulateAndGet(x, f) / aa.compareAndExchange(e, u) /
 //	  aa.getPlain() / aa.getAcquire() / aa.getOpaque() → elemOf[aa]
@@ -4203,6 +4218,8 @@ func javaArrayAccessElemType(val *grammar.Node, content []byte, elemOf, valOf ma
 		// as.toArray(new A[0])[i] / var arr = as.stream().toArray(); arr[i] when
 		// the root is still the call — element type from the stream/collection
 		// pipeline (toArray is type-preserving).
+		// Arrays.copyOf(as, n)[i] / Arrays.copyOfRange(as, from, to)[i] —
+		// first-arg array element type (length/range only).
 		return javaStreamPipelineElemType(val, content, elemOf, valOf)
 	}
 	return ""
