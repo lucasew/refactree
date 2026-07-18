@@ -1925,6 +1925,8 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // `for pair in list(zip(...)): for a in pair` (wrapper + nested shared elemOf),
 // `pairs = zip/zip_longest/product/pairwise(...); for a, b in pairs` /
 // `for pair in pairs: for a in pair` (assigned pair-iter; shared → elemOf),
+// `combos = combinations/permutations/batched(...); for a, b in combos` /
+// `for combo in combos: for a in combo` (assigned; literal r/n → pair slots),
 // `for item in enumerate(xs): a = item[1]` (pair-slot subscript; [0] fails closed),
 // `a, b = next(zip(xs, ys))` / `a, b = next(pairs)` when pairs = zip/... /
 // `a, b = pair` when pair = next(pairs) / for-pair (pairSlots unpack),
@@ -1967,7 +1969,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 	// Empty slot ("") fails closed on subscript/unpack of that index.
 	pairSlots := map[string][]string{}
 	// Assigned pair-iterators → per-slot types of each yielded tuple
-	// (pairs = zip/enumerate/product/...; for a, b in pairs / for pair in pairs).
+	// (pairs = zip/enumerate/product/...; combos = combinations/batched(xs, n);
+	// for a, b in pairs / for pair in pairs).
 	pairIterSlots := map[string][]string{}
 	if root == nil || len(ourReceivers) == 0 {
 		return out
@@ -2151,7 +2154,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// xs = list(items) / filter(...) — preserve element type via wrappers.
 				// d = dict.fromkeys(keys, A()) — value leaf is A (for .values/.get).
 				// pairs = zip/enumerate/product/pairwise(...) /
-				// pairs = list/tuple/iter/reversed/sorted/filter(...zip...) — pair-iter slots.
+				// pairs = list/tuple/iter/reversed/sorted/filter(...zip...) —
+				// combos = combinations/permutations/batched(...) (literal r/n) — pair-iter slots.
 				if right != nil {
 					if types := pythonPairIterSlotsOf(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
 						// Foreign slots too — shadow prior same-name pair-iters.
@@ -3080,7 +3084,8 @@ func pythonPairSlotSubscriptType(sub *grammar.Node, content []byte, pairSlots ma
 }
 
 // pythonPairIterSlotsOf recovers per-slot types for a pair-iterator expression:
-// zip/enumerate/product/pairwise calls, assigned pair-iter locals, and identity
+// zip/enumerate/product/pairwise calls, combinations/permutations/batched with
+// a positive integer-literal size (r/n), assigned pair-iter locals, and identity
 // wrappers list/tuple/iter/reversed/sorted/filter around those. Not an element
 // type — each yield is a tuple (pair slots preserved through the wrapper).
 func pythonPairIterSlotsOf(right *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string, pairIterSlots map[string][]string) []string {
@@ -3101,6 +3106,11 @@ func pythonPairIterSlotsOf(right *grammar.Node, content []byte, elemOf, egElems,
 		return pairIterSlots[ingest.NodeText(right, content)]
 	case "call":
 		if types := pythonEnumerateZipTargetTypes(right, content, elemOf, egElems, typeOf); len(types) > 0 {
+			return types
+		}
+		// combinations/permutations/combinations_with_replacement/batched with
+		// literal r/n → homogeneous slots (assigned pair-iter reuse).
+		if types := pythonCombBatchedPairSlots(right, content, elemOf, egElems, typeOf); len(types) > 0 {
 			return types
 		}
 		// list/tuple/iter/reversed/sorted(zip(...)) / filter(pred, zip(...)) —
@@ -3131,6 +3141,60 @@ func pythonPairIterSlotsOf(right *grammar.Node, content []byte, elemOf, egElems,
 	default:
 		return nil
 	}
+}
+
+// pythonCombBatchedPairSlots returns [elem]*n for combinations / permutations /
+// combinations_with_replacement / batched when the size arg (r or n) is a
+// positive integer literal. Enables assigned pair-iters:
+// `combos = combinations(xs, 2); for a, b in combos` via pairIterSlots.
+// Non-literal size fails closed here; direct for-loops still type via
+// pythonCombPermElemType / pythonBatchedElemType without needing the size.
+func pythonCombBatchedPairSlots(right *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) []string {
+	et := pythonCombPermElemType(right, content, elemOf, egElems, typeOf)
+	if et == "" {
+		et = pythonBatchedElemType(right, content, elemOf, egElems, typeOf)
+	}
+	if et == "" {
+		return nil
+	}
+	n := pythonCallSecondPositionalInt(right, content)
+	if n <= 0 {
+		return nil
+	}
+	out := make([]string, n)
+	for i := range out {
+		out[i] = et
+	}
+	return out
+}
+
+// pythonCallSecondPositionalInt returns the 2nd positional arg as a non-negative
+// integer literal, or -1 when missing / not a plain integer.
+func pythonCallSecondPositionalInt(call *grammar.Node, content []byte) int {
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) < 2 {
+		return -1
+	}
+	return pythonNonNegIntLiteral(args[1], content)
+}
+
+// pythonNonNegIntLiteral parses a non-negative integer literal node, or -1.
+func pythonNonNegIntLiteral(n *grammar.Node, content []byte) int {
+	if n == nil || n.Type() != "integer" {
+		return -1
+	}
+	text := ingest.NodeText(n, content)
+	if text == "" {
+		return -1
+	}
+	v := 0
+	for _, c := range text {
+		if c < '0' || c > '9' {
+			return -1
+		}
+		v = v*10 + int(c-'0')
+	}
+	return v
 }
 
 // pythonNextPairSlots recovers pair slot types for next(pair_iter[, default]).
