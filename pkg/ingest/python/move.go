@@ -2218,11 +2218,19 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 					}
 				}
 				// make_a().run() after def make_a() -> A / def make_a(): return A() /
-				// @lru_cache def make_a() -> A — same-file factory return (before Class() ctor path).
+				// @lru_cache def make_a() -> A / make_a = lambda: A() — same-file
+				// factory return (before Class() ctor path).
 				if rt := funcReturns[name]; rt != "" {
 					return pythonRenameByTypeMaps(rt, ourReceivers, foreignReceivers, nil)
 				}
 				return pythonRenameByTypeMaps(name, ourReceivers, foreignReceivers, nil)
+			}
+			// A.make().run() / A.create().run() — @staticmethod / @classmethod
+			// factory recorded as "A.make" / "A.create" in funcReturns.
+			if fn.Type() == "attribute" {
+				if rt := pythonCallFuncReturnType(obj, content, funcReturns); rt != "" {
+					return pythonRenameByTypeMaps(rt, ourReceivers, foreignReceivers, nil)
+				}
 			}
 			if ft := pythonRecordKeyAccessType(obj, content, fieldOf); ft != "" {
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
@@ -2737,6 +2745,11 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // functools.lru_cache / cache / etc.) peel through to the nested
 // function_definition. Nested functions inside bodies are included (same-file
 // name → last wins). Missing / mixed / non-simple returns fail closed.
+//
+// Also records:
+//   - make_a = lambda: A() — zero-arg expression-bodied lambda factory locals
+//   - A.make / A.create — @staticmethod / @classmethod factories that return
+//     A() or cls() (keys are "Class.method" for A.make().run() peels)
 func pythonSameFileFuncReturnTypes(root *grammar.Node, content []byte) map[string]string {
 	out := map[string]string{}
 	if root == nil {
@@ -2764,6 +2777,23 @@ func pythonSameFileFuncReturnTypes(root *grammar.Node, content []byte) map[strin
 					}
 				}
 			}
+		case "assignment":
+			// make_a = lambda: A() / make_b = lambda: B() — factory local.
+			left := ingest.ChildByField(n, "left")
+			right := ingest.ChildByField(n, "right")
+			if left != nil && left.Type() == "identifier" && right != nil && right.Type() == "lambda" {
+				lname := ingest.NodeText(left, content)
+				if lname != "" {
+					if tn := pythonLambdaFactoryReturnCtor(right, content); tn != "" {
+						out[lname] = tn
+					}
+				}
+			}
+		case "class_definition":
+			// @staticmethod / @classmethod factories on the class:
+			// A.make().run() after @staticmethod def make(): return A()
+			// A.create().run() after @classmethod def create(cls): return cls()
+			pythonHarvestClassFactoryReturns(n, content, out)
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
@@ -2771,6 +2801,200 @@ func pythonSameFileFuncReturnTypes(root *grammar.Node, content []byte) map[strin
 	}
 	walk(root)
 	return out
+}
+
+// pythonLambdaFactoryReturnCtor recovers T from a zero-arg expression-bodied
+// lambda whose body is a Class() call: lambda: A(). Other shapes fail closed.
+func pythonLambdaFactoryReturnCtor(lam *grammar.Node, content []byte) string {
+	if lam == nil || lam.Type() != "lambda" {
+		return ""
+	}
+	// Zero-arg only (same gate as submit(lambda: T())).
+	if params := ingest.ChildByField(lam, "parameters"); params != nil {
+		for i := uint32(0); i < params.ChildCount(); i++ {
+			ch := params.Child(i)
+			switch ch.Type() {
+			case ",", "(", ")", "comment":
+				continue
+			default:
+				return ""
+			}
+		}
+	}
+	body := ingest.ChildByField(lam, "body")
+	if body == nil || body.Type() != "call" {
+		return ""
+	}
+	return pythonExprClassType(body, content)
+}
+
+// pythonHarvestClassFactoryReturns records Class.method → Class for
+// @staticmethod / @classmethod methods whose body always returns Class() or
+// (classmethod only) cls(). Keys use "Class.method" so A.make().run() peels
+// under foreign same-leaf methods without colliding with bare make().
+func pythonHarvestClassFactoryReturns(classDef *grammar.Node, content []byte, out map[string]string) {
+	if classDef == nil || classDef.Type() != "class_definition" || out == nil {
+		return
+	}
+	nameN := ingest.ChildByField(classDef, "name")
+	if nameN == nil || nameN.Type() != "identifier" {
+		return
+	}
+	className := ingest.NodeText(nameN, content)
+	if className == "" {
+		return
+	}
+	body := ingest.ChildByField(classDef, "body")
+	if body == nil {
+		return
+	}
+	for i := uint32(0); i < body.ChildCount(); i++ {
+		ch := body.Child(i)
+		if ch == nil || ch.Type() != "decorated_definition" {
+			continue
+		}
+		kind := pythonFactoryDecoratorKind(ch, content)
+		if kind == "" {
+			continue
+		}
+		var fn *grammar.Node
+		for j := uint32(0); j < ch.ChildCount(); j++ {
+			c := ch.Child(j)
+			if c != nil && (c.Type() == "function_definition" || c.Type() == "async_function_definition") {
+				fn = c
+				break
+			}
+		}
+		if fn == nil {
+			continue
+		}
+		mNameN := ingest.ChildByField(fn, "name")
+		if mNameN == nil || mNameN.Type() != "identifier" {
+			continue
+		}
+		method := ingest.NodeText(mNameN, content)
+		if method == "" {
+			continue
+		}
+		ret := ""
+		if tn := pythonFuncBodyReturnCtor(fn, content); tn == className {
+			// @staticmethod def make(): return A() / @classmethod … return A()
+			ret = className
+		} else if kind == "classmethod" && pythonFuncBodyReturnsCls(fn, content) {
+			// @classmethod def create(cls): return cls()
+			ret = className
+		}
+		if ret != "" {
+			out[className+"."+method] = ret
+		}
+	}
+}
+
+// pythonFactoryDecoratorKind returns "staticmethod" / "classmethod" when the
+// decorated_definition has that bare decorator (or fails closed on others).
+func pythonFactoryDecoratorKind(decorated *grammar.Node, content []byte) string {
+	if decorated == nil || decorated.Type() != "decorated_definition" {
+		return ""
+	}
+	kind := ""
+	for i := uint32(0); i < decorated.ChildCount(); i++ {
+		ch := decorated.Child(i)
+		if ch == nil || ch.Type() != "decorator" {
+			continue
+		}
+		// @staticmethod / @classmethod — decorator child is bare identifier.
+		var id *grammar.Node
+		for j := uint32(0); j < ch.ChildCount(); j++ {
+			c := ch.Child(j)
+			if c != nil && c.Type() == "identifier" {
+				id = c
+				break
+			}
+		}
+		if id == nil {
+			continue
+		}
+		switch ingest.NodeText(id, content) {
+		case "staticmethod", "classmethod":
+			// Last matching decorator wins (unusual stacks fail toward last).
+			kind = ingest.NodeText(id, content)
+		}
+	}
+	return kind
+}
+
+// pythonFuncBodyReturnsCls reports whether every return in fn's body is
+// `return cls(...)` (classmethod factory). Nested scopes are skipped.
+func pythonFuncBodyReturnsCls(fn *grammar.Node, content []byte) bool {
+	if fn == nil {
+		return false
+	}
+	body := ingest.ChildByField(fn, "body")
+	if body == nil {
+		return false
+	}
+	saw := false
+	ok := true
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() || !ok {
+			return
+		}
+		switch n.Type() {
+		case "function_definition", "async_function_definition", "class_definition", "lambda":
+			return
+		case "return_statement":
+			var expr *grammar.Node
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch == nil || ch.Type() == "return" {
+					continue
+				}
+				expr = ch
+				break
+			}
+			if expr == nil || expr.Type() != "call" {
+				ok = false
+				return
+			}
+			f := ingest.ChildByField(expr, "function")
+			if f == nil || f.Type() != "identifier" || ingest.NodeText(f, content) != "cls" {
+				ok = false
+				return
+			}
+			saw = true
+			return
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(body)
+	return saw && ok
+}
+
+// pythonCallFuncReturnType recovers the same-file factory return class leaf of
+// a call: make_a() (bare) or A.make() / A.create() ("Class.method" keys).
+func pythonCallFuncReturnType(call *grammar.Node, content []byte, funcReturns map[string]string) string {
+	if call == nil || call.Type() != "call" || funcReturns == nil {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil {
+		return ""
+	}
+	switch fn.Type() {
+	case "identifier":
+		return funcReturns[ingest.NodeText(fn, content)]
+	case "attribute":
+		obj := ingest.ChildByField(fn, "object")
+		attr := ingest.ChildByField(fn, "attribute")
+		if obj != nil && obj.Type() == "identifier" && attr != nil && attr.Type() == "identifier" {
+			key := ingest.NodeText(obj, content) + "." + ingest.NodeText(attr, content)
+			return funcReturns[key]
+		}
+	}
+	return ""
 }
 
 // pythonFuncBodyReturnCtor recovers T when every return in fn's body is
@@ -2978,6 +3202,18 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					if spec := pythonOperatorGetterLocalSpec(right, content); spec != "" {
 						getterOf[lname] = spec
 					}
+					// a = A.make() / a = A.create() — @staticmethod / @classmethod
+					// factory (attribute callee; "Class.method" keys in funcReturns).
+					// Bare make_a() is handled in the identifier branch below too.
+					if fn != nil && fn.Type() == "attribute" {
+						if rt := pythonCallFuncReturnType(right, content, funcReturns); rt != "" {
+							typeOf[lname] = rt
+							bindFields(lname, rt)
+							if ourReceivers[rt] {
+								out[lname] = true
+							}
+						}
+					}
 					if fn != nil && fn.Type() == "identifier" {
 						fname := ingest.NodeText(fn, content)
 						if ourReceivers[fname] {
@@ -2991,8 +3227,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							typeOf[lname] = fname
 							bindFields(lname, fname)
 						}
-						// a = make_a() after def make_a() -> A / @lru_cache def make_a() -> A.
-						// Foreign returns too for shadowing (b = make_b() with -> B).
+						// a = make_a() after def make_a() -> A / @lru_cache def make_a() -> A /
+						// make_a = lambda: A(). Foreign returns too for shadowing.
 						if rt := funcReturns[fname]; rt != "" {
 							typeOf[lname] = rt
 							bindFields(lname, rt)
@@ -3531,6 +3767,15 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			lname := ingest.NodeText(nameN, content)
 			if valueN.Type() == "call" {
 				fn := ingest.ChildByField(valueN, "function")
+				// a := A.make() / a := A.create() — class factory attribute callee.
+				if fn != nil && fn.Type() == "attribute" {
+					if rt := pythonCallFuncReturnType(valueN, content, funcReturns); rt != "" {
+						typeOf[lname] = rt
+						if ourReceivers[rt] {
+							out[lname] = true
+						}
+					}
+				}
 				if fn != nil && fn.Type() == "identifier" {
 					fname := ingest.NodeText(fn, content)
 					if ourReceivers[fname] {
@@ -3538,7 +3783,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						out[lname] = true
 						typeOf[lname] = fname
 					}
-					// a := make_a() after def make_a() -> A / @lru_cache …
+					// a := make_a() after def make_a() -> A / @lru_cache … /
+					// make_a = lambda: A()
 					if rt := funcReturns[fname]; rt != "" {
 						typeOf[lname] = rt
 						if ourReceivers[rt] {
