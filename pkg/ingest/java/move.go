@@ -1716,6 +1716,8 @@ func javaMapValueBiLambdaMethod(method string) bool {
 // as.stream().toArray() / toArray(generator) / as.toArray([generator]) → same
 // element (T[] for toArray()[i] / var arr = toArray(); arr[i]),
 // m.values() → valOf[m],
+// m.keySet() / navigableKeySet() / descendingKeySet() → elemOf[m]
+// (Set of map keys K; Map stores K in elemOf — same key leaf as newSetFromMap),
 // List.of(new A()) / Stream.of(new A()) / Arrays.asList(new A()) → "A",
 // Collections.singletonList(new A()) / Collections.singleton(new A()) → "A",
 // Collections.nCopies(n, new A()) → "A",
@@ -1865,6 +1867,13 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 		case "values":
 			// m.values() / collect(toMap(...)).values() — Collection of map values.
 			return javaMapPipelineValueType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
+		case "keySet", "navigableKeySet", "descendingKeySet":
+			// m.keySet() / navigableKeySet() / descendingKeySet() — Set of map keys K
+			// (Map stores K in elemOf; same key leaf as Collections.newSetFromMap).
+			// navigable/descending are order-only views; key type unchanged.
+			// Map view receivers (descendingMap/headMap/…) recover K via the key
+			// pipeline (dual of values → javaMapPipelineValueType).
+			return javaMapPipelineKeyType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
 		case "of", "asList", "ofNullable", "singletonList", "singleton":
 			// List.of(new A()) / Stream.of(new A(), new A()) / Arrays.asList(new A())
 			// / Set.of(new A()) / Optional.of(new A()) / Optional.ofNullable(new A())
@@ -3099,6 +3108,126 @@ func javaArraysStreamElemType(call *grammar.Node, content []byte, elemOf, valOf 
 		}
 	}
 	return ""
+}
+
+// javaMapPipelineKeyType recovers the key type of a Map-typed expression:
+// m → elemOf[m] when m is map-like (also recorded in valOf),
+// Collections.unmodifiableMap/synchronizedMap/checkedMap(m[, …]) → elemOf[m],
+// Collections.unmodifiableSequencedMap/synchronizedSequencedMap(m) → elemOf[m]
+// (and Sorted/Navigable wrappers; same K — dual of value path),
+// Map.copyOf(m) → elemOf[m],
+// m.reversed() → elemOf[m] (SequencedMap view; order only),
+// m.descendingMap() → elemOf[m] (NavigableMap reverse-order view),
+// m.headMap/tailMap/subMap(...) → elemOf[m] (SortedMap/NavigableMap range views;
+// bounds/inclusivity args do not change the key type leaf).
+// Used by keySet / navigableKeySet / descendingKeySet. Fail closed on factories
+// whose keys are not statically recoverable (Map.of key slots, toMap key mappers, …).
+func javaMapPipelineKeyType(obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(obj, "expression")
+		if inner == nil {
+			for i := uint32(0); i < obj.ChildCount(); i++ {
+				ch := obj.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		obj = inner
+	}
+	if obj == nil || obj.IsNull() {
+		return ""
+	}
+	switch obj.Type() {
+	case "identifier":
+		if elemOf == nil {
+			return ""
+		}
+		id := ingest.NodeText(obj, content)
+		// Map-like only: value type is also recorded (List has elemOf without valOf).
+		if valOf == nil || valOf[id] == "" {
+			return ""
+		}
+		return elemOf[id]
+	case "method_invocation":
+		nameN := ingest.ChildByField(obj, "name")
+		if nameN == nil {
+			return ""
+		}
+		switch name := ingest.NodeText(nameN, content); name {
+		case "unmodifiableMap", "synchronizedMap", "checkedMap",
+			"unmodifiableSortedMap", "synchronizedSortedMap", "checkedSortedMap",
+			"unmodifiableNavigableMap", "synchronizedNavigableMap", "checkedNavigableMap",
+			"unmodifiableSequencedMap", "synchronizedSequencedMap":
+			// Collections.*Map wrappers — key type of first-arg map (Class args ignored).
+			return javaCollectionsMapWrapperKeyType(obj, content, elemOf, valOf)
+		case "copyOf":
+			// Map.copyOf(m) — key type of first-arg map (List/Set.copyOf stay in stream path).
+			return javaMapCopyOfKeyType(obj, content, elemOf, valOf)
+		case "reversed":
+			// SequencedMap.reversed() — same key type (order only; Java 21).
+			return javaMapPipelineKeyType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
+		case "descendingMap", "headMap", "tailMap", "subMap":
+			// NavigableMap.descendingMap / SortedMap|NavigableMap headMap/tailMap/subMap
+			// — same key type (order/bounds only; inclusivity args ignored).
+			return javaMapPipelineKeyType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
+		default:
+			return ""
+		}
+	default:
+		return ""
+	}
+}
+
+// javaCollectionsMapWrapperKeyType recovers K from
+// Collections.unmodifiableMap/synchronizedMap/checkedMap(m[, keyClass, valueClass])
+// (and Sorted/Navigable/Sequenced variants). First arg's map key type; Class args ignored.
+// Non-Collections receivers fail closed.
+func javaCollectionsMapWrapperKeyType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	recvN := ingest.ChildByField(call, "object")
+	if recvN == nil {
+		return ""
+	}
+	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
+		return ""
+	}
+	if ingest.NodeText(recvN, content) != "Collections" {
+		return ""
+	}
+	first := javaFirstCallArg(call)
+	if first == nil {
+		return ""
+	}
+	return javaMapPipelineKeyType(first, content, elemOf, valOf)
+}
+
+// javaMapCopyOfKeyType recovers K from Map.copyOf(m): key type of the first
+// argument map. Non-Map receivers fail closed (List/Set.copyOf stay on the
+// element pipeline via javaListSetCopyOfElemType).
+func javaMapCopyOfKeyType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	recvN := ingest.ChildByField(call, "object")
+	if recvN == nil {
+		return ""
+	}
+	if recvN.Type() != "identifier" && recvN.Type() != "type_identifier" {
+		return ""
+	}
+	if ingest.NodeText(recvN, content) != "Map" {
+		return ""
+	}
+	first := javaFirstCallArg(call)
+	if first == nil {
+		return ""
+	}
+	return javaMapPipelineKeyType(first, content, elemOf, valOf)
 }
 
 // javaMapPipelineValueType recovers the value type of a Map-typed expression:
