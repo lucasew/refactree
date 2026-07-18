@@ -1882,8 +1882,11 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	// reduce(fn, items).run() / functools.reduce(fn, items, init).run() — fold result
 	// typed as iterable element (same leaf as a = reduce(...); a.run()).
 	// items.popleft().run() / d.get(k).run() / q.get().run() / items.pop().run() /
-	// list(items).pop().run() — collection/queue element accessors (same leaf as
-	// a = items.popleft(); a.run()). Unknown call receivers: unique-leaf only.
+	// list(items).pop().run() / items.__getitem__(i).run() — collection/queue
+	// element accessors (same leaf as a = items.popleft(); a.run()).
+	// getitem(items, i).run() / operator.getitem(items, i).run() — same leaf as
+	// items[i] (bare from operator / module-qualified).
+	// Unknown call receivers: unique-leaf only.
 	if obj.Type() == "call" {
 		if fn := ingest.ChildByField(obj, "function"); fn != nil {
 			// getattr(box, "a") before bare-ident ctor path (function is identifier).
@@ -1940,6 +1943,12 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 						return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 					}
 				}
+				// getitem(items, i).run() — before Class() ctor path (bare from operator).
+				if name == "getitem" {
+					if et := pythonGetitemElemType(obj, content, elemOf, nil, typeOf); et != "" {
+						return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+					}
+				}
 				return pythonRenameByTypeMaps(name, ourReceivers, foreignReceivers, nil)
 			}
 			if ft := pythonRecordKeyAccessType(obj, content, fieldOf); ft != "" {
@@ -1958,6 +1967,11 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 			// single-index getter on a known collection (same leaf as assignment).
 			// Multi-index / string-key itemgetter use field path or fail closed.
 			if et := pythonItemgetterElemType(obj, content, elemOf, nil, typeOf); et != "" {
+				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+			}
+			// getitem(items, i).run() / operator.getitem(items, i).run() —
+			// same element leaf as items[i] / a = getitem(items, i); a.run().
+			if et := pythonGetitemElemType(obj, content, elemOf, nil, typeOf); et != "" {
 				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 			}
 			// random.choice(seq).run() — module-qualified form (function is attribute).
@@ -2052,7 +2066,7 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 //
 //	items.popleft().run() / items.pop().run() / items.pop(0).run()
 //	d.get(k).run() / d.setdefault(k).run() / q.get().run()
-//	it.__next__().run() / list(items).pop().run()
+//	it.__next__().run() / items.__getitem__(i).run() / list(items).pop().run()
 //
 // Same methods as the assignment path in pythonTypedLocals. Other methods and
 // untyped receivers fail closed ("").
@@ -2069,8 +2083,9 @@ func pythonCollectionAccessElemType(call *grammar.Node, content []byte, elemOf m
 		return ""
 	}
 	switch ingest.NodeText(attr, content) {
-	case "pop", "popleft", "get", "setdefault", "__next__":
+	case "pop", "popleft", "get", "setdefault", "__next__", "__getitem__":
 		// Element/value type of the receiver collection (default args ignored).
+		// __getitem__(i) is the same leaf as items[i] / d[k].
 		return pythonIterableElemType(ingest.ChildByField(fn, "object"), content, elemOf, nil, nil)
 	}
 	return ""
@@ -2120,6 +2135,8 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 // each target is an iterator of items elements (elemOf; not an element itself),
 // `xs = items.copy()` / `xs = items or []` (elemOf preserved for later index/for),
 // `a = it.__next__()` when `it = iter(items)` (or other known iterable) has element type,
+// `a = items.__getitem__(i)` / `a = d.__getitem__(k)` (same element/value as items[i]),
+// `a = getitem(items, i)` / `a = operator.getitem(items, i)` (same leaf as items[i]),
 // as-bindings (`case A() as a`, `with A() as a`, `except A as e`),
 // match sequence captures from a known collection subject
 // (`match items: case [a]:` / `case [a, *rest]:` with `items: list[A]` —
@@ -2544,6 +2561,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								if et := pythonIterableElemType(obj, content, elemOf, egElems, typeOf); ourReceivers[et] {
 									out[lname] = true
 								}
+							case "__getitem__":
+								// a = items.__getitem__(i) / d.__getitem__(k) /
+								// list(items).__getitem__(0) — same element/value leaf as
+								// items[i] / d[k] (key/index arg ignored for typing).
+								obj := ingest.ChildByField(fn, "object")
+								if et := pythonIterableElemType(obj, content, elemOf, egElems, typeOf); ourReceivers[et] {
+									out[lname] = true
+								}
 							}
 						}
 					}
@@ -2563,6 +2588,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					} else if types := pythonItemgetterPairSlots(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
 						pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 					} else if et := pythonItemgetterElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
+						out[lname] = true
+					}
+					// a = getitem(items, i) / operator.getitem(items, i) /
+					// getitem(d, k) — same element/value leaf as items[i] / d[k].
+					if et := pythonGetitemElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 						out[lname] = true
 					}
 					// xa = attrgetter("a")(box) / attrgetter("a")(replace(box)) /
@@ -3009,6 +3039,13 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							if et := pythonIterableElemType(obj, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
 							}
+						case "__getitem__":
+							// a := items.__getitem__(i) / d.__getitem__(k) —
+							// same element/value leaf as items[i] / d[k].
+							obj := ingest.ChildByField(fn, "object")
+							if et := pythonIterableElemType(obj, content, elemOf, egElems, typeOf); ourReceivers[et] {
+								out[lname] = true
+							}
 						}
 					}
 				}
@@ -3024,6 +3061,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				} else if types := pythonItemgetterPairSlots(valueN, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
 					pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 				} else if et := pythonItemgetterElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
+					out[lname] = true
+				}
+				// a := getitem(items, i) / operator.getitem(items, i) —
+				// same element/value leaf as items[i] / d[k].
+				if et := pythonGetitemElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 					out[lname] = true
 				}
 				// xa := attrgetter("a")(box) / attrgetter("a")(replace(box)) /
@@ -5785,6 +5827,44 @@ func pythonReduceElemType(call *grammar.Node, content []byte, elemOf, egElems, t
 	}
 	// reduce(function, iterable[, initializer]) — element type of the iterable.
 	return pythonIterableElemType(args[1], content, elemOf, egElems, typeOf)
+}
+
+// pythonGetitemElemType recovers the element type of getitem(collection, key) /
+// operator.getitem(collection, key). Same leaf as collection[key] / d[k].
+// Bare getitem (from operator import getitem) and module-qualified
+// operator.getitem are accepted; other receivers fail closed. Requires at least
+// two positional args (collection, key); key is ignored for typing.
+func pythonGetitemElemType(call *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil {
+		return ""
+	}
+	switch fn.Type() {
+	case "identifier":
+		if ingest.NodeText(fn, content) != "getitem" {
+			return ""
+		}
+	case "attribute":
+		attr := ingest.ChildByField(fn, "attribute")
+		obj := ingest.ChildByField(fn, "object")
+		if attr == nil || ingest.NodeText(attr, content) != "getitem" {
+			return ""
+		}
+		if obj == nil || obj.Type() != "identifier" || ingest.NodeText(obj, content) != "operator" {
+			return ""
+		}
+	default:
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) < 2 {
+		return ""
+	}
+	// getitem(collection, key) — element/value type of the collection.
+	return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
 }
 
 // pythonItemgetterElemType recovers the element type of
