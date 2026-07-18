@@ -1437,6 +1437,7 @@ func javaMapValueBiLambdaMethod(method string) bool {
 
 // javaStreamPipelineElemType recovers the element type of a stream pipeline object:
 // as / as.stream() / as.iterator() / as.stream().filter(...) → elemOf[as],
+// as.reversed() / as.reversed().stream() → elemOf[as] (SequencedCollection/List view),
 // as.stream().findFirst() / findAny() / min() / max() / reduce(op) → same element
 // (Optional wraps T; ifPresent / orElse use T),
 // as.stream().toList() / collect(Collectors.toList()/toSet()/toUnmodifiableList()/
@@ -1507,7 +1508,9 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// not change the element type). Identity reduce returns T directly —
 			// handled in javaCollectionAccessElemType for bare var targets.
 			// toList() returns List<T> — element preserved for forEach / for-var.
-			"findFirst", "findAny", "min", "max", "reduce", "toList":
+			// reversed() returns List/SequencedCollection of the same element type
+			// (Java 21 SequencedCollection; order only, element type unchanged).
+			"findFirst", "findAny", "min", "max", "reduce", "toList", "reversed":
 			recv := ingest.ChildByField(obj, "object")
 			// Arrays.stream(arr[, from, to]) — element type from first arg, not
 			// from receiver Arrays (unlike coll.stream() which uses elemOf[coll]).
