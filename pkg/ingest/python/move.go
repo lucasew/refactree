@@ -1875,6 +1875,10 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	// element of iterable / homogeneous values view (same leaf as a = min(...); a.run()).
 	// choice(items).run() / random.choice(items).run() — sequence element (same leaf
 	// as a = choice(items); a.run()).
+	// heappop(items).run() / heapq.heappushpop(items, x).run() /
+	// heapreplace(items, x).run() — heap element (same leaf as a = heappop(...); a.run()).
+	// reduce(fn, items).run() / functools.reduce(fn, items, init).run() — fold result
+	// typed as iterable element (same leaf as a = reduce(...); a.run()).
 	// items.popleft().run() / d.get(k).run() / q.get().run() / items.pop().run() /
 	// list(items).pop().run() — collection/queue element accessors (same leaf as
 	// a = items.popleft(); a.run()). Unknown call receivers: unique-leaf only.
@@ -1920,6 +1924,20 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 						return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 					}
 				}
+				// heappop(heap).run() / heappushpop(...).run() / heapreplace(...).run()
+				// — before Class() ctor path (bare from heapq).
+				if name == "heappop" || name == "heappushpop" || name == "heapreplace" {
+					if et := pythonHeappopElemType(obj, content, elemOf, nil, typeOf); et != "" {
+						return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+					}
+				}
+				// reduce(fn, iterable[, init]).run() — before Class() ctor path
+				// (bare from functools; fold result is iterable element).
+				if name == "reduce" {
+					if et := pythonReduceElemType(obj, content, elemOf, nil, typeOf); et != "" {
+						return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+					}
+				}
 				return pythonRenameByTypeMaps(name, ourReceivers, foreignReceivers, nil)
 			}
 			if ft := pythonRecordKeyAccessType(obj, content, fieldOf); ft != "" {
@@ -1936,6 +1954,15 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 			}
 			// random.choice(seq).run() — module-qualified form (function is attribute).
 			if et := pythonRandomChoiceElemType(obj, content, elemOf, nil, typeOf); et != "" {
+				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+			}
+			// heapq.heappop(heap).run() / heapq.heappushpop(...).run() /
+			// heapq.heapreplace(...).run() — module-qualified form.
+			if et := pythonHeappopElemType(obj, content, elemOf, nil, typeOf); et != "" {
+				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+			}
+			// functools.reduce(fn, iterable[, init]).run() — module-qualified form.
+			if et := pythonReduceElemType(obj, content, elemOf, nil, typeOf); et != "" {
 				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 			}
 			if et := pythonCollectionAccessElemType(obj, content, elemOf); et != "" {
