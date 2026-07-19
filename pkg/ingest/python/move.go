@@ -6306,15 +6306,20 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// method-return collection / object-dict subjects under foreign
 			// same-leaf (Class() peels via pythonIterableElemType; assigned
 			// xs = [ba.get()]; match xs already peels via elemOf).
+			// match [ba.get() for _ in range(1)]: / match list(ba.get() for _ in …):
+			// / match list(filter/map/chain([ba.get()])): — method-return
+			// comprehension / wrapper subjects (Class() peels via
+			// pythonIterableElemType; pythonObjectCollectionElem alone misses
+			// listcomp/genexp/filter/map/chain — use pythonObjectIterableElemType).
 			// Without this, a.m() is skipped under foreign same-leaf; *rest loops
 			// also stay untyped. as_pattern cases still handled above when walked.
 			subject := ingest.ChildByField(n, "subject")
 			if subject != nil {
 				et := pythonIterableElemType(subject, content, elemOf, egElems, typeOf)
 				if et == "" {
-					// match [ba.get()]: / match (ba.get(),): / match {ba.get()}:
-					// method-return sequence subject (Class() already peels).
-					et = pythonObjectCollectionElem(subject, content, funcReturns, typeOf, fieldOf)
+					// match [ba.get()]: / listcomp / list(filter/map/chain(...)):
+					// method-return iterable subject (Class() already peels).
+					et = pythonObjectIterableElemType(subject, content, funcReturns, typeOf, fieldOf)
 				}
 				if et == "" {
 					// match {"k": ba.get()}: case {"k": x}: — object-dict value.
