@@ -1448,10 +1448,11 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// var w = oa.get() after var oa = s.findFirst() —
 					// List of stream element T (not scalar T); track for w.get(0).m().
 					elemOf[name] = et
-				} else if et := javaNestedCollectionGetElemType(valN, content, elemOf, valOf); et != "" {
+				} else if et := javaNestedCollectionGetElemType(valN, content, elemOf, valOf, compOf, typeMembers); et != "" {
 					// var ga = oa.get() when oa: Optional<List<A>> /
 					// var row = aa.get(0) when aa: List<List<A>> /
-					// var ga = ma.get(k) when ma: Map<K, List<A>> —
+					// var ga = ma.get(k) when ma: Map<K, List<A>> /
+					// var ga = Optional.of(List.of(ba.get())).get() —
 					// List of T (not scalar T); track for ga.get(0).m().
 					elemOf[name] = et
 				} else if et := javaCollectionAccessElemType(valN, content, elemOf, valOf, entryValOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, typeMembers); et != "" {
@@ -2029,10 +2030,9 @@ func javaOptionalOfCollectionElemType(typeN *grammar.Node, content []byte) strin
 // receiver is a collection/map/Optional of list-of-T (elemOf["@nested."+src]). Used as the
 // outer get in aa.get(0).get(0).m() / ma.get(k).get(0).m() / oa.get().get(0).m() under
 // foreign same-leaf. Unknown / non-nested sources fail closed.
-func javaNestedCollectionGetElemType(val *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
-	if elemOf == nil {
-		return ""
-	}
+// Method-return peels (Optional.of(List.of(ba.get())).get().get(0)) need compOf/typeMembers;
+// Class()-only peels work with nil maps.
+func javaNestedCollectionGetElemType(val *grammar.Node, content []byte, elemOf, valOf, compOf map[string]string, typeMembers map[string]map[string]string) string {
 	for val != nil && !val.IsNull() && val.Type() == "parenthesized_expression" {
 		inner := ingest.ChildByField(val, "expression")
 		if inner == nil {
@@ -2071,13 +2071,18 @@ func javaNestedCollectionGetElemType(val *grammar.Node, content []byte, elemOf, 
 		return ""
 	}
 	// Bare identifier: aa.get(0) / ma.get(k) / oa.get() with @nested.
-	if obj.Type() == "identifier" {
+	if obj.Type() == "identifier" && elemOf != nil {
 		return elemOf["@nested."+ingest.NodeText(obj, content)]
 	}
 	// Optional.of(List.of(new A())).get() / ofNullable / orElseThrow —
 	// factory Optional wrapping a collection factory of T. Nested list element
 	// peels as T under foreign same-leaf (same leaf as Optional<List<A>> local).
 	if nest := javaOptionalOfCollectionFactoryElemType(obj, content); nest != "" {
+		return nest
+	}
+	// Optional.of(List.of(ba.get())).get() / ofNullable / orElseThrow —
+	// method-return collection factory under foreign same-leaf.
+	if nest := javaOptionalOfCollectionFactoryObjectElemType(obj, content, compOf, typeMembers); nest != "" {
 		return nest
 	}
 	return ""
@@ -2158,6 +2163,65 @@ func javaOptionalOfCollectionFactoryElemType(opt *grammar.Node, content []byte) 
 	default:
 		return ""
 	}
+}
+
+// javaOptionalOfCollectionFactoryObjectElemType recovers T when opt is
+// Optional.of(List.of(ba.get())) / Optional.ofNullable(Arrays.asList(ba.get())) /
+// Optional.of(Collections.singletonList(ba.get())) /
+// Optional.of(Set.of(ba.get())) / Optional.of(Collections.singleton(ba.get())) /
+// Optional.of(Set.copyOf(List.of(ba.get()))) / Optional.of(List.copyOf(...)) /
+// Optional.of(Collections.nCopies(n, ba.get())) — Optional wrapping a collection
+// factory of method-return T. Enables
+// Optional.of(List.of(ba.get())).get().get(0).m() /
+// Optional.of(List.of(ba.get())).orElseThrow().get(0).m() /
+// Optional.of(Set.of(ba.get())).get().iterator().next().m() under foreign same-leaf.
+// Class()-only peels live in javaOptionalOfCollectionFactoryElemType.
+// Scalar Optional.of(ba.get()) / unknown args fail closed (no nested collection).
+func javaOptionalOfCollectionFactoryObjectElemType(opt *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
+	if opt == nil || opt.IsNull() || opt.Type() != "method_invocation" {
+		return ""
+	}
+	nameN := ingest.ChildByField(opt, "name")
+	if nameN == nil {
+		return ""
+	}
+	name := ingest.NodeText(nameN, content)
+	if name != "of" && name != "ofNullable" {
+		return ""
+	}
+	recv := javaStaticFactoryReceiverName(ingest.ChildByField(opt, "object"), content)
+	if recv != "Optional" {
+		return ""
+	}
+	var args *grammar.Node
+	for i := uint32(0); i < opt.ChildCount(); i++ {
+		if opt.Child(i).Type() == "argument_list" {
+			args = opt.Child(i)
+			break
+		}
+	}
+	if args == nil {
+		return ""
+	}
+	var first *grammar.Node
+	count := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," || ch.Type() == "comment" {
+			continue
+		}
+		count++
+		if first == nil {
+			first = ch
+		}
+	}
+	// Optional.of takes one value arg (ofNullable same). Extra args fail closed.
+	if count != 1 || first == nil {
+		return ""
+	}
+	// Collection factory of method-return T (List.of(ba.get()) / …).
+	// javaStaticCollectionOfObjectElemType also peels copyOf / nCopies / singleton.
+	return javaStaticCollectionOfObjectElemType(first, content, compOf, typeMembers)
 }
 
 // javaOptionalOrElseFallbackType recovers T from Optional.orElse(new T(...)/ba.get()) /
@@ -7765,7 +7829,22 @@ func javaStaticCollectionOfObjectElemType(obj *grammar.Node, content []byte, com
 					return ""
 				}
 			}
-			return javaHomogeneousObjectElem(args, content, compOf, typeMembers)
+			// Scalar Optional.of(ba.get()) / List.of(ba.get()) / …
+			if et := javaHomogeneousObjectElem(args, content, compOf, typeMembers); et != "" {
+				return et
+			}
+			// Nested: Optional.of(List.of(ba.get())) / ofNullable(Arrays.asList(ba.get()))
+			// — Optional wrapping a collection factory of method-return T. Enables
+			// Optional.of(List.of(ba.get())).get().get(0) /
+			// Optional.of(Set.of(ba.get())).get().iterator().next() under foreign
+			// same-leaf (Class peels via javaOptionalOfCollectionFactoryElemType /
+			// javaStreamPipelineElemType). Scalar peels above already returned.
+			if (name == "of" || name == "ofNullable") && recvName == "Optional" {
+				if nest := javaOptionalOfCollectionFactoryObjectElemType(obj, content, compOf, typeMembers); nest != "" {
+					return nest
+				}
+			}
+			return ""
 		case "nCopies":
 			// Collections.nCopies(n, ba.get()) — List of T from second-arg method-return.
 			// Enables .get(0) / .iterator().next() / .stream().findFirst() / forEach /
@@ -8571,11 +8650,13 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 				}
 			}
 			// aa.get(0).get(0) / ma.get(k).get(0) when aa: List<List<A>> /
-			// ma: Map<K, List<A>> — outer get peels nested element T.
+			// ma: Map<K, List<A>> /
+			// Optional.of(List.of(ba.get())).get().get(0) — outer get peels nested element T
+			// (method-return via typeMembers; Class peels via factory-only path).
 			if method == "get" || method == "getFirst" || method == "getLast" ||
 				method == "remove" || method == "removeFirst" || method == "removeLast" ||
 				method == "set" {
-				if et := javaNestedCollectionGetElemType(obj, content, elemOf, valOf); et != "" {
+				if et := javaNestedCollectionGetElemType(obj, content, elemOf, valOf, compOf, typeMembers); et != "" {
 					return et
 				}
 			}
