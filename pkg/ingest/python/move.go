@@ -4384,6 +4384,17 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// dict values of A; store nested leaf.
 						// Foreign too for shadowing (db = {"k": [B()]} after da).
 						elemOf["@nested."+lname] = nest
+					} else if nest := pythonDictStarCopyNestedValueType(right, content, elemOf); nest != "" {
+						// ca = {**da} / {**da, **ea} / {**da, "j": [A()]} when da is
+						// dict[str, list[A]] (@nested) — preserve nested leaf so
+						// ca["k"][0].run() peels under foreign same-leaf.
+						// Foreign too for shadowing (cb = {**db} after ca).
+						elemOf["@nested."+lname] = nest
+					} else if nest := pythonNestedMappingCopyCallType(right, content, elemOf); nest != "" {
+						// ca = da.copy() / da.deepcopy() when da is nested mapping of A —
+						// preserve @nested leaf (scalar .copy peels via elemOf below).
+						// Foreign too for shadowing.
+						elemOf["@nested."+lname] = nest
 					} else if et := pythonHomogeneousDictValueCtorElem(right, content); et != "" {
 						// da = {"k": A()} / dict(k=A()) / OrderedDict(k=A()) /
 						// ChainMap({"k": A()}) / {k: A() for k in ...} — scalar values.
@@ -9313,15 +9324,20 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 				case "get", "setdefault", "pop":
 					// da.get("k") / da.pop("k") when da: defaultdict[str, list[A]] —
 					// value is list of A; da.get("k")[0].run() peels via subscript.
+					// {**da}.get("k") / da.copy().get("k") — nested star-copy / copy.
 					// Scalar dict[str, A] get stays on assignment/collection-access
 					// (elemOf leaf) — not an iterable of A here.
-					obj, method := pythonAttrCall(right, content)
-					if obj == "" || elemOf == nil {
+					objN := ingest.ChildByField(fn, "object")
+					if objN == nil || elemOf == nil {
 						return ""
 					}
-					_ = method
-					if nest := elemOf["@nested."+obj]; nest != "" {
-						return nest
+					switch objN.Type() {
+					case "identifier":
+						return elemOf["@nested."+ingest.NodeText(objN, content)]
+					case "dictionary":
+						return pythonDictStarCopyNestedValueType(objN, content, elemOf)
+					case "call":
+						return pythonNestedMappingCopyCallType(objN, content, elemOf)
 					}
 					return ""
 				case "fromkeys":
@@ -10715,6 +10731,7 @@ func pythonHomogeneousDictValueCtorElem(collection *grammar.Node, content []byte
 // Enables {**da}["k"].run() / db = {**da}; db["k"].run() under foreign same-leaf
 // (same leaf as da.copy()["k"] / da["k"]). Nested-only mappings (@nested without
 // scalar elemOf), empty dicts, mixed leaves, and non-identifier splats fail closed.
+// Nested dict[str, list[A]] star-copy uses pythonDictStarCopyNestedValueType.
 func pythonDictStarCopyValueType(n *grammar.Node, content []byte, elemOf map[string]string) string {
 	if n == nil || n.Type() != "dictionary" || elemOf == nil {
 		return ""
@@ -10730,19 +10747,7 @@ func pythonDictStarCopyValueType(n *grammar.Node, content []byte, elemOf map[str
 		case "{", "}", ",", "comment":
 			continue
 		case "dictionary_splat":
-			var arg *grammar.Node
-			for j := uint32(0); j < ch.ChildCount(); j++ {
-				c := ch.Child(j)
-				if c == nil || c.Type() == "**" {
-					continue
-				}
-				arg = c
-				break
-			}
-			if arg == nil || arg.Type() != "identifier" {
-				return ""
-			}
-			name := ingest.NodeText(arg, content)
+			name := pythonDictSplatIdent(ch, content)
 			if name == "" {
 				return ""
 			}
@@ -10779,6 +10784,127 @@ func pythonDictStarCopyValueType(n *grammar.Node, content []byte, elemOf map[str
 		return ""
 	}
 	return found
+}
+
+// pythonDictSplatIdent returns the identifier name inside a dictionary_splat
+// node (**da). Non-identifier splats fail closed ("").
+func pythonDictSplatIdent(ch *grammar.Node, content []byte) string {
+	if ch == nil || ch.Type() != "dictionary_splat" {
+		return ""
+	}
+	var arg *grammar.Node
+	for j := uint32(0); j < ch.ChildCount(); j++ {
+		c := ch.Child(j)
+		if c == nil || c.Type() == "**" {
+			continue
+		}
+		arg = c
+		break
+	}
+	if arg == nil || arg.Type() != "identifier" {
+		return ""
+	}
+	return ingest.NodeText(arg, content)
+}
+
+// pythonDictStarCopyNestedValueType recovers T from a dictionary star-copy whose
+// every arm peels to the same nested mapping-of-list/set leaf T (@nested):
+//
+//	{**da} / {**da, **ea} when da/ea are dict[str, list[A]] / nested literals
+//	{**da, "j": [A()]} when pair values are homogeneous list/set of A
+//
+// Enables {**da}["k"][0].run() / ca = {**da}; ca["k"][0].run() /
+// for a in {**da}["k"] / {**da}.get("k")[0].run() under foreign same-leaf
+// (same leaf as da["k"][0] / annotated nested). Scalar dict[str, A] stays on
+// pythonDictStarCopyValueType. Empty / mixed leaves / non-ident splats fail closed.
+func pythonDictStarCopyNestedValueType(n *grammar.Node, content []byte, elemOf map[string]string) string {
+	if n == nil || n.Type() != "dictionary" || elemOf == nil {
+		return ""
+	}
+	found := ""
+	saw := false
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		if ch == nil {
+			continue
+		}
+		switch ch.Type() {
+		case "{", "}", ",", "comment":
+			continue
+		case "dictionary_splat":
+			name := pythonDictSplatIdent(ch, content)
+			if name == "" {
+				return ""
+			}
+			et := elemOf["@nested."+name]
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				found = et
+				saw = true
+			} else if found != et {
+				return ""
+			}
+		case "pair":
+			val := ingest.ChildByField(ch, "value")
+			et := pythonNestedDictValueCollectionElem(val, content)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				found = et
+				saw = true
+			} else if found != et {
+				return ""
+			}
+		default:
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return found
+}
+
+// pythonNestedMappingCopyCallType recovers T from da.copy() / da.deepcopy() /
+// {**da}.copy() when the receiver is a nested mapping of list/set of T.
+// Zero-arg only; other receivers / arity fail closed.
+func pythonNestedMappingCopyCallType(call *grammar.Node, content []byte, elemOf map[string]string) string {
+	if call == nil || call.Type() != "call" || elemOf == nil {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "attribute" {
+		return ""
+	}
+	attr := ingest.ChildByField(fn, "attribute")
+	obj := ingest.ChildByField(fn, "object")
+	if attr == nil || obj == nil {
+		return ""
+	}
+	method := ingest.NodeText(attr, content)
+	if method != "copy" && method != "deepcopy" {
+		return ""
+	}
+	// copy.copy(x) module form is not a nested mapping copy of x's @nested leaf
+	// via attribute on the mapping — handled elsewhere for scalar elemOf.
+	if obj.Type() == "identifier" && ingest.NodeText(obj, content) == "copy" {
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) != 0 {
+		return ""
+	}
+	switch obj.Type() {
+	case "identifier":
+		return elemOf["@nested."+ingest.NodeText(obj, content)]
+	case "dictionary":
+		return pythonDictStarCopyNestedValueType(obj, content, elemOf)
+	default:
+		return ""
+	}
 }
 
 // pythonHomogeneousDictLiteralValueCtorElem recovers T from a dictionary
@@ -11540,15 +11666,30 @@ func pythonNestedCollectionIdentElemType(right *grammar.Node, content []byte, el
 // pythonNestedMappingItemsElemType recovers T from da.items() when da is a
 // mapping of list/set of T. Item values are list-of-T (not T); callers bind
 // elemOf[ga] = T for for k, ga in da.items(); ga[0].run().
+// Also {**da}.items() / da.copy().items() nested star-copy / copy receivers.
 func pythonNestedMappingItemsElemType(right *grammar.Node, content []byte, elemOf map[string]string) string {
 	if right == nil || right.Type() != "call" || elemOf == nil {
 		return ""
 	}
-	obj, method := pythonAttrCall(right, content)
-	if obj == "" || method != "items" {
+	fn := ingest.ChildByField(right, "function")
+	if fn == nil || fn.Type() != "attribute" {
 		return ""
 	}
-	return elemOf["@nested."+obj]
+	attr := ingest.ChildByField(fn, "attribute")
+	obj := ingest.ChildByField(fn, "object")
+	if attr == nil || obj == nil || ingest.NodeText(attr, content) != "items" {
+		return ""
+	}
+	switch obj.Type() {
+	case "identifier":
+		return elemOf["@nested."+ingest.NodeText(obj, content)]
+	case "dictionary":
+		return pythonDictStarCopyNestedValueType(obj, content, elemOf)
+	case "call":
+		return pythonNestedMappingCopyCallType(obj, content, elemOf)
+	default:
+		return ""
+	}
 }
 
 // pythonMappingNestedListElemType recovers T from mapping annotations whose value
@@ -11691,7 +11832,8 @@ func pythonDataAttrObjectIdent(n *grammar.Node, content []byte) string {
 // pythonNestedMappingSubscriptElemType recovers T from da["k"] when da is a
 // mapping of list/set of T (elemOf["@nested."+da]). The subscript expression
 // is a collection of T (not T itself). Also da.data["k"] when da is UserDict
-// of nested list values (underlying .data shares @nested leaf).
+// of nested list values (underlying .data shares @nested leaf),
+// {**da}["k"] star-copy, and da.copy()["k"] zero-arg copy.
 func pythonNestedMappingSubscriptElemType(sub *grammar.Node, content []byte, elemOf map[string]string) string {
 	if sub == nil || sub.Type() != "subscript" || elemOf == nil {
 		return ""
@@ -11720,6 +11862,12 @@ func pythonNestedMappingSubscriptElemType(sub *grammar.Node, content []byte, ele
 			return ""
 		}
 		return elemOf["@nested."+ingest.NodeText(obj, content)]
+	case "dictionary":
+		// {**da}["k"] / {**da, "j": [A()]}["j"] — nested star-copy.
+		return pythonDictStarCopyNestedValueType(val, content, elemOf)
+	case "call":
+		// da.copy()["k"] / {**da}.copy()["k"] — zero-arg nested mapping copy.
+		return pythonNestedMappingCopyCallType(val, content, elemOf)
 	default:
 		return ""
 	}
@@ -11728,15 +11876,30 @@ func pythonNestedMappingSubscriptElemType(sub *grammar.Node, content []byte, ele
 // pythonNestedMappingValuesElemType recovers T from da.values() when da is a
 // mapping of list/set of T. Values yield list-of-T (not T); callers bind
 // elemOf[ga] = T for for ga in da.values(); ga[0].run().
+// Also {**da}.values() / da.copy().values() nested star-copy / copy receivers.
 func pythonNestedMappingValuesElemType(right *grammar.Node, content []byte, elemOf map[string]string) string {
 	if right == nil || right.Type() != "call" || elemOf == nil {
 		return ""
 	}
-	obj, method := pythonAttrCall(right, content)
-	if obj == "" || method != "values" {
+	fn := ingest.ChildByField(right, "function")
+	if fn == nil || fn.Type() != "attribute" {
 		return ""
 	}
-	return elemOf["@nested."+obj]
+	attr := ingest.ChildByField(fn, "attribute")
+	obj := ingest.ChildByField(fn, "object")
+	if attr == nil || obj == nil || ingest.NodeText(attr, content) != "values" {
+		return ""
+	}
+	switch obj.Type() {
+	case "identifier":
+		return elemOf["@nested."+ingest.NodeText(obj, content)]
+	case "dictionary":
+		return pythonDictStarCopyNestedValueType(obj, content, elemOf)
+	case "call":
+		return pythonNestedMappingCopyCallType(obj, content, elemOf)
+	default:
+		return ""
+	}
 }
 
 // pythonBindMatchSubjectTypeCaptures binds match patterns that capture the whole
