@@ -1878,6 +1878,10 @@ type rangeSourceInfo struct {
 	// type. Used so new(AA) peels under foreign same-leaf while new(AS) for a
 	// named slice does not (result is *[]T, not indexable without deref).
 	isArray bool
+	// typeName is set for non-collection struct fields that yield a named type
+	// (embedded SA in type WA struct { SA }) so nested wa.SA.Items peels under
+	// foreign same-leaf. Empty for ordinary collection/func field entries.
+	typeName string
 }
 
 // collectResultParameterBindings records named result params from a
@@ -2529,8 +2533,30 @@ func sameFileStructNamedFuncFields(root *grammar.Node, content []byte) map[strin
 		}
 	}
 	walk(root)
+	// Register embedded field names as type-yielding intermediates so nested
+	// explicit paths peel: type WA struct { SA } → wa.SA.Items (SA has Items).
+	// Direct named fields win over embed typeName entries.
+	for recv, embList := range embeds {
+		dst := out[recv]
+		if dst == nil {
+			dst = map[string]rangeSourceInfo{}
+		}
+		for _, emb := range embList {
+			if emb == "" {
+				continue
+			}
+			if _, exists := dst[emb]; exists {
+				continue
+			}
+			dst[emb] = rangeSourceInfo{typeName: emb}
+		}
+		if len(dst) > 0 {
+			out[recv] = dst
+		}
+	}
 	// Promote embedded struct fields fixed-point (WA embeds SA → wa.Items peels).
 	// Direct fields win over promoted; cycles / unresolved embeds fail closed.
+	// typeName-only embed entries promote too (XA embeds WA embeds SA → xa.SA).
 	for changed := true; changed; {
 		changed = false
 		for recv, embList := range embeds {
@@ -2545,7 +2571,7 @@ func sameFileStructNamedFuncFields(root *grammar.Node, content []byte) map[strin
 					continue
 				}
 				for fname, info := range src {
-					if info.elemType == "" {
+					if info.elemType == "" && info.typeName == "" {
 						continue
 					}
 					if _, exists := dst[fname]; exists {
@@ -2601,6 +2627,7 @@ func callReturningFuncCollection(n *grammar.Node, content []byte, funcRetFunc ma
 // xa.Fa / sa.Items and xa/sa has a known same-file struct type with:
 //   - function-typed field Fa (type Box struct { Fa FA } with FA func() []*A)
 //   - collection field Items (type SA struct { Items []*A } / Items AS / M map[K]*A)
+//   - nested explicit embed path wa.SA.Items (type WA struct { SA })
 //
 // Used for xa.Fa() call peels, sa.Items[0] index peels, and short-var
 // items := sa.Items / fa := xa.Fa under foreign same-leaf methods.
@@ -2623,14 +2650,13 @@ func selectorNamedFuncField(n *grammar.Node, content []byte, valueType func(stri
 	}
 	operand := ingest.ChildByField(n, "operand")
 	field := ingest.ChildByField(n, "field")
-	if operand == nil || field == nil || operand.Type() != "identifier" {
+	if operand == nil || field == nil {
 		return rangeSourceInfo{}, false
 	}
-	recvType, ok := valueType(ingest.NodeText(operand, content), at)
+	recvType, ok := selectorOperandStructType(operand, content, valueType, structFields, at)
 	if !ok || recvType == "" {
 		return rangeSourceInfo{}, false
 	}
-	recvType = strings.TrimPrefix(recvType, "*")
 	fields := structFields[recvType]
 	if len(fields) == 0 {
 		return rangeSourceInfo{}, false
@@ -2640,6 +2666,101 @@ func selectorNamedFuncField(n *grammar.Node, content []byte, valueType func(stri
 		return rangeSourceInfo{}, false
 	}
 	return info, true
+}
+
+// selectorOperandStructType resolves the named struct type of a selector
+// operand: bare sa / (*sa) / wa.SA (embed intermediate with typeName).
+// Used so wa.SA.Items and (*sa).Items peel under foreign same-leaf methods.
+func selectorOperandStructType(operand *grammar.Node, content []byte, valueType func(string, uint32) (string, bool), structFields map[string]map[string]rangeSourceInfo, at uint32) (string, bool) {
+	operand = peelSelectorOperand(operand, content)
+	if operand == nil {
+		return "", false
+	}
+	if operand.Type() == "identifier" {
+		if valueType == nil {
+			return "", false
+		}
+		recvType, ok := valueType(ingest.NodeText(operand, content), at)
+		if !ok || recvType == "" {
+			return "", false
+		}
+		return strings.TrimPrefix(recvType, "*"), true
+	}
+	// Nested: wa.SA — field SA is an embed (typeName) or promoted embed path.
+	if operand.Type() != "selector_expression" {
+		return "", false
+	}
+	base := ingest.ChildByField(operand, "operand")
+	field := ingest.ChildByField(operand, "field")
+	if base == nil || field == nil {
+		return "", false
+	}
+	baseType, ok := selectorOperandStructType(base, content, valueType, structFields, at)
+	if !ok || baseType == "" {
+		return "", false
+	}
+	fields := structFields[baseType]
+	if len(fields) == 0 {
+		return "", false
+	}
+	info, ok := fields[ingest.NodeText(field, content)]
+	if !ok || info.typeName == "" {
+		return "", false
+	}
+	return info.typeName, true
+}
+
+// peelSelectorOperand peels parenthesized and pointer-deref unary wrappers
+// from a selector operand: (x) / (*x) / (*(*x)) → x. Used for pointer-to-
+// interface (*ga).GetAS and (*sa).Items under foreign same-leaf methods.
+func peelSelectorOperand(n *grammar.Node, content []byte) *grammar.Node {
+	for n != nil {
+		switch n.Type() {
+		case "parenthesized_expression":
+			var inner *grammar.Node
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch == nil || ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+			n = inner
+		case "unary_expression":
+			star := false
+			var inner *grammar.Node
+			if opField := ingest.ChildByField(n, "operator"); opField != nil && ingest.NodeText(opField, content) == "*" {
+				star = true
+			}
+			if opField := ingest.ChildByField(n, "operand"); opField != nil {
+				inner = opField
+			}
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch == nil {
+					continue
+				}
+				if ch.Type() == "*" || (ch.Type() == "unary_operator" && ingest.NodeText(ch, content) == "*") {
+					star = true
+					continue
+				}
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				if inner == nil {
+					inner = ch
+				}
+			}
+			if !star || inner == nil {
+				return nil
+			}
+			n = inner
+		default:
+			return n
+		}
+	}
+	return nil
 }
 
 // collectStructCollectionAndFuncFields walks a struct_type for named fields
@@ -3172,6 +3293,7 @@ func sameFileIfaceMethodFuncCollectionResults(root *grammar.Node, content []byte
 // selectorIfaceMethod reports collection element info when n is a selector
 // g.GetX or a call g.GetX() whose receiver is typed as a same-file interface
 // with method GetX registered in methods (iface → method → info).
+// Also peels (*ga).GetX / (*ga).GetX() for pointer-to-interface params.
 func selectorIfaceMethod(n *grammar.Node, content []byte, valueType func(string, uint32) (string, bool), methods map[string]map[string]rangeSourceInfo, at uint32) (rangeSourceInfo, bool) {
 	if n == nil || valueType == nil || len(methods) == 0 {
 		return rangeSourceInfo{}, false
@@ -3196,7 +3318,7 @@ func selectorIfaceMethod(n *grammar.Node, content []byte, valueType func(string,
 	if sel.Type() != "selector_expression" {
 		return rangeSourceInfo{}, false
 	}
-	operand := ingest.ChildByField(sel, "operand")
+	operand := peelSelectorOperand(ingest.ChildByField(sel, "operand"), content)
 	field := ingest.ChildByField(sel, "field")
 	if operand == nil || field == nil || operand.Type() != "identifier" {
 		return rangeSourceInfo{}, false
@@ -4291,7 +4413,8 @@ func collectionInfosFromIfaceMethodCall(n *grammar.Node, content []byte, valueTy
 	if fn == nil || fn.Type() != "selector_expression" {
 		return nil
 	}
-	operand := ingest.ChildByField(fn, "operand")
+	// (*ga).GetAS() multi-result short-var — same peel as selectorIfaceMethod.
+	operand := peelSelectorOperand(ingest.ChildByField(fn, "operand"), content)
 	field := ingest.ChildByField(fn, "field")
 	if operand == nil || field == nil || operand.Type() != "identifier" {
 		return nil
@@ -5653,6 +5776,10 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 					} else if info, ok := selectorIfaceMethod(exprs[i], content, valueType, ifaceFunc, n.StartByte()); ok {
 						// var fa = ga.GetFA() with interface method GetFA() FA.
 						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
+					} else if info, ok := selectorIfaceMethod(exprs[i], content, valueType, ifaceColl, n.StartByte()); ok {
+						// var fa = sa.Get method value of Get() []*A / Get() AS —
+						// method value type is func() coll; fa() peels to elem.
+						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
 					}
 				}
 			}
@@ -5661,6 +5788,7 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 			// as, err := getA() with getA() ([]*A, error) — multi-return slots.
 			// fa := func() []*A { … } / fa, fb := func() []*A{…}, func() []*B{…}.
 			// fa := getFA() / fa := xa.Fa — named func type returns / struct fields.
+			// fa := sa.Get — method value of collection-returning method.
 			names := identListNames(ingest.ChildByField(n, "left"), content)
 			right := ingest.ChildByField(n, "right")
 			if bindMultiReturnCall(n.StartByte(), names, right) {
@@ -5685,6 +5813,9 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
 				} else if info, ok := selectorIfaceMethod(exprs[i], content, valueType, ifaceFunc, n.StartByte()); ok {
 					// fa := ga.GetFA() with interface method GetFA() FA.
+					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
+				} else if info, ok := selectorIfaceMethod(exprs[i], content, valueType, ifaceColl, n.StartByte()); ok {
+					// fa := sa.Get method value of Get() []*A / Get() AS.
 					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
 				}
 			}
