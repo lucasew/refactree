@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/lucasew/refactree/pkg/ingest"
@@ -1894,10 +1895,22 @@ func collectResultParameterBindings(decl *grammar.Node, content []byte, bindings
 	collectParameterListBindings(result, content, decl.StartByte(), decl.EndByte(), bindings, rangeSrc, namedColl)
 }
 
+// inlineIfaceTypeKey is a synthetic type name for params typed as an inline
+// interface{ … } so ga.GetAS peels can look up methods without a named type.
+// Keyed by the interface_type node's start byte (unique within a file).
+func inlineIfaceTypeKey(ifaceType *grammar.Node) string {
+	if ifaceType == nil {
+		return ""
+	}
+	return "·inlineiface·" + strconv.FormatUint(uint64(ifaceType.StartByte()), 10)
+}
+
 // collectParameterListBindings records concrete-typed params (a *A, a, b *A)
 // and container params usable as range sources (as []*A, m map[K]*B, c ...T).
 // namedColl maps same-file type names (type AS []*A) to collection element
 // info so params typed as AS / *AS / AM peel under foreign same-leaf (may be nil).
+// Inline interface params (ga interface{ GetAS() AS }) bind a synthetic type key
+// matching sameFileIfaceMethodCollectionResults registration.
 func collectParameterListBindings(paramList *grammar.Node, content []byte, scopeStart, scopeEnd uint32, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo, namedColl map[string]rangeSourceInfo) {
 	if paramList == nil {
 		return
@@ -1917,6 +1930,16 @@ func collectParameterListBindings(paramList *grammar.Node, content []byte, scope
 						continue
 					}
 					*bindings = append(*bindings, identTypeBinding{scopeStart, scopeEnd, name, typ})
+				}
+			} else if typeN != nil && typeN.Type() == "interface_type" {
+				// ga interface{ GetAS() AS } — synthetic key for method peels.
+				if key := inlineIfaceTypeKey(typeN); key != "" {
+					for _, name := range names {
+						if name == "" || name == "_" {
+							continue
+						}
+						*bindings = append(*bindings, identTypeBinding{scopeStart, scopeEnd, name, key})
+					}
 				}
 			}
 			if info, ok := rangeSourceFromTypeNode(typeN, content); ok {
@@ -2628,16 +2651,52 @@ func collectStructNamedFuncFields(structType *grammar.Node, content []byte, name
 //	type GA interface { GetAM() AM }           // map
 //	func (s SA) GetAS() AS                     // concrete method
 //	type GA = GA0                              // alias of interface with methods
+//	func Use(ga interface{ GetAS() AS })       // inline param (synthetic key)
 //
-// Multi-result methods (GetAS() (AS, error)) fail closed. Used so ga.GetAS()[0].M,
-// sa.GetAS()[0].M, and as := ga.GetAS() resolve under foreign same-leaf methods.
-func sameFileIfaceMethodCollectionResults(root *grammar.Node, content []byte) map[string]map[string]rangeSourceInfo {
+// multi maps multi-result methods (GetAS() (AS, error)) → positional slots for
+// short-var as, err := ga.GetAS(). Single-result stays in the first map for
+// ga.GetAS()[0].M / as := ga.GetAS() peels under foreign same-leaf methods.
+func sameFileIfaceMethodCollectionResults(root *grammar.Node, content []byte) (map[string]map[string]rangeSourceInfo, map[string]map[string][]rangeSourceInfo) {
 	out := map[string]map[string]rangeSourceInfo{}
+	multi := map[string]map[string][]rangeSourceInfo{}
 	if root == nil {
-		return out
+		return out, multi
 	}
 	namedColl := sameFileNamedCollectionResults(root, content)
-	edges := map[string]string{} // type GA = GA0 / type GA GA0
+	edges := map[string]string{}     // type GA = GA0 / type GA GA0
+	embeds := map[string][]string{} // type HA interface { GA } — embedded ifaces
+	register := func(recv, name string, infos []rangeSourceInfo) {
+		if recv == "" || name == "" || name == "_" || len(infos) == 0 {
+			return
+		}
+		if len(infos) == 1 {
+			if infos[0].elemType == "" {
+				return
+			}
+			if out[recv] == nil {
+				out[recv] = map[string]rangeSourceInfo{}
+			}
+			out[recv][name] = infos[0]
+			return
+		}
+		// Multi-result: keep positional slots when any is a collection.
+		any := false
+		for _, info := range infos {
+			if info.elemType != "" {
+				any = true
+				break
+			}
+		}
+		if !any {
+			return
+		}
+		if multi[recv] == nil {
+			multi[recv] = map[string][]rangeSourceInfo{}
+		}
+		cp := make([]rangeSourceInfo, len(infos))
+		copy(cp, infos)
+		multi[recv][name] = cp
+	}
 	var walk func(n *grammar.Node, ifaceName string, inIface bool)
 	walk = func(n *grammar.Node, ifaceName string, inIface bool) {
 		if n == nil {
@@ -2683,37 +2742,35 @@ func sameFileIfaceMethodCollectionResults(root *grammar.Node, content []byte) ma
 					}
 				}
 			}
+		case "parameter_declaration":
+			// ga interface{ GetAS() AS } — synthetic key matches param binding.
+			if t := ingest.ChildByField(n, "type"); t != nil && t.Type() == "interface_type" {
+				if key := inlineIfaceTypeKey(t); key != "" {
+					nextName = key
+					nextIface = true
+				}
+			}
 		case "method_declaration":
-			// Concrete method: func (s SA) GetAS() AS
+			// Concrete method: func (s SA) GetAS() AS / GetAS() (AS, error)
 			recv := methodDeclReceiverType(n, content)
 			nameN := ingest.ChildByField(n, "name")
 			if recv != "" && nameN != nil {
 				name := ingest.NodeText(nameN, content)
-				if name != "" && name != "_" {
-					infos := functionCollectionResults(n, content, namedColl)
-					if len(infos) == 1 && infos[0].elemType != "" {
-						if out[recv] == nil {
-							out[recv] = map[string]rangeSourceInfo{}
-						}
-						out[recv][name] = infos[0]
-					}
-				}
+				register(recv, name, functionCollectionResults(n, content, namedColl))
 			}
 		}
 		if inIface && (n.Type() == "method_elem" || n.Type() == "field_declaration") {
 			nameN := ingest.ChildByField(n, "name")
 			if nameN != nil && ifaceName != "" {
 				name := ingest.NodeText(nameN, content)
-				if name != "" && name != "_" {
-					// Single collection result only (multi-result fail closed).
-					infos := functionCollectionResults(n, content, namedColl)
-					if len(infos) == 1 && infos[0].elemType != "" {
-						if out[ifaceName] == nil {
-							out[ifaceName] = map[string]rangeSourceInfo{}
-						}
-						out[ifaceName][name] = infos[0]
-					}
-				}
+				register(ifaceName, name, functionCollectionResults(n, content, namedColl))
+			}
+		}
+		// Embedded interface: type HA interface { GA } — type_elem with a single
+		// type_identifier (unions have multiple; ~T is negated_type).
+		if inIface && n.Type() == "type_elem" && ifaceName != "" {
+			if tgt := singleEmbeddedIfaceName(n, content); tgt != "" && tgt != ifaceName {
+				embeds[ifaceName] = appendUniqueString(embeds[ifaceName], tgt)
 			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -2723,28 +2780,152 @@ func sameFileIfaceMethodCollectionResults(root *grammar.Node, content []byte) ma
 	walk(root, "", false)
 	// Copy methods along alias/defined-type edges (type GA = GA0) so params typed
 	// as GA peel the base interface's methods. Fixed-point; cycles fail closed.
-	for round := 0; round < len(edges)+1; round++ {
-		progress := false
-		for name, tgt := range edges {
-			if _, has := out[name]; has {
-				continue
+	// Single-result and multi-result maps are copied independently.
+	copyEdges := func(dst map[string]map[string]rangeSourceInfo) {
+		for round := 0; round < len(edges)+1; round++ {
+			progress := false
+			for name, tgt := range edges {
+				if _, has := dst[name]; has {
+					continue
+				}
+				base, ok := dst[tgt]
+				if !ok || len(base) == 0 {
+					continue
+				}
+				cp := make(map[string]rangeSourceInfo, len(base))
+				for k, v := range base {
+					cp[k] = v
+				}
+				dst[name] = cp
+				progress = true
 			}
-			base, ok := out[tgt]
-			if !ok || len(base) == 0 {
-				continue
+			if !progress {
+				break
 			}
-			cp := make(map[string]rangeSourceInfo, len(base))
-			for k, v := range base {
-				cp[k] = v
-			}
-			out[name] = cp
-			progress = true
-		}
-		if !progress {
-			break
 		}
 	}
-	return out
+	copyMultiEdges := func(dst map[string]map[string][]rangeSourceInfo) {
+		for round := 0; round < len(edges)+1; round++ {
+			progress := false
+			for name, tgt := range edges {
+				if _, has := dst[name]; has {
+					continue
+				}
+				base, ok := dst[tgt]
+				if !ok || len(base) == 0 {
+					continue
+				}
+				cp := make(map[string][]rangeSourceInfo, len(base))
+				for k, v := range base {
+					slot := make([]rangeSourceInfo, len(v))
+					copy(slot, v)
+					cp[k] = slot
+				}
+				dst[name] = cp
+				progress = true
+			}
+			if !progress {
+				break
+			}
+		}
+	}
+	// Merge promoted methods from embedded interfaces (HA embeds GA). Merge
+	// (not replace) so HA's own methods stay; fixed-point for embed chains.
+	mergeEmbeds := func(dst map[string]map[string]rangeSourceInfo) {
+		for round := 0; round < len(embeds)+1; round++ {
+			progress := false
+			for name, bases := range embeds {
+				for _, base := range bases {
+					src, ok := dst[base]
+					if !ok || len(src) == 0 {
+						continue
+					}
+					if dst[name] == nil {
+						dst[name] = map[string]rangeSourceInfo{}
+					}
+					for k, v := range src {
+						if _, has := dst[name][k]; has {
+							continue
+						}
+						dst[name][k] = v
+						progress = true
+					}
+				}
+			}
+			if !progress {
+				break
+			}
+		}
+	}
+	mergeMultiEmbeds := func(dst map[string]map[string][]rangeSourceInfo) {
+		for round := 0; round < len(embeds)+1; round++ {
+			progress := false
+			for name, bases := range embeds {
+				for _, base := range bases {
+					src, ok := dst[base]
+					if !ok || len(src) == 0 {
+						continue
+					}
+					if dst[name] == nil {
+						dst[name] = map[string][]rangeSourceInfo{}
+					}
+					for k, v := range src {
+						if _, has := dst[name][k]; has {
+							continue
+						}
+						slot := make([]rangeSourceInfo, len(v))
+						copy(slot, v)
+						dst[name][k] = slot
+						progress = true
+					}
+				}
+			}
+			if !progress {
+				break
+			}
+		}
+	}
+	copyEdges(out)
+	copyMultiEdges(multi)
+	mergeEmbeds(out)
+	mergeMultiEmbeds(multi)
+	return out, multi
+}
+
+// singleEmbeddedIfaceName reports the embedded interface name when n is a
+// type_elem with exactly one type_identifier child (type HA interface { GA }).
+// Unions (int | string) and approximations (~T) return empty.
+func singleEmbeddedIfaceName(typeElem *grammar.Node, content []byte) string {
+	if typeElem == nil || typeElem.Type() != "type_elem" {
+		return ""
+	}
+	var only *grammar.Node
+	count := 0
+	for i := uint32(0); i < typeElem.ChildCount(); i++ {
+		ch := typeElem.Child(i)
+		if ch == nil || !ch.IsNamed() {
+			continue
+		}
+		count++
+		only = ch
+	}
+	if count != 1 || only == nil || only.Type() != "type_identifier" {
+		return ""
+	}
+	return ingest.NodeText(only, content)
+}
+
+// appendUniqueString appends s to xs when not already present.
+func appendUniqueString(xs []string, s string) []string {
+	if s == "" {
+		return xs
+	}
+	for _, x := range xs {
+		if x == s {
+			return xs
+		}
+	}
+	return append(xs, s)
 }
 
 // sameFileIfaceMethodFuncCollectionResults maps same-file receiver type →
@@ -2754,6 +2935,7 @@ func sameFileIfaceMethodCollectionResults(root *grammar.Node, content []byte) ma
 //	type GA interface { GetFA() func() []*A }   // inline
 //	func (s SA) GetFA() FA                      // concrete method
 //	type GA = GA0                               // alias of interface with methods
+//	func Use(ga interface{ GetFA() FA })        // inline param (synthetic key)
 //
 // Multi-result methods fail closed. Used so ga.GetFA()()[0].M and
 // fa := ga.GetFA(); fa()[0].M resolve under foreign same-leaf methods.
@@ -2764,6 +2946,7 @@ func sameFileIfaceMethodFuncCollectionResults(root *grammar.Node, content []byte
 	}
 	namedFunc := sameFileNamedFuncCollectionResults(root, content)
 	edges := map[string]string{}
+	embeds := map[string][]string{}
 	var walk func(n *grammar.Node, ifaceName string, inIface bool)
 	walk = func(n *grammar.Node, ifaceName string, inIface bool) {
 		if n == nil {
@@ -2807,6 +2990,14 @@ func sameFileIfaceMethodFuncCollectionResults(root *grammar.Node, content []byte
 					}
 				}
 			}
+		case "parameter_declaration":
+			// ga interface{ GetFA() FA } — synthetic key matches param binding.
+			if t := ingest.ChildByField(n, "type"); t != nil && t.Type() == "interface_type" {
+				if key := inlineIfaceTypeKey(t); key != "" {
+					nextName = key
+					nextIface = true
+				}
+			}
 		case "method_declaration":
 			recv := methodDeclReceiverType(n, content)
 			nameN := ingest.ChildByField(n, "name")
@@ -2836,6 +3027,11 @@ func sameFileIfaceMethodFuncCollectionResults(root *grammar.Node, content []byte
 				}
 			}
 		}
+		if inIface && n.Type() == "type_elem" && ifaceName != "" {
+			if tgt := singleEmbeddedIfaceName(n, content); tgt != "" && tgt != ifaceName {
+				embeds[ifaceName] = appendUniqueString(embeds[ifaceName], tgt)
+			}
+		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i), nextName, nextIface)
 		}
@@ -2857,6 +3053,31 @@ func sameFileIfaceMethodFuncCollectionResults(root *grammar.Node, content []byte
 			}
 			out[name] = cp
 			progress = true
+		}
+		if !progress {
+			break
+		}
+	}
+	// Merge promoted methods from embedded interfaces (HA embeds GA).
+	for round := 0; round < len(embeds)+1; round++ {
+		progress := false
+		for name, bases := range embeds {
+			for _, base := range bases {
+				src, ok := out[base]
+				if !ok || len(src) == 0 {
+					continue
+				}
+				if out[name] == nil {
+					out[name] = map[string]rangeSourceInfo{}
+				}
+				for k, v := range src {
+					if _, has := out[name][k]; has {
+						continue
+					}
+					out[name][k] = v
+					progress = true
+				}
+			}
 		}
 		if !progress {
 			break
@@ -3929,6 +4150,58 @@ func collectionInfosFromCallResults(n *grammar.Node, content []byte, funcColl ma
 	return out
 }
 
+// collectionInfosFromIfaceMethodCall returns positional collection infos when
+// n is ga.GetAS() / sa.GetAS() (or expression_list of one such call) and the
+// receiver type has a multi-result collection method registered in multi.
+// Used for as, err := ga.GetAS() with GetAS() (AS, error) under foreign same-leaf.
+func collectionInfosFromIfaceMethodCall(n *grammar.Node, content []byte, valueType func(string, uint32) (string, bool), multi map[string]map[string][]rangeSourceInfo, at uint32) []rangeSourceInfo {
+	if n == nil || valueType == nil || len(multi) == 0 {
+		return nil
+	}
+	if n.Type() == "expression_list" {
+		var exprs []*grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			exprs = append(exprs, c)
+		}
+		if len(exprs) != 1 {
+			return nil
+		}
+		n = exprs[0]
+	}
+	if n.Type() != "call_expression" {
+		return nil
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil || fn.Type() != "selector_expression" {
+		return nil
+	}
+	operand := ingest.ChildByField(fn, "operand")
+	field := ingest.ChildByField(fn, "field")
+	if operand == nil || field == nil || operand.Type() != "identifier" {
+		return nil
+	}
+	recvType, ok := valueType(ingest.NodeText(operand, content), at)
+	if !ok || recvType == "" {
+		return nil
+	}
+	recvType = strings.TrimPrefix(recvType, "*")
+	ms := multi[recvType]
+	if len(ms) == 0 {
+		return nil
+	}
+	infos := ms[ingest.NodeText(field, content)]
+	if len(infos) == 0 {
+		return nil
+	}
+	out := make([]rangeSourceInfo, len(infos))
+	copy(out, infos)
+	return out
+}
+
 // functionResultTypes returns positional concrete type names from a
 // function_declaration's result (parameter_list or single type).
 func functionResultTypes(decl *grammar.Node, content []byte) []string {
@@ -4510,7 +4783,7 @@ func findComplexOperandSelectorEdits(file string, content []byte, oldLeaf, newLe
 	namedColl := sameFileNamedCollectionResults(pf.Root, content)
 	funcRetFunc := sameFileFuncReturningFuncCollection(pf.Root, content)
 	structFields := sameFileStructNamedFuncFields(pf.Root, content)
-	ifaceColl := sameFileIfaceMethodCollectionResults(pf.Root, content)
+	ifaceColl, _ := sameFileIfaceMethodCollectionResults(pf.Root, content)
 	ifaceFunc := sameFileIfaceMethodFuncCollectionResults(pf.Root, content)
 	indexElemType := collectionIndexElemTypeFunc(pf.Root, content, funcColl)
 	// new(T).M / getA().M / (*pa).M under foreign same-leaf methods.
@@ -4657,7 +4930,8 @@ func collectionIndexElemTypeFunc(root *grammar.Node, content []byte, funcColl ma
 	valueType := goIdentTypeAtFunc(root, content, sameFileFuncResultTypes(root, content))
 	// Interface methods returning named collections / func types:
 	// ga.GetAS() AS / ga.GetFA() FA under foreign same-leaf.
-	ifaceColl := sameFileIfaceMethodCollectionResults(root, content)
+	// Multi-result GetAS() (AS, error) for as, err := ga.GetAS() short-var.
+	ifaceColl, ifaceMulti := sameFileIfaceMethodCollectionResults(root, content)
 	ifaceFunc := sameFileIfaceMethodFuncCollectionResults(root, content)
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
@@ -4703,7 +4977,7 @@ func collectionIndexElemTypeFunc(root *grammar.Node, content []byte, funcColl ma
 				}
 			}
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalCollectionElemBindings(body, content, &bindings, funcColl, namedFunc, namedColl, funcRetFunc, structFields, valueType, ifaceColl, ifaceFunc)
+				collectLocalCollectionElemBindings(body, content, &bindings, funcColl, namedFunc, namedColl, funcRetFunc, structFields, valueType, ifaceColl, ifaceFunc, ifaceMulti)
 			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -5103,7 +5377,7 @@ func rangeSourceFromNewArrayCall(n *grammar.Node, content []byte, namedColl map[
 // namedFunc maps same-file type names (type FA func() []*A) to collection
 // result element info (may be nil). namedColl maps type AS []*A / AM map[K]*A
 // (may be nil).
-func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bindings *[]identTypeBinding, funcColl map[string][]rangeSourceInfo, namedFunc map[string]rangeSourceInfo, namedColl map[string]rangeSourceInfo, funcRetFunc map[string]rangeSourceInfo, structFields map[string]map[string]rangeSourceInfo, valueType func(string, uint32) (string, bool), ifaceColl, ifaceFunc map[string]map[string]rangeSourceInfo) {
+func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bindings *[]identTypeBinding, funcColl map[string][]rangeSourceInfo, namedFunc map[string]rangeSourceInfo, namedColl map[string]rangeSourceInfo, funcRetFunc map[string]rangeSourceInfo, structFields map[string]map[string]rangeSourceInfo, valueType func(string, uint32) (string, bool), ifaceColl, ifaceFunc map[string]map[string]rangeSourceInfo, ifaceMulti map[string]map[string][]rangeSourceInfo) {
 	if body == nil {
 		return
 	}
@@ -5162,10 +5436,15 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 		return out
 	}
 	// Bind names from a multi-return same-file collection call
-	// (as, err := getA() / var as, err = getA()). Returns true when the RHS
-	// was such a call (even if no collection slot bound — skip expr walk).
+	// (as, err := getA() / var as, err = getA() / as, err := ga.GetAS()).
+	// Returns true when the RHS was such a call (even if no collection slot
+	// bound — skip expr walk).
 	bindMultiReturnCall := func(start uint32, names []string, right *grammar.Node) bool {
 		infos := collectionInfosFromCallResults(right, content, funcColl)
+		if len(infos) == 0 {
+			// as, err := ga.GetAS() / sa.GetAS() with GetAS() (AS, error).
+			infos = collectionInfosFromIfaceMethodCall(right, content, valueType, ifaceMulti, start)
+		}
 		if len(infos) == 0 {
 			return false
 		}
