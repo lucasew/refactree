@@ -5254,9 +5254,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						if len(targets) >= 2 && ourReceivers[vt] {
 							out[targets[1]] = true
 						}
-					} else if et := pythonTeeElemType(right, content, elemOf, egElems, typeOf); et != "" {
+					} else if et := pythonTeeElemType(right, content, elemOf, egElems, typeOf, funcReturns, fieldOf); et != "" {
 						// it1, it2 = tee(items) / itertools.tee(items[, n]) —
 						// each target is an iterator of items elements (like groupby's g).
+						// Also tee([ba.get()]) method-return object collections under
+						// foreign same-leaf (Class/typed-local peels via iterable path).
 						// Do not put targets into out (iterators, not elements).
 						// Foreign element types too — shadow prior same-name collections.
 						for _, name := range targets {
@@ -12364,39 +12366,57 @@ func pythonNextGroupbyGroupSubElemType(sub *grammar.Node, content []byte, elemOf
 // Not registered in pythonIterableElemType — bare `for x in tee(xs)` yields
 // iterators, not elements. Callers bind unpack targets into elemOf so nested
 // `for a in it1` / next(it1) / it1.__next__() type.
-func pythonTeeElemType(right *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
-	if right == nil || right.Type() != "call" {
+// Class()/typed-local peels via pythonIterableElemType; method-return object
+// iterables (tee([ba.get()])) via pythonObjectIterableElemType under foreign
+// same-leaf when funcReturns is provided.
+func pythonTeeElemType(right *grammar.Node, content []byte, elemOf, egElems, typeOf, funcReturns, fieldOf map[string]string) string {
+	arg := pythonTeeFirstArg(right, content)
+	if arg == nil {
 		return ""
+	}
+	if et := pythonIterableElemType(arg, content, elemOf, egElems, typeOf); et != "" {
+		return et
+	}
+	// it1, it2 = tee([ba.get()]) / itertools.tee([ba.get()][, n]) — method-return
+	// object collection under foreign same-leaf (Class peels above).
+	return pythonObjectIterableElemType(arg, content, funcReturns, typeOf, fieldOf)
+}
+
+// pythonTeeFirstArg returns the 1st positional arg of tee(...) / itertools.tee(...)
+// or nil when the call is not a resolvable bare/itertools-qualified tee form.
+func pythonTeeFirstArg(right *grammar.Node, content []byte) *grammar.Node {
+	if right == nil || right.Type() != "call" {
+		return nil
 	}
 	fn := ingest.ChildByField(right, "function")
 	if fn == nil {
-		return ""
+		return nil
 	}
 	switch fn.Type() {
 	case "identifier":
 		if ingest.NodeText(fn, content) != "tee" {
-			return ""
+			return nil
 		}
 	case "attribute":
 		objN := ingest.ChildByField(fn, "object")
 		attrN := ingest.ChildByField(fn, "attribute")
 		if objN == nil || attrN == nil || objN.Type() != "identifier" {
-			return ""
+			return nil
 		}
 		if ingest.NodeText(objN, content) != "itertools" {
-			return ""
+			return nil
 		}
 		if ingest.NodeText(attrN, content) != "tee" {
-			return ""
+			return nil
 		}
 	default:
-		return ""
+		return nil
 	}
 	args, ok := pythonCallPositionalArgNodes(right)
 	if !ok || len(args) == 0 {
-		return ""
+		return nil
 	}
-	return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
+	return args[0]
 }
 
 // pythonEnumerateZipTargetTypes returns per-unpack-target element types for
