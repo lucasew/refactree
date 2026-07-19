@@ -4833,6 +4833,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 									// — object-dict merge value under foreign same-leaf (inline
 									// already peels; Class merge peels via pythonIterableElemType).
 									out[lname] = true
+								} else if et := pythonMappingProxyObjectValueType(obj, content, elemOf, funcReturns, typeOf, fieldOf); ourReceivers[et] {
+									// a = MappingProxyType({"k": ba.get()}).get("k") /
+									// types.MappingProxyType({"k": ba.get()}).get("k") —
+									// proxy of object-dict value under foreign same-leaf (inline
+									// already peels; Class proxy peels via pythonIterableElemType).
+									out[lname] = true
 								} else if et := pythonHomogeneousDictValueCtorElem(obj, content); ourReceivers[et] {
 									// a = {"k": A()}.get("k") / dict(k=A()).get("k")
 									out[lname] = true
@@ -5706,6 +5712,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								out[lname] = true
 							} else if et := pythonHomogeneousObjectDictValue(obj, content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
 								// a := {"k": ba.get()}.get("k") / dict(k=ba.get()).get("k")
+								out[lname] = true
+							} else if et := pythonMappingProxyObjectValueType(obj, content, elemOf, funcReturns, typeOf, fieldOf); ourReceivers[et] {
+								// a := MappingProxyType({"k": ba.get()}).get("k") —
+								// proxy of object-dict value under foreign same-leaf.
 								out[lname] = true
 							} else if et := pythonHomogeneousDictValueCtorElem(obj, content); ourReceivers[et] {
 								// a := {"k": A()}.get("k") / dict(k=A()).get("k")
@@ -13960,6 +13970,12 @@ func pythonObjectSubscriptElemType(sub *grammar.Node, content []byte, funcReturn
 	}
 	// {"k": ba.get()}["k"] / dict(k=ba.get())["k"] — object-dict value peel.
 	if et := pythonHomogeneousObjectDictValue(val, content, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
+	// MappingProxyType({"k": ba.get()})["k"] / types.MappingProxyType(...)["k"] —
+	// proxy of object-dict value (inline already peels via pythonShouldRenameAttr;
+	// assigned form needs typeOf bind under foreign same-leaf).
+	if et := pythonMappingProxyObjectValueType(val, content, nil, funcReturns, typeOf, fieldOf); et != "" {
 		return et
 	}
 	// ({"k": ba.get()} | {})["k"] / ({} | {"k": ba.get()})["k"] — object-dict

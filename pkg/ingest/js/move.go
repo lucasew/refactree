@@ -2076,8 +2076,13 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// const a = Object.fromEntries(...)["k"] / o.k after fromEntries local /
 						// Object.fromEntries(ma).k after Map.set / new Map
 						out[ingest.NodeText(nameN, content)] = t
-					} else if t := jsMapGetValueType(valN, content, out, factories, mapLocals, entryArrayLocals); ourReceivers[t] {
-						// const a = new Map([[k, new A()]]).get(k) / ma.get(k) / new Map(pa).get(k)
+					} else if t := jsMapGetValueTypeEx(valN, content, out, factories, mapLocals, entryArrayLocals, classFields, methodReturns); ourReceivers[t] {
+						// const a = new Map([[k, new A()]]).get(k) / ma.get(k) / new Map(pa).get(k) /
+						// const a = new Map([[k, new BoxA().get()]]).get(k) /
+						// const a = new WeakMap([[k, ba.get()]]).get(k) — method-return
+						// Map/WeakMap value under foreign same-leaf (inline already peels
+						// via jsMapGetValueTypeEx in shouldRenameMember; Class peels via
+						// jsMapGetValueType).
 						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsNullishOrDefaultTypeEx(valN, content, out, factories, mapLocals, entryArrayLocals, classFields, methodReturns); ourReceivers[t] {
 						// const a = ma.get(k) ?? new A() / null ?? new BoxA().get() /
