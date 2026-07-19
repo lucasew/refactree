@@ -6681,18 +6681,29 @@ func javaEntryExprValueTypeEx(obj *grammar.Node, content []byte, elemOf, valOf, 
 			"pollFirstEntry", "pollLastEntry",
 			"ceilingEntry", "floorEntry", "higherEntry", "lowerEntry":
 			// NavigableMap.*Entry → Map.Entry<K,V>; V from map value type.
-			return javaMapPipelineValueType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
+			// Class peels via javaMapPipelineValueType; method-return map factories
+			// (new TreeMap<>(Map.of(k, ba.get())).firstEntry()) via object peels.
+			recv := ingest.ChildByField(obj, "object")
+			if vt := javaMapPipelineValueType(recv, content, elemOf, valOf); vt != "" {
+				return vt
+			}
+			return javaMapPipelineObjectValueType(recv, content, compOf, typeMembers)
 		case "reduceEntries":
 			// ConcurrentHashMap.reduceEntries(threshold, BiFunction) returns
 			// Map.Entry<K,V> (2-arg form). 3-arg returns U — fail closed here.
 			if len(javaCallArgs(obj)) == 2 {
-				return javaMapPipelineValueType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
+				recv := ingest.ChildByField(obj, "object")
+				if vt := javaMapPipelineValueType(recv, content, elemOf, valOf); vt != "" {
+					return vt
+				}
+				return javaMapPipelineObjectValueType(recv, content, compOf, typeMembers)
 			}
 			return ""
 		case "next", "previous":
 			// m.entrySet().iterator().next() / m.entrySet().listIterator().previous()
 			// — Entry of V; recover V via the entrySet pipeline under the iterator.
-			return javaEntrySetPipelineValueType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
+			// Method-return map factories (Map.of(k, ba.get()).entrySet()…) via Ex.
+			return javaEntrySetPipelineValueTypeEx(ingest.ChildByField(obj, "object"), content, elemOf, valOf, compOf, typeMembers)
 		case "get", "orElse", "orElseGet", "orElseThrow":
 			// Optional unwrap of Map.Entry:
 			//   m.entrySet().stream().findFirst().get()
@@ -6702,7 +6713,7 @@ func javaEntryExprValueTypeEx(obj *grammar.Node, content []byte, elemOf, valOf, 
 			if name == "get" && len(javaCallArgs(obj)) != 0 {
 				return ""
 			}
-			return javaOptionalEntryValueType(ingest.ChildByField(obj, "object"), content, elemOf, valOf, entryValOf)
+			return javaOptionalEntryValueTypeEx(ingest.ChildByField(obj, "object"), content, elemOf, valOf, entryValOf, compOf, typeMembers)
 		default:
 			return ""
 		}
@@ -6720,6 +6731,12 @@ func javaEntryExprValueTypeEx(obj *grammar.Node, content []byte, elemOf, valOf, 
 // findFirst().get().getValue() / Optional.of(e).get().getValue() bind under
 // foreign same-leaf methods. Unknown Optional sources fail closed.
 func javaOptionalEntryValueType(opt *grammar.Node, content []byte, elemOf, valOf, entryValOf map[string]string) string {
+	return javaOptionalEntryValueTypeEx(opt, content, elemOf, valOf, entryValOf, nil, nil)
+}
+
+// javaOptionalEntryValueTypeEx is javaOptionalEntryValueType with method-return
+// map factory peels (Map.of(k, ba.get()).entrySet().stream().findFirst().get()).
+func javaOptionalEntryValueTypeEx(opt *grammar.Node, content []byte, elemOf, valOf, entryValOf, compOf map[string]string, typeMembers map[string]map[string]string) string {
 	for opt != nil && !opt.IsNull() && opt.Type() == "parenthesized_expression" {
 		inner := ingest.ChildByField(opt, "expression")
 		if inner == nil {
@@ -6745,7 +6762,8 @@ func javaOptionalEntryValueType(opt *grammar.Node, content []byte, elemOf, valOf
 	case "findFirst", "findAny", "min", "max":
 		// Stream of Map.Entry → Optional<Entry>; V from the entrySet pipeline.
 		// One-arg reduce returns Optional too but is type-changing more often — fail closed.
-		return javaEntrySetPipelineValueType(ingest.ChildByField(opt, "object"), content, elemOf, valOf)
+		// Method-return map factories via entrySet Ex peels under foreign same-leaf.
+		return javaEntrySetPipelineValueTypeEx(ingest.ChildByField(opt, "object"), content, elemOf, valOf, compOf, typeMembers)
 	case "of", "ofNullable":
 		// Optional.of(entry) / ofNullable(entry) — Entry from the first arg.
 		recv := ingest.ChildByField(opt, "object")
@@ -6759,7 +6777,7 @@ func javaOptionalEntryValueType(opt *grammar.Node, content []byte, elemOf, valOf
 		if first == nil {
 			return ""
 		}
-		return javaEntryExprValueType(first, content, elemOf, valOf, entryValOf)
+		return javaEntryExprValueTypeEx(first, content, elemOf, valOf, entryValOf, compOf, typeMembers)
 	default:
 		return ""
 	}
@@ -7174,6 +7192,14 @@ func javaToMapCollectValueType(val *grammar.Node, content []byte, elemOf, valOf 
 // collect(toMap(...)).entrySet() → stream element type.
 // Type-changing stages (map/flatMap) fail closed.
 func javaEntrySetPipelineValueType(obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	return javaEntrySetPipelineValueTypeEx(obj, content, elemOf, valOf, nil, nil)
+}
+
+// javaEntrySetPipelineValueTypeEx recovers V from m.entrySet() pipelines.
+// Class()-only map factories use javaMapPipelineValueType; method-return map
+// factories (Map.of(k, ba.get()).entrySet().iterator().next().getValue()) fall
+// back to javaMapPipelineObjectValueType under foreign same-leaf.
+func javaEntrySetPipelineValueTypeEx(obj *grammar.Node, content []byte, elemOf, valOf, compOf map[string]string, typeMembers map[string]map[string]string) string {
 	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
 		inner := ingest.ChildByField(obj, "expression")
 		if inner == nil {
@@ -7197,7 +7223,11 @@ func javaEntrySetPipelineValueType(obj *grammar.Node, content []byte, elemOf, va
 	}
 	switch name := ingest.NodeText(nameN, content); name {
 	case "entrySet":
-		return javaMapPipelineValueType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
+		recv := ingest.ChildByField(obj, "object")
+		if vt := javaMapPipelineValueType(recv, content, elemOf, valOf); vt != "" {
+			return vt
+		}
+		return javaMapPipelineObjectValueType(recv, content, compOf, typeMembers)
 	case "stream", "parallelStream",
 		// iterator/listIterator/spliterator yield Entry views of the same V
 		// (for next/previous/forEachRemaining under foreign same-leaf methods).
@@ -7205,7 +7235,7 @@ func javaEntrySetPipelineValueType(obj *grammar.Node, content []byte, elemOf, va
 		"filter", "peek", "sorted", "distinct", "limit", "skip",
 		"unordered", "sequential", "parallel", "onClose",
 		"takeWhile", "dropWhile":
-		return javaEntrySetPipelineValueType(ingest.ChildByField(obj, "object"), content, elemOf, valOf)
+		return javaEntrySetPipelineValueTypeEx(ingest.ChildByField(obj, "object"), content, elemOf, valOf, compOf, typeMembers)
 	default:
 		return ""
 	}
@@ -7520,6 +7550,12 @@ func javaStaticCollectionOfObjectElemType(obj *grammar.Node, content []byte, com
 				}
 			}
 			return javaHomogeneousObjectElem(args, content, compOf, typeMembers)
+		case "values", "sequencedValues":
+			// Map.of(k, ba.get()).values().iterator().next() /
+			// Map.of(k, ba.get()).values().stream().findFirst().get() —
+			// Collection of map values V (method-return map factories).
+			// Class peels live in javaStreamPipelineElemType values case.
+			return javaMapPipelineObjectValueType(recv, content, compOf, typeMembers)
 		case "findFirst", "findAny", "toList", "toSet",
 			"stream", "parallelStream", "iterator", "listIterator",
 			"descendingIterator", "spliterator",
@@ -8269,11 +8305,17 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 			return ""
 		}
 		// Map-only value mutators on non-id factories/pipelines (same V leaf).
+		// Class peels via javaMapPipelineValueType; method-return map factories
+		// (Map.of(k, ba.get()).getOrDefault(k, d)) via object peels — same path
+		// as Map.of(k, ba.get()).get(k) above.
 		switch method {
 		case "getOrDefault",
 			"computeIfAbsent", "putIfAbsent", "compute", "computeIfPresent",
 			"put", "replace", "merge", "putFirst", "putLast":
-			return javaMapPipelineValueType(obj, content, elemOf, valOf)
+			if vt := javaMapPipelineValueType(obj, content, elemOf, valOf); vt != "" {
+				return vt
+			}
+			return javaMapPipelineObjectValueType(obj, content, compOf, typeMembers)
 		}
 		return ""
 	case "getValue", "setValue":
