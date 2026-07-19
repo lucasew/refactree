@@ -1,0 +1,4 @@
+{
+  "source": "path:./box.go::*A.Run",
+  "destination": "path:./box.go::*A.Execute"
+}
