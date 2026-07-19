@@ -2284,10 +2284,11 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 			if local, et := jsArrayMutationElemType(n, content, arrayLocals, out, factories, extra); local != "" && et != "" {
 				arrayLocals[local] = et
 			}
-			// xs.add(new A()) — bare Set mutation after new Set() / empty ctor.
-			// Bind setLocals so for (const a of xs) / xs.values().next().value
-			// peel under foreign same-leaf. Foreign elems too for shadowing.
-			if local, et := jsSetAddMutationElemType(n, content, out, factories); local != "" && et != "" {
+			// xs.add(new A()) / xs.add(new BoxA().get()) — bare Set mutation after
+			// new Set() / empty ctor. Bind setLocals so for (const a of xs) /
+			// xs.values().next().value peel under foreign same-leaf. Foreign elems
+			// too for shadowing.
+			if local, et := jsSetAddMutationElemTypeEx(n, content, out, factories, classFields, methodReturns); local != "" && et != "" {
 				setLocals[local] = et
 			}
 			// m.set(k, new A()) / wm.set(k, new A()) — bare Map/WeakMap mutation.
@@ -7861,6 +7862,7 @@ func jsArrayConcatElemType(obj, args *grammar.Node, content []byte, arrayLocals,
 // the receiver is an identifier and inserted/filled values peel to uniform T:
 //
 //	xs.push(new A()) / xs.unshift(new A()) / xs.push(new A(), new A())
+//	xs.push(new BoxA().get()) / xs.unshift(ba.get()) — method-return inserts
 //	xs.push(...[new A()]) / xs.push(...as)  — spread of array-source of T
 //	xs.splice(0, 0, new A()) / xs.splice(i, d, new A(), new A())
 //	xs.fill(new A()) / xs.fill(new A(), 0, 1)
@@ -7908,7 +7910,8 @@ func jsArrayMutationElemType(call *grammar.Node, content []byte, arrayLocals, ty
 		if pos < 1 || val == nil {
 			return "", ""
 		}
-		t := jsExprConcreteType(val, content, typedLocals, factories)
+		// Class() / typed local / factory / method-return (ba.get()).
+		t := jsExprLeafType(val, content, typedLocals, factories, extra.classFields, extra.methodReturns)
 		if t == "" {
 			return "", ""
 		}
@@ -7949,7 +7952,8 @@ func jsArrayMutationElemType(call *grammar.Node, content []byte, arrayLocals, ty
 			}
 			t = jsArraySourceElemType(arg, content, arrayLocals, typedLocals, factories, extra)
 		} else {
-			t = jsExprConcreteType(ch, content, typedLocals, factories)
+			// Class() / typed local / factory / method-return (new BoxA().get()).
+			t = jsExprLeafType(ch, content, typedLocals, factories, extra.classFields, extra.methodReturns)
 		}
 		if t == "" {
 			return "", ""
@@ -7971,11 +7975,19 @@ func jsArrayMutationElemType(call *grammar.Node, content []byte, arrayLocals, ty
 // receiver is an identifier and the inserted value peels to concrete T:
 //
 //	xs.add(new A()) / xs.add(a) after const a = new A()
+//	xs.add(new BoxA().get()) / xs.add(ba.get()) — method-return inserts
 //
 // Enables for (const a of xs) / xs.values().next().value.run() under foreign
 // same-leaf after const xs = new Set() / empty ctor. Non-ident receivers /
 // non-concrete args fail closed. Multi-arg add is not a Set method shape.
+// Method-return peels use jsSetAddMutationElemTypeEx.
 func jsSetAddMutationElemType(call *grammar.Node, content []byte, typedLocals, factories map[string]string) (local, classType string) {
+	return jsSetAddMutationElemTypeEx(call, content, typedLocals, factories, nil, nil)
+}
+
+// jsSetAddMutationElemTypeEx also peels xs.add(new BoxA().get()) / xs.add(ba.get())
+// method-return values under foreign same-leaf.
+func jsSetAddMutationElemTypeEx(call *grammar.Node, content []byte, typedLocals, factories map[string]string, classFields, methodReturns map[string]map[string]string) (local, classType string) {
 	if call == nil || call.Type() != "call_expression" {
 		return "", ""
 	}
@@ -8010,7 +8022,7 @@ func jsSetAddMutationElemType(call *grammar.Node, content []byte, typedLocals, f
 	if pos != 1 || val == nil {
 		return "", ""
 	}
-	t := jsExprConcreteType(val, content, typedLocals, factories)
+	t := jsExprLeafType(val, content, typedLocals, factories, classFields, methodReturns)
 	if t == "" {
 		return "", ""
 	}
