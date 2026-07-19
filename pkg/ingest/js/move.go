@@ -2020,9 +2020,10 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// (groupBy-like shape); oa[k][0] / Object.values(oa)[0][0] peel
 						// via groupByLocals. Bind foreign too for dual-class shadowing.
 						groupByLocals[ingest.NodeText(nameN, content)] = t
-					} else if t := jsObjectLiteralValueType(valN, content, out, factories); t != "" {
-						// const oa = {k: new A()} — plain object of uniform property
-						// values T; Object.values(oa)[0] / oa.k peel via objValueLocals.
+					} else if t := jsObjectLiteralValueTypeEx(valN, content, out, factories, extra); t != "" {
+						// const oa = {k: new A()} / {k: new BoxA().get()} — plain object
+						// of uniform property values T (method-return via extra);
+						// Object.values(oa)[0] / oa.k peel via objValueLocals.
 						// Nested-array shape handled above. Bind foreign too for shadowing.
 						objValueLocals[ingest.NodeText(nameN, content)] = t
 					} else if t := jsObjectGroupByElemType(valN, content, arrayLocals, out, factories, extra); t != "" {
@@ -2075,8 +2076,9 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 					} else if t := jsMapGetValueType(valN, content, out, factories, mapLocals, entryArrayLocals); ourReceivers[t] {
 						// const a = new Map([[k, new A()]]).get(k) / ma.get(k) / new Map(pa).get(k)
 						out[ingest.NodeText(nameN, content)] = t
-					} else if t := jsNullishOrDefaultType(valN, content, out, factories, mapLocals, entryArrayLocals); ourReceivers[t] {
-						// const a = ma.get(k) ?? new A() / ma.get(k) || new A()
+					} else if t := jsNullishOrDefaultTypeEx(valN, content, out, factories, mapLocals, entryArrayLocals, classFields, methodReturns); ourReceivers[t] {
+						// const a = ma.get(k) ?? new A() / null ?? new BoxA().get() /
+						// null || new BoxA().get() / true && new BoxA().get()
 						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsArrayElemSubscriptType(valN, content, arrayLocals, out, factories, extra); ourReceivers[t] {
 						// const a = [new A()][0] / Array.from([new A()])[0] /
