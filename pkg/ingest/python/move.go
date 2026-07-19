@@ -2292,11 +2292,18 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	// box.a.run() — dataclass/class field access when box is a typed local.
 	// replace(box).a.run() / dataclasses.replace(box).a.run() — same field leaf
 	// as box.a (return type of replace is the dataclass of its first arg).
+	// ba._replace(...).a.run() / Box._make([A()]).a.run() — namedtuple peels.
 	if obj.Type() == "attribute" {
 		if ft := pythonFieldAccessType(obj, content, fieldOf); ft != "" {
 			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 		}
 		if ft := pythonReplaceFieldAccessType(obj, content, fieldOf); ft != "" {
+			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
+		}
+		if ft := pythonNamedtupleReplaceFieldAccessType(obj, content, fieldOf); ft != "" {
+			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
+		}
+		if ft := pythonNamedtupleMakeFieldAccessType(obj, content); ft != "" {
 			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 		}
 		return len(foreignReceivers) == 0
@@ -2305,6 +2312,8 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	// asdict(box)["a"].run() / vars(box)["a"].run() / box.__dict__["a"].run() —
 	// dict-view field keys of first arg / object (same leaf as d = asdict(box);
 	// d["a"].run()).
+	// ba._asdict()["a"].run() / vars(SimpleNamespace(k=A()))["k"].run() —
+	// namedtuple / inline SNS dict-view peels.
 	// astuple(box)[0].run() / dataclasses.astuple(box)[0].run() /
 	// astuple(replace(box))[0].run() / list(astuple(box))[0].run() /
 	// tuple(astuple(box))[0].run() — declaration-order index slots of first arg
@@ -2319,6 +2328,7 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	// pair local value slot (pairSlots; same leaf as a = p[1]; a.run()).
 	// items[0].run() / d["k"].run() / list(items)[0].run() — collection subscript
 	// element (same leaf as a = items[0]; a.run()). Slices fail closed.
+	// Box._make([A()])[0].run() — namedtuple make sequence element peel.
 	if obj.Type() == "subscript" {
 		if ft := pythonRecordKeyAccessType(obj, content, fieldOf); ft != "" {
 			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
@@ -2331,6 +2341,10 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 		}
 		// box[0].run() — namedtuple positional field (fieldOf["box.#0"]).
 		if ft := pythonNamedtupleIndexType(obj, content, fieldOf); ft != "" {
+			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
+		}
+		// Box._make([A()])[0].run() — make sequence element peel.
+		if ft := pythonNamedtupleMakeIndexType(obj, content); ft != "" {
 			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 		}
 		// pairSlots enables p[1].run() for assigned pair locals; typeOf for
@@ -4477,10 +4491,21 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					if tn := pythonVarsCallObjectType(right, content, typeOf); tn != "" {
 						bindFields(lname, tn)
 					}
-					if fn != nil && fn.Type() == "identifier" && ingest.NodeText(fn, content) == "vars" {
-						if args, ok := pythonCallPositionalArgNodes(right); ok && len(args) > 0 && args[0].Type() == "identifier" {
-							pythonCopyLocalFieldOf(ingest.NodeText(args[0], content), lname, fieldOf)
-						}
+					// d = vars(box) / d = asdict(box) / d = ba._asdict() — copy instance
+					// fieldOf for dual-class namedtuple/SNS (type-level bindFields is
+					// last-writer-wins across ba=Box(A()); bb=Box(B())).
+					if src := pythonDictViewObjectLocal(right, content); src != "" {
+						pythonCopyLocalFieldOf(src, lname, fieldOf)
+					}
+					// ra = ba._replace(...) — same namedtuple instance fields with
+					// keyword overrides (dual-class under foreign same-leaf).
+					if pythonBindNamedtupleReplaceLocal(lname, right, content, typeOf, fieldOf, fieldNames, fieldIndex, ourReceivers, out) {
+						// bound
+					}
+					// ba = Box._make([A()]) — namedtuple from iterable; instance fields
+					// from sequence elements (dual-class under foreign same-leaf).
+					if pythonBindNamedtupleMakeLocal(lname, right, content, typeOf, fieldOf, fieldNames, fieldIndex, ourReceivers, out) {
+						// bound
 					}
 					// t = astuple(box) / dataclasses.astuple(box) — tuple of field
 					// values in declaration order (fieldOf["t.#i"] for t[i].run()).
@@ -4528,6 +4553,13 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						if ourReceivers[ft] {
 							out[lname] = true
 						}
+					} else if ft := pythonNamedtupleMakeIndexType(right, content); ft != "" {
+						// xa = Box._make([A()])[0] — make sequence element peel.
+						typeOf[lname] = ft
+						bindFields(lname, ft)
+						if ourReceivers[ft] {
+							out[lname] = true
+						}
 					} else if et := pythonSubscriptElemType(right, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots, fieldOf); ourReceivers[et] {
 						out[lname] = true
 					}
@@ -4552,6 +4584,18 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							out[lname] = true
 						}
 					} else if ft := pythonReplaceFieldAccessType(right, content, fieldOf); ft != "" {
+						typeOf[lname] = ft
+						bindFields(lname, ft)
+						if ourReceivers[ft] {
+							out[lname] = true
+						}
+					} else if ft := pythonNamedtupleReplaceFieldAccessType(right, content, fieldOf); ft != "" {
+						typeOf[lname] = ft
+						bindFields(lname, ft)
+						if ourReceivers[ft] {
+							out[lname] = true
+						}
+					} else if ft := pythonNamedtupleMakeFieldAccessType(right, content); ft != "" {
 						typeOf[lname] = ft
 						bindFields(lname, ft)
 						if ourReceivers[ft] {
@@ -5102,15 +5146,15 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				if tn := pythonVarsCallObjectType(valueN, content, typeOf); tn != "" {
 					bindFields(lname, tn)
 				}
+				// d := vars/asdict/_asdict — instance fieldOf copy (dual-class).
+				if src := pythonDictViewObjectLocal(valueN, content); src != "" {
+					pythonCopyLocalFieldOf(src, lname, fieldOf)
+				}
 				if valueN.Type() == "call" {
-					if fn := ingest.ChildByField(valueN, "function"); fn != nil &&
-						fn.Type() == "identifier" && ingest.NodeText(fn, content) == "vars" {
-						if args, ok := pythonCallPositionalArgNodes(valueN); ok && len(args) > 0 && args[0].Type() == "identifier" {
-							pythonCopyLocalFieldOf(ingest.NodeText(args[0], content), lname, fieldOf)
-						}
-					}
 					// da := SimpleNamespace(k=A()) — same fieldOf bind as plain assignment.
 					pythonBindSimpleNamespaceLocal(lname, valueN, content, fieldOf)
+					pythonBindNamedtupleReplaceLocal(lname, valueN, content, typeOf, fieldOf, fieldNames, fieldIndex, ourReceivers, out)
+					pythonBindNamedtupleMakeLocal(lname, valueN, content, typeOf, fieldOf, fieldNames, fieldIndex, ourReceivers, out)
 				}
 				// t := astuple(box) / dataclasses.astuple(box) — tuple of field
 				// values in declaration order (fieldOf["t.#i"] for t[i].run()).
@@ -6681,6 +6725,281 @@ func pythonReplaceCallObjectType(call *grammar.Node, content []byte, typeOf map[
 	return pythonObjectExprType(args[0], content, typeOf)
 }
 
+// pythonNamedtupleReplaceObjectLocal recovers ba from ba._replace(...).
+// Zero or more keyword overrides; positional args fail closed ("").
+func pythonNamedtupleReplaceObjectLocal(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "attribute" {
+		return ""
+	}
+	attr := ingest.ChildByField(fn, "attribute")
+	obj := ingest.ChildByField(fn, "object")
+	if attr == nil || obj == nil || obj.Type() != "identifier" {
+		return ""
+	}
+	if ingest.NodeText(attr, content) != "_replace" {
+		return ""
+	}
+	// Reject positional overrides (namedtuple _replace is keyword-only).
+	if args, ok := pythonCallPositionalArgNodes(call); ok && len(args) > 0 {
+		return ""
+	}
+	return ingest.NodeText(obj, content)
+}
+
+// pythonBindNamedtupleReplaceLocal binds ra = ba._replace(a=A()) with instance
+// fieldOf copied from ba and keyword overrides applied. Dual-class solid.
+func pythonBindNamedtupleReplaceLocal(local string, call *grammar.Node, content []byte, typeOf, fieldOf map[string]string, fieldNames map[string][]string, fieldIndex map[string]map[string]string, ourReceivers, out map[string]bool) bool {
+	src := pythonNamedtupleReplaceObjectLocal(call, content)
+	if src == "" || local == "" || fieldOf == nil {
+		return false
+	}
+	// Type of replace result is the same namedtuple as src.
+	if tn := typeOf[src]; tn != "" {
+		typeOf[local] = tn
+		pythonBindClassLocalFields(local, tn, fieldIndex, fieldOf)
+		pythonBindNamedtupleIndexFields(local, tn, fieldNames, fieldIndex, fieldOf)
+	}
+	pythonCopyLocalFieldOf(src, local, fieldOf)
+	// Keyword overrides: ba._replace(a=A()) → field a is A.
+	argList := ingest.ChildByField(call, "arguments")
+	if argList != nil {
+		for i := uint32(0); i < argList.ChildCount(); i++ {
+			ch := argList.Child(i)
+			if ch == nil || ch.Type() != "keyword_argument" {
+				continue
+			}
+			nameN := ingest.ChildByField(ch, "name")
+			valN := ingest.ChildByField(ch, "value")
+			if nameN == nil || nameN.Type() != "identifier" || valN == nil {
+				continue
+			}
+			fname := ingest.NodeText(nameN, content)
+			if et := pythonExprClassType(valN, content); et != "" && fname != "" {
+				fieldOf[local+"."+fname] = et
+			}
+		}
+	}
+	// Index aliases from named field order when known.
+	if tn := typeOf[local]; tn != "" {
+		if names := fieldNames[tn]; len(names) > 0 {
+			for i, fname := range names {
+				if t := fieldOf[local+"."+fname]; t != "" {
+					fieldOf[local+".#"+fmt.Sprintf("%d", i)] = t
+				}
+			}
+		}
+	}
+	return true
+}
+
+// pythonNamedtupleReplaceFieldAccessType recovers T from ba._replace(...).a /
+// ba._replace(a=A()).a — keyword override wins, else fieldOf[ba.a].
+func pythonNamedtupleReplaceFieldAccessType(attr *grammar.Node, content []byte, fieldOf map[string]string) string {
+	if attr == nil || attr.Type() != "attribute" || fieldOf == nil {
+		return ""
+	}
+	field := ingest.ChildByField(attr, "attribute")
+	obj := ingest.ChildByField(attr, "object")
+	if field == nil || obj == nil || obj.Type() != "call" {
+		return ""
+	}
+	fname := ingest.NodeText(field, content)
+	if fname == "" {
+		return ""
+	}
+	// Keyword override on this _replace call.
+	argList := ingest.ChildByField(obj, "arguments")
+	if argList != nil {
+		for i := uint32(0); i < argList.ChildCount(); i++ {
+			ch := argList.Child(i)
+			if ch == nil || ch.Type() != "keyword_argument" {
+				continue
+			}
+			nameN := ingest.ChildByField(ch, "name")
+			valN := ingest.ChildByField(ch, "value")
+			if nameN == nil || ingest.NodeText(nameN, content) != fname || valN == nil {
+				continue
+			}
+			if et := pythonExprClassType(valN, content); et != "" {
+				return et
+			}
+		}
+	}
+	src := pythonNamedtupleReplaceObjectLocal(obj, content)
+	if src == "" {
+		return ""
+	}
+	return fieldOf[src+"."+fname]
+}
+
+// pythonNamedtupleMakeCallType recovers (typeName, field→Class) from
+// Box._make([A()]) / Box._make((A(), B())) when field order is known.
+// First arg must be list/tuple of Class() elems matching field count (or a
+// single-field list). Other forms fail closed.
+func pythonNamedtupleMakeInstanceFields(call *grammar.Node, content []byte, fieldNames map[string][]string) (typeName string, fields map[string]string) {
+	if call == nil || call.Type() != "call" || fieldNames == nil {
+		return "", nil
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "attribute" {
+		return "", nil
+	}
+	attr := ingest.ChildByField(fn, "attribute")
+	obj := ingest.ChildByField(fn, "object")
+	if attr == nil || obj == nil || obj.Type() != "identifier" {
+		return "", nil
+	}
+	if ingest.NodeText(attr, content) != "_make" {
+		return "", nil
+	}
+	typeName = ingest.NodeText(obj, content)
+	names := fieldNames[typeName]
+	if len(names) == 0 {
+		return "", nil
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) != 1 {
+		return "", nil
+	}
+	seq := args[0]
+	if seq.Type() != "list" && seq.Type() != "tuple" {
+		return "", nil
+	}
+	var elems []*grammar.Node
+	for i := uint32(0); i < seq.ChildCount(); i++ {
+		ch := seq.Child(i)
+		if ch == nil || ch.Type() == "[" || ch.Type() == "]" || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		elems = append(elems, ch)
+	}
+	if len(elems) == 0 || len(elems) > len(names) {
+		return "", nil
+	}
+	fields = map[string]string{}
+	for i, el := range elems {
+		et := pythonExprClassType(el, content)
+		if et == "" {
+			return "", nil
+		}
+		fields[names[i]] = et
+	}
+	return typeName, fields
+}
+
+// pythonBindNamedtupleMakeLocal binds ba = Box._make([A()]) with instance fields.
+func pythonBindNamedtupleMakeLocal(local string, call *grammar.Node, content []byte, typeOf, fieldOf map[string]string, fieldNames map[string][]string, fieldIndex map[string]map[string]string, ourReceivers, out map[string]bool) bool {
+	tn, fields := pythonNamedtupleMakeInstanceFields(call, content, fieldNames)
+	if tn == "" || len(fields) == 0 || local == "" || fieldOf == nil {
+		return false
+	}
+	typeOf[local] = tn
+	pythonBindClassLocalFields(local, tn, fieldIndex, fieldOf)
+	pythonBindNamedtupleIndexFields(local, tn, fieldNames, fieldIndex, fieldOf)
+	for f, t := range fields {
+		if f != "" && t != "" {
+			fieldOf[local+"."+f] = t
+		}
+	}
+	if names := fieldNames[tn]; len(names) > 0 {
+		for i, fname := range names {
+			if t := fields[fname]; t != "" {
+				fieldOf[local+".#"+fmt.Sprintf("%d", i)] = t
+			}
+		}
+	}
+	return true
+}
+
+// pythonNamedtupleMakeFieldAccessType recovers T from Box._make([A()]).a when
+// the make sequence has a single Class() element (single-field namedtuple —
+// dual-class solid). Multi-field inline .field fails closed (use assign bind).
+func pythonNamedtupleMakeFieldAccessType(attr *grammar.Node, content []byte) string {
+	if attr == nil || attr.Type() != "attribute" {
+		return ""
+	}
+	field := ingest.ChildByField(attr, "attribute")
+	obj := ingest.ChildByField(attr, "object")
+	if field == nil || obj == nil || obj.Type() != "call" {
+		return ""
+	}
+	if ingest.NodeText(field, content) == "" {
+		return ""
+	}
+	elems := pythonNamedtupleMakeSeqElems(obj, content)
+	// Single-element make: only one field value; .a peels that Class leaf.
+	if len(elems) != 1 {
+		return ""
+	}
+	return pythonExprClassType(elems[0], content)
+}
+
+// pythonNamedtupleMakeIndexType recovers T from Box._make([A(), B()])[i] when
+// index i is a decimal integer selecting a Class() sequence element.
+func pythonNamedtupleMakeIndexType(sub *grammar.Node, content []byte) string {
+	if sub == nil || sub.Type() != "subscript" {
+		return ""
+	}
+	val := ingest.ChildByField(sub, "value")
+	if val == nil {
+		val = ingest.ChildByField(sub, "object")
+	}
+	keyN := ingest.ChildByField(sub, "subscript")
+	if val == nil || keyN == nil || val.Type() != "call" {
+		return ""
+	}
+	idx := pythonNonNegIntLiteral(keyN, content)
+	if idx < 0 {
+		return ""
+	}
+	elems := pythonNamedtupleMakeSeqElems(val, content)
+	if idx >= len(elems) {
+		return ""
+	}
+	return pythonExprClassType(elems[idx], content)
+}
+
+// pythonNamedtupleMakeSeqElems recovers Class()-bearing list/tuple elements from
+// Box._make([...]) / Box._make((...)). Non-_make / wrong arity fail closed (nil).
+func pythonNamedtupleMakeSeqElems(call *grammar.Node, content []byte) []*grammar.Node {
+	if call == nil || call.Type() != "call" {
+		return nil
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "attribute" {
+		return nil
+	}
+	attr := ingest.ChildByField(fn, "attribute")
+	obj := ingest.ChildByField(fn, "object")
+	if attr == nil || obj == nil || obj.Type() != "identifier" {
+		return nil
+	}
+	if ingest.NodeText(attr, content) != "_make" {
+		return nil
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) != 1 {
+		return nil
+	}
+	seq := args[0]
+	if seq.Type() != "list" && seq.Type() != "tuple" {
+		return nil
+	}
+	var elems []*grammar.Node
+	for i := uint32(0); i < seq.ChildCount(); i++ {
+		ch := seq.Child(i)
+		if ch == nil || ch.Type() == "[" || ch.Type() == "]" || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		elems = append(elems, ch)
+	}
+	return elems
+}
+
 // pythonAsdictCallObjectType recovers T from asdict(x) / dataclasses.asdict(x)
 // when the first positional arg is a typed object local or Class() ctor.
 // asdict returns a dict of field values of that object (field keys via
@@ -7475,11 +7794,14 @@ func pythonReplacePeeledObjectLocal(n *grammar.Node, content []byte) string {
 // box.__dict__["a"] / asdict(box).get("a") / vars(box).get("a") /
 // box.__dict__.get("a") (also setdefault/pop) when box is a typed local with
 // annotated field a of type T (fieldOf; same leaf as d = asdict(box); d["a"] /
-// d.get("a") / box.a). First positional arg / object must be an identifier
-// local; non-string keys and other callees fail closed. dataclasses.asdict
-// accepted (leaf name asdict); vars is bare builtin only.
+// d.get("a") / box.a). Also peels inline vars(SimpleNamespace(k=A()))["k"] /
+// SimpleNamespace(k=A()).__dict__["k"] / ba._asdict()["a"] (namedtuple) under
+// foreign same-leaf. First positional arg / object is an identifier local, an
+// inline SimpleNamespace(...), or ba._asdict(); non-string keys and other
+// callees fail closed. dataclasses.asdict accepted (leaf name asdict); vars is
+// bare builtin only.
 func pythonDictViewKeyAccessType(n *grammar.Node, content []byte, fieldOf map[string]string) string {
-	if n == nil || fieldOf == nil {
+	if n == nil {
 		return ""
 	}
 	switch n.Type() {
@@ -7496,13 +7818,12 @@ func pythonDictViewKeyAccessType(n *grammar.Node, content []byte, fieldOf map[st
 		if key == "" {
 			return ""
 		}
-		objLocal := pythonDictViewObjectLocal(val, content)
-		if objLocal == "" {
-			return ""
+		if t := pythonDictViewKeyFromSource(val, content, fieldOf, key); t != "" {
+			return t
 		}
-		return fieldOf[objLocal+"."+key]
 	case "call":
 		// asdict(box).get("a") / vars(box).pop("a") / box.__dict__.setdefault("a")
+		// / ba._asdict().get("a")
 		fn := ingest.ChildByField(n, "function")
 		if fn == nil || fn.Type() != "attribute" {
 			return ""
@@ -7522,19 +7843,82 @@ func pythonDictViewKeyAccessType(n *grammar.Node, content []byte, fieldOf map[st
 			if key == "" {
 				return ""
 			}
-			objLocal := pythonDictViewObjectLocal(obj, content)
-			if objLocal == "" {
-				return ""
+			if t := pythonDictViewKeyFromSource(obj, content, fieldOf, key); t != "" {
+				return t
 			}
-			return fieldOf[objLocal+"."+key]
 		}
 	}
 	return ""
 }
 
+// pythonDictViewKeyFromSource recovers field key type T from a dict-view source
+// expression (asdict(box) / vars(box) / box.__dict__ / ba._asdict() /
+// vars(SimpleNamespace(...)) / SimpleNamespace(...).__dict__).
+func pythonDictViewKeyFromSource(src *grammar.Node, content []byte, fieldOf map[string]string, key string) string {
+	if src == nil || key == "" {
+		return ""
+	}
+	// Inline vars(SimpleNamespace(k=A())) / SimpleNamespace(...).__dict__ —
+	// field types from kwargs (no local fieldOf needed).
+	if t := pythonInlineSimpleNamespaceDictViewFieldType(src, content, key); t != "" {
+		return t
+	}
+	if fieldOf == nil {
+		return ""
+	}
+	objLocal := pythonDictViewObjectLocal(src, content)
+	if objLocal == "" {
+		return ""
+	}
+	return fieldOf[objLocal+"."+key]
+}
+
+// pythonInlineSimpleNamespaceDictViewFieldType recovers T from
+// vars(SimpleNamespace(k=A())) / vars(types.SimpleNamespace(k=A())) /
+// SimpleNamespace(k=A()).__dict__ field key k under foreign same-leaf.
+// Keyword fields only; mixed / non-Class values fail closed via
+// pythonSimpleNamespaceFieldTypes.
+func pythonInlineSimpleNamespaceDictViewFieldType(src *grammar.Node, content []byte, key string) string {
+	if src == nil || key == "" {
+		return ""
+	}
+	var call *grammar.Node
+	switch src.Type() {
+	case "call":
+		fn := ingest.ChildByField(src, "function")
+		// vars(SimpleNamespace(...)) — bare vars only.
+		if fn == nil || fn.Type() != "identifier" || ingest.NodeText(fn, content) != "vars" {
+			return ""
+		}
+		args, ok := pythonCallPositionalArgNodes(src)
+		if !ok || len(args) == 0 || args[0].Type() != "call" {
+			return ""
+		}
+		call = args[0]
+	case "attribute":
+		// SimpleNamespace(...).__dict__
+		field := ingest.ChildByField(src, "attribute")
+		obj := ingest.ChildByField(src, "object")
+		if field == nil || obj == nil || ingest.NodeText(field, content) != "__dict__" {
+			return ""
+		}
+		if obj.Type() != "call" {
+			return ""
+		}
+		call = obj
+	default:
+		return ""
+	}
+	fields, _ := pythonSimpleNamespaceFieldTypes(call, content)
+	if fields == nil {
+		return ""
+	}
+	return fields[key]
+}
+
 // pythonDictViewObjectLocal recovers the identifier local whose field keys are
-// exposed by asdict(x) / dataclasses.asdict(x) / vars(x) / x.__dict__. Other
-// forms fail closed ("").
+// exposed by asdict(x) / dataclasses.asdict(x) / vars(x) / x.__dict__ /
+// x._asdict() (namedtuple). Other forms fail closed ("").
 func pythonDictViewObjectLocal(n *grammar.Node, content []byte) string {
 	if n == nil {
 		return ""
@@ -7542,6 +7926,32 @@ func pythonDictViewObjectLocal(n *grammar.Node, content []byte) string {
 	switch n.Type() {
 	case "call":
 		fn := ingest.ChildByField(n, "function")
+		// ba._asdict() — zero-arg namedtuple dict view of instance fields.
+		// dataclasses.asdict falls through to leaf-name "asdict" below.
+		if fn != nil && fn.Type() == "attribute" {
+			attr := ingest.ChildByField(fn, "attribute")
+			obj := ingest.ChildByField(fn, "object")
+			if attr != nil && obj != nil && obj.Type() == "identifier" &&
+				ingest.NodeText(attr, content) == "_asdict" {
+				// Require zero-arg call.
+				if args, ok := pythonCallPositionalArgNodes(n); ok && len(args) == 0 {
+					return ingest.NodeText(obj, content)
+				}
+				// No positional args field / empty argument_list.
+				argList := ingest.ChildByField(n, "arguments")
+				if argList == nil {
+					return ingest.NodeText(obj, content)
+				}
+				for i := uint32(0); i < argList.ChildCount(); i++ {
+					ch := argList.Child(i)
+					if ch == nil || ch.Type() == "(" || ch.Type() == ")" {
+						continue
+					}
+					return ""
+				}
+				return ingest.NodeText(obj, content)
+			}
+		}
 		name := pythonSimpleCalleeName(fn, content)
 		switch name {
 		case "asdict":

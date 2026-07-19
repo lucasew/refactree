@@ -1600,8 +1600,9 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 			// (rejection handler ignored for typing; same leaf as finally).
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
-		if t := jsWeakRefDerefType(obj, content, typedLocals, factories); t != "" {
-			// new WeakRef(new A()).deref() — referent peel under foreign same-leaf.
+		if t := jsWeakRefDerefType(obj, content, typedLocals, factories, genLocals); t != "" {
+			// new WeakRef(new A()).deref() / wa.deref() after const wa = new WeakRef(...) —
+			// referent peel under foreign same-leaf.
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 		if t := jsReflectGetType(obj, content, typedLocals, factories, objValueLocals); t != "" {
@@ -1823,6 +1824,11 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 					} else if t := jsProxyTargetType(valN, content, out, factories); ourReceivers[t] {
 						// const pa = new Proxy(a, {}) / new Proxy(new A(), {})
 						out[ingest.NodeText(nameN, content)] = t
+					} else if t := jsWeakRefTargetType(valN, content, out, factories); t != "" {
+						// const wa = new WeakRef(new A()) / new WeakRef(a) — WeakRef holder;
+						// wa.deref() peels via genLocals["@weakref."+name]. Bind foreign too
+						// for shadowing (wb after wa).
+						genLocals["@weakref."+ingest.NodeText(nameN, content)] = t
 					} else if t := jsNestedArrayFlatElemType(valN, content, arrayLocals, out, factories, extra); t != "" {
 						// const aa = [[new A()]] — nested array local of element type A.
 						// Stored under @nested so aa[0][0].run() / aa.flat()[0].run() peel
@@ -2029,8 +2035,9 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 					} else if t := jsPromiseCatchType(valN, content, out, factories); ourReceivers[t] {
 						// const a = await Promise.resolve(new A()).catch(() => null)
 						out[ingest.NodeText(nameN, content)] = t
-					} else if t := jsWeakRefDerefType(valN, content, out, factories); ourReceivers[t] {
-						// const a = new WeakRef(new A()).deref()
+					} else if t := jsWeakRefDerefType(valN, content, out, factories, genLocals); ourReceivers[t] {
+						// const a = new WeakRef(new A()).deref() / wa.deref() after
+						// const wa = new WeakRef(...)
 						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsReflectGetType(valN, content, out, factories, objValueLocals); ourReceivers[t] {
 						// const a = Reflect.get({k: new A()}, "k") / Reflect.get(oa, "k")
@@ -8151,12 +8158,66 @@ func jsIdentityObjectValueType(n *grammar.Node, content []byte, typedLocals, fac
 	return ""
 }
 
+// jsWeakRefTargetType recovers T from new WeakRef(x) when x peels to T
+// (new T() / typed local / factory). Used to bind WeakRef holder locals so
+// wa.deref() peels under foreign same-leaf. Non-WeakRef / missing target fail closed.
+func jsWeakRefTargetType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "new_expression" {
+		return ""
+	}
+	ctor := ingest.ChildByField(n, "constructor")
+	if ctor == nil || ctor.Type() != "identifier" || ingest.NodeText(ctor, content) != "WeakRef" {
+		return ""
+	}
+	args := ingest.ChildByField(n, "arguments")
+	if args == nil {
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch != nil && ch.Type() == "arguments" {
+				args = ch
+				break
+			}
+		}
+	}
+	if args == nil {
+		return ""
+	}
+	var first *grammar.Node
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		first = ch
+		break
+	}
+	if first == nil {
+		return ""
+	}
+	return jsExprConcreteType(first, content, typedLocals, factories)
+}
+
 // jsWeakRefDerefType recovers T from new WeakRef(x).deref() when x peels to T
-// (new T() / typed local / factory). Zero-arg deref only. Local WeakRef holders
-// (const wa = new WeakRef(...); wa.deref()) fail closed without a weakRef map.
-// Enables new WeakRef(new A()).deref().run() / const a = new WeakRef(new A()).deref()
-// under foreign same-leaf methods.
-func jsWeakRefDerefType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+// (new T() / typed local / factory), or wa.deref() after const wa = new WeakRef(...)
+// (referent stored under genLocals["@weakref."+name]). Zero-arg deref only.
+// Enables new WeakRef(new A()).deref().run() / wa.deref().run() /
+// const a = new WeakRef(new A()).deref() under foreign same-leaf methods.
+func jsWeakRefDerefType(n *grammar.Node, content []byte, typedLocals, factories, genLocals map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -8199,39 +8260,18 @@ func jsWeakRefDerefType(n *grammar.Node, content []byte, typedLocals, factories 
 		}
 		obj = inner
 	}
-	if obj == nil || obj.Type() != "new_expression" {
+	if obj == nil {
 		return ""
 	}
-	ctor := ingest.ChildByField(obj, "constructor")
-	if ctor == nil || ctor.Type() != "identifier" || ingest.NodeText(ctor, content) != "WeakRef" {
-		return ""
-	}
-	args := ingest.ChildByField(obj, "arguments")
-	if args == nil {
-		for i := uint32(0); i < obj.ChildCount(); i++ {
-			ch := obj.Child(i)
-			if ch != nil && ch.Type() == "arguments" {
-				args = ch
-				break
-			}
+	// wa.deref() after const wa = new WeakRef(...) — referent via @weakref map.
+	if obj.Type() == "identifier" {
+		if genLocals == nil {
+			return ""
 		}
+		return genLocals["@weakref."+ingest.NodeText(obj, content)]
 	}
-	if args == nil {
-		return ""
-	}
-	var first *grammar.Node
-	for i := uint32(0); i < args.ChildCount(); i++ {
-		ch := args.Child(i)
-		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
-			continue
-		}
-		first = ch
-		break
-	}
-	if first == nil {
-		return ""
-	}
-	return jsExprConcreteType(first, content, typedLocals, factories)
+	// new WeakRef(x).deref() — peel target inline.
+	return jsWeakRefTargetType(obj, content, typedLocals, factories)
 }
 
 // jsReflectGetType recovers T from Reflect.get(obj, key) when obj peels to a

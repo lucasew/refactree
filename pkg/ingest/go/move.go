@@ -4315,11 +4315,15 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType, valueT
 		return typeNameFromTypeNode(n, content)
 	case "index_expression":
 		// as[0].M / m[k].M — element/value type of the collection operand.
+		// (*pas)[0].M — pointer-to-slice/map param (pas *[]*A / *map[K]*A):
+		// indexElemType already peels *[]T / *map to element T via
+		// rangeSourceFromTypeNode pointer_type; only the unary * operand needs
+		// unwrapping here (dual-class under foreign same-leaf).
 		op := ingest.ChildByField(n, "operand")
 		if op == nil {
 			return ""
 		}
-		// Peel (as)[0].
+		// Peel (as)[0] / (*pas)[0] outer parens.
 		for op != nil && op.Type() == "parenthesized_expression" {
 			var inner *grammar.Node
 			for i := uint32(0); i < op.ChildCount(); i++ {
@@ -4334,6 +4338,55 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType, valueT
 		}
 		if op == nil {
 			return ""
+		}
+		// (*pas)[0] — unary * of collection pointer local/param.
+		if op.Type() == "unary_expression" {
+			star := false
+			var inner *grammar.Node
+			for i := uint32(0); i < op.ChildCount(); i++ {
+				ch := op.Child(i)
+				if ch == nil {
+					continue
+				}
+				if ch.Type() == "*" || (ch.Type() == "unary_operator" && ingest.NodeText(ch, content) == "*") {
+					star = true
+					continue
+				}
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				// Prefer field-named operand when present.
+				inner = ch
+			}
+			if opField := ingest.ChildByField(op, "operand"); opField != nil {
+				inner = opField
+			}
+			if opField := ingest.ChildByField(op, "operator"); opField != nil && ingest.NodeText(opField, content) == "*" {
+				star = true
+			}
+			if star && inner != nil {
+				// Peel (*pas) inner parens if any.
+				for inner != nil && inner.Type() == "parenthesized_expression" {
+					var in2 *grammar.Node
+					for i := uint32(0); i < inner.ChildCount(); i++ {
+						ch := inner.Child(i)
+						if ch == nil || ch.Type() == "(" || ch.Type() == ")" {
+							continue
+						}
+						in2 = ch
+						break
+					}
+					inner = in2
+				}
+				if inner != nil && inner.Type() == "identifier" && indexElemType != nil {
+					if el, ok := indexElemType(ingest.NodeText(inner, content), n.StartByte()); ok {
+						return el
+					}
+				}
+				if info, ok := rangeSourceFromCollectionExprIdent(inner, content, indexElemType, n.StartByte(), funcColl); ok {
+					return info.elemType
+				}
+			}
 		}
 		if op.Type() == "identifier" && indexElemType != nil {
 			if el, ok := indexElemType(ingest.NodeText(op, content), n.StartByte()); ok {

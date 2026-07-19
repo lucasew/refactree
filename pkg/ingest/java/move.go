@@ -6951,7 +6951,13 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// the collector is identity reducing (2-arg or identity-mapper 3-arg).
 		// Optional forms (1-arg reducing / maxBy / minBy) fail closed here so var
 		// binds via javaStreamPipelineElemType → elemOf for orElse/ifPresent.
-		// toList/toSet collect is Collection — also fails closed here (elemOf path).
+		// collectingAndThen(toList()/toSet(), l -> l.get(0)) returns scalar T when
+		// the finisher extracts one element (dual-class under foreign same-leaf).
+		// toList/toSet collect (identity finisher) is Collection — fails closed here
+		// (elemOf path).
+		if t := javaStreamCollectCollectingAndThenElemType(val, obj, content, elemOf, valOf); t != "" {
+			return t
+		}
 		return javaStreamCollectReducingIdentityElemType(val, obj, content, elemOf, valOf)
 	case "searchValues":
 		// ConcurrentHashMap.searchValues(threshold, Function<? super V,? extends U>)
@@ -7376,6 +7382,198 @@ func javaIsReducingMaxMinCollectorExpr(n *grammar.Node, content []byte) bool {
 	}
 	// At least one arg (op / comparator / identity+op).
 	return len(javaCallArgs(n)) >= 1
+}
+
+// javaStreamCollectCollectingAndThenElemType recovers T from
+// stream.collect(Collectors.collectingAndThen(toList()/toSet()/toUnmodifiable…/
+// toCollection(…), finisher)) when finisher clearly extracts one collection
+// element: l -> l.get(0) / l.getFirst() / l.iterator().next() / List::getFirst.
+// Result is scalar stream element T (not Collection). Identity finishers
+// (xs -> xs / Collections::unmodifiableList) stay on the toList Collection path.
+// Enables collect(...).run() / var xa = collect(...) under foreign same-leaf.
+func javaStreamCollectCollectingAndThenElemType(collectCall, streamObj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	if collectCall == nil || streamObj == nil {
+		return ""
+	}
+	first := javaCollectFirstArg(collectCall)
+	if first == nil || first.Type() != "method_invocation" {
+		return ""
+	}
+	nameN := ingest.ChildByField(first, "name")
+	if nameN == nil || ingest.NodeText(nameN, content) != "collectingAndThen" {
+		return ""
+	}
+	if obj := ingest.ChildByField(first, "object"); obj != nil {
+		if obj.Type() != "identifier" && obj.Type() != "type_identifier" {
+			return ""
+		}
+		if ingest.NodeText(obj, content) != "Collectors" {
+			return ""
+		}
+	}
+	args := javaCallArgs(first)
+	if len(args) != 2 {
+		return ""
+	}
+	// Downstream must be toList/toSet/toUnmodifiable/toCollection.
+	if !javaIsToListOrSetCollectorExpr(args[0], content) {
+		return ""
+	}
+	// Finisher must extract one element of the collected Collection.
+	if !javaIsCollectionElemFinisher(args[1], content) {
+		return ""
+	}
+	return javaStreamPipelineElemType(streamObj, content, elemOf, valOf)
+}
+
+// javaIsCollectionElemFinisher reports finishers that yield one element of a
+// List/Set/Collection: l -> l.get(0) / l.getFirst() / l.iterator().next() /
+// List::getFirst. Other finishers (identity, unmodifiableList, …) fail closed.
+func javaIsCollectionElemFinisher(n *grammar.Node, content []byte) bool {
+	if n == nil {
+		return false
+	}
+	switch n.Type() {
+	case "lambda_expression":
+		// Unary lambda: l -> <body>
+		params := javaInferredLambdaParamNames(n, content)
+		if len(params) != 1 || params[0] == "" {
+			return false
+		}
+		body := javaLambdaExprBody(n)
+		if body == nil {
+			// Fall back to body field when helper is shape-specific.
+			body = ingest.ChildByField(n, "body")
+		}
+		if body == nil {
+			return false
+		}
+		return javaIsCollectionElemExtract(body, content, params[0])
+	case "method_reference":
+		// List::getFirst / Collection::getFirst (Java 21 SequencedCollection).
+		var parts []*grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "::" {
+				continue
+			}
+			parts = append(parts, ch)
+		}
+		if len(parts) < 2 {
+			return false
+		}
+		obj, name := parts[0], parts[len(parts)-1]
+		if name.Type() != "identifier" || ingest.NodeText(name, content) != "getFirst" {
+			return false
+		}
+		if obj.Type() != "identifier" && obj.Type() != "type_identifier" {
+			return false
+		}
+		switch ingest.NodeText(obj, content) {
+		case "List", "SequencedCollection", "Deque", "LinkedList", "ArrayList":
+			return true
+		}
+		return false
+	default:
+		return false
+	}
+}
+
+// javaIsCollectionElemExtract reports expressions that extract one element from
+// collection param p: p.get(0) / p.getFirst() / p.iterator().next().
+func javaIsCollectionElemExtract(n *grammar.Node, content []byte, param string) bool {
+	if n == nil || param == "" {
+		return false
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(n, "expression")
+		if inner == nil {
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "method_invocation" {
+		return false
+	}
+	nameN := ingest.ChildByField(n, "name")
+	obj := ingest.ChildByField(n, "object")
+	if nameN == nil || obj == nil {
+		return false
+	}
+	name := ingest.NodeText(nameN, content)
+	switch name {
+	case "get":
+		// p.get(0) — single integer-literal 0 arg.
+		if obj.Type() != "identifier" || ingest.NodeText(obj, content) != param {
+			return false
+		}
+		args := javaCallArgs(n)
+		if len(args) != 1 {
+			return false
+		}
+		return javaIsIntegerZero(args[0], content)
+	case "getFirst":
+		// p.getFirst() — zero-arg.
+		if obj.Type() != "identifier" || ingest.NodeText(obj, content) != param {
+			return false
+		}
+		return javaCallIsZeroArg(n)
+	case "next":
+		// p.iterator().next() — zero-arg next on iterator() of param.
+		if !javaCallIsZeroArg(n) {
+			return false
+		}
+		if obj.Type() != "method_invocation" {
+			return false
+		}
+		itName := ingest.ChildByField(obj, "name")
+		itObj := ingest.ChildByField(obj, "object")
+		if itName == nil || itObj == nil || ingest.NodeText(itName, content) != "iterator" {
+			return false
+		}
+		if !javaCallIsZeroArg(obj) {
+			return false
+		}
+		return itObj.Type() == "identifier" && ingest.NodeText(itObj, content) == param
+	default:
+		return false
+	}
+}
+
+// javaIsIntegerZero reports integer literal 0 (decimal).
+func javaIsIntegerZero(n *grammar.Node, content []byte) bool {
+	if n == nil {
+		return false
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(n, "expression")
+		if inner == nil {
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		n = inner
+	}
+	if n == nil {
+		return false
+	}
+	if n.Type() == "decimal_integer_literal" || n.Type() == "integer_literal" || n.Type() == "decimal_floating_point_literal" {
+		return ingest.NodeText(n, content) == "0"
+	}
+	// Some grammars use generic "number" / bare text "0".
+	return ingest.NodeText(n, content) == "0"
 }
 
 // javaStreamCollectReducingIdentityElemType recovers T from
