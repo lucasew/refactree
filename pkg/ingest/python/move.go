@@ -5257,6 +5257,16 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// dict values of A; store nested leaf.
 						// Foreign too for shadowing (db = {"k": [B()]} after da).
 						elemOf["@nested."+lname] = nest
+					} else if nest := pythonNestedHomogeneousObjectElem(right, content, funcReturns, typeOf, fieldOf); nest != "" {
+						// aa = [[ba.get()]] / [{"k": ba.get()}] — method-return nested rows
+						// under foreign same-leaf (Class peels above).
+						// Foreign too for shadowing (bb = [[bb.get()]] after aa).
+						elemOf["@nested."+lname] = nest
+					} else if nest := pythonNestedDictHomogeneousObjectListElem(right, content, funcReturns, typeOf, fieldOf); nest != "" {
+						// da = {"k": [ba.get()]} / {"outer": {"k": ba.get()}} /
+						// dict(k=[ba.get()]) — method-return nested mapping under foreign
+						// same-leaf (Class peels above). Foreign too for shadowing.
+						elemOf["@nested."+lname] = nest
 					} else if nest := pythonDictStarCopyNestedValueType(right, content, elemOf); nest != "" {
 						// ca = {**da} / {**da, **ea} / {**da, "j": [A()]} when da is
 						// dict[str, list[A]] (@nested) — preserve nested leaf so
@@ -5998,6 +6008,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			} else if nest := pythonNestedHomogeneousCtorElem(valueN, content); nest != "" {
 				elemOf["@nested."+lname] = nest
 			} else if nest := pythonNestedDictHomogeneousListCtorElem(valueN, content); nest != "" {
+				elemOf["@nested."+lname] = nest
+			} else if nest := pythonNestedHomogeneousObjectElem(valueN, content, funcReturns, typeOf, fieldOf); nest != "" {
+				// aa := [[ba.get()]] / [{"k": ba.get()}] — method-return nested rows.
+				elemOf["@nested."+lname] = nest
+			} else if nest := pythonNestedDictHomogeneousObjectListElem(valueN, content, funcReturns, typeOf, fieldOf); nest != "" {
+				// da := {"k": [ba.get()]} / {"outer": {"k": ba.get()}} — method-return nested map.
 				elemOf["@nested."+lname] = nest
 			} else if et := pythonHomogeneousObjectDictValue(valueN, content, funcReturns, typeOf, fieldOf); et != "" {
 				// da := {"k": ba.get()} — after nested peels.
@@ -14743,6 +14759,32 @@ peeled:
 	if et := pythonObjectCollectionElem(n, content, funcReturns, typeOf, fieldOf); et != "" {
 		return et
 	}
+	// [[ba.get()]][0] / ((ba.get(),),)[0] / [{"k": ba.get()}][0] /
+	// {"k": [ba.get()]}["k"] / {"outer": {"k": ba.get()}}["outer"] —
+	// one-level nested object collection / mapping row under foreign same-leaf
+	// (Class peels via pythonNestedMappingSubscriptElemType). Enables further
+	// [0] / ["k"] access as the nested leaf (same model as @nested locals).
+	if n.Type() == "subscript" {
+		hasSlice := false
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			if n.Child(i).Type() == "slice" {
+				hasSlice = true
+				break
+			}
+		}
+		if !hasSlice {
+			val := ingest.ChildByField(n, "value")
+			for val != nil && val.Type() == "parenthesized_expression" {
+				val = pythonParenInner(val)
+			}
+			if nest := pythonNestedHomogeneousObjectElem(val, content, funcReturns, typeOf, fieldOf); nest != "" {
+				return nest
+			}
+			if nest := pythonNestedDictHomogeneousObjectListElem(val, content, funcReturns, typeOf, fieldOf); nest != "" {
+				return nest
+			}
+		}
+	}
 	// dict(k=ba.get()).values() / {"k": ba.get()}.values() / ChainMap(...).values()
 	if et := pythonObjectDictValuesElemType(n, content, funcReturns, typeOf, fieldOf); et != "" {
 		return et
@@ -15265,6 +15307,73 @@ func pythonNestedHomogeneousCtorElem(collection *grammar.Node, content []byte) s
 			}
 		default:
 			// Nested non-list / Class() at outer level → not a nest of rows.
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return nest
+}
+
+// pythonNestedHomogeneousObjectElem recovers T from one-level nested list/tuple
+// literals of homogeneous method-return / typed-local object rows (or
+// dict-of-object rows):
+//
+//	[[ba.get()]] / ((ba.get(),),) / ([ba.get()],) → "A"
+//	[{"k": ba.get()}] / ({"k": ba.get()},) → "A"
+//
+// Stored as elemOf["@nested."+name] so aa = [[ba.get()]]; aa[0][0].run() /
+// la = [{"k": ba.get()}]; la[0]["k"].run() peel under foreign same-leaf
+// (Class()-only peels live in pythonNestedHomogeneousCtorElem). Mixed row
+// leaves / deeper nests / sets of lists / non-list/dict rows fail closed.
+func pythonNestedHomogeneousObjectElem(collection *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if collection == nil {
+		return ""
+	}
+	switch collection.Type() {
+	case "list", "tuple":
+		// ok — one-level nest of rows (not set of lists; product fails closed).
+	default:
+		return ""
+	}
+	var nest string
+	saw := false
+	for i := uint32(0); i < collection.ChildCount(); i++ {
+		ch := collection.Child(i)
+		switch ch.Type() {
+		case "[", "]", "(", ")", ",", "comment":
+			continue
+		case "list", "tuple":
+			// Row must itself be a homogeneous object list/tuple of T.
+			et := pythonHomogeneousObjectElem(ch, content, funcReturns, typeOf, fieldOf)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				nest = et
+				saw = true
+				continue
+			}
+			if et != nest {
+				return ""
+			}
+		case "dictionary":
+			// Row is a mapping of object values: {"k": ba.get()} (list-of-dict).
+			et := pythonHomogeneousObjectDictLiteralValue(ch, content, funcReturns, typeOf, fieldOf)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				nest = et
+				saw = true
+				continue
+			}
+			if et != nest {
+				return ""
+			}
+		default:
+			// Nested non-list / object at outer level → not a nest of rows.
 			return ""
 		}
 	}
@@ -16217,6 +16326,250 @@ func pythonNestedDictValueCollectionElem(val *grammar.Node, content []byte) stri
 	default:
 		return ""
 	}
+}
+
+// pythonNestedDictValueObjectCollectionElem recovers T when val is a homogeneous
+// method-return / typed-local object list/tuple/set, a frozenset/deque/list/tuple
+// wrapper of those, a dictionary of object values (dict-of-dict), or a
+// dict/OrderedDict call whose values are objects. Class()-only peels live in
+// pythonNestedDictValueCollectionElem. Other shapes fail closed ("").
+func pythonNestedDictValueObjectCollectionElem(val *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if val == nil {
+		return ""
+	}
+	switch val.Type() {
+	case "list", "tuple", "set":
+		return pythonHomogeneousObjectElem(val, content, funcReturns, typeOf, fieldOf)
+	case "dictionary":
+		// Nested mapping of object values: {"k": ba.get()} inside outer map.
+		return pythonHomogeneousObjectDictLiteralValue(val, content, funcReturns, typeOf, fieldOf)
+	case "call":
+		// frozenset([ba.get()]) / deque([ba.get()]) / list([ba.get()]) /
+		// tuple((ba.get(),)) — single positional homogeneous object collection.
+		// dict(k=ba.get()) / OrderedDict(k=ba.get()) — nested scalar mapping of
+		// objects (outer {"o": dict(k=ba.get())} peels via @nested).
+		fn := ingest.ChildByField(val, "function")
+		name := pythonSimpleCalleeName(fn, content)
+		switch name {
+		case "frozenset", "deque", "set", "list", "tuple":
+			args, ok := pythonCallPositionalArgNodes(val)
+			if !ok || len(args) == 0 {
+				return ""
+			}
+			if name == "deque" {
+				if len(args) > 1 {
+					return ""
+				}
+			} else if len(args) != 1 {
+				return ""
+			}
+			return pythonHomogeneousObjectElem(args[0], content, funcReturns, typeOf, fieldOf)
+		case "dict", "OrderedDict":
+			return pythonHomogeneousObjectDictValue(val, content, funcReturns, typeOf, fieldOf)
+		default:
+			return ""
+		}
+	default:
+		return ""
+	}
+}
+
+// pythonNestedDictHomogeneousObjectListElem recovers T from mapping constructors
+// whose values are homogeneous method-return / typed-local object collections
+// or dict-of-object (one-level nest):
+//
+//	{"k": [ba.get()]} / {"k": (ba.get(),)} / {"k": {ba.get()}} → "A"
+//	{"outer": {"k": ba.get()}} → "A"
+//	dict(k=[ba.get()]) / OrderedDict(k=[ba.get()]) → "A"
+//
+// Stored as elemOf["@nested."+name] so da = {"k": [ba.get()]}; da["k"][0].run() /
+// {"k": [ba.get()]}["k"][0].run() peel under foreign same-leaf (Class()-only
+// peels live in pythonNestedDictHomogeneousListCtorElem). Scalar {"k": ba.get()}
+// stays on pythonHomogeneousObjectDictValue; mixed / empty / splat fail closed.
+func pythonNestedDictHomogeneousObjectListElem(collection *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if collection == nil {
+		return ""
+	}
+	switch collection.Type() {
+	case "dictionary":
+		return pythonNestedDictLiteralHomogeneousObjectListElem(collection, content, funcReturns, typeOf, fieldOf)
+	case "call":
+		return pythonNestedDictCallHomogeneousObjectListElem(collection, content, funcReturns, typeOf, fieldOf)
+	default:
+		return ""
+	}
+}
+
+// pythonNestedDictLiteralHomogeneousObjectListElem recovers T from a dictionary
+// literal whose values are homogeneous object list/tuple/set/frozenset/deque
+// collections or dict-of-object.
+func pythonNestedDictLiteralHomogeneousObjectListElem(collection *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if collection == nil || collection.Type() != "dictionary" {
+		return ""
+	}
+	var nest string
+	saw := false
+	for i := uint32(0); i < collection.ChildCount(); i++ {
+		ch := collection.Child(i)
+		switch ch.Type() {
+		case "{", "}", ",", "comment":
+			continue
+		case "pair":
+			val := ingest.ChildByField(ch, "value")
+			et := pythonNestedDictValueObjectCollectionElem(val, content, funcReturns, typeOf, fieldOf)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				nest = et
+				saw = true
+				continue
+			}
+			if et != nest {
+				return ""
+			}
+		default:
+			// Splat / comprehension / unknown — fail closed.
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return nest
+}
+
+// pythonNestedDictCallHomogeneousObjectListElem recovers T from dict/OrderedDict
+// forms with nested object collections (mirrors Class nested call peels):
+//
+//	dict(k=[ba.get()]) / OrderedDict(k=[ba.get()]) — all-keyword
+//	dict([("k", [ba.get()])]) / OrderedDict((("k", [ba.get()]),)) — pairs
+//	dict({"k": [ba.get()]}) — single dictionary arg
+//
+// Mixed positional+kwargs, splat, empty, and non-collection values fail closed.
+func pythonNestedDictCallHomogeneousObjectListElem(call *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	name := pythonSimpleCalleeName(ingest.ChildByField(call, "function"), content)
+	switch name {
+	case "dict", "OrderedDict", "UserDict":
+		// ok
+	default:
+		return ""
+	}
+	argList := ingest.ChildByField(call, "arguments")
+	if argList == nil {
+		return ""
+	}
+	var positionals []*grammar.Node
+	var keywords []*grammar.Node
+	for i := uint32(0); i < argList.ChildCount(); i++ {
+		ch := argList.Child(i)
+		switch ch.Type() {
+		case "(", ")", ",", "comment":
+			continue
+		case "keyword_argument":
+			keywords = append(keywords, ch)
+		case "list_splat", "dictionary_splat", "parenthesized_list_splat":
+			return ""
+		default:
+			positionals = append(positionals, ch)
+		}
+	}
+	if len(positionals) == 0 {
+		if len(keywords) == 0 {
+			return ""
+		}
+		var nest string
+		saw := false
+		for _, kw := range keywords {
+			val := ingest.ChildByField(kw, "value")
+			et := pythonNestedDictValueObjectCollectionElem(val, content, funcReturns, typeOf, fieldOf)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				nest = et
+				saw = true
+				continue
+			}
+			if et != nest {
+				return ""
+			}
+		}
+		if !saw {
+			return ""
+		}
+		return nest
+	}
+	if len(positionals) != 1 || len(keywords) != 0 {
+		return ""
+	}
+	arg := positionals[0]
+	switch arg.Type() {
+	case "dictionary":
+		return pythonNestedDictLiteralHomogeneousObjectListElem(arg, content, funcReturns, typeOf, fieldOf)
+	case "list", "tuple":
+		return pythonNestedDictPairsHomogeneousObjectListElem(arg, content, funcReturns, typeOf, fieldOf)
+	default:
+		return ""
+	}
+}
+
+// pythonNestedDictPairsHomogeneousObjectListElem recovers T from a list/tuple of
+// (key, nested-object-collection) pairs: [("k", [ba.get()])] → "A".
+func pythonNestedDictPairsHomogeneousObjectListElem(pairs *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if pairs == nil {
+		return ""
+	}
+	switch pairs.Type() {
+	case "list", "tuple":
+		// ok
+	default:
+		return ""
+	}
+	var nest string
+	saw := false
+	for i := uint32(0); i < pairs.ChildCount(); i++ {
+		ch := pairs.Child(i)
+		switch ch.Type() {
+		case "[", "]", "(", ")", ",", "comment":
+			continue
+		case "list", "tuple":
+			var elems []*grammar.Node
+			for j := uint32(0); j < ch.ChildCount(); j++ {
+				el := ch.Child(j)
+				switch el.Type() {
+				case "[", "]", "(", ")", ",", "comment":
+					continue
+				default:
+					elems = append(elems, el)
+				}
+			}
+			if len(elems) != 2 {
+				return ""
+			}
+			et := pythonNestedDictValueObjectCollectionElem(elems[1], content, funcReturns, typeOf, fieldOf)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				nest = et
+				saw = true
+				continue
+			}
+			if et != nest {
+				return ""
+			}
+		default:
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return nest
 }
 
 // pythonNestedDictLiteralHomogeneousListCtorElem recovers T from a dictionary
