@@ -1687,9 +1687,9 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 	}
 	// (c ? new A() : new A()).run() / (c ? a : x).run() — both arms agree on T.
 	// (c ? new BoxA().get() : new BoxA().get()).helper() — method-return arms
-	// under foreign same-leaf (jsTernaryExprType only peels new/local/factory).
+	// under foreign same-leaf (jsTernaryExprLeafType peels ba.get() / new T()).
 	if obj.Type() == "ternary_expression" {
-		if t := jsTernaryExprType(obj, content, typedLocals, factories); t != "" {
+		if t := jsTernaryExprLeafType(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 		cons := ingest.ChildByField(obj, "consequence")
@@ -1857,8 +1857,11 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 					} else if t := jsClassFieldAccessType(valN, content, out, classFields, methodReturns, ""); t != "" {
 						// const xa = new BoxA().a / oa.box — field peel under foreign same-leaf.
 						out[ingest.NodeText(nameN, content)] = t
-					} else if t := jsTernaryExprType(valN, content, out, factories); t != "" {
+					} else if t := jsTernaryExprLeafType(valN, content, out, factories, classFields, methodReturns); t != "" {
 						// const xa = c ? a : x / c ? new A() : new A() — both arms agree.
+						// const mrA = c ? new BoxA().get() : new BoxA().get() — method-return
+						// arms under foreign same-leaf (inline already renames via dual
+						// shouldRenameMember on arms; Class peels via jsTernaryExprType).
 						// Bind foreign too so dual-class B rebinds fail closed.
 						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsObjectSpreadPropTypeEx(valN, content, out, factories, objValueLocals, classFields, methodReturns); t != "" {
