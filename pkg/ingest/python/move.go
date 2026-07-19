@@ -7239,12 +7239,12 @@ func pythonAttrgetterFieldType(call *grammar.Node, content []byte, fieldOf, func
 // local with annotated field a of type T (fieldOf; same leaf as box.a /
 // attrgetter("a")(box)). Also getattr(w.get(), "a") / getattr(Box(A()), "a") via
 // type-level fieldOf under foreign same-leaf, and getattr(SimpleNamespace(k=A()), "k")
-// / types.SimpleNamespace(k=A()) — inline SNS kwargs (same leaf as
-// vars(SimpleNamespace(...))["k"] / SimpleNamespace(...).k). Exactly two
-// positional args: object + string field name. Three-arg getattr(obj, name,
-// default), non-string attr names, and other objects fail closed. Bare builtin
-// name only — getattr from other modules / getattr stored in a variable are
-// not tracked.
+// / getattr(SimpleNamespace(k=ba.get()), "k") / types.SimpleNamespace — inline SNS
+// kwargs (Class or method-return; same leaf as vars(SimpleNamespace(...))["k"] /
+// SimpleNamespace(...).k). Exactly two positional args: object + string field
+// name. Three-arg getattr(obj, name, default), non-string attr names, and other
+// objects fail closed. Bare builtin name only — getattr from other modules /
+// getattr stored in a variable are not tracked.
 func pythonGetattrFieldType(call *grammar.Node, content []byte, fieldOf, funcReturns, typeOf map[string]string) string {
 	if call == nil || call.Type() != "call" {
 		return ""
@@ -7283,10 +7283,10 @@ func pythonGetattrFieldType(call *grammar.Node, content []byte, fieldOf, funcRet
 				return t
 			}
 		}
-		// getattr(SimpleNamespace(k=A()), "k") / types.SimpleNamespace — inline SNS.
-		fields, _ := pythonSimpleNamespaceFieldTypes(args[0], content)
-		if fields != nil {
-			return fields[field]
+		// getattr(SimpleNamespace(k=A()), "k") / getattr(SimpleNamespace(k=ba.get()), "k")
+		// / types.SimpleNamespace — inline SNS kwargs (Class or method-return).
+		if t := pythonInlineSimpleNamespaceObjectFieldTypeOn(args[0], content, field, funcReturns, typeOf, fieldOf); t != "" {
+			return t
 		}
 	}
 	return ""
@@ -7310,8 +7310,9 @@ func pythonItemgetterFieldType(call *grammar.Node, content []byte, fieldOf, func
 //
 //	attrgetter — box / replace(box) / dataclasses.replace(box) /
 //	  w.get() / Box(A()) method-return / Class() via type-level fieldOf /
-//	  SimpleNamespace(k=A()) / types.SimpleNamespace(k=A()) inline kwargs
-//	  (same leaf as getattr(SimpleNamespace(...), "k"))
+//	  SimpleNamespace(k=A()) / SimpleNamespace(k=ba.get()) /
+//	  types.SimpleNamespace inline kwargs (Class or method-return; same leaf as
+//	  getattr(SimpleNamespace(...), "k") / SimpleNamespace(...).k)
 //	itemgetter — box / asdict(box) / vars(box) / box.__dict__ /
 //	  w.get() / Box(A()) method-return / Class() via type-level fieldOf
 func pythonOperatorGetterFieldType(call *grammar.Node, content []byte, fieldOf, funcReturns, typeOf map[string]string, name string) string {
@@ -7379,9 +7380,10 @@ func pythonOperatorGetterFieldType(call *grammar.Node, content []byte, fieldOf, 
 			}
 		}
 	}
-	// attrgetter("k")(SimpleNamespace(k=A())) / types.SimpleNamespace — inline SNS.
+	// attrgetter("k")(SimpleNamespace(k=A())) / attrgetter("k")(SimpleNamespace(k=ba.get()))
+	// / types.SimpleNamespace — inline SNS kwargs (Class or method-return).
 	if name == "attrgetter" {
-		return pythonInlineSimpleNamespaceFieldType(objArgs[0], content, field)
+		return pythonInlineSimpleNamespaceObjectFieldTypeOn(objArgs[0], content, field, funcReturns, typeOf, fieldOf)
 	}
 	// itemgetter("k")(vars(SimpleNamespace(k=A()))) / itemgetter("k")(SNS(...).__dict__)
 	// — same leaf as vars(SNS(...))["k"] under foreign same-leaf.
@@ -7389,13 +7391,6 @@ func pythonOperatorGetterFieldType(call *grammar.Node, content []byte, fieldOf, 
 		return pythonInlineSimpleNamespaceDictViewFieldType(objArgs[0], content, field, funcReturns, typeOf, fieldOf)
 	}
 	return ""
-}
-
-// pythonInlineSimpleNamespaceFieldType recovers T from SimpleNamespace(k=A()) /
-// types.SimpleNamespace(k=A()) field k under foreign same-leaf. Keyword Class()
-// fields only; parenthesized forms peel. Mixed / non-SNS fail closed.
-func pythonInlineSimpleNamespaceFieldType(n *grammar.Node, content []byte, field string) string {
-	return pythonInlineSimpleNamespaceObjectFieldTypeOn(n, content, field, nil, nil, nil)
 }
 
 // pythonInlineSimpleNamespaceObjectFieldType recovers T from
@@ -7570,8 +7565,9 @@ func pythonStoredOperatorGetterType(call *grammar.Node, content []byte, getterOf
 				}
 			}
 		}
-		// ga(SimpleNamespace(k=A())) after ga = attrgetter("k") — inline SNS.
-		return pythonInlineSimpleNamespaceFieldType(args[0], content, field)
+		// ga(SimpleNamespace(k=A())) / ga(SimpleNamespace(k=ba.get())) after
+		// ga = attrgetter("k") — inline SNS kwargs (Class or method-return).
+		return pythonInlineSimpleNamespaceObjectFieldTypeOn(args[0], content, field, funcReturns, typeOf, fieldOf)
 	case "itemgetter":
 		if field == "#" {
 			// gi(items) — typed collection element.
