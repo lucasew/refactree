@@ -1247,6 +1247,9 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 	generators := jsSameFileGeneratorYields(pf.Root, content)
 	classFields := jsClassFieldIndex(pf.Root, content)
 	methodReturns := jsClassMethodReturns(pf.Root, content, classFields)
+	// Second pass: field inits that are method-return (mrA = new BoxA().get())
+	// need methodReturns, which depends on Class()-only field index above.
+	jsEnhanceClassFieldsMethodReturn(pf.Root, content, classFields, methodReturns)
 	typedLocals, settledOf, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals := jsTypedLocals(pf.Root, content, ourReceivers, factories, generators, classFields, methodReturns)
 	// Unique method leaf: ExtraRename already rewrites every simple obj.oldLeaf.
 	// Apply the same aggressiveness to object-pattern property keys.
@@ -2177,8 +2180,9 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						jsBindObjectPatternUniformValues(nameN, content, t, out)
 					} else if t := jsObjectLiteralValueType(valN, content, out, factories); t != "" {
 						jsBindObjectPatternUniformValues(nameN, content, t, out)
-					} else if t := jsObjectSpreadValueType(valN, content, out, factories, objValueLocals); t != "" {
-						// const {k: a} = {...{k: new A()}} / {...oa}
+					} else if t := jsObjectSpreadValueTypeEx(valN, content, out, factories, objValueLocals, classFields, methodReturns); t != "" {
+						// const {k: a} = {...{k: new A()}} / {...oa} /
+						// {...{k: new BoxA().get()}} — method-return spread values.
 						jsBindObjectPatternUniformValues(nameN, content, t, out)
 					} else if valN.Type() == "identifier" && objValueLocals != nil {
 						if t := objValueLocals[ingest.NodeText(valN, content)]; t != "" {
@@ -2409,6 +2413,88 @@ func jsClassFieldIndex(root *grammar.Node, content []byte) map[string]map[string
 	}
 	walk(root)
 	return out
+}
+
+// jsEnhanceClassFieldsMethodReturn fills classFields entries for field
+// initializers that peel as method-return leaves (mrA = new BoxA().get() → A)
+// after methodReturns is built. Class()-only peels live in jsClassFieldIndex.
+// Enables new HolderM().mrA.run() / h.mrA.run() under foreign same-leaf.
+// Existing Class() fields are left unchanged; empty peels fail closed.
+func jsEnhanceClassFieldsMethodReturn(root *grammar.Node, content []byte, classFields, methodReturns map[string]map[string]string) {
+	if root == nil || classFields == nil || methodReturns == nil {
+		return
+	}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		if n.Type() == "class_declaration" || n.Type() == "class" {
+			nameN := ingest.ChildByField(n, "name")
+			body := ingest.ChildByField(n, "body")
+			if nameN != nil && body != nil {
+				typeName := ingest.NodeText(nameN, content)
+				if typeName != "" {
+					fields := classFields[typeName]
+					if fields == nil {
+						fields = map[string]string{}
+					}
+					for i := uint32(0); i < body.ChildCount(); i++ {
+						ch := body.Child(i)
+						if ch == nil {
+							continue
+						}
+						if ch.Type() != "field_definition" && ch.Type() != "public_field_definition" {
+							continue
+						}
+						prop := ingest.ChildByField(ch, "property")
+						val := ingest.ChildByField(ch, "value")
+						if prop == nil || val == nil {
+							// Fall back to child scan (same as jsClassFieldIndex).
+							for j := uint32(0); j < ch.ChildCount(); j++ {
+								c := ch.Child(j)
+								if c == nil {
+									continue
+								}
+								switch c.Type() {
+								case "property_identifier", "private_property_identifier", "identifier":
+									if prop == nil {
+										prop = c
+									}
+								case "call_expression", "new_expression":
+									if val == nil {
+										val = c
+									}
+								}
+							}
+						}
+						if prop == nil || val == nil {
+							continue
+						}
+						fname := ingest.NodeText(prop, content)
+						if fname == "" {
+							continue
+						}
+						// Already Class()-indexed — leave alone.
+						if fields[fname] != "" {
+							continue
+						}
+						// new BoxA().get() / ba.get() — method-return leaf.
+						if tn := jsExprLeafType(val, content, nil, nil, classFields, methodReturns); tn != "" {
+							fields[fname] = tn
+						}
+					}
+					if len(fields) > 0 {
+						classFields[typeName] = fields
+					}
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
 }
 
 // jsClassFieldAccessType recovers T from new BoxA().a / BoxA.sa / ba.a /

@@ -4494,9 +4494,19 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					}
 				}
 				// xa = a if c else x / xa = A() if c else A() — both arms agree on T.
-				// Foreign too for shadowing (xb = b if c else y).
+				// xa = ba.get() if c else ba.get() — method-return arms under foreign
+				// same-leaf (pythonObjectLeafType peels ternary + method-return).
+				// Foreign too for shadowing (xb = b if c else y / mrB = bb.get() if c …).
 				if right != nil {
 					if tn := pythonObjectExprType(right, content, typeOf); tn != "" {
+						typeOf[lname] = tn
+						bindFields(lname, tn)
+						if ourReceivers[tn] {
+							out[lname] = true
+						}
+					} else if tn := pythonObjectLeafType(right, content, funcReturns, typeOf, fieldOf); tn != "" {
+						// Method-return / factory peels not covered by Class()-only
+						// pythonObjectExprType (e.g. ba.get() if c else ba.get()).
 						typeOf[lname] = tn
 						bindFields(lname, tn)
 						if ourReceivers[tn] {
@@ -5089,6 +5099,16 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						if ourReceivers[ft] {
 							out[lname] = true
 						}
+					} else if ft := pythonInlineSimpleNamespaceObjectFieldType(right, content, funcReturns, typeOf, fieldOf); ft != "" {
+						// mrA = SimpleNamespace(k=ba.get()).k / types.SimpleNamespace —
+						// inline SNS kwargs (Class() or method-return) under foreign
+						// same-leaf. Direct .run() already peels; assigned form needs
+						// typeOf bind. Foreign too for shadowing.
+						typeOf[lname] = ft
+						bindFields(lname, ft)
+						if ourReceivers[ft] {
+							out[lname] = true
+						}
 					}
 				}
 				// xs = [A()] / (A(),) / [B()] — track element type for later for-loops.
@@ -5291,6 +5311,19 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						for i, name := range targets {
 							if i < len(types) && ourReceivers[types[i]] {
 								out[name] = true
+							}
+						}
+					} else if types := pythonObjectLeafListTypes(right, content, funcReturns, typeOf, fieldOf); len(types) > 0 {
+						// [mrA] = [ba.get()] / (mrA,) = (ba.get(),) / mrA, = [ba.get()] —
+						// method-return list/tuple unpack under foreign same-leaf
+						// (Class() peels via pythonCtorListTypes above).
+						for i, name := range targets {
+							if i < len(types) && types[i] != "" {
+								typeOf[name] = types[i]
+								bindFields(name, types[i])
+								if ourReceivers[types[i]] {
+									out[name] = true
+								}
 							}
 						}
 					} else if types := pythonAssignPairUnpackTypes(right, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots); len(types) > 0 {
@@ -13745,6 +13778,41 @@ func pythonCtorListTypes(n *grammar.Node, content []byte) []string {
 			out = append(out, ingest.NodeText(fn, content))
 		default:
 			return nil
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// pythonObjectLeafListTypes recovers per-slot Class leaves from a list/tuple/
+// expression_list of object leaves (Class() / typed local / method-return):
+// [ba.get()] / (ba.get(),) / ba.get(), / [A(), ba.get()]. Enables
+// [mrA] = [ba.get()] / (mrA,) = (ba.get(),) / mrA, = [ba.get()] unpack under
+// foreign same-leaf. Mixed empty / non-object slots fail closed.
+func pythonObjectLeafListTypes(n *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) []string {
+	if n == nil {
+		return nil
+	}
+	switch n.Type() {
+	case "expression_list", "tuple", "list":
+		// ok
+	default:
+		return nil
+	}
+	var out []string
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		switch ch.Type() {
+		case "(", ")", "[", "]", ",", "comment":
+			continue
+		default:
+			et := pythonObjectLeafType(ch, content, funcReturns, typeOf, fieldOf)
+			if et == "" {
+				return nil
+			}
+			out = append(out, et)
 		}
 	}
 	if len(out) == 0 {
