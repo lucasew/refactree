@@ -3702,6 +3702,23 @@ func pythonSameFileFuncReturnTypes(root *grammar.Node, content []byte) map[strin
 	if root == nil {
 		return out
 	}
+	// Pass 1: instance method returns (BoxA.get → A) so later body peels of
+	// @staticmethod/@classmethod factories and free functions can resolve
+	// method-return under foreign same-leaf even when BoxA is declared after A.
+	var pass1 func(n *grammar.Node)
+	pass1 = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		if n.Type() == "class_definition" {
+			pythonHarvestClassInstanceMethodReturns(n, content, out)
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			pass1(n.Child(i))
+		}
+	}
+	pass1(root)
+	// Pass 2: factories, free functions, lambdas (funcReturns=out peels BoxA.get).
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
 		if n == nil || n.IsNull() {
@@ -3744,9 +3761,9 @@ func pythonSameFileFuncReturnTypes(root *grammar.Node, content []byte) map[strin
 			// @staticmethod / @classmethod factories on the class:
 			// A.make().run() after @staticmethod def make(): return A()
 			// A.create().run() after @classmethod def create(cls): return cls()
+			// A.from_box(ba).run() after @staticmethod def from_box(ba: BoxA): return ba.get()
+			// (instance method returns already in out from pass 1).
 			pythonHarvestClassFactoryReturns(n, content, out)
-			// Instance methods with annotated returns: BoxA.get → A.
-			pythonHarvestClassInstanceMethodReturns(n, content, out)
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
@@ -3849,9 +3866,11 @@ func pythonHarvestClassInstanceMethodReturns(classDef *grammar.Node, content []b
 }
 
 // pythonHarvestClassFactoryReturns records Class.method → Class for
-// @staticmethod / @classmethod methods whose body always returns Class() or
-// (classmethod only) cls(). Keys use "Class.method" so A.make().run() peels
-// under foreign same-leaf methods without colliding with bare make().
+// @staticmethod / @classmethod methods whose body always returns Class() /
+// method-return peeling to Class (return ba.get() with BoxA.get → A) or
+// (classmethod only) cls(). Keys use "Class.method" so A.make().run() /
+// A.from_box(ba).run() peel under foreign same-leaf methods without colliding
+// with bare make().
 func pythonHarvestClassFactoryReturns(classDef *grammar.Node, content []byte, out map[string]string) {
 	if classDef == nil || classDef.Type() != "class_definition" || out == nil {
 		return
@@ -4229,6 +4248,8 @@ func pythonFuncBodyReturnCtor(fn *grammar.Node, content []byte, funcReturns, typ
 // skipped (with-as uses pythonSameFileContextManagerYields). Mixed/non-leaf
 // yields and yield-from fail closed (pythonFuncBodyYieldCtor).
 // funcReturns peels method-return yields under foreign same-leaf.
+// Nested free-var generators (def gen(): yield ba.get()) rebind later in
+// typedLocals with enclosing typeOf.
 func pythonSameFileGeneratorYields(root *grammar.Node, content []byte, funcReturns map[string]string) map[string]string {
 	out := map[string]string{}
 	if root == nil {
@@ -4249,7 +4270,7 @@ func pythonSameFileGeneratorYields(root *grammar.Node, content []byte, funcRetur
 			if nameN != nil && nameN.Type() == "identifier" {
 				name := ingest.NodeText(nameN, content)
 				if name != "" {
-					if tn := pythonFuncBodyYieldCtor(n, content, funcReturns); tn != "" {
+					if tn := pythonFuncBodyYieldCtor(n, content, funcReturns, nil); tn != "" {
 						out[name] = tn
 					}
 				}
@@ -4275,9 +4296,15 @@ func pythonSameFileGeneratorYields(root *grammar.Node, content []byte, funcRetur
 //	    a = A()
 //	    yield a
 //
+//	@contextmanager
+//	def make_ma(ba: BoxA):
+//	    yield ba.get()
+//
 // Enables `with make_a() as a: a.run()` under foreign same-leaf methods.
 // Mixed/non-ctor yields and non-CM decorators fail closed.
-func pythonSameFileContextManagerYields(root *grammar.Node, content []byte) map[string]string {
+// funcReturns peels method-return yields under foreign same-leaf (may be nil
+// for Class()-only paths).
+func pythonSameFileContextManagerYields(root *grammar.Node, content []byte, funcReturns map[string]string) map[string]string {
 	out := map[string]string{}
 	if root == nil {
 		return out
@@ -4302,8 +4329,8 @@ func pythonSameFileContextManagerYields(root *grammar.Node, content []byte) map[
 					if nameN != nil && nameN.Type() == "identifier" {
 						name := ingest.NodeText(nameN, content)
 						if name != "" {
-							// CM factories: Class()-only yield peel (funcReturns nil).
-							if tn := pythonFuncBodyYieldCtor(fn, content, nil); tn != "" {
+							// Class() / method-return / assign-yield peels.
+							if tn := pythonFuncBodyYieldCtor(fn, content, funcReturns, nil); tn != "" {
 								out[name] = tn
 							}
 						}
@@ -4358,12 +4385,15 @@ func pythonIsContextManagerDecorated(decorated *grammar.Node, content []byte) bo
 }
 
 // pythonFuncBodyYieldCtor recovers T when every yield in fn's body is
-// `yield T(...)` / `yield ba.get()` (typed param or local) / `yield x` after
-// a local `x = T()` or `x = ba.get()` assignment. Nested scopes and `yield from`
-// fail closed. Zero/mixed/non-leaf yields fail closed.
+// `yield T(...)` / `yield ba.get()` (typed param or outer typeOf local) /
+// `yield x` after a local `x = T()` or `x = ba.get()` assignment. Nested scopes
+// and `yield from` fail closed. Zero/mixed/non-leaf yields fail closed.
+//
 // funcReturns peels method-return yields under foreign same-leaf (may be nil
-// for Class()-only paths such as contextmanager factories).
-func pythonFuncBodyYieldCtor(fn *grammar.Node, content []byte, funcReturns map[string]string) string {
+// for Class()-only paths). typeOf seeds free-var peels from an enclosing scope
+// (nested def gen(): yield ba.get() with outer ba: BoxA); same-file harvest
+// passes nil typeOf and relies on the function's own typed parameters.
+func pythonFuncBodyYieldCtor(fn *grammar.Node, content []byte, funcReturns, typeOf map[string]string) string {
 	if fn == nil {
 		return ""
 	}
@@ -4371,8 +4401,13 @@ func pythonFuncBodyYieldCtor(fn *grammar.Node, content []byte, funcReturns map[s
 	if body == nil {
 		return ""
 	}
-	// Typed locals inside the generator: params (ba: BoxA) + assignments.
+	// Seed free vars from enclosing typeOf, then own typed params + assignments.
 	localCtor := map[string]string{}
+	for k, v := range typeOf {
+		if k != "" && v != "" {
+			localCtor[k] = v
+		}
+	}
 	// Harvest annotated parameters so yield ba.get() peels under foreign same-leaf.
 	if params := ingest.ChildByField(fn, "parameters"); params != nil {
 		for i := uint32(0); i < params.ChildCount(); i++ {
@@ -4564,7 +4599,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 		return out, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf, funcReturns
 	}
 	funcReturns = pythonSameFileFuncReturnTypes(root, content)
-	cmYieldOf = pythonSameFileContextManagerYields(root, content)
+	// CM factories: Class() + method-return yields (funcReturns peels BoxA.get).
+	cmYieldOf = pythonSameFileContextManagerYields(root, content, funcReturns)
 	// Same-file bare generators (yield A() / yield ba.get()) → elemOf["@yield.name"]
 	// so next(gen_a()) / for a in gen_a() / g = gen_a(); next(g) peel under
 	// foreign same-leaf methods. @contextmanager factories stay out (with-as).
@@ -4616,6 +4652,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// def make_mna(): return ba.get() (free-var ba: BoxA) and param-body
 			// factories bind into funcReturns under foreign same-leaf. Annotated
 			// returns already live in funcReturns from same-file harvest.
+			// Also re-peel generator yields so nested def gen_mna(): yield ba.get()
+			// binds elemOf["@yield.gen_mna"] under foreign same-leaf.
 			nameN := ingest.ChildByField(n, "name")
 			if nameN != nil && nameN.Type() == "identifier" {
 				name := ingest.NodeText(nameN, content)
@@ -4623,6 +4661,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				if name != "" && retN == nil {
 					if tn := pythonFuncBodyReturnCtor(n, content, funcReturns, typeOf); tn != "" {
 						funcReturns[name] = tn
+					}
+				}
+				if name != "" {
+					if tn := pythonFuncBodyYieldCtor(n, content, funcReturns, typeOf); tn != "" {
+						elemOf["@yield."+name] = tn
 					}
 				}
 			}
