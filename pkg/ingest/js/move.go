@@ -10793,12 +10793,14 @@ func jsPromiseFinallyType(n *grammar.Node, content []byte, typedLocals, factorie
 	return ""
 }
 
-// jsPromiseCatchType recovers T from p.catch(fn) / await p.catch(fn) when
-// p peels to a Promise of value T. catch is identity for the fulfilled value
-// (rejection handler ignored for typing). Enables
-// (await Promise.resolve(new A()).catch(() => null)).run() /
-// (await Promise.resolve(new BoxA().get()).catch(() => null)).run() and
-// Promise.resolve(new A()).catch(() => null).then(a => a.run()) under foreign
+// jsPromiseCatchType recovers T from p.catch(fn) / await p.catch(fn).
+// When p peels to a Promise of value T, catch is identity for the fulfilled
+// value (rejection handler ignored for typing). When p is Promise.reject(...)
+// (no fulfilled value), recover T from the catch handler body:
+// catch(() => new A()) / catch(() => new BoxA().get()).
+// Enables (await Promise.resolve(new A()).catch(() => null)).run() /
+// (await Promise.reject(null).catch(() => new A())).run() /
+// (await Promise.reject(null).catch(() => new BoxA().get())).run() under foreign
 // same-leaf methods (method-return via methodReturns). Unknown receivers fail closed.
 func jsPromiseCatchType(n *grammar.Node, content []byte, typedLocals, factories map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
@@ -10843,7 +10845,8 @@ func jsPromiseCatchType(n *grammar.Node, content []byte, typedLocals, factories 
 	if prop == nil || ingest.NodeText(prop, content) != "catch" {
 		return ""
 	}
-	// Require ≥1 arg (handler present); body ignored (not type-changing for fulfill).
+	// Require ≥1 arg (handler present).
+	var firstArg *grammar.Node
 	count := 0
 	if args != nil {
 		for i := uint32(0); i < args.ChildCount(); i++ {
@@ -10852,6 +10855,9 @@ func jsPromiseCatchType(n *grammar.Node, content []byte, typedLocals, factories 
 				continue
 			}
 			count++
+			if firstArg == nil {
+				firstArg = ch
+			}
 		}
 	}
 	if count < 1 {
@@ -10873,6 +10879,65 @@ func jsPromiseCatchType(n *grammar.Node, content []byte, typedLocals, factories 
 	}
 	if t := jsPromiseCatchType(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
 		return t
+	}
+	// Promise.reject(...).catch(() => new A() / new BoxA().get()) — no fulfilled
+	// value; recover T from expression-bodied handler under foreign same-leaf.
+	if jsIsPromiseRejectCall(obj, content) {
+		if t := jsPromiseCatchHandlerReturnType(firstArg, content, typedLocals, factories, classFields, methodReturns); t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
+// jsIsPromiseRejectCall reports Promise.reject(...).
+func jsIsPromiseRejectCall(n *grammar.Node, content []byte) bool {
+	if n == nil {
+		return false
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "call_expression" {
+		return false
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil || (fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain") {
+		return false
+	}
+	base := ingest.ChildByField(fn, "object")
+	prop := ingest.ChildByField(fn, "property")
+	if base == nil || prop == nil {
+		return false
+	}
+	if ingest.NodeText(prop, content) != "reject" {
+		return false
+	}
+	return base.Type() == "identifier" && ingest.NodeText(base, content) == "Promise"
+}
+
+// jsPromiseCatchHandlerReturnType recovers T from an expression-bodied catch
+// handler: () => new A() / () => new BoxA().get() / (e) => x. Blocks fail closed.
+func jsPromiseCatchHandlerReturnType(handler *grammar.Node, content []byte, typedLocals, factories map[string]string, classFields, methodReturns map[string]map[string]string) string {
+	if handler == nil {
+		return ""
+	}
+	// Arrow expression body: () => new A()
+	if handler.Type() == "arrow_function" {
+		body := ingest.ChildByField(handler, "body")
+		if body == nil || body.Type() == "statement_block" {
+			return ""
+		}
+		return jsExprLeafType(body, content, typedLocals, factories, classFields, methodReturns)
 	}
 	return ""
 }
