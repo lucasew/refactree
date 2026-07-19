@@ -1244,12 +1244,13 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 	defer pf.Close()
 
 	factories := jsSameFileFactoryReturns(pf.Root, content)
-	generators := jsSameFileGeneratorYields(pf.Root, content)
 	classFields := jsClassFieldIndex(pf.Root, content)
 	methodReturns := jsClassMethodReturns(pf.Root, content, classFields)
 	// Second pass: field inits that are method-return (mrA = new BoxA().get())
 	// need methodReturns, which depends on Class()-only field index above.
 	jsEnhanceClassFieldsMethodReturn(pf.Root, content, classFields, methodReturns)
+	// Generators after methodReturns so yield new BoxA().get() peels under foreign same-leaf.
+	generators := jsSameFileGeneratorYields(pf.Root, content, classFields, methodReturns)
 	typedLocals, settledOf, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals := jsTypedLocals(pf.Root, content, ourReceivers, factories, generators, classFields, methodReturns)
 	// Unique method leaf: ExtraRename already rewrites every simple obj.oldLeaf.
 	// Apply the same aggressiveness to object-pattern property keys.
@@ -3954,11 +3955,13 @@ func jsTypeName(typeN *grammar.Node, content []byte) string {
 }
 
 // jsSameFileGeneratorYields maps same-file generator names → yield type leaf
-// recovered from body-only `yield new T()` / `yield x` after `x = new T()`.
+// recovered from body-only `yield new T()` / `yield new BoxA().get()` /
+// `yield x` after `x = new T()` / `x = new BoxA().get()`.
 // function* genA(){ yield new A() } / async function* agenA(){ yield new A() } /
-// const genA = function*(){ yield new A() }. Mixed/non-new yields and yield*
+// const genA = function*(){ yield new A() }. Mixed/non-leaf yields and yield*
 // fail closed. Same-file name → last wins.
-func jsSameFileGeneratorYields(root *grammar.Node, content []byte) map[string]string {
+// classFields/methodReturns peel method-return yields under foreign same-leaf.
+func jsSameFileGeneratorYields(root *grammar.Node, content []byte, classFields, methodReturns map[string]map[string]string) map[string]string {
 	out := map[string]string{}
 	if root == nil {
 		return out
@@ -3974,7 +3977,7 @@ func jsSameFileGeneratorYields(root *grammar.Node, content []byte) map[string]st
 			if nameN != nil && nameN.Type() == "identifier" {
 				name := ingest.NodeText(nameN, content)
 				if name != "" {
-					if t := jsFuncBodyYieldNew(n, content); t != "" {
+					if t := jsFuncBodyYieldNew(n, content, classFields, methodReturns); t != "" {
 						out[name] = t
 					}
 				}
@@ -3991,7 +3994,7 @@ func jsSameFileGeneratorYields(root *grammar.Node, content []byte) map[string]st
 					continue
 				}
 				if valN.Type() == "generator_function" {
-					if t := jsFuncBodyYieldNew(valN, content); t != "" {
+					if t := jsFuncBodyYieldNew(valN, content, classFields, methodReturns); t != "" {
 						out[ingest.NodeText(nameN, content)] = t
 					}
 				}
@@ -4005,10 +4008,12 @@ func jsSameFileGeneratorYields(root *grammar.Node, content []byte) map[string]st
 	return out
 }
 
-// jsFuncBodyYieldNew recovers T when every yield in fn is `yield new T()`
-// or `yield x` after a local `x = new T()` assignment. Nested function/class
-// bodies are skipped. yield* / zero / mixed / non-new yields fail closed.
-func jsFuncBodyYieldNew(fn *grammar.Node, content []byte) string {
+// jsFuncBodyYieldNew recovers T when every yield in fn is `yield new T()` /
+// `yield new BoxA().get()` / `yield x` after a local `x = new T()` or
+// `x = new BoxA().get()` assignment. Nested function/class bodies are skipped.
+// yield* / zero / mixed / non-leaf yields fail closed.
+// methodReturns peels product method-return yields under foreign same-leaf.
+func jsFuncBodyYieldNew(fn *grammar.Node, content []byte, classFields, methodReturns map[string]map[string]string) string {
 	if fn == nil {
 		return ""
 	}
@@ -4035,12 +4040,13 @@ func jsFuncBodyYieldNew(fn *grammar.Node, content []byte) string {
 			nameN := ingest.ChildByField(n, "name")
 			valN := ingest.ChildByField(n, "value")
 			if nameN != nil && nameN.Type() == "identifier" && valN != nil {
-				if t := jsNewExpressionType(valN, content); t != "" {
+				// new T() / new BoxA().get() / factories — leaf for yield x.
+				if t := jsExprLeafType(valN, content, localCtor, nil, classFields, methodReturns); t != "" {
 					localCtor[ingest.NodeText(nameN, content)] = t
 				}
 			}
 		case "yield_expression":
-			// yield new T() / yield x — reject yield*.
+			// yield new T() / yield new BoxA().get() / yield x — reject yield*.
 			var expr *grammar.Node
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				ch := n.Child(i)
@@ -4061,11 +4067,7 @@ func jsFuncBodyYieldNew(fn *grammar.Node, content []byte) string {
 			}
 			t := ""
 			if expr != nil {
-				if ctor := jsNewExpressionType(expr, content); ctor != "" {
-					t = ctor
-				} else if expr.Type() == "identifier" {
-					t = localCtor[ingest.NodeText(expr, content)]
-				}
+				t = jsExprLeafType(expr, content, localCtor, nil, classFields, methodReturns)
 			}
 			if t == "" {
 				found = fail
