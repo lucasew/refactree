@@ -13616,11 +13616,17 @@ func pythonCallPositionalArgNodes(call *grammar.Node) (args []*grammar.Node, ok 
 	return args, true
 }
 
-// pythonComprehensionElemType recovers the element type of an identity
-// generator/list/set comprehension: `x for x in items` / `[x for x in items if x]`.
-// Body must be the same identifier as the single for-target; nested fors and
-// transforming bodies (`f(x) for x in items`) fail closed. if_clause is ignored
-// (filter does not change element type).
+// pythonComprehensionElemType recovers the element type of a generator/list/set
+// comprehension:
+//
+//   - Identity: `x for x in items` / `[x for x in items if x]` — element type of
+//     the iterable (body name matches the single for-target).
+//   - Class() body: `[A() for _ in range(1)]` / `(A() for _ in xs)` — element type
+//     is A, independent of the iterable (enables xs = [A() for …]; xs[0].run()
+//     and next(A() for …).run() under foreign same-leaf).
+//
+// Nested fors and other transforming bodies (`f(x) for x in items`) fail closed.
+// if_clause is ignored (filter does not change element type).
 func pythonComprehensionElemType(comp *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
 	if comp == nil {
 		return ""
@@ -13632,7 +13638,7 @@ func pythonComprehensionElemType(comp *grammar.Node, content []byte, elemOf, egE
 		return ""
 	}
 	body := ingest.ChildByField(comp, "body")
-	if body == nil || body.Type() != "identifier" {
+	if body == nil {
 		return ""
 	}
 	var forClause *grammar.Node
@@ -13651,14 +13657,24 @@ func pythonComprehensionElemType(comp *grammar.Node, content []byte, elemOf, egE
 	}
 	left := ingest.ChildByField(forClause, "left")
 	right := ingest.ChildByField(forClause, "right")
-	if left == nil || right == nil || left.Type() != "identifier" {
+	if left == nil || right == nil {
 		return ""
 	}
-	// Identity only: body name must match the for-target (`x for x in items`).
-	if ingest.NodeText(body, content) != ingest.NodeText(left, content) {
-		return ""
+	// Identity: body name must match the for-target (`x for x in items`).
+	if body.Type() == "identifier" && left.Type() == "identifier" &&
+		ingest.NodeText(body, content) == ingest.NodeText(left, content) {
+		return pythonIterableElemType(right, content, elemOf, egElems, typeOf)
 	}
-	return pythonIterableElemType(right, content, elemOf, egElems, typeOf)
+	// Body is Class() / Class(...) — element type is the Class name
+	// (`[A() for _ in range(1)]` / next(A() for _ in items)).
+	// Typed-local / Class() peels via pythonObjectExprType for paren/ternary.
+	if ct := pythonClassCtorName(body, content); ct != "" {
+		return ct
+	}
+	if tn := pythonObjectExprType(body, content, typeOf); tn != "" {
+		return tn
+	}
+	return ""
 }
 
 // pythonPatternIdents returns simple identifier targets from pattern_list /
@@ -14729,9 +14745,15 @@ func pythonObjectChainFromIterableElemType(arg *grammar.Node, content []byte, fu
 	return et
 }
 
-// pythonObjectComprehensionElemType recovers T from identity genexp/list/set
-// comps over object iterables: x for x in [ba.get()] / [x for x in [ba.get()]].
-// Same identity rules as pythonComprehensionElemType; body must match for-target.
+// pythonObjectComprehensionElemType recovers T from genexp/list/set comps over
+// object leaves under foreign same-leaf:
+//
+//   - Identity over object iterables: x for x in [ba.get()] / [x for x in [ba.get()]]
+//   - Method-return / Class() body: [ba.get() for _ in range(1)] /
+//     next(ba.get() for _ in xs) — body peels via pythonObjectLeafType
+//
+// Same single-for rules as pythonComprehensionElemType. Nested fors and other
+// transforming bodies fail closed. if_clause is ignored.
 func pythonObjectComprehensionElemType(comp *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
 	if comp == nil {
 		return ""
@@ -14743,7 +14765,7 @@ func pythonObjectComprehensionElemType(comp *grammar.Node, content []byte, funcR
 		return ""
 	}
 	body := ingest.ChildByField(comp, "body")
-	if body == nil || body.Type() != "identifier" {
+	if body == nil {
 		return ""
 	}
 	var forClause *grammar.Node
@@ -14761,13 +14783,17 @@ func pythonObjectComprehensionElemType(comp *grammar.Node, content []byte, funcR
 	}
 	left := ingest.ChildByField(forClause, "left")
 	right := ingest.ChildByField(forClause, "right")
-	if left == nil || right == nil || left.Type() != "identifier" {
+	if left == nil || right == nil {
 		return ""
 	}
-	if ingest.NodeText(body, content) != ingest.NodeText(left, content) {
-		return ""
+	// Identity: body name matches for-target over an object iterable.
+	if body.Type() == "identifier" && left.Type() == "identifier" &&
+		ingest.NodeText(body, content) == ingest.NodeText(left, content) {
+		return pythonObjectIterableElemType(right, content, funcReturns, typeOf, fieldOf)
 	}
-	return pythonObjectIterableElemType(right, content, funcReturns, typeOf, fieldOf)
+	// Body is method-return / Class() / typed-local leaf
+	// (`[ba.get() for _ in range(1)]` / next(ba.get() for _ in xs)).
+	return pythonObjectLeafType(body, content, funcReturns, typeOf, fieldOf)
 }
 
 // pythonObjectChainElemType recovers shared T from chain/merge of object
