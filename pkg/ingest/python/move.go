@@ -2510,31 +2510,33 @@ func pythonFutureResultCallType(call *grammar.Node, content []byte, futureOf map
 // each value must be a Class() call. Splat / positional / non-Class values fail
 // closed (nil). Used to bind fieldOf["da.k"] for da.k.run() under foreign
 // same-leaf without inventing namedtuple fieldIndex entries.
-func pythonSimpleNamespaceFieldTypes(call *grammar.Node, content []byte) map[string]string {
+// order is declaration-order Class leaves for @astuple.local.#i slots so
+// vars(da).values() / d = vars(da); d.values() peels when values are uniform.
+func pythonSimpleNamespaceFieldTypes(call *grammar.Node, content []byte) (map[string]string, []string) {
 	if call == nil || call.Type() != "call" {
-		return nil
+		return nil, nil
 	}
 	fn := ingest.ChildByField(call, "function")
 	if fn == nil {
-		return nil
+		return nil, nil
 	}
 	if pythonSimpleCalleeName(fn, content) != "SimpleNamespace" {
-		return nil
+		return nil, nil
 	}
 	// types.SimpleNamespace — require module ident "types". Bare SimpleNamespace
 	// (from types import SimpleNamespace) accepted by leaf name alone.
 	if fn.Type() == "attribute" {
 		obj := ingest.ChildByField(fn, "object")
 		if obj == nil || obj.Type() != "identifier" || ingest.NodeText(obj, content) != "types" {
-			return nil
+			return nil, nil
 		}
 	}
 	argList := ingest.ChildByField(call, "arguments")
 	if argList == nil {
-		return nil
+		return nil, nil
 	}
 	out := map[string]string{}
-	saw := false
+	var order []string
 	for i := uint32(0); i < argList.ChildCount(); i++ {
 		ch := argList.Child(i)
 		switch ch.Type() {
@@ -2544,23 +2546,73 @@ func pythonSimpleNamespaceFieldTypes(call *grammar.Node, content []byte) map[str
 			nameN := ingest.ChildByField(ch, "name")
 			valN := ingest.ChildByField(ch, "value")
 			if nameN == nil || nameN.Type() != "identifier" {
-				return nil
+				return nil, nil
 			}
 			et := pythonClassCtorName(valN, content)
 			if et == "" {
-				return nil
+				return nil, nil
 			}
 			out[ingest.NodeText(nameN, content)] = et
-			saw = true
+			order = append(order, et)
 		default:
 			// Positional / splat — fail closed (product kwargs-only form).
-			return nil
+			return nil, nil
 		}
 	}
-	if !saw {
-		return nil
+	if len(order) == 0 {
+		return nil, nil
 	}
-	return out
+	return out, order
+}
+
+// pythonCopyLocalFieldOf copies fieldOf entries from src local to dst local:
+// named keys src.f → dst.f and @astuple.src.#i → @astuple.dst.#i. Used when
+// d = vars(src) / d = src.__dict__ for SimpleNamespace (instance fieldOf without
+// typeOf / fieldIndex). Empty / identical locals fail closed.
+func pythonCopyLocalFieldOf(src, dst string, fieldOf map[string]string) {
+	if src == "" || dst == "" || fieldOf == nil || src == dst {
+		return
+	}
+	namedPrefix := src + "."
+	astuplePrefix := "@astuple." + src + "."
+	type kv struct{ k, v string }
+	var adds []kv
+	for k, v := range fieldOf {
+		if v == "" {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(k, astuplePrefix):
+			adds = append(adds, kv{"@astuple." + dst + "." + k[len(astuplePrefix):], v})
+		case strings.HasPrefix(k, namedPrefix):
+			adds = append(adds, kv{dst + "." + k[len(namedPrefix):], v})
+		}
+	}
+	for _, p := range adds {
+		fieldOf[p.k] = p.v
+	}
+}
+
+// pythonBindSimpleNamespaceLocal records fieldOf["local.f"] and declaration-order
+// @astuple.local.#i slots from SimpleNamespace(...) / types.SimpleNamespace(...).
+func pythonBindSimpleNamespaceLocal(local string, call *grammar.Node, content []byte, fieldOf map[string]string) {
+	if local == "" || fieldOf == nil {
+		return
+	}
+	fields, order := pythonSimpleNamespaceFieldTypes(call, content)
+	if len(fields) == 0 {
+		return
+	}
+	for f, t := range fields {
+		if f != "" && t != "" {
+			fieldOf[local+"."+f] = t
+		}
+	}
+	for i, t := range order {
+		if t != "" {
+			fieldOf["@astuple."+local+".#"+fmt.Sprintf("%d", i)] = t
+		}
+	}
 }
 
 // pythonCollectionMutationElemType recovers (local, T, nested) from list/deque/
@@ -4065,17 +4117,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						getterOf[lname] = spec
 					}
 					// da = SimpleNamespace(k=A()) / types.SimpleNamespace(k=A()) —
-					// bind fieldOf["da.k"] so da.k.run() / xa = da.k peel under
-					// foreign same-leaf. Dedicated path (not namedtuple fieldIndex):
-					// kwargs are attributes, not invented ctor fields.
+					// bind fieldOf["da.k"] + @astuple.da.#i so da.k.run() /
+					// vars(da)["k"] / for x in vars(da).values() peel under foreign
+					// same-leaf. Dedicated path (not namedtuple fieldIndex): kwargs
+					// are attributes, not invented ctor fields.
 					// Foreign fields too for shadowing (db = SimpleNamespace(k=B())).
-					if fields := pythonSimpleNamespaceFieldTypes(right, content); len(fields) > 0 {
-						for f, t := range fields {
-							if f != "" && t != "" {
-								fieldOf[lname+"."+f] = t
-							}
-						}
-					}
+					pythonBindSimpleNamespaceLocal(lname, right, content, fieldOf)
 					// a = A.make() / a = A.create() — @staticmethod / @classmethod
 					// factory (attribute callee; "Class.method" keys in funcReturns).
 					// Bare make_a() is handled in the identifier branch below too.
@@ -4420,8 +4467,16 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						bindFields(lname, tn)
 					}
 					// d = vars(box) — same field keys as asdict (obj.__dict__).
+					// typeOf path for annotated dataclasses; always also copy
+					// instance fieldOf for SNS (no typeOf / fieldIndex). Idempotent
+					// when bindFields already recorded the same keys.
 					if tn := pythonVarsCallObjectType(right, content, typeOf); tn != "" {
 						bindFields(lname, tn)
+					}
+					if fn != nil && fn.Type() == "identifier" && ingest.NodeText(fn, content) == "vars" {
+						if args, ok := pythonCallPositionalArgNodes(right); ok && len(args) > 0 && args[0].Type() == "identifier" {
+							pythonCopyLocalFieldOf(ingest.NodeText(args[0], content), lname, fieldOf)
+						}
 					}
 					// t = astuple(box) / dataclasses.astuple(box) — tuple of field
 					// values in declaration order (fieldOf["t.#i"] for t[i].run()).
@@ -4477,10 +4532,16 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// with annotated field a: A (under foreign same-leaf methods).
 				// xa = replace(box).a / dataclasses.replace(box).a — field of first arg.
 				// d = box.__dict__ — same field keys as vars/asdict (not a field leaf).
+				// typeOf path for annotated classes; always also copy instance
+				// fieldOf for SNS (no typeOf / fieldIndex).
 				if right != nil && right.Type() == "attribute" {
 					if tn := pythonDunderDictObjectType(right, content, typeOf); tn != "" {
 						bindFields(lname, tn)
-					} else if ft := pythonFieldAccessType(right, content, fieldOf); ft != "" {
+					}
+					if src := pythonDictViewObjectLocal(right, content); src != "" {
+						pythonCopyLocalFieldOf(src, lname, fieldOf)
+					}
+					if ft := pythonFieldAccessType(right, content, fieldOf); ft != "" {
 						typeOf[lname] = ft
 						bindFields(lname, ft)
 						if ourReceivers[ft] {
@@ -5029,8 +5090,19 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					bindFields(lname, tn)
 				}
 				// d := vars(box) — same field keys as asdict (obj.__dict__).
+				// typeOf path for annotated dataclasses; always also copy SNS fieldOf.
 				if tn := pythonVarsCallObjectType(valueN, content, typeOf); tn != "" {
 					bindFields(lname, tn)
+				}
+				if valueN.Type() == "call" {
+					if fn := ingest.ChildByField(valueN, "function"); fn != nil &&
+						fn.Type() == "identifier" && ingest.NodeText(fn, content) == "vars" {
+						if args, ok := pythonCallPositionalArgNodes(valueN); ok && len(args) > 0 && args[0].Type() == "identifier" {
+							pythonCopyLocalFieldOf(ingest.NodeText(args[0], content), lname, fieldOf)
+						}
+					}
+					// da := SimpleNamespace(k=A()) — same fieldOf bind as plain assignment.
+					pythonBindSimpleNamespaceLocal(lname, valueN, content, fieldOf)
 				}
 				// t := astuple(box) / dataclasses.astuple(box) — tuple of field
 				// values in declaration order (fieldOf["t.#i"] for t[i].run()).
@@ -5084,10 +5156,15 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// xa := box.a — dataclass/class field access (same as plain assignment).
 			// xa := replace(box).a / dataclasses.replace(box).a — field of first arg.
 			// d := box.__dict__ — same field keys as vars/asdict (not a field leaf).
+			// typeOf path for annotated classes; always also copy SNS fieldOf.
 			if valueN.Type() == "attribute" {
 				if tn := pythonDunderDictObjectType(valueN, content, typeOf); tn != "" {
 					bindFields(lname, tn)
-				} else if ft := pythonFieldAccessType(valueN, content, fieldOf); ft != "" {
+				}
+				if src := pythonDictViewObjectLocal(valueN, content); src != "" {
+					pythonCopyLocalFieldOf(src, lname, fieldOf)
+				}
+				if ft := pythonFieldAccessType(valueN, content, fieldOf); ft != "" {
 					typeOf[lname] = ft
 					bindFields(lname, ft)
 					if ourReceivers[ft] {

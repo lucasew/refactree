@@ -1666,10 +1666,19 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 		if t := jsStructuredCloneObjectPropType(obj, content, typedLocals, factories, objValueLocals); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
+		// new Proxy({k: new A()}, {}).k / Object.freeze({k: new A()}).k /
+		// Object.create(oa).k — identity object wrappers preserve prop value T.
+		if t := jsIdentityObjectPropType(obj, content, typedLocals, factories, objValueLocals); t != "" {
+			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
 	}
-	// structuredClone({k: new A()})["k"] — bracket form of object-prop clone peel.
+	// structuredClone({k: new A()})["k"] / new Proxy({k: new A()}, {})["k"] —
+	// bracket form of object-prop peels.
 	if obj.Type() == "subscript_expression" {
 		if t := jsStructuredCloneObjectPropType(obj, content, typedLocals, factories, objValueLocals); t != "" {
+			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
+		if t := jsIdentityObjectPropType(obj, content, typedLocals, factories, objValueLocals); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 	}
@@ -1782,6 +1791,9 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsStructuredCloneObjectPropType(valN, content, out, factories, objValueLocals); t != "" {
 						// const a = structuredClone({k: new A()}).k / structuredClone(oa).k
+						out[ingest.NodeText(nameN, content)] = t
+					} else if t := jsIdentityObjectPropType(valN, content, out, factories, objValueLocals); t != "" {
+						// const a = new Proxy({k: new A()}, {}).k / Object.freeze({k: new A()}).k
 						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsPromiseResolveArgType(valN, content, out, factories); ourReceivers[t] {
 						// await Promise.resolve(new A() / a / makeA()) — resolved value is A.
@@ -1914,6 +1926,11 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// const o = Object.assign({}, {k: new A()}, …) — plain object of
 						// uniform property values T; Object.values(o) peels via objValueLocals.
 						// Bind foreign too so dual-class B rebinds fail closed.
+						objValueLocals[ingest.NodeText(nameN, content)] = t
+					} else if t := jsIdentityObjectValueType(valN, content, out, factories, objValueLocals); t != "" {
+						// const pa = new Proxy({k: new A()}, {}) / Object.freeze(oa) /
+						// Object.create(oa) — plain object of uniform property values T;
+						// pa.k peels via objValueLocals. Bind foreign too for shadowing.
 						objValueLocals[ingest.NodeText(nameN, content)] = t
 					} else if t := jsObjectLiteralNestedArrayElemType(valN, content, arrayLocals, out, factories, extra); t != "" {
 						// const oa = {k: [new A()]} — property values are arrays of T
@@ -7965,6 +7982,149 @@ func jsIdentityCloneType(n *grammar.Node, content []byte, typedLocals, factories
 	// Object.create(A.prototype) — prototype of Class is identity for method peels.
 	if isCreate {
 		return jsPrototypeClassType(first, content)
+	}
+	return ""
+}
+
+// jsIdentityObjectPropType recovers T from new Proxy({k: new A()}, {}).k /
+// Object.freeze({k: new A()}).k / Object.create(oa).k / Object.seal(oa)["k"] when
+// the wrapper peels via jsIdentityObjectValueType to uniform property value T.
+// Scalar identity peels stay on jsIdentityCloneType / jsProxyTargetType.
+func jsIdentityObjectPropType(n *grammar.Node, content []byte, typedLocals, factories, objValueLocals map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	var obj *grammar.Node
+	switch n.Type() {
+	case "member_expression", "member_expression_optional", "optional_chain", "subscript_expression":
+		obj = ingest.ChildByField(n, "object")
+	default:
+		return ""
+	}
+	if obj == nil {
+		return ""
+	}
+	return jsIdentityObjectValueType(obj, content, typedLocals, factories, objValueLocals)
+}
+
+// jsIdentityObjectValueType recovers uniform property value T from
+// new Proxy(objectLiteral | objValueLocal) / Object.freeze|seal|preventExtensions|create
+// of the same. Object.assign stays on jsObjectAssignValueType; structuredClone on
+// jsStructuredCloneObjectValueType. Object.create with property descriptors (2nd
+// arg) fails closed. Non-object first args fail closed (scalar identity peels
+// stay on jsIdentityCloneType / jsProxyTargetType).
+func jsIdentityObjectValueType(n *grammar.Node, content []byte, typedLocals, factories, objValueLocals map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil {
+		return ""
+	}
+	var first *grammar.Node
+	switch n.Type() {
+	case "new_expression":
+		// new Proxy(target[, handler])
+		ctor := ingest.ChildByField(n, "constructor")
+		if ctor == nil || ctor.Type() != "identifier" || ingest.NodeText(ctor, content) != "Proxy" {
+			return ""
+		}
+		args := ingest.ChildByField(n, "arguments")
+		if args == nil {
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch != nil && ch.Type() == "arguments" {
+					args = ch
+					break
+				}
+			}
+		}
+		if args == nil {
+			return ""
+		}
+		for i := uint32(0); i < args.ChildCount(); i++ {
+			ch := args.Child(i)
+			if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+				continue
+			}
+			first = ch
+			break
+		}
+	case "call_expression":
+		// Object.freeze/seal/preventExtensions/create(x)
+		fn := ingest.ChildByField(n, "function")
+		args := ingest.ChildByField(n, "arguments")
+		if fn == nil || args == nil {
+			return ""
+		}
+		if fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain" {
+			return ""
+		}
+		prop := ingest.ChildByField(fn, "property")
+		obj := ingest.ChildByField(fn, "object")
+		if prop == nil || obj == nil || obj.Type() != "identifier" || ingest.NodeText(obj, content) != "Object" {
+			return ""
+		}
+		isCreate := false
+		switch ingest.NodeText(prop, content) {
+		case "freeze", "seal", "preventExtensions":
+		case "create":
+			isCreate = true
+		default:
+			return ""
+		}
+		posCount := 0
+		for i := uint32(0); i < args.ChildCount(); i++ {
+			ch := args.Child(i)
+			if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+				continue
+			}
+			posCount++
+			if first == nil {
+				first = ch
+			}
+		}
+		if isCreate && posCount != 1 {
+			// Object.create(proto, props) — descriptors fail closed.
+			return ""
+		}
+	default:
+		return ""
+	}
+	if first == nil {
+		return ""
+	}
+	for first != nil && first.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < first.ChildCount(); i++ {
+			ch := first.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		first = inner
+	}
+	if first == nil {
+		return ""
+	}
+	if first.Type() == "object" {
+		return jsObjectLiteralValueType(first, content, typedLocals, factories)
+	}
+	if first.Type() == "identifier" && objValueLocals != nil {
+		return objValueLocals[ingest.NodeText(first, content)]
 	}
 	return ""
 }
