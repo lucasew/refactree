@@ -2063,6 +2063,50 @@ func rangeSourceFromTypeNode(n *grammar.Node, content []byte) (rangeSourceInfo, 
 	return rangeSourceInfo{}, false
 }
 
+// functionTypeSingleCollectionResult reports element/value type when typeN is a
+// function_type with a single collection result:
+//
+//	func() []*T
+//	func() map[K]*T
+//	func() ([]*T) / func() (as []*T)  — parenthesized single result
+//
+// Multi-result signatures (func() ([]*T, error)) fail closed — same policy as
+// multi-result same-file helpers used as lone call values. Parameter types of
+// the function type are ignored (only the result matters for fa() peels).
+func functionTypeSingleCollectionResult(typeN *grammar.Node, content []byte) (rangeSourceInfo, bool) {
+	if typeN == nil || typeN.Type() != "function_type" {
+		return rangeSourceInfo{}, false
+	}
+	result := ingest.ChildByField(typeN, "result")
+	if result == nil {
+		return rangeSourceInfo{}, false
+	}
+	if result.Type() == "parameter_list" {
+		// Parenthesized results: ( []*T ) / ( as []*T ) / ( []*T, error ).
+		var only rangeSourceInfo
+		count := 0
+		for i := uint32(0); i < result.ChildCount(); i++ {
+			p := result.Child(i)
+			if p == nil || (p.Type() != "parameter_declaration" && p.Type() != "variadic_parameter_declaration") {
+				continue
+			}
+			count++
+			typeN := ingest.ChildByField(p, "type")
+			info, ok := rangeSourceFromTypeNode(typeN, content)
+			if !ok || info.elemType == "" {
+				// Non-collection slot (error, bool, …) or multi mixed — fail closed.
+				return rangeSourceInfo{}, false
+			}
+			only = info
+		}
+		if count != 1 {
+			return rangeSourceInfo{}, false
+		}
+		return only, true
+	}
+	return rangeSourceFromTypeNode(result, content)
+}
+
 // selectorReceiverIdent returns the identifier immediately before '.' at leafStart.
 func selectorReceiverIdent(content []byte, leafStart uint32) string {
 	if leafStart == 0 {
@@ -3767,6 +3811,29 @@ func collectionIndexElemTypeFunc(root *grammar.Node, content []byte, funcColl ma
 				}
 				bindings = append(bindings, identTypeBinding{n.StartByte(), n.EndByte(), name, info.elemType})
 			}
+			// Function-typed params with a single collection result:
+			// fa func() []*A / fm func() map[K]*A — bind fa→A so fa()[0].M and
+			// as := fa(); as[0].M resolve under foreign same-leaf methods.
+			// Multi-result func types fail closed (functionTypeSingleCollectionResult).
+			if params := ingest.ChildByField(n, "parameters"); params != nil {
+				for i := uint32(0); i < params.ChildCount(); i++ {
+					p := params.Child(i)
+					if p == nil || p.Type() != "parameter_declaration" {
+						continue
+					}
+					typeN := ingest.ChildByField(p, "type")
+					info, ok := functionTypeSingleCollectionResult(typeN, content)
+					if !ok || info.elemType == "" {
+						continue
+					}
+					for _, name := range parameterDeclNames(p, content) {
+						if name == "" || name == "_" {
+							continue
+						}
+						bindings = append(bindings, identTypeBinding{n.StartByte(), n.EndByte(), name, info.elemType})
+					}
+				}
+			}
 			if body := ingest.ChildByField(n, "body"); body != nil {
 				collectLocalCollectionElemBindings(body, content, &bindings, funcColl)
 			}
@@ -3859,10 +3926,13 @@ func rangeSourceFromCollectionExpr(n *grammar.Node, content []byte) (rangeSource
 
 // rangeSourceFromCollectionExprIdent is rangeSourceFromCollectionExpr plus
 // optional resolution of bare collection identifiers via identElem (params and
-// prior short-var/var bindings) and same-file function collection results via
-// funcColl. That covers append(as, …) / append(append(as, …), …) when as is a
-// typed slice/map local or parameter, as[:n] / s := as[:n] when as is known,
-// and getA() / as := getA() when getA returns a single slice/array/map.
+// prior short-var/var bindings), function-typed params/vars with a single
+// collection result (fa func() []*A → fa() peels via identElem), and same-file
+// function collection results via funcColl. That covers append(as, …) /
+// append(append(as, …), …) when as is a typed slice/map local or parameter,
+// as[:n] / s := as[:n] when as is known, getA() / as := getA() when getA
+// returns a single slice/array/map, and fa() / as := fa() when fa is
+// func() []*A / func() map[K]*A (param or var).
 // Multi-result helpers (getA() ([]*A, error)) are not valid as a lone call
 // expression value — those bind via collectLocalCollectionElemBindings.
 func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identElem func(name string, at uint32) (string, bool), at uint32, funcColl map[string][]rangeSourceInfo) (rangeSourceInfo, bool) {
@@ -4007,12 +4077,26 @@ func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identEl
 		}
 		return rangeSourceInfo{}, false
 	}
-	// Same-file helper with a single collection result: getA() []*A /
-	// getM() map[K]*A. Multi-result signatures cannot appear as a lone call
-	// value (compile error); those bind positionally via short-var / var.
-	if fn.Type() == "identifier" && funcColl != nil {
-		if infos := funcColl[ingest.NodeText(fn, content)]; len(infos) == 1 && infos[0].elemType != "" {
-			return infos[0], true
+	// Callable with a single collection result:
+	//  1. Function-typed params/vars in scope: fa func() []*A / var fa func() map[K]*A
+	//     (registered in identElem with the *result* element type). Prefer these
+	//     over same-file helpers so params shadow file-level functions.
+	//  2. Same-file helper: getA() []*A / getM() map[K]*A.
+	// Multi-result signatures cannot appear as a lone call value (compile
+	// error); those bind positionally via short-var / var.
+	// Note: bare collection idents (as []*A) also live in identElem; as() is
+	// invalid Go so a peel here is harmless on real code.
+	if fn.Type() == "identifier" {
+		name := ingest.NodeText(fn, content)
+		if identElem != nil {
+			if el, ok := identElem(name, at); ok && el != "" {
+				return rangeSourceInfo{elemType: el}, true
+			}
+		}
+		if funcColl != nil {
+			if infos := funcColl[name]; len(infos) == 1 && infos[0].elemType != "" {
+				return infos[0], true
+			}
 		}
 	}
 	return rangeSourceInfo{}, false
@@ -4073,11 +4157,13 @@ func rangeSourceFromNewArrayCall(n *grammar.Node, content []byte) (rangeSourceIn
 }
 
 // collectLocalCollectionElemBindings records slice/array/map locals from
-// var_spec with an explicit type (var as []*A / var m map[K]*B) and from
+// var_spec with an explicit type (var as []*A / var m map[K]*B), function-typed
+// vars with a single collection result (var fa func() []*A), and from
 // collection short-var / untyped var initializers:
 // make(T, …), new([n]T), append([]*T{}, …) / append(ident, …), []*T{…} /
 // map[K]*T{…}, x.([]*T) / ([]*T)(x), as[:n] / as[i:], same-file getA() []*A /
-// multi-return as, err := getA() with getA() ([]*A, error).
+// multi-return as, err := getA() with getA() ([]*A, error), fa() when fa is a
+// function-typed param/var with a single collection result.
 // append(ident, …) and slice of ident resolve against params and earlier
 // collection bindings already recorded in *bindings. funcColl maps same-file
 // function names to positional collection result element types (may be nil).
@@ -4174,6 +4260,9 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 			names := varSpecNames(n, content)
 			typeN := ingest.ChildByField(n, "type")
 			if info, ok := rangeSourceFromTypeNode(typeN, content); ok && info.elemType != "" {
+				bindElem(n.StartByte(), names, info)
+			} else if info, ok := functionTypeSingleCollectionResult(typeN, content); ok && info.elemType != "" {
+				// var fa func() []*A / var fm func() map[K]*A — fa() peels to result elem.
 				bindElem(n.StartByte(), names, info)
 			} else {
 				valueN := ingest.ChildByField(n, "value")

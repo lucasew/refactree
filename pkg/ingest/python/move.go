@@ -4740,6 +4740,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// k, x = next(asdict(pair).items()) / next(iter(asdict(pair).items())) when
 			// homogeneous field values (same leaf as for k, x in asdict(...).items()) /
 			// it1, it2 = tee(items) / itertools.tee(items[, n]) (each → elemOf) /
+			// _, ga = next(groupby(items)) / k, ga = next(itertools.groupby(items))
+			// (ga → elemOf; key untyped; same leaf as for k, g in groupby) /
 			// a, *rest = items / *rest, a = items / a, = items (items: list[A]) /
 			// xa, *rest = astuple(box) / asdict(box).values() (fixed slots by
 			// declaration order; *rest of mixed fails closed)
@@ -4812,6 +4814,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// Foreign element types too — shadow prior same-name collections.
 						for _, name := range targets {
 							elemOf[name] = et
+						}
+					} else if et := pythonNextGroupbyGroupElemType(right, content, elemOf, egElems, typeOf); et != "" {
+						// _, ga = next(groupby(items)) / k, ga = next(itertools.groupby(items)) —
+						// next yields (key, group); group is an iterable of items elements
+						// (same leaf as for k, g in groupby(items): g). Key slot untyped.
+						// Do not put ga into out (group is not an element).
+						if len(targets) >= 2 {
+							elemOf[targets[1]] = et
 						}
 					} else if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); et != "" {
 						// a, b = items / a, = items — homogeneous collection elements.
@@ -11548,6 +11558,27 @@ func pythonGroupbyGroupElemType(right *grammar.Node, content []byte, elemOf, egE
 		return ""
 	}
 	return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
+}
+
+// pythonNextGroupbyGroupElemType recovers the group-iterator element type from
+// next(groupby(iterable[, key])) / next(itertools.groupby(...)).
+// next yields one (key, group) pair; group iterates elements of the groupby
+// iterable (key= ignored). Used for unpack `_, ga = next(groupby(items))` so
+// subsequent next(ga) / for a in ga type under foreign same-leaf methods.
+// Default arg of next is ignored. Other next args fail closed.
+func pythonNextGroupbyGroupElemType(call *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "identifier" || ingest.NodeText(fn, content) != "next" {
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) == 0 {
+		return ""
+	}
+	return pythonGroupbyGroupElemType(args[0], content, elemOf, egElems, typeOf)
 }
 
 // pythonTeeElemType recovers the element type of each independent iterator
