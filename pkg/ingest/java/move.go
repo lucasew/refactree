@@ -7317,6 +7317,7 @@ func javaHomogeneousObjectElem(args *grammar.Node, content []byte, compOf map[st
 //	Stream.of(ba.get()) / Stream.of(ba.get()).findFirst() / .toList()
 //	Optional.of(ba.get()) / ofNullable(ba.get())
 //	CompletableFuture.completedFuture(ba.get())
+//	new CompletableFuture<>().completeAsync(() -> ba.get()) — diamond supplier peel
 //
 // Class()-only peels live in javaStaticCollectionOfElemType. Mixed / unknown
 // methods / non-homogeneous args fail closed.
@@ -7500,6 +7501,18 @@ func javaStaticCollectionOfObjectElemType(obj *grammar.Node, content []byte, com
 			if javaStaticFactoryReceiverName(recv, content) != "CompletableFuture" {
 				return ""
 			}
+			args := javaCallArgs(obj)
+			if len(args) < 1 || len(args) > 2 {
+				return ""
+			}
+			return javaZeroArgSupplierObjectElem(args[0], content, compOf, typeMembers)
+		case "completeAsync":
+			// new CompletableFuture<>().completeAsync(() -> ba.get()) /
+			// completeAsync(() -> ba.get(), executor) — returns this CF; diamond/raw
+			// recover T from zero-arg supplier body under foreign same-leaf
+			// (Class peels via javaCompleteAsyncSupplierElemType for new T() only).
+			// Typed CF receivers peel T via javaStreamPipelineElemType on the Class path.
+			// Optional Executor ignored. Blocks / method refs / non-object bodies fail closed.
 			args := javaCallArgs(obj)
 			if len(args) < 1 || len(args) > 2 {
 				return ""
