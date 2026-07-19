@@ -3889,6 +3889,50 @@ func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identEl
 		}
 		return rangeSourceInfo{}, false
 	}
+	// (*pas) / (*pam) — pointer-to-collection param/local (pas *[]*A / *map[K]*A).
+	// indexElemType peels *[]T / *map to element T; enable (*pas)[1:][0] and
+	// range over *pas under foreign same-leaf (same leaf as (*pas)[0]).
+	if n.Type() == "unary_expression" {
+		star := false
+		var inner *grammar.Node
+		if opField := ingest.ChildByField(n, "operator"); opField != nil && ingest.NodeText(opField, content) == "*" {
+			star = true
+		}
+		if opField := ingest.ChildByField(n, "operand"); opField != nil {
+			inner = opField
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch == nil {
+				continue
+			}
+			if ch.Type() == "*" || (ch.Type() == "unary_operator" && ingest.NodeText(ch, content) == "*") {
+				star = true
+				continue
+			}
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			if inner == nil {
+				inner = ch
+			}
+		}
+		if star && inner != nil {
+			for inner != nil && inner.Type() == "parenthesized_expression" {
+				var in2 *grammar.Node
+				for i := uint32(0); i < inner.ChildCount(); i++ {
+					ch := inner.Child(i)
+					if ch == nil || ch.Type() == "(" || ch.Type() == ")" {
+						continue
+					}
+					in2 = ch
+					break
+				}
+				inner = in2
+			}
+			return rangeSourceFromCollectionExprIdent(inner, content, identElem, at, funcColl)
+		}
+	}
 	// as[:n] / as[i:] / as[i:j] / as[:] — result has the same element type as
 	// the sliced collection (param, local, make/append/composite, nested slice).
 	if n.Type() == "slice_expression" {

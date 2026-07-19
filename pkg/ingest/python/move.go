@@ -6451,6 +6451,11 @@ func pythonOperatorGetterFieldType(call *grammar.Node, content []byte, fieldOf m
 	if name == "attrgetter" {
 		return pythonInlineSimpleNamespaceFieldType(objArgs[0], content, field)
 	}
+	// itemgetter("k")(vars(SimpleNamespace(k=A()))) / itemgetter("k")(SNS(...).__dict__)
+	// — same leaf as vars(SNS(...))["k"] under foreign same-leaf.
+	if name == "itemgetter" {
+		return pythonInlineSimpleNamespaceDictViewFieldType(objArgs[0], content, field)
+	}
 	return ""
 }
 
@@ -6660,23 +6665,35 @@ func pythonCopyCallObjectType(call *grammar.Node, content []byte, typeOf map[str
 	}
 	// Prefer structured peels before Class() ctor / typed-local peels:
 	// pythonObjectExprType treats any identifier call as a Class ctor, so
-	// next(...)/getattr(...) would otherwise bind the bogus leaf "next"/"getattr"
-	// and fail closed under foreign same-leaf methods.
+	// next(...)/getattr(...)/attrgetter(...) would otherwise bind the bogus leaf
+	// "next"/"getattr"/"attrgetter" and fail closed under foreign same-leaf methods.
 	// copy.copy(next(iter(vars(SimpleNamespace(k=A())).values()))) /
 	// copy.copy(next(asdict(box).values())) — first declaration-order field
 	// (same leaf as next(...values()).run()). Only peel when arg is next(...).
 	if args[0].Type() == "call" {
-		if fn0 := ingest.ChildByField(args[0], "function"); fn0 != nil &&
-			fn0.Type() == "identifier" {
-			switch ingest.NodeText(fn0, content) {
-			case "next":
-				if et := pythonAstupleNextFirstField(args[0], content, fieldOf); et != "" {
-					return et
+		if fn0 := ingest.ChildByField(args[0], "function"); fn0 != nil {
+			switch fn0.Type() {
+			case "identifier":
+				switch ingest.NodeText(fn0, content) {
+				case "next":
+					if et := pythonAstupleNextFirstField(args[0], content, fieldOf); et != "" {
+						return et
+					}
+				case "getattr":
+					// copy.copy(getattr(box, "a")) / getattr(SimpleNamespace(k=A()), "k")
+					// — same leaf as getattr(...).run() / attrgetter peels.
+					if ft := pythonGetattrFieldType(args[0], content, fieldOf); ft != "" {
+						return ft
+					}
 				}
-			case "getattr":
-				// copy.copy(getattr(box, "a")) / getattr(SimpleNamespace(k=A()), "k")
-				// — same leaf as getattr(...).run() / attrgetter peels.
-				if ft := pythonGetattrFieldType(args[0], content, fieldOf); ft != "" {
+			case "call":
+				// copy.copy(attrgetter("k")(SimpleNamespace(...))) /
+				// copy.copy(itemgetter("k")(vars(SNS(...)))) — structured getter peels
+				// before Class() ctor path (attrgetter/itemgetter would be bogus leaves).
+				if ft := pythonAttrgetterFieldType(args[0], content, fieldOf); ft != "" {
+					return ft
+				}
+				if ft := pythonItemgetterFieldType(args[0], content, fieldOf); ft != "" {
 					return ft
 				}
 			}
@@ -7608,11 +7625,107 @@ func pythonItemsIndexValueType(sub *grammar.Node, content []byte, elemOf, fieldO
 			return ft
 		}
 	}
+	// list(vars(SimpleNamespace(...)).items())[i][1] — declaration-order field i
+	// of inline SNS (same leaf as list(...values())[i]).
+	if t := pythonInlineSimpleNamespaceItemsSeqIndexType(seq, content, pairIdx); t != "" {
+		return t
+	}
+	// list(dict.fromkeys(keys, A()).items())[i][1] — value leaf A (index ignored).
+	if t := pythonFromkeysItemsSeqValueType(seq, content); t != "" {
+		return t
+	}
 	// typed dict list(d.items())[i][1] — homogeneous value leaf (index ignored).
 	if vt := pythonDictItemsSeqValueType(seq, content, elemOf); vt != "" {
 		return vt
 	}
 	return ""
+}
+
+// pythonInlineSimpleNamespaceItemsSeqIndexType recovers field type at index i
+// from list/tuple(vars(SimpleNamespace(...)).items()) / list(SNS(...).__dict__.items()).
+// Same leaf as list(vars(SNS).values())[i]. Other forms fail closed.
+func pythonInlineSimpleNamespaceItemsSeqIndexType(seq *grammar.Node, content []byte, pairIdx string) string {
+	itemsCall := pythonItemsSeqItemsCall(seq, content)
+	if itemsCall == nil {
+		return ""
+	}
+	fn := ingest.ChildByField(itemsCall, "function")
+	if fn == nil || fn.Type() != "attribute" {
+		return ""
+	}
+	obj := ingest.ChildByField(fn, "object")
+	if obj == nil {
+		return ""
+	}
+	snsCall := pythonInlineSimpleNamespaceDictViewCall(obj, content)
+	if snsCall == nil {
+		return ""
+	}
+	_, order := pythonSimpleNamespaceFieldTypes(snsCall, content)
+	if len(order) == 0 {
+		return ""
+	}
+	idx := 0
+	for _, c := range pairIdx {
+		if c < '0' || c > '9' {
+			return ""
+		}
+		idx = idx*10 + int(c-'0')
+	}
+	if idx < 0 || idx >= len(order) {
+		return ""
+	}
+	return order[idx]
+}
+
+// pythonFromkeysItemsSeqValueType recovers A from list/tuple(dict.fromkeys(keys, A()).items()).
+func pythonFromkeysItemsSeqValueType(seq *grammar.Node, content []byte) string {
+	itemsCall := pythonItemsSeqItemsCall(seq, content)
+	if itemsCall == nil {
+		return ""
+	}
+	fn := ingest.ChildByField(itemsCall, "function")
+	if fn == nil || fn.Type() != "attribute" {
+		return ""
+	}
+	obj := ingest.ChildByField(fn, "object")
+	if obj == nil {
+		return ""
+	}
+	return pythonDictFromkeysValueType(obj, content)
+}
+
+// pythonItemsSeqItemsCall peels list/tuple wrappers to the underlying .items() call.
+func pythonItemsSeqItemsCall(n *grammar.Node, content []byte) *grammar.Node {
+	if n == nil {
+		return nil
+	}
+	if n.Type() == "parenthesized_expression" {
+		return pythonItemsSeqItemsCall(pythonParenInner(n), content)
+	}
+	if n.Type() != "call" {
+		return nil
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil {
+		return nil
+	}
+	name := pythonSimpleCalleeName(fn, content)
+	if name == "list" || name == "tuple" {
+		args, ok := pythonCallPositionalArgNodes(n)
+		if !ok || len(args) != 1 {
+			return nil
+		}
+		return pythonItemsSeqItemsCall(args[0], content)
+	}
+	if name == "items" && fn.Type() == "attribute" {
+		args, ok := pythonCallPositionalArgNodes(n)
+		if !ok || len(args) != 0 {
+			return nil
+		}
+		return n
+	}
+	return nil
 }
 
 // pythonDictViewItemsSeqLocal recovers the identifier local whose
@@ -7696,12 +7809,14 @@ func pythonDictItemsSeqValueType(n *grammar.Node, content []byte, elemOf map[str
 
 // pythonDictViewItemsHomogeneousValueType recovers the shared value type of
 // asdict(box).items() / vars(box).items() / box.__dict__.items() /
-// d.items() after d = asdict(box) / vars / __dict__ when all declaration-order
-// field types agree (fieldOf @astuple.*.#i). Mixed field types and non-dict-view
-// forms fail closed (""). Same leaf as for k, x in d.items() with d: dict[K, A]
-// when values are uniform (key slot stays untyped).
+// d.items() after d = asdict(box) / vars / __dict__ /
+// vars(SimpleNamespace(...)).items() / SimpleNamespace(...).__dict__.items() /
+// dict.fromkeys(keys, A()).items() when all declaration-order field types agree
+// (fieldOf @astuple.*.#i or inline SNS/fromkeys value). Mixed field types and
+// non-dict-view forms fail closed (""). Same leaf as for k, x in d.items() with
+// d: dict[K, A] when values are uniform (key slot stays untyped).
 func pythonDictViewItemsHomogeneousValueType(n *grammar.Node, content []byte, fieldOf map[string]string) string {
-	if n == nil || fieldOf == nil {
+	if n == nil {
 		return ""
 	}
 	if n.Type() == "parenthesized_expression" {
@@ -7723,6 +7838,17 @@ func pythonDictViewItemsHomogeneousValueType(n *grammar.Node, content []byte, fi
 	}
 	obj := ingest.ChildByField(fn, "object")
 	if obj == nil {
+		return ""
+	}
+	// Inline vars(SimpleNamespace(k=A())).items() — no fieldOf local needed.
+	if t := pythonInlineSimpleNamespaceDictViewHomogeneousType(obj, content); t != "" {
+		return t
+	}
+	// dict.fromkeys(keys, A()).items() — value leaf is A (same as .values()).
+	if t := pythonDictFromkeysValueType(obj, content); t != "" {
+		return t
+	}
+	if fieldOf == nil {
 		return ""
 	}
 	var local string
@@ -8195,11 +8321,13 @@ func pythonDictViewObjectLocal(n *grammar.Node, content []byte) string {
 }
 
 // pythonReplaceFieldAccessType recovers T from replace(box).a /
-// dataclasses.replace(box).a when box is a typed local with annotated field a of
-// type T (fieldOf; same leaf as box.a). First positional arg must be an
-// identifier local; keyword-only object / non-replace callees fail closed.
+// dataclasses.replace(box).a / replace(box, a=A()).a when box is a typed local
+// with annotated field a of type T (fieldOf; same leaf as box.a), or when a
+// keyword override is a Class() ctor (override wins — same leaf as
+// ba._replace(a=A()).a). First positional must be an identifier local for
+// fieldOf fallback; keyword-only object / non-replace callees fail closed.
 func pythonReplaceFieldAccessType(attr *grammar.Node, content []byte, fieldOf map[string]string) string {
-	if attr == nil || attr.Type() != "attribute" || fieldOf == nil {
+	if attr == nil || attr.Type() != "attribute" {
 		return ""
 	}
 	obj := ingest.ChildByField(attr, "object")
@@ -8211,11 +8339,36 @@ func pythonReplaceFieldAccessType(attr *grammar.Node, content []byte, fieldOf ma
 	if fn == nil || pythonSimpleCalleeName(fn, content) != "replace" {
 		return ""
 	}
+	fname := ingest.NodeText(field, content)
+	if fname == "" {
+		return ""
+	}
+	// Keyword override: replace(box, a=A()).a → A (same as namedtuple _replace).
+	argList := ingest.ChildByField(obj, "arguments")
+	if argList != nil {
+		for i := uint32(0); i < argList.ChildCount(); i++ {
+			ch := argList.Child(i)
+			if ch == nil || ch.Type() != "keyword_argument" {
+				continue
+			}
+			nameN := ingest.ChildByField(ch, "name")
+			valN := ingest.ChildByField(ch, "value")
+			if nameN == nil || ingest.NodeText(nameN, content) != fname || valN == nil {
+				continue
+			}
+			if et := pythonExprClassType(valN, content); et != "" {
+				return et
+			}
+		}
+	}
+	if fieldOf == nil {
+		return ""
+	}
 	args, ok := pythonCallPositionalArgNodes(obj)
 	if !ok || len(args) == 0 || args[0].Type() != "identifier" {
 		return ""
 	}
-	return fieldOf[ingest.NodeText(args[0], content)+"."+ingest.NodeText(field, content)]
+	return fieldOf[ingest.NodeText(args[0], content)+"."+fname]
 }
 
 // pythonRecordKeyAccessType recovers T from box["a"] / box.get("a") /
@@ -9488,7 +9641,8 @@ func pythonReduceElemType(call *grammar.Node, content []byte, elemOf, egElems, t
 // operator.getitem(collection, key). Same leaf as collection[key] / d[k].
 // Bare getitem (from operator import getitem) and module-qualified
 // operator.getitem are accepted; other receivers fail closed. Requires at least
-// two positional args (collection, key); key is ignored for typing.
+// two positional args (collection, key); key is ignored for typing except when
+// the collection is a dict-view of inline SNS (string key peels field type).
 func pythonGetitemElemType(call *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
 	if call == nil || call.Type() != "call" {
 		return ""
@@ -9517,6 +9671,14 @@ func pythonGetitemElemType(call *grammar.Node, content []byte, elemOf, egElems, 
 	args, ok := pythonCallPositionalArgNodes(call)
 	if !ok || len(args) < 2 {
 		return ""
+	}
+	// getitem(vars(SimpleNamespace(k=A())), "k") — same leaf as vars(SNS)["k"].
+	if args[1].Type() == "string" {
+		if _, key := pythonStringContent(args[1], content); key != "" {
+			if t := pythonInlineSimpleNamespaceDictViewFieldType(args[0], content, key); t != "" {
+				return t
+			}
+		}
 	}
 	// getitem(collection, key) — element/value type of the collection.
 	return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
@@ -12614,10 +12776,12 @@ func pythonChainMapLocalValueType(call *grammar.Node, content []byte, elemOf map
 
 // pythonMappingProxyValueType recovers T from MappingProxyType(da) /
 // types.MappingProxyType(da) when the sole positional is a typed scalar mapping
-// local (elemOf) or a homogeneous dict literal of Class() values. Enables
-// MappingProxyType(da)["k"].run() / pa = MappingProxyType(da); pa["k"].run() /
-// MappingProxyType({"k": A()})["k"].run() under foreign same-leaf. Nested list
-// values / multi-arg / kwargs / splat fail closed.
+// local (elemOf), a homogeneous dict literal of Class() values, or
+// vars(SimpleNamespace(...)) / SimpleNamespace(...).__dict__ with homogeneous
+// Class() fields. Enables MappingProxyType(da)["k"].run() /
+// pa = MappingProxyType(da); pa["k"].run() / MappingProxyType({"k": A()})["k"].run() /
+// MappingProxyType(vars(SimpleNamespace(k=A())))["k"].run() under foreign same-leaf.
+// Nested list values / multi-arg / kwargs / splat fail closed.
 func pythonMappingProxyValueType(call *grammar.Node, content []byte, elemOf map[string]string) string {
 	if call == nil || call.Type() != "call" {
 		return ""
@@ -12647,6 +12811,11 @@ func pythonMappingProxyValueType(call *grammar.Node, content []byte, elemOf map[
 			return ""
 		}
 		return elemOf[name]
+	}
+	// MappingProxyType(vars(SimpleNamespace(k=A()))) / MappingProxyType(SNS(...).__dict__)
+	// — homogeneous Class() fields (same leaf as vars(SNS).values()).
+	if t := pythonInlineSimpleNamespaceDictViewHomogeneousType(arg, content); t != "" {
+		return t
 	}
 	// MappingProxyType({"k": A()}) — homogeneous Class() values.
 	return pythonHomogeneousDictValueCtorElem(arg, content)

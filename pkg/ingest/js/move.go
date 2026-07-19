@@ -2857,6 +2857,8 @@ func jsPromiseArrayElemType(n *grammar.Node, content []byte, typedLocals, factor
 		return ""
 	}
 	// All array elements must peel to the same concrete type.
+	// Promise.resolve(new T()) / Promise.resolve(a) is accepted as an element of
+	// race/any/all (thenable of T) — same leaf as bare new T() under foreign same-leaf.
 	found := ""
 	saw := false
 	for i := uint32(0); i < first.ChildCount(); i++ {
@@ -2865,6 +2867,9 @@ func jsPromiseArrayElemType(n *grammar.Node, content []byte, typedLocals, factor
 			continue
 		}
 		t := jsExprConcreteType(el, content, typedLocals, factories)
+		if t == "" {
+			t = jsPromiseResolveArgType(el, content, typedLocals, factories)
+		}
 		if t == "" {
 			return ""
 		}
@@ -4589,6 +4594,8 @@ func jsArrayIdentityElemType(n *grammar.Node, content []byte, arrayLocals, typed
 		//   - x => [x] on array of T — one-level flatten of [T] yields T
 		//   - xs => xs on nested array of T (const aa = [[new A()]]) — identity
 		//     flatten one level (same leaf as aa.flat()[0])
+		//   - () => [new T()] / (_v) => [new T()] — sole return array of uniform T
+		//     (same leaf as Array.from({length}, () => new T()); receiver ignored)
 		// Non-identity / unknown receivers fail closed.
 		if args == nil {
 			return ""
@@ -4614,15 +4621,19 @@ func jsArrayIdentityElemType(n *grammar.Node, content []byte, arrayLocals, typed
 		// Nested identity: aa.flatMap(xs => xs) when aa is [[new A()], …].
 		// Nested identity-map: aa.flatMap(xs => xs.map(x => x)) — same leaf as
 		// identity flatten / aa.flat()[0] under foreign same-leaf.
-		if !jsIsIdentityCallback(cb, content) && !jsIsNestedIdentityMapCallback(cb, content) {
-			return ""
-		}
-		if obj != nil && obj.Type() == "identifier" && arrayLocals != nil {
-			if t := arrayLocals["@nested."+ingest.NodeText(obj, content)]; t != "" {
-				return t
+		if jsIsIdentityCallback(cb, content) || jsIsNestedIdentityMapCallback(cb, content) {
+			if obj != nil && obj.Type() == "identifier" && arrayLocals != nil {
+				if t := arrayLocals["@nested."+ingest.NodeText(obj, content)]; t != "" {
+					return t
+				}
 			}
+			return jsNestedArrayFlatElemType(obj, content, arrayLocals, typedLocals, factories, extra)
 		}
-		return jsNestedArrayFlatElemType(obj, content, arrayLocals, typedLocals, factories, extra)
+		// Non-identity sole-return array of uniform T: [0].flatMap(() => [new A()]).
+		if t := jsFlatMapSoleArrayReturnElemType(cb, content, typedLocals, factories); t != "" {
+			return t
+		}
+		return ""
 	case "fill":
 		// arr.fill(val[, start[, end]]) overwrites selected slots with val.
 		// Element type is val's type (prior content discarded). Enables
@@ -7779,16 +7790,11 @@ func jsIteratorHelperYieldType(n *grammar.Node, content []byte, generators, genL
 		return ""
 	}
 	name := ingest.NodeText(prop, content)
-	switch name {
-	case "take", "drop", "filter":
-		// ok — identity iterator helpers
-	default:
-		return ""
-	}
 	args := ingest.ChildByField(n, "arguments")
 	if args == nil {
 		return ""
 	}
+	var firstArg *grammar.Node
 	count := 0
 	for i := uint32(0); i < args.ChildCount(); i++ {
 		ch := args.Child(i)
@@ -7796,8 +7802,22 @@ func jsIteratorHelperYieldType(n *grammar.Node, content []byte, generators, genL
 			continue
 		}
 		count++
+		if firstArg == nil {
+			firstArg = ch
+		}
 	}
 	if count < 1 {
+		return ""
+	}
+	switch name {
+	case "take", "drop", "filter":
+		// ok — identity iterator helpers (predicate/limit ignored)
+	case "map":
+		// iter.map(x => x) identity only — non-identity map changes yield type.
+		if firstArg == nil || !jsIsIdentityCallback(firstArg, content) {
+			return ""
+		}
+	default:
 		return ""
 	}
 	obj := ingest.ChildByField(fn, "object")
@@ -8686,6 +8706,55 @@ func jsIsIdentityArrayCallback(cb *grammar.Node, content []byte) bool {
 		return false
 	}
 	return ingest.NodeText(only, content) == first
+}
+
+// jsFlatMapSoleArrayReturnElemType recovers T from a flatMap callback whose sole
+// return is an array of uniform concrete T: () => [new A()] / (_v) => [a0] /
+// () => { return [new A()] }. One-level flatten yields T (receiver ignored —
+// same leaf as Array.from({length}, () => new A())). Empty / mixed / non-array
+// sole returns fail closed.
+func jsFlatMapSoleArrayReturnElemType(cb *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	ret := jsCallbackSoleReturnExpr(cb, content)
+	if ret == nil {
+		return ""
+	}
+	for ret != nil && ret.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < ret.ChildCount(); i++ {
+			ch := ret.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		ret = inner
+	}
+	if ret == nil || ret.Type() != "array" {
+		return ""
+	}
+	found := ""
+	saw := false
+	for i := uint32(0); i < ret.ChildCount(); i++ {
+		ch := ret.Child(i)
+		if ch == nil || ch.Type() == "[" || ch.Type() == "]" || ch.Type() == "," {
+			continue
+		}
+		t := jsExprConcreteType(ch, content, typedLocals, factories)
+		if t == "" {
+			return ""
+		}
+		if !saw {
+			found = t
+			saw = true
+		} else if found != t {
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return found
 }
 
 // jsCallbackReturnedParamIndex returns the 0-based index of the formal param
