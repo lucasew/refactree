@@ -2147,8 +2147,9 @@ peeled:
 	// (same leaf as Class() ctor under foreign same-leaf methods).
 	// pa().run() after pa = partial(A) / functools.partial(A) — factory local
 	// call result is A (same leaf as partial(A)().run()).
-	// ex.submit(lambda: A()).result().run() — Future result is A (Callable lambda
-	// body Class(); same leaf as Java ExecutorService.submit(() -> new A()).get()).
+	// ex.submit(lambda: A()).result().run() / ex.submit(lambda: ba.get()).result().run()
+	// — Future result is A (Callable lambda body Class() or method-return;
+	// same leaf as Java ExecutorService.submit(() -> ba.get()).get()).
 	// items.popleft().run() / d.get(k).run() / q.get().run() / items.pop().run() /
 	// list(items).pop().run() / items.__getitem__(i).run() — collection/queue
 	// element accessors (same leaf as a = items.popleft(); a.run()).
@@ -2204,7 +2205,7 @@ peeled:
 			}
 			// ex.submit(lambda: A()).result().run() / fa.result().run() after
 			// fa.set_result(A()) — Future.result peel.
-			if et := pythonFutureResultCallType(obj, content, futureOf); et != "" {
+			if et := pythonFutureResultCallType(obj, content, futureOf, funcReturns, typeOf, fieldOf); et != "" {
 				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 			}
 			if fn.Type() == "identifier" {
@@ -2807,12 +2808,13 @@ func pythonPartialFactoryClassType(call *grammar.Node, content []byte) string {
 
 // pythonFutureResultCallType recovers T from fut.result() when fut is
 // executor.submit(lambda: T()) / submit(lambda: T()) with an expression-bodied
-// zero-arg lambda whose body is a Class() call, or when fut is a local bound via
-// futureOf from fut.set_result(T()). Enables
-// ex.submit(lambda: A()).result().run() and fa.set_result(A()); fa.result().run()
+// zero-arg lambda whose body is a Class() call or method-return / typed-local
+// leaf (lambda: ba.get()), or when fut is a local bound via futureOf from
+// fut.set_result(T()). Enables ex.submit(lambda: A()).result().run() /
+// ex.submit(lambda: ba.get()).result().run() and fa.set_result(A()); fa.result().run()
 // under foreign same-leaf methods. Timeout args on result() are ignored;
 // non-submit / non-set_result receivers fail closed.
-func pythonFutureResultCallType(call *grammar.Node, content []byte, futureOf map[string]string) string {
+func pythonFutureResultCallType(call *grammar.Node, content []byte, futureOf, funcReturns, typeOf, fieldOf map[string]string) string {
 	if call == nil || call.Type() != "call" {
 		return ""
 	}
@@ -2825,7 +2827,7 @@ func pythonFutureResultCallType(call *grammar.Node, content []byte, futureOf map
 		return ""
 	}
 	obj := ingest.ChildByField(fn, "object")
-	if et := pythonSubmitCallableResultType(obj, content); et != "" {
+	if et := pythonSubmitCallableResultType(obj, content, funcReturns, typeOf, fieldOf); et != "" {
 		return et
 	}
 	// fa.result() after fa.set_result(A()) — local Future result leaf.
@@ -3443,8 +3445,9 @@ func pythonFutureSetResultType(call *grammar.Node, content []byte) (futLocal, cl
 
 // pythonSubmitCallableResultType recovers T from executor.submit(lambda: T())
 // when the first positional arg is a zero-arg expression-bodied lambda whose body
-// is a Class() call. Other submit forms (fn, *args) / blocks fail closed.
-func pythonSubmitCallableResultType(call *grammar.Node, content []byte) string {
+// is a Class() call or method-return / typed-local leaf (lambda: ba.get() → A).
+// Other submit forms (fn, *args) / blocks fail closed.
+func pythonSubmitCallableResultType(call *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
 	if call == nil || call.Type() != "call" {
 		return ""
 	}
@@ -3477,11 +3480,13 @@ func pythonSubmitCallableResultType(call *grammar.Node, content []byte) string {
 	if body == nil {
 		return ""
 	}
-	// Expression-bodied: lambda: A()  (body is the expression, not a block).
-	if body.Type() == "call" {
-		return pythonExprClassType(body, content)
+	// Expression-bodied: lambda: A() / lambda: ba.get() (body is the expression).
+	// Class peels via pythonExprClassType; method-return / typed-local via
+	// pythonObjectLeafType under foreign same-leaf.
+	if et := pythonExprClassType(body, content); et != "" {
+		return et
 	}
-	return ""
+	return pythonObjectLeafType(body, content, funcReturns, typeOf, fieldOf)
 }
 
 // pythonIsSuperCall reports whether n is a call to super (super() / super(C, self)).
@@ -4890,7 +4895,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								// xa = fa.result() after fa.set_result(A()) — Future result
 								// leaf via futureOf. Also ex.submit(lambda: A()).result().
 								// Timeout args ignored. Other receivers fail closed.
-								if et := pythonFutureResultCallType(right, content, futureOf); ourReceivers[et] {
+								if et := pythonFutureResultCallType(right, content, futureOf, funcReturns, typeOf, fieldOf); ourReceivers[et] {
 									out[lname] = true
 									typeOf[lname] = et
 									bindFields(lname, et)
