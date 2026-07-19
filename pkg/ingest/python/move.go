@@ -2631,6 +2631,190 @@ func pythonCollectionMutationElemType(call *grammar.Node, content []byte) (local
 	}
 }
 
+// pythonDictMutationValueType recovers (local, T) from unannotated mapping
+// mutations that insert a Class() value:
+//
+//	da.setdefault("k", A()) — 2nd positional is Class()
+//	da.update({"k": A()}) / da.update(k=A(), j=A()) — homogeneous Class values
+//
+// Enables da["k"].run() / a = da.setdefault(...) under foreign same-leaf after
+// da = {}. Non-ident receivers / mixed values / non-Class fail closed.
+// set.update([A()]) is handled by pythonCollectionMutationElemType (set elems).
+func pythonDictMutationValueType(call *grammar.Node, content []byte) (local, classType string) {
+	if call == nil || call.Type() != "call" {
+		return "", ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "attribute" {
+		return "", ""
+	}
+	attr := ingest.ChildByField(fn, "attribute")
+	obj := ingest.ChildByField(fn, "object")
+	if attr == nil || obj == nil || obj.Type() != "identifier" {
+		return "", ""
+	}
+	method := ingest.NodeText(attr, content)
+	switch method {
+	case "setdefault":
+		args, ok := pythonCallPositionalArgNodes(call)
+		if !ok || len(args) < 2 {
+			return "", ""
+		}
+		et := pythonClassCtorName(args[1], content)
+		if et == "" {
+			return "", ""
+		}
+		return ingest.NodeText(obj, content), et
+	case "update":
+		et := pythonDictUpdateValueClassType(call, content)
+		if et == "" {
+			return "", ""
+		}
+		return ingest.NodeText(obj, content), et
+	default:
+		return "", ""
+	}
+}
+
+// pythonDictUpdateValueClassType recovers homogeneous Class() value type from
+// da.update({"k": A()}) / da.update(k=A(), j=A()). Positional list/set of
+// Class() is Counter/set path (not mapping values) — fail closed here.
+// Mixed / non-Class / splat fail closed.
+func pythonDictUpdateValueClassType(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	argList := ingest.ChildByField(call, "arguments")
+	if argList == nil {
+		return ""
+	}
+	found := ""
+	saw := false
+	for i := uint32(0); i < argList.ChildCount(); i++ {
+		ch := argList.Child(i)
+		if ch == nil {
+			continue
+		}
+		switch ch.Type() {
+		case "(", ")", ",", "comment":
+			continue
+		case "keyword_argument":
+			// k=A()
+			val := ingest.ChildByField(ch, "value")
+			if val == nil {
+				return ""
+			}
+			et := pythonClassCtorName(val, content)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				found = et
+				saw = true
+			} else if found != et {
+				return ""
+			}
+		case "dictionary":
+			// {"k": A()}
+			et := pythonDictLiteralHomogeneousValueClass(ch, content)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				found = et
+				saw = true
+			} else if found != et {
+				return ""
+			}
+		default:
+			// positional list/set/other — not mapping-value update.
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return found
+}
+
+// pythonDictLiteralHomogeneousValueClass recovers T from {"k": A(), "j": A()}
+// when every value is Class() of the same leaf. Empty / mixed / non-pair fail closed.
+func pythonDictLiteralHomogeneousValueClass(n *grammar.Node, content []byte) string {
+	if n == nil || n.Type() != "dictionary" {
+		return ""
+	}
+	found := ""
+	saw := false
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		if ch == nil {
+			continue
+		}
+		switch ch.Type() {
+		case "{", "}", ",", "comment":
+			continue
+		case "pair":
+			val := ingest.ChildByField(ch, "value")
+			if val == nil {
+				return ""
+			}
+			et := pythonClassCtorName(val, content)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				found = et
+				saw = true
+			} else if found != et {
+				return ""
+			}
+		default:
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return found
+}
+
+// pythonDictSubscriptAssignValueType recovers (local, T) from da["k"] = A() /
+// da[k] = A() when the value is Class() and the key is not a slice.
+// Foreign values bind too for shadowing under dual-class same-leaf.
+func pythonDictSubscriptAssignValueType(left, right *grammar.Node, content []byte) (local, classType string) {
+	if left == nil || left.Type() != "subscript" || right == nil {
+		return "", ""
+	}
+	for i := uint32(0); i < left.ChildCount(); i++ {
+		if left.Child(i).Type() == "slice" {
+			return "", ""
+		}
+	}
+	val := ingest.ChildByField(left, "value")
+	if val == nil || val.Type() != "identifier" {
+		return "", ""
+	}
+	et := pythonClassCtorName(right, content)
+	if et == "" {
+		return "", ""
+	}
+	return ingest.NodeText(val, content), et
+}
+
+// pythonSetdefaultDefaultClassType recovers T from d.setdefault(k, A()) when
+// the 2nd positional arg is Class(). Used when the dict local is untyped so
+// elemOf cannot peel the return. Single-arg setdefault fails closed here.
+func pythonSetdefaultDefaultClassType(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) < 2 {
+		return ""
+	}
+	return pythonClassCtorName(args[1], content)
+}
+
 // pythonNamedtupleCtorInstanceFields recovers field→Class leaves from one
 // namedtuple constructor call: Box(A(), B()) / Box(a=A(), b=B()) when field
 // names are known from namedtuple(...). Used to bind instance-level fieldOf
@@ -3957,6 +4141,17 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								}
 								if et := pythonIterableElemType(obj, content, elemOf, egElems, typeOf); ourReceivers[et] {
 									out[lname] = true
+								} else if ingest.NodeText(attr, content) == "setdefault" {
+									// a = da.setdefault("k", A()) — unannotated dict: peel Class()
+									// default and bind elemOf so da["k"] peels under foreign same-leaf.
+									if et := pythonSetdefaultDefaultClassType(right, content); et != "" {
+										if obj != nil && obj.Type() == "identifier" {
+											elemOf[ingest.NodeText(obj, content)] = et
+										}
+										if ourReceivers[et] {
+											out[lname] = true
+										}
+									}
 								}
 							case "copy", "deepcopy":
 								// a = copy.copy(item) / copy.deepcopy(item) — preserve object
@@ -4213,6 +4408,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							elemOf["@nested."+lname] = nest
 						}
 					}
+				}
+			}
+			// da["k"] = A() / da[k] = A() — unannotated mapping value assign.
+			// Bind elemOf so da["k"].run() peels under foreign same-leaf.
+			// Non-slice key only; foreign values too for shadowing.
+			if left != nil && left.Type() == "subscript" && right != nil {
+				if local, et := pythonDictSubscriptAssignValueType(left, right, content); local != "" && et != "" {
+					elemOf[local] = et
 				}
 			}
 			// a, b = A(), B() / (a, b) = A(), B() / a, b = (A(), B()) /
@@ -4918,6 +5121,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				} else {
 					elemOf[local] = et
 				}
+			}
+			// da.setdefault("k", A()) / da.update({"k": A()}) / da.update(k=A()) —
+			// unannotated mapping value mutation. Bind elemOf so da["k"].run() /
+			// setdefault return peels under foreign same-leaf. Foreign too for shadowing.
+			if local, et := pythonDictMutationValueType(n, content); local != "" && et != "" {
+				elemOf[local] = et
 			}
 		case "as_pattern":
 			// match `case A() as a`, with `with A() as a`, except `except A as e`.

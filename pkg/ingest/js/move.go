@@ -1828,6 +1828,11 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// (groupBy-like shape); oa[k][0] / Object.values(oa)[0][0] peel
 						// via groupByLocals. Bind foreign too for dual-class shadowing.
 						groupByLocals[ingest.NodeText(nameN, content)] = t
+					} else if t := jsObjectLiteralValueType(valN, content, out, factories); t != "" {
+						// const oa = {k: new A()} — plain object of uniform property
+						// values T; Object.values(oa)[0] / oa.k peel via objValueLocals.
+						// Nested-array shape handled above. Bind foreign too for shadowing.
+						objValueLocals[ingest.NodeText(nameN, content)] = t
 					} else if t := jsObjectGroupByElemType(valN, content, arrayLocals, out, factories, extra); t != "" {
 						// const ga = Object.groupBy([new A()], fn) — groups of T;
 						// ga[k][0].run() peels via groupByLocals.
@@ -2046,6 +2051,18 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 			// foreign same-leaf. Foreign elems too for shadowing.
 			if local, et := jsArrayMutationElemType(n, content, arrayLocals, out, factories, extra); local != "" && et != "" {
 				arrayLocals[local] = et
+			}
+			// xs.add(new A()) — bare Set mutation after new Set() / empty ctor.
+			// Bind setLocals so for (const a of xs) / xs.values().next().value
+			// peel under foreign same-leaf. Foreign elems too for shadowing.
+			if local, et := jsSetAddMutationElemType(n, content, out, factories); local != "" && et != "" {
+				setLocals[local] = et
+			}
+			// m.set(k, new A()) / wm.set(k, new A()) — bare Map/WeakMap mutation.
+			// Bind mapLocals so m.get(k) / [...m.values()] peel under foreign
+			// same-leaf. Foreign values too for shadowing.
+			if local, et := jsMapSetMutationElemType(n, content, out, factories); local != "" && et != "" {
+				mapLocals[local] = et
 			}
 		case "assignment_expression":
 			// xs = [...xs, new A()] / xs = xs.concat([new A()]) /
@@ -6331,6 +6348,174 @@ func jsArrayMutationElemType(call *grammar.Node, content []byte, arrayLocals, ty
 		return "", ""
 	}
 	return ingest.NodeText(obj, content), found
+}
+
+// jsSetAddMutationElemType recovers (local, T) from bare Set mutations when the
+// receiver is an identifier and the inserted value peels to concrete T:
+//
+//	xs.add(new A()) / xs.add(a) after const a = new A()
+//
+// Enables for (const a of xs) / xs.values().next().value.run() under foreign
+// same-leaf after const xs = new Set() / empty ctor. Non-ident receivers /
+// non-concrete args fail closed. Multi-arg add is not a Set method shape.
+func jsSetAddMutationElemType(call *grammar.Node, content []byte, typedLocals, factories map[string]string) (local, classType string) {
+	if call == nil || call.Type() != "call_expression" {
+		return "", ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	args := ingest.ChildByField(call, "arguments")
+	if fn == nil || args == nil {
+		return "", ""
+	}
+	if fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain" {
+		return "", ""
+	}
+	prop := ingest.ChildByField(fn, "property")
+	obj := ingest.ChildByField(fn, "object")
+	if prop == nil || obj == nil || obj.Type() != "identifier" {
+		return "", ""
+	}
+	if ingest.NodeText(prop, content) != "add" {
+		return "", ""
+	}
+	var val *grammar.Node
+	pos := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		pos++
+		if pos == 1 {
+			val = ch
+		}
+	}
+	if pos != 1 || val == nil {
+		return "", ""
+	}
+	t := jsExprConcreteType(val, content, typedLocals, factories)
+	if t == "" {
+		return "", ""
+	}
+	return ingest.NodeText(obj, content), t
+}
+
+// jsMapSetMutationElemType recovers (local, T) from bare Map/WeakMap mutations
+// when the receiver is an identifier and the value peels to concrete T:
+//
+//	m.set(k, new A()) / m.set(k, a) after const a = new A()
+//
+// Enables m.get(k).run() / [...m.values()][0].run() under foreign same-leaf
+// after const m = new Map() / new WeakMap(). Key shape free; non-ident
+// receivers / missing value / non-concrete value fail closed.
+func jsMapSetMutationElemType(call *grammar.Node, content []byte, typedLocals, factories map[string]string) (local, classType string) {
+	if call == nil || call.Type() != "call_expression" {
+		return "", ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	args := ingest.ChildByField(call, "arguments")
+	if fn == nil || args == nil {
+		return "", ""
+	}
+	if fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain" {
+		return "", ""
+	}
+	prop := ingest.ChildByField(fn, "property")
+	obj := ingest.ChildByField(fn, "object")
+	if prop == nil || obj == nil || obj.Type() != "identifier" {
+		return "", ""
+	}
+	if ingest.NodeText(prop, content) != "set" {
+		return "", ""
+	}
+	var val *grammar.Node
+	pos := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		pos++
+		if pos == 2 {
+			val = ch
+		}
+	}
+	if pos < 2 || val == nil {
+		return "", ""
+	}
+	t := jsExprConcreteType(val, content, typedLocals, factories)
+	if t == "" {
+		return "", ""
+	}
+	return ingest.NodeText(obj, content), t
+}
+
+// jsObjectLiteralValueType recovers uniform property-value type T from a plain
+// object literal {k: new T() / a, …}. Empty objects fail closed. Method /
+// spread / nested-array property values fail closed (nested arrays use
+// jsObjectLiteralNestedArrayElemType). Enables const oa = {k: new A()};
+// Object.values(oa)[0].run() / oa.k.run() under foreign same-leaf.
+func jsObjectLiteralValueType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "object" {
+		return ""
+	}
+	found := ""
+	saw := false
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		if ch == nil || ch.Type() == "{" || ch.Type() == "}" || ch.Type() == "," {
+			continue
+		}
+		var val *grammar.Node
+		switch ch.Type() {
+		case "pair":
+			val = ingest.ChildByField(ch, "value")
+		case "shorthand_property_identifier":
+			val = ch
+		default:
+			// method_definition / spread_element — fail closed.
+			return ""
+		}
+		if val == nil {
+			return ""
+		}
+		t := ""
+		if val.Type() == "shorthand_property_identifier" {
+			if typedLocals != nil {
+				t = typedLocals[ingest.NodeText(val, content)]
+			}
+		} else {
+			t = jsExprConcreteType(val, content, typedLocals, factories)
+		}
+		if t == "" {
+			return ""
+		}
+		if !saw {
+			found = t
+			saw = true
+		} else if found != t {
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return found
 }
 
 // jsArrayAssignSourceElemType recovers T from an assignment RHS used to rebind
