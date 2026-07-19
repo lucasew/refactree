@@ -1064,6 +1064,10 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 		if id := javaObjectsRequireNonNullArgIdent(obj, content); id != "" {
 			return javaRenameByTypeMaps(id, ourReceivers, foreignReceivers, typedLocals)
 		}
+		// Function.identity().apply(a) when a is a typed local — apply arg type leaf.
+		if id := javaFunctionIdentityApplyArgIdent(obj, content); id != "" {
+			return javaRenameByTypeMaps(id, ourReceivers, foreignReceivers, typedLocals)
+		}
 		// Optional.of(a).get() / ofNullable(a).orElseThrow() when a is a typed local —
 		// unwrap peels the ident's type under foreign same-leaf methods.
 		if id := javaOptionalOfIdentUnwrap(obj, content); id != "" {
@@ -1418,6 +1422,9 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// var xa = Objects.requireNonNull(a) / requireNonNullElse(a, d) /
 					// requireNonNullElseGet(a, s) when a is already a typed local
 					// (A a formal / prior bind). First-arg type leaf preserved.
+					out[name] = true
+				} else if id := javaFunctionIdentityApplyArgIdent(valN, content); id != "" && out[id] {
+					// var xa = Function.identity().apply(a) when a is a typed local.
 					out[name] = true
 				} else if vt := javaEntryExprValueType(valN, content, elemOf, valOf, entryValOf); vt != "" {
 					// var ea = Map.entry(k, new A()) / am.firstEntry() /
@@ -6986,6 +6993,13 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 				return elemOf[id]
 			}
 		}
+		// Function.identity().apply(new A()) / Function.<A>identity().apply(a) —
+		// identity Function peels apply arg to T under foreign same-leaf.
+		if method == "apply" {
+			if t := javaFunctionIdentityApplyType(val, content, elemOf, valOf); t != "" {
+				return t
+			}
+		}
 		// Element accessors on factory/pipeline receivers (not just bare identifiers):
 		//   as.stream().findFirst().get() / as.findAny().get() /
 		//   Optional.of(new A()).get() / Optional.ofNullable(new A()).get()
@@ -7489,6 +7503,129 @@ func javaFirstMethodArg(call *grammar.Node) *grammar.Node {
 		}
 	}
 	return nil
+}
+
+// javaFunctionIdentityApplyType recovers T from Function.identity().apply(x) /
+// Function.<T>identity().apply(x) / java.util.function.Function.identity().apply(x)
+// when x peels to concrete T (new T() / typed local / pipeline). Identity is
+// Function<T,T> so apply returns the arg type. Enables
+// Function.identity().apply(new A()).run() under foreign same-leaf.
+// Non-identity / multi-arg apply fail closed.
+func javaFunctionIdentityApplyType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	nameN := ingest.ChildByField(call, "name")
+	if nameN == nil || ingest.NodeText(nameN, content) != "apply" {
+		return ""
+	}
+	// Exactly one apply arg.
+	argCount := 0
+	var firstArg *grammar.Node
+	for i := uint32(0); i < call.ChildCount(); i++ {
+		if call.Child(i).Type() != "argument_list" {
+			continue
+		}
+		al := call.Child(i)
+		for j := uint32(0); j < al.ChildCount(); j++ {
+			ch := al.Child(j)
+			switch ch.Type() {
+			case "(", ")", ",", "comment":
+				continue
+			default:
+				argCount++
+				if firstArg == nil {
+					firstArg = ch
+				}
+			}
+		}
+	}
+	if argCount != 1 || firstArg == nil {
+		return ""
+	}
+	obj := ingest.ChildByField(call, "object")
+	if obj == nil || obj.Type() != "method_invocation" {
+		return ""
+	}
+	idName := ingest.ChildByField(obj, "name")
+	if idName == nil || ingest.NodeText(idName, content) != "identity" {
+		return ""
+	}
+	// Zero-arg identity() only.
+	if javaMethodCallArgCount(obj) != 0 {
+		return ""
+	}
+	idObj := ingest.ChildByField(obj, "object")
+	if idObj == nil || !javaIsFunctionTypeName(idObj, content) {
+		return ""
+	}
+	// Apply arg: new A() / typed local / collection access / pipeline.
+	if t := javaCollectionAccessElemType(firstArg, content, elemOf, valOf, nil, nil, nil, nil, nil, nil); t != "" {
+		return t
+	}
+	if t := javaInferExprType(firstArg, content); t != "" {
+		return t
+	}
+	if firstArg.Type() == "identifier" && elemOf != nil {
+		if t := elemOf[ingest.NodeText(firstArg, content)]; t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
+// javaIsFunctionTypeName reports Function / java.util.function.Function receivers
+// of Function.identity() (type_identifier, identifier, or scoped type).
+func javaIsFunctionTypeName(n *grammar.Node, content []byte) bool {
+	if n == nil {
+		return false
+	}
+	switch n.Type() {
+	case "identifier", "type_identifier":
+		return ingest.NodeText(n, content) == "Function"
+	case "scoped_type_identifier", "field_access":
+		// java.util.function.Function or Function nested scope — leaf must be Function.
+		return strings.HasSuffix(ingest.NodeText(n, content), "Function")
+	case "generic_type":
+		// Function<A,A> — peel type name.
+		if name := ingest.ChildByField(n, "type"); name != nil {
+			return javaIsFunctionTypeName(name, content)
+		}
+	}
+	return false
+}
+
+// javaFunctionIdentityApplyArgIdent returns the bare identifier apply-arg of
+// Function.identity().apply(id) when the receiver is Function.identity().
+// Empty when not that shape or the arg is not an identifier.
+func javaFunctionIdentityApplyArgIdent(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	nameN := ingest.ChildByField(call, "name")
+	if nameN == nil || ingest.NodeText(nameN, content) != "apply" {
+		return ""
+	}
+	obj := ingest.ChildByField(call, "object")
+	if obj == nil || obj.Type() != "method_invocation" {
+		return ""
+	}
+	idName := ingest.ChildByField(obj, "name")
+	if idName == nil || ingest.NodeText(idName, content) != "identity" {
+		return ""
+	}
+	if javaMethodCallArgCount(obj) != 0 {
+		return ""
+	}
+	idObj := ingest.ChildByField(obj, "object")
+	if idObj == nil || !javaIsFunctionTypeName(idObj, content) {
+		return ""
+	}
+	first := javaFirstMethodArg(call)
+	if first == nil || first.Type() != "identifier" {
+		return ""
+	}
+	return ingest.NodeText(first, content)
 }
 
 // javaRecordComponentAccessType recovers T from ba.a() when ba is a record local

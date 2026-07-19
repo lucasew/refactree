@@ -1584,6 +1584,14 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 			// identity reduce/reduceRight peels to element T under foreign same-leaf.
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
+		if t := jsIteratorFindElemType(obj, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals); t != "" {
+			// Iterator.from([new A()]).find(pred) / iter.findLast(pred) — yield peel.
+			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
+		if t := jsIteratorReduceElemType(obj, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals); t != "" {
+			// Iterator.from([new A()]).reduce((a,x) => x) — identity reduce yield peel.
+			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
 		if t := jsPromiseThenIdentityType(obj, content, typedLocals, factories); t != "" {
 			// Promise.resolve(new A()).then(x => x) / await …then(x => x) —
 			// identity then peels to resolved value T under foreign same-leaf.
@@ -1600,6 +1608,10 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 			// (rejection handler ignored for typing; same leaf as finally).
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
+		if t := jsPromiseTryType(obj, content, typedLocals, factories); t != "" {
+			// Promise.try(() => new A()) / await Promise.try(() => a) — sole-return peel.
+			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
 		if t := jsWeakRefDerefType(obj, content, typedLocals, factories, genLocals); t != "" {
 			// new WeakRef(new A()).deref() / wa.deref() after const wa = new WeakRef(...) —
 			// referent peel under foreign same-leaf.
@@ -1607,6 +1619,10 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 		}
 		if t := jsReflectGetType(obj, content, typedLocals, factories, objValueLocals); t != "" {
 			// Reflect.get({k: new A()}, "k") / Reflect.get(oa, "k") — property value peel.
+			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
+		if t := jsReflectConstructType(obj, content); t != "" {
+			// Reflect.construct(A, []).run() — constructed instance peel.
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 	}
@@ -2026,6 +2042,12 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 					} else if t := jsArrayReduceElemType(valN, content, arrayLocals, out, factories, extra); ourReceivers[t] {
 						// const a = [new A()].reduce((a,b)=>a) / as.reduce((a,b)=>b)
 						out[ingest.NodeText(nameN, content)] = t
+					} else if t := jsIteratorFindElemType(valN, content, generators, genLocals, arrayLocals, out, factories, mapLocals, entryArrayLocals, setLocals); ourReceivers[t] {
+						// const a = Iterator.from([new A()]).find(pred)
+						out[ingest.NodeText(nameN, content)] = t
+					} else if t := jsIteratorReduceElemType(valN, content, generators, genLocals, arrayLocals, out, factories, mapLocals, entryArrayLocals, setLocals); ourReceivers[t] {
+						// const a = Iterator.from([new A()]).reduce((a,x) => x)
+						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsPromiseThenIdentityType(valN, content, out, factories); ourReceivers[t] {
 						// const a = await Promise.resolve(new A()).then(x => x)
 						out[ingest.NodeText(nameN, content)] = t
@@ -2035,12 +2057,18 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 					} else if t := jsPromiseCatchType(valN, content, out, factories); ourReceivers[t] {
 						// const a = await Promise.resolve(new A()).catch(() => null)
 						out[ingest.NodeText(nameN, content)] = t
+					} else if t := jsPromiseTryType(valN, content, out, factories); ourReceivers[t] {
+						// const a = await Promise.try(() => new A())
+						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsWeakRefDerefType(valN, content, out, factories, genLocals); ourReceivers[t] {
 						// const a = new WeakRef(new A()).deref() / wa.deref() after
 						// const wa = new WeakRef(...)
 						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsReflectGetType(valN, content, out, factories, objValueLocals); ourReceivers[t] {
 						// const a = Reflect.get({k: new A()}, "k") / Reflect.get(oa, "k")
+						out[ingest.NodeText(nameN, content)] = t
+					} else if t := jsReflectConstructType(valN, content); ourReceivers[t] {
+						// const a = Reflect.construct(A, [])
 						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsGeneratorNextResultType(valN, content, generators, genLocals, arrayLocals, out, factories, mapLocals, entryArrayLocals, setLocals); ourReceivers[t] {
 						// const ra = genA().next() / [new A()].values().next() /
@@ -2532,6 +2560,13 @@ func jsBindForEachParams(call *grammar.Node, content []byte, ourReceivers map[st
 			valueT = t
 		}
 	}
+	// Iterator.from([new A()]).forEach/some/every/find/map — yield peel when the
+	// receiver is an iterator of T (not an array source).
+	if valueT == "" {
+		if t := jsIteratorSourceYieldType(obj, content, nil, nil, arrayLocals, out, factories, mapLocals, entryArrayLocals, setLocals); ourReceivers[t] {
+			valueT = t
+		}
+	}
 	if valueT == "" {
 		return
 	}
@@ -2615,6 +2650,10 @@ func jsBindPromiseThenParams(call *grammar.Node, content []byte, ourReceivers ma
 	obj := ingest.ChildByField(fn, "object")
 	// Promise.resolve(new T() / typed local / factory) → scalar param type.
 	resolveT := jsPromiseResolveArgType(obj, content, out, factories)
+	// Promise.try(() => new T()) / Promise.try(() => a) → scalar param type.
+	if resolveT == "" {
+		resolveT = jsPromiseTryType(obj, content, out, factories)
+	}
 	// Promise.resolve(...).then(x => x) identity chain → scalar value type.
 	if resolveT == "" {
 		resolveT = jsPromiseThenIdentityType(obj, content, out, factories)
@@ -3064,7 +3103,9 @@ func jsExprConcreteType(n *grammar.Node, content []byte, typedLocals, factories 
 }
 
 // jsTernaryExprType recovers T from (c ? a : b) when both arms peel to the same
-// Class leaf (new T() / typed local / factory / nested ternary). Mixed fail closed.
+// Class leaf (new T() / typed local / factory / nested ternary), or one arm peels
+// to T and the other is null/undefined. Enables (c ? new A() : null).run() /
+// const a = c ? new A() : null under foreign same-leaf. Mixed fail closed.
 func jsTernaryExprType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
 	if n == nil || n.Type() != "ternary_expression" {
 		return ""
@@ -3075,6 +3116,12 @@ func jsTernaryExprType(n *grammar.Node, content []byte, typedLocals, factories m
 	t2 := jsExprConcreteType(alt, content, typedLocals, factories)
 	if t1 != "" && t1 == t2 {
 		return t1
+	}
+	if t1 != "" && jsIsNullUndefinedLiteral(alt, content) {
+		return t1
+	}
+	if t2 != "" && jsIsNullUndefinedLiteral(cons, content) {
+		return t2
 	}
 	return ""
 }
@@ -6512,11 +6559,13 @@ func jsObjectEntriesPairAtType(n *grammar.Node, content []byte, typedLocals, fac
 	return jsObjectEntriesArraySourceType(ingest.ChildByField(fn, "object"), content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals)
 }
 
-// jsNullishOrDefaultType recovers T from left ?? right / left || right when both
-// arms peel to the same concrete type T, or one arm peels to T and the other is
-// null/undefined. Arms peel via map.get value type or concrete new/local/factory.
-// Enables (ma.get(k) ?? new A()).run() / const a = ma.get(k) || new A() under
-// foreign same-leaf. Mismatched arms (get A ?? new B()) fail closed.
+// jsNullishOrDefaultType recovers T from left ?? right / left || right / left && right
+// when both arms peel to the same concrete type T, or (for ?? / ||) one arm peels
+// to T and the other is null/undefined, or (for &&) left is boolean true and right
+// peels to T. Arms peel via map.get value type or concrete new/local/factory.
+// Enables (ma.get(k) ?? new A()).run() / const a = ma.get(k) || new A() /
+// (true && new A()).run() / const a = true && new A() under foreign same-leaf.
+// Mismatched arms (get A ?? new B()) fail closed.
 func jsNullishOrDefaultType(n *grammar.Node, content []byte, typedLocals, factories, mapLocals, entryArrayLocals map[string]string) string {
 	if n == nil {
 		return ""
@@ -6540,8 +6589,9 @@ func jsNullishOrDefaultType(n *grammar.Node, content []byte, typedLocals, factor
 	if op == nil {
 		return ""
 	}
-	switch ingest.NodeText(op, content) {
-	case "??", "||":
+	opText := ingest.NodeText(op, content)
+	switch opText {
+	case "??", "||", "&&":
 		// ok
 	default:
 		return ""
@@ -6556,6 +6606,13 @@ func jsNullishOrDefaultType(n *grammar.Node, content []byte, typedLocals, factor
 		}
 		return ""
 	}
+	if opText == "&&" {
+		// true && new A() → A. (new A() && true) stays boolean — fail closed.
+		if rt != "" && jsIsTrueLiteral(left, content) {
+			return rt
+		}
+		return ""
+	}
 	if lt != "" && jsIsNullUndefinedLiteral(right, content) {
 		return lt
 	}
@@ -6563,6 +6620,33 @@ func jsNullishOrDefaultType(n *grammar.Node, content []byte, typedLocals, factor
 		return rt
 	}
 	return ""
+}
+
+// jsIsTrueLiteral reports the boolean true literal (true / (true)).
+func jsIsTrueLiteral(n *grammar.Node, content []byte) bool {
+	if n == nil {
+		return false
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil {
+		return false
+	}
+	// tree-sitter-javascript: true is "true" node type or identifier/boolean.
+	if n.Type() == "true" {
+		return true
+	}
+	return ingest.NodeText(n, content) == "true"
 }
 
 // jsNullishArmType recovers T from one arm of ?? / ||: map.get value, new T(),
@@ -7760,7 +7844,8 @@ func jsStructuredCloneArrayElemType(n *grammar.Node, content []byte, arrayLocals
 }
 
 // jsIteratorHelperYieldType recovers T from iter.take(n) / iter.drop(n) /
-// iter.filter(pred) when the receiver peels as an iterator yielding T.
+// iter.filter(pred) / iter.map(x => x) / iter.flatMap(() => [new T()]) when the
+// receiver peels as an iterator yielding T (or flatMap sole-return peels T).
 // Limit / predicate args ignored (not type-changing). Unknown receivers fail closed.
 func jsIteratorHelperYieldType(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals map[string]string) string {
 	if n == nil {
@@ -7809,6 +7894,7 @@ func jsIteratorHelperYieldType(n *grammar.Node, content []byte, generators, genL
 	if count < 1 {
 		return ""
 	}
+	obj := ingest.ChildByField(fn, "object")
 	switch name {
 	case "take", "drop", "filter":
 		// ok — identity iterator helpers (predicate/limit ignored)
@@ -7817,11 +7903,361 @@ func jsIteratorHelperYieldType(n *grammar.Node, content []byte, generators, genL
 		if firstArg == nil || !jsIsIdentityCallback(firstArg, content) {
 			return ""
 		}
+	case "flatMap":
+		// iter.flatMap(x => [x]) — one-level flatten of yield T → T
+		// iter.flatMap(() => [new T()]) — sole-return array of uniform T
+		// (receiver ignored for sole-return type; same leaf as Array.flatMap sole return).
+		// Array.prototype.flatMap stays on jsArrayIdentityElemType so
+		// const as = [0].flatMap(() => [new A()]) binds as arrayLocals (as[0].run()).
+		if firstArg == nil {
+			return ""
+		}
+		if !jsLooksLikeIteratorReceiver(obj, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals) {
+			return ""
+		}
+		if jsIsIdentityArrayCallback(firstArg, content) {
+			return jsIteratorSourceYieldType(obj, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals)
+		}
+		if t := jsFlatMapSoleArrayReturnElemType(firstArg, content, typedLocals, factories); t != "" {
+			return t
+		}
+		return ""
 	default:
 		return ""
 	}
-	obj := ingest.ChildByField(fn, "object")
 	return jsIteratorSourceYieldType(obj, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals)
+}
+
+// jsLooksLikeIteratorReceiver reports whether n is an iterator source (not a
+// plain array). Used to keep Array.flatMap on the array-identity path while
+// Iterator.from(...).flatMap / values().flatMap peels as iterator helpers.
+// Structural: Iterator.from, generator/array-iterator/map.values/set locals,
+// identity iterator helpers — even when the yield leaf is non-class (numbers).
+func jsLooksLikeIteratorReceiver(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals map[string]string) bool {
+	if n == nil {
+		return false
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil {
+		return false
+	}
+	// Bound iterator local (const ia = Iterator.from(...)/arr.values()/…).
+	if n.Type() == "identifier" && genLocals != nil {
+		if genLocals[ingest.NodeText(n, content)] != "" {
+			return true
+		}
+	}
+	// Iterator.from(...) — structural even when iterable elems are non-class.
+	if jsIsIteratorFromCall(n, content) {
+		return true
+	}
+	// arr.values() / map.values() / set.values() / generator call — yield peels.
+	if t := jsGeneratorCallYieldType(n, content, generators, genLocals); t != "" {
+		return true
+	}
+	if t := jsArrayIteratorYieldType(n, content, arrayLocals, typedLocals, factories, jsExtraLocals{}); t != "" {
+		return true
+	}
+	if t := jsMapValuesYieldType(n, content, typedLocals, factories, mapLocals, entryArrayLocals); t != "" {
+		return true
+	}
+	if t := jsSetIteratorYieldType(n, content, arrayLocals, typedLocals, factories, setLocals); t != "" {
+		return true
+	}
+	// Chained identity helpers: iter.take(n).flatMap(...).
+	if n.Type() == "call_expression" {
+		fn := ingest.ChildByField(n, "function")
+		if fn != nil && (fn.Type() == "member_expression" || fn.Type() == "member_expression_optional" || fn.Type() == "optional_chain") {
+			prop := ingest.ChildByField(fn, "property")
+			if prop != nil {
+				switch ingest.NodeText(prop, content) {
+				case "take", "drop", "filter", "map", "flatMap":
+					return jsLooksLikeIteratorReceiver(ingest.ChildByField(fn, "object"), content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals)
+				}
+			}
+		}
+	}
+	return false
+}
+
+// jsIsIteratorFromCall reports Iterator.from(...) structurally (args ignored).
+func jsIsIteratorFromCall(n *grammar.Node, content []byte) bool {
+	if n == nil || n.Type() != "call_expression" {
+		return false
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil || (fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain") {
+		return false
+	}
+	obj := ingest.ChildByField(fn, "object")
+	prop := ingest.ChildByField(fn, "property")
+	if obj == nil || prop == nil {
+		return false
+	}
+	return obj.Type() == "identifier" && ingest.NodeText(obj, content) == "Iterator" &&
+		ingest.NodeText(prop, content) == "from"
+}
+
+// jsIteratorFindElemType recovers T from iter.find(pred) / iter.findLast(pred)
+// when the receiver peels as an iterator yielding T. Predicate ignored (not
+// type-changing for uniform yields). Enables
+// Iterator.from([new A()]).find(x => true).run() under foreign same-leaf.
+func jsIteratorFindElemType(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	args := ingest.ChildByField(n, "arguments")
+	if fn == nil || args == nil {
+		return ""
+	}
+	if fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain" {
+		return ""
+	}
+	prop := ingest.ChildByField(fn, "property")
+	if prop == nil {
+		return ""
+	}
+	name := ingest.NodeText(prop, content)
+	if name != "find" && name != "findLast" {
+		return ""
+	}
+	count := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		count++
+	}
+	if count < 1 {
+		return ""
+	}
+	return jsIteratorSourceYieldType(ingest.ChildByField(fn, "object"), content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals)
+}
+
+// jsIteratorReduceElemType recovers T from iter.reduce((a,x) => x) /
+// iter.reduce((a,x) => a, init) when the receiver peels as an iterator yielding T
+// and the callback is identity of first or second formal (same shapes as
+// Array.prototype.reduce). Enables Iterator.from([new A()]).reduce((a,x) => x).run()
+// under foreign same-leaf. Non-identity reducers fail closed.
+func jsIteratorReduceElemType(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	args := ingest.ChildByField(n, "arguments")
+	if fn == nil || args == nil {
+		return ""
+	}
+	if fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain" {
+		return ""
+	}
+	prop := ingest.ChildByField(fn, "property")
+	if prop == nil || ingest.NodeText(prop, content) != "reduce" {
+		return ""
+	}
+	var cb, init *grammar.Node
+	pos := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		pos++
+		if pos == 1 {
+			cb = ch
+		} else if pos == 2 {
+			init = ch
+		}
+	}
+	if pos < 1 || pos > 2 || cb == nil {
+		return ""
+	}
+	idx := jsCallbackReturnedParamIndex(cb, content)
+	if idx != 0 && idx != 1 {
+		return ""
+	}
+	t := jsIteratorSourceYieldType(ingest.ChildByField(fn, "object"), content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals)
+	if t == "" {
+		if init != nil && idx == 0 {
+			if it := jsExprConcreteType(init, content, typedLocals, factories); it != "" {
+				return it
+			}
+		}
+		return ""
+	}
+	if init != nil && jsExprConcreteType(init, content, typedLocals, factories) != t {
+		return ""
+	}
+	return t
+}
+
+// jsReflectConstructType recovers T from Reflect.construct(T, args) when the
+// first positional arg is a bare class identifier T. Args ignored for typing.
+// Enables Reflect.construct(A, []).run() / const a = Reflect.construct(A, [])
+// under foreign same-leaf. Non-Reflect / non-identifier target fail closed.
+func jsReflectConstructType(n *grammar.Node, content []byte) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	args := ingest.ChildByField(n, "arguments")
+	if fn == nil || args == nil {
+		return ""
+	}
+	if fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain" {
+		return ""
+	}
+	obj := ingest.ChildByField(fn, "object")
+	prop := ingest.ChildByField(fn, "property")
+	if obj == nil || prop == nil ||
+		obj.Type() != "identifier" || ingest.NodeText(obj, content) != "Reflect" ||
+		ingest.NodeText(prop, content) != "construct" {
+		return ""
+	}
+	var first *grammar.Node
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		first = ch
+		break
+	}
+	if first == nil || first.Type() != "identifier" {
+		return ""
+	}
+	name := ingest.NodeText(first, content)
+	if name == "" || name == "_" {
+		return ""
+	}
+	return name
+}
+
+// jsPromiseTryType recovers T from Promise.try(() => new T()) / Promise.try(() => a)
+// when the sole callback return peels to concrete T (new / local / factory).
+// Enables Promise.try(() => new A()).then(x => x.run()) under foreign same-leaf.
+// Multi-arg / non-Promise / non-sole-return fail closed.
+func jsPromiseTryType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	if n.Type() == "await_expression" {
+		var arg *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch == nil || ch.Type() == "await" {
+				continue
+			}
+			arg = ch
+			break
+		}
+		return jsPromiseTryType(arg, content, typedLocals, factories)
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	args := ingest.ChildByField(n, "arguments")
+	if fn == nil || args == nil || fn.Type() != "member_expression" {
+		return ""
+	}
+	obj := ingest.ChildByField(fn, "object")
+	prop := ingest.ChildByField(fn, "property")
+	if obj == nil || prop == nil ||
+		obj.Type() != "identifier" || ingest.NodeText(obj, content) != "Promise" ||
+		ingest.NodeText(prop, content) != "try" {
+		return ""
+	}
+	var first *grammar.Node
+	count := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		count++
+		if first == nil {
+			first = ch
+		}
+	}
+	if count != 1 || first == nil {
+		return ""
+	}
+	ret := jsCallbackSoleReturnExpr(first, content)
+	if ret == nil {
+		return ""
+	}
+	return jsExprConcreteType(ret, content, typedLocals, factories)
 }
 
 // jsIteratorToArrayElemType recovers T from iter.toArray() when the receiver
