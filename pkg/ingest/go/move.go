@@ -1873,6 +1873,10 @@ type rangeSourceInfo struct {
 	elemType string // element (slice/array/chan) or map value named type
 	keyType  string // map key named type (only when isMap)
 	isMap    bool
+	// isArray is true when the collection is (or is a named alias of) an array
+	// type. Used so new(AA) peels under foreign same-leaf while new(AS) for a
+	// named slice does not (result is *[]T, not indexable without deref).
+	isArray bool
 }
 
 // collectResultParameterBindings records named result params from a
@@ -2033,10 +2037,16 @@ func rangeSourceFromTypeNode(n *grammar.Node, content []byte) (rangeSourceInfo, 
 			}
 			return rangeSourceFromTypeNode(c, content)
 		}
-	case "slice_type", "array_type":
+	case "slice_type":
 		if el := ingest.ChildByField(n, "element"); el != nil {
 			if typ := typeNameFromTypeNode(el, content); typ != "" {
 				return rangeSourceInfo{elemType: typ, isMap: false}, true
+			}
+		}
+	case "array_type":
+		if el := ingest.ChildByField(n, "element"); el != nil {
+			if typ := typeNameFromTypeNode(el, content); typ != "" {
+				return rangeSourceInfo{elemType: typ, isMap: false, isArray: true}, true
 			}
 		}
 	case "map_type":
@@ -2176,6 +2186,8 @@ func sameFileNamedFuncCollectionResults(root *grammar.Node, content []byte) map[
 //	type PAS *[]*A
 //
 // Only direct collection RHS is peeled — chained aliases (type AS = BS) left unresolved.
+// isArray is set only when the declared type is (paren of) array_type, not when
+// reached only via pointer peel (type PAS *[n]T) so new(AA) peels but new(PAS) does not.
 func sameFileNamedCollectionResults(root *grammar.Node, content []byte) map[string]rangeSourceInfo {
 	out := map[string]rangeSourceInfo{}
 	if root == nil {
@@ -2198,6 +2210,10 @@ func sameFileNamedCollectionResults(root *grammar.Node, content []byte) map[stri
 				break
 			}
 			if info, ok := rangeSourceFromTypeNode(typeN, content); ok && info.elemType != "" {
+				// Clear isArray unless the declared type is directly an array
+				// (possibly parenthesized). Pointer-to-array named types stay
+				// indexable via (*pas) but not via new(PAS).
+				info.isArray = typeNodeIsDirectArray(typeN)
 				out[name] = info
 			}
 		}
@@ -2207,6 +2223,23 @@ func sameFileNamedCollectionResults(root *grammar.Node, content []byte) map[stri
 	}
 	walk(root)
 	return out
+}
+
+// typeNodeIsDirectArray reports whether n is (or is parenthesized) an array_type.
+func typeNodeIsDirectArray(n *grammar.Node) bool {
+	for n != nil && n.Type() == "parenthesized_type" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "(" || c.Type() == ")" {
+				continue
+			}
+			inner = c
+			break
+		}
+		n = inner
+	}
+	return n != nil && n.Type() == "array_type"
 }
 
 // functionTypeOrNamedCollectionResult peels an inline function_type or a
@@ -2224,6 +2257,233 @@ func functionTypeOrNamedCollectionResult(typeN *grammar.Node, content []byte, na
 		return rangeSourceInfo{}, false
 	}
 	return info, true
+}
+
+// sameFileFuncReturningFuncCollection maps same-file function names whose
+// single result is a function type with a single collection result:
+//
+//	func getFA() FA          // type FA func() []*A
+//	func getFA() func() []*A // inline function type
+//
+// Multi-result signatures (func getFA() (FA, error)) fail closed. Used so
+// fa := getFA(); fa()[0].M and getFA()()[0].M resolve under foreign same-leaf.
+func sameFileFuncReturningFuncCollection(root *grammar.Node, content []byte) map[string]rangeSourceInfo {
+	out := map[string]rangeSourceInfo{}
+	if root == nil {
+		return out
+	}
+	namedFunc := sameFileNamedFuncCollectionResults(root, content)
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type() == "function_declaration" {
+			nameN := ingest.ChildByField(n, "name")
+			if nameN != nil && nameN.Type() == "identifier" {
+				name := ingest.NodeText(nameN, content)
+				if name != "" {
+					if info, ok := functionDeclSingleFuncCollectionResult(n, content, namedFunc); ok && info.elemType != "" {
+						out[name] = info
+					}
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	return out
+}
+
+// functionDeclSingleFuncCollectionResult reports the collection element of a
+// function's single result when that result is itself a function type with a
+// single collection result (named FA or inline func() []*T). Multi-result
+// parameter_list fails closed.
+func functionDeclSingleFuncCollectionResult(decl *grammar.Node, content []byte, namedFunc map[string]rangeSourceInfo) (rangeSourceInfo, bool) {
+	if decl == nil {
+		return rangeSourceInfo{}, false
+	}
+	result := ingest.ChildByField(decl, "result")
+	if result == nil {
+		return rangeSourceInfo{}, false
+	}
+	if result.Type() == "parameter_list" {
+		var only rangeSourceInfo
+		count := 0
+		for i := uint32(0); i < result.ChildCount(); i++ {
+			p := result.Child(i)
+			if p == nil || (p.Type() != "parameter_declaration" && p.Type() != "variadic_parameter_declaration") {
+				continue
+			}
+			count++
+			typeN := ingest.ChildByField(p, "type")
+			info, ok := functionTypeOrNamedCollectionResult(typeN, content, namedFunc)
+			if !ok || info.elemType == "" {
+				return rangeSourceInfo{}, false
+			}
+			only = info
+		}
+		if count != 1 {
+			return rangeSourceInfo{}, false
+		}
+		return only, true
+	}
+	return functionTypeOrNamedCollectionResult(result, content, namedFunc)
+}
+
+// sameFileStructNamedFuncFields maps same-file struct type → field name →
+// collection result of a function-typed field (type Box struct { Fa FA } with
+// type FA func() []*A). Only direct same-file named/inline function types;
+// multi-result function types fail closed. Embedded fields without names skipped.
+func sameFileStructNamedFuncFields(root *grammar.Node, content []byte) map[string]map[string]rangeSourceInfo {
+	out := map[string]map[string]rangeSourceInfo{}
+	if root == nil {
+		return out
+	}
+	namedFunc := sameFileNamedFuncCollectionResults(root, content)
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type() == "type_spec" {
+			nameN := ingest.ChildByField(n, "name")
+			typeN := ingest.ChildByField(n, "type")
+			if nameN != nil && typeN != nil && typeN.Type() == "struct_type" {
+				structName := ingest.NodeText(nameN, content)
+				if structName != "" {
+					fields := collectStructNamedFuncFields(typeN, content, namedFunc)
+					if len(fields) > 0 {
+						out[structName] = fields
+					}
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	return out
+}
+
+// callReturningFuncCollection reports collection result element info when n is
+// a call to a same-file helper that returns a function type with a single
+// collection result (getFA() FA / getFA() func() []*A). Used to bind
+// fa := getFA() so fa()[0].M peels under foreign same-leaf.
+func callReturningFuncCollection(n *grammar.Node, content []byte, funcRetFunc map[string]rangeSourceInfo) (rangeSourceInfo, bool) {
+	if n == nil || len(funcRetFunc) == 0 {
+		return rangeSourceInfo{}, false
+	}
+	if n.Type() == "expression_list" {
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			return callReturningFuncCollection(c, content, funcRetFunc)
+		}
+		return rangeSourceInfo{}, false
+	}
+	if n.Type() != "call_expression" {
+		return rangeSourceInfo{}, false
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil || fn.Type() != "identifier" {
+		return rangeSourceInfo{}, false
+	}
+	info, ok := funcRetFunc[ingest.NodeText(fn, content)]
+	if !ok || info.elemType == "" {
+		return rangeSourceInfo{}, false
+	}
+	return info, true
+}
+
+// selectorNamedFuncField reports collection result element info when n is a
+// selector xa.Fa and xa has a known same-file struct type with function-typed
+// field Fa (type Box struct { Fa FA } with type FA func() []*A).
+func selectorNamedFuncField(n *grammar.Node, content []byte, valueType func(string, uint32) (string, bool), structFields map[string]map[string]rangeSourceInfo, at uint32) (rangeSourceInfo, bool) {
+	if n == nil || valueType == nil || len(structFields) == 0 {
+		return rangeSourceInfo{}, false
+	}
+	if n.Type() == "expression_list" {
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			return selectorNamedFuncField(c, content, valueType, structFields, at)
+		}
+		return rangeSourceInfo{}, false
+	}
+	if n.Type() != "selector_expression" {
+		return rangeSourceInfo{}, false
+	}
+	operand := ingest.ChildByField(n, "operand")
+	field := ingest.ChildByField(n, "field")
+	if operand == nil || field == nil || operand.Type() != "identifier" {
+		return rangeSourceInfo{}, false
+	}
+	recvType, ok := valueType(ingest.NodeText(operand, content), at)
+	if !ok || recvType == "" {
+		return rangeSourceInfo{}, false
+	}
+	recvType = strings.TrimPrefix(recvType, "*")
+	fields := structFields[recvType]
+	if len(fields) == 0 {
+		return rangeSourceInfo{}, false
+	}
+	info, ok := fields[ingest.NodeText(field, content)]
+	if !ok || info.elemType == "" {
+		return rangeSourceInfo{}, false
+	}
+	return info, true
+}
+
+// collectStructNamedFuncFields walks a struct_type for named fields whose type
+// is a function type with a single collection result.
+func collectStructNamedFuncFields(structType *grammar.Node, content []byte, namedFunc map[string]rangeSourceInfo) map[string]rangeSourceInfo {
+	fields := map[string]rangeSourceInfo{}
+	if structType == nil {
+		return fields
+	}
+	var walk func(*grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type() == "field_declaration" {
+			typeField := ingest.ChildByField(n, "type")
+			info, ok := functionTypeOrNamedCollectionResult(typeField, content, namedFunc)
+			if !ok || info.elemType == "" {
+				return
+			}
+			// Collect all field_identifier names (Fa FA / X, Y FA). Skip
+			// embedded fields (type only, no field_identifier).
+			anyName := false
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch == nil || ch.Type() != "field_identifier" {
+					continue
+				}
+				fname := ingest.NodeText(ch, content)
+				if fname == "" || fname == "_" {
+					continue
+				}
+				fields[fname] = info
+				anyName = true
+			}
+			_ = anyName
+			return
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(structType)
+	return fields
 }
 
 // collectionTypeOrNamedResult peels an inline collection type or a same-file
@@ -3073,7 +3333,7 @@ func goCallFirstArgNode(call *grammar.Node) *grammar.Node {
 // argument of a call_expression (A{} / &A{} / new(A) / nested peels). Used by
 // generic identity Id(arg) and multi-param First2(a, b) peels (first value
 // param is the result type param; extra args ignored).
-func goCallFirstArgType(call *grammar.Node, content []byte, indexElemType, valueType func(name string, at uint32) (string, bool), funcColl map[string][]rangeSourceInfo, funcResults map[string][]string, genericPeels map[string]string) string {
+func goCallFirstArgType(call *grammar.Node, content []byte, indexElemType, valueType func(name string, at uint32) (string, bool), funcColl map[string][]rangeSourceInfo, funcResults map[string][]string, genericPeels map[string]string, namedColl map[string]rangeSourceInfo, funcRetFunc map[string]rangeSourceInfo, structFields map[string]map[string]rangeSourceInfo) string {
 	if call == nil || call.Type() != "call_expression" {
 		return ""
 	}
@@ -3089,7 +3349,7 @@ func goCallFirstArgType(call *grammar.Node, content []byte, indexElemType, value
 	if t := typeNameFromRHS(first, content); t != "" {
 		return strings.TrimPrefix(t, "*")
 	}
-	return goComplexOperandType(first, content, indexElemType, valueType, funcColl, funcResults, genericPeels)
+	return goComplexOperandType(first, content, indexElemType, valueType, funcColl, funcResults, genericPeels, namedColl, funcRetFunc, structFields)
 }
 
 // goCallFirstArgElemType recovers the element type of the first positional
@@ -3097,13 +3357,13 @@ func goCallFirstArgType(call *grammar.Node, content []byte, indexElemType, value
 // append, …). Used by generic First[T](xs []T) T / At[T](xs []T, i int) T peels.
 // Extra args after the collection are ignored (At index). Missing first arg
 // fails closed.
-func goCallFirstArgElemType(call *grammar.Node, content []byte, indexElemType func(name string, at uint32) (string, bool), funcColl map[string][]rangeSourceInfo) string {
+func goCallFirstArgElemType(call *grammar.Node, content []byte, indexElemType func(name string, at uint32) (string, bool), funcColl map[string][]rangeSourceInfo, namedColl map[string]rangeSourceInfo, funcRetFunc map[string]rangeSourceInfo, structFields map[string]map[string]rangeSourceInfo, valueType func(string, uint32) (string, bool)) string {
 	first := goCallFirstArgNode(call)
 	if first == nil {
 		return ""
 	}
 	at := call.StartByte()
-	if info, ok := rangeSourceFromCollectionExprIdent(first, content, indexElemType, at, funcColl); ok && info.elemType != "" {
+	if info, ok := rangeSourceFromCollectionExprIdent(first, content, indexElemType, at, funcColl, namedColl, funcRetFunc, structFields, valueType); ok && info.elemType != "" {
 		return strings.TrimPrefix(info.elemType, "*")
 	}
 	return ""
@@ -3112,13 +3372,14 @@ func goCallFirstArgElemType(call *grammar.Node, content []byte, indexElemType fu
 // sameFileFuncCollectionResults maps same-file function names to positional
 // collection element/value info for each result slot
 // (func getA() []*A / func getA() ([]*A, error) / func getM() map[K]*A /
-// named (as []*A, err error)). Empty-elem slots keep multi-return indices
-// aligned so as, err := getA(); as[0].M and getA()[0].M (single-result only)
-// resolve under foreign same-leaf methods.
+// named (as []*A, err error) / func getAS() AS with type AS []*A). Empty-elem
+// slots keep multi-return indices aligned so as, err := getA(); as[0].M and
+// getA()[0].M (single-result only) resolve under foreign same-leaf methods.
 func sameFileFuncCollectionResults(root *grammar.Node, content []byte) map[string][]rangeSourceInfo {
 	if root == nil {
 		return nil
 	}
+	namedColl := sameFileNamedCollectionResults(root, content)
 	out := map[string][]rangeSourceInfo{}
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
@@ -3130,7 +3391,7 @@ func sameFileFuncCollectionResults(root *grammar.Node, content []byte) map[strin
 			if nameN != nil && nameN.Type() == "identifier" {
 				name := ingest.NodeText(nameN, content)
 				if name != "" {
-					if infos := functionCollectionResults(n, content); len(infos) > 0 {
+					if infos := functionCollectionResults(n, content, namedColl); len(infos) > 0 {
 						out[name] = infos
 					}
 				}
@@ -3148,10 +3409,12 @@ func sameFileFuncCollectionResults(root *grammar.Node, content []byte) map[strin
 }
 
 // functionCollectionResults returns positional collection element/value info
-// from a function_declaration's result list. Non-collection slots (error, bool,
-// scalars) keep empty elemType so multi-return indices stay aligned
-// (e.g. ([]*A, error) → [{A}, {}]). Returns nil when no result is a collection.
-func functionCollectionResults(decl *grammar.Node, content []byte) []rangeSourceInfo {
+// from a function_declaration's (or func_literal's) result list. Non-collection
+// slots (error, bool, scalars) keep empty elemType so multi-return indices stay
+// aligned (e.g. ([]*A, error) → [{A}, {}]). namedColl peels same-file named
+// collection result types (func getAS() AS with type AS []*A; may be nil).
+// Returns nil when no result is a collection.
+func functionCollectionResults(decl *grammar.Node, content []byte, namedColl map[string]rangeSourceInfo) []rangeSourceInfo {
 	if decl == nil {
 		return nil
 	}
@@ -3168,7 +3431,7 @@ func functionCollectionResults(decl *grammar.Node, content []byte) []rangeSource
 				continue
 			}
 			typeN := ingest.ChildByField(p, "type")
-			info, ok := rangeSourceFromTypeNode(typeN, content)
+			info, ok := collectionTypeOrNamedResult(typeN, content, namedColl)
 			if !ok || info.elemType == "" {
 				// Non-collection slot — keep alignment (e.g. error in ([]*A, error)).
 				info = rangeSourceInfo{}
@@ -3191,7 +3454,7 @@ func functionCollectionResults(decl *grammar.Node, content []byte) []rangeSource
 		}
 		return infos
 	}
-	if info, ok := rangeSourceFromTypeNode(result, content); ok && info.elemType != "" {
+	if info, ok := collectionTypeOrNamedResult(result, content, namedColl); ok && info.elemType != "" {
 		return []rangeSourceInfo{info}
 	}
 	return nil
@@ -3382,7 +3645,7 @@ func typeNamesFromCallResults(n *grammar.Node, content []byte, funcResults map[s
 		return nil
 	} else if mode == "elem" {
 		// Element peel for assign: a := First([]A{{}}) / a := First(xs).
-		if t := goCallFirstArgElemType(n, content, indexElemType, nil); t != "" {
+		if t := goCallFirstArgElemType(n, content, indexElemType, nil, nil, nil, nil, nil); t != "" {
 			return []string{t}
 		}
 		return nil
@@ -3817,6 +4080,9 @@ func findComplexOperandSelectorEdits(file string, content []byte, oldLeaf, newLe
 	// rewritten and ours are not skipped. Same-file func results (getA() []*A)
 	// feed short-var / inline index too.
 	funcColl := sameFileFuncCollectionResults(pf.Root, content)
+	namedColl := sameFileNamedCollectionResults(pf.Root, content)
+	funcRetFunc := sameFileFuncReturningFuncCollection(pf.Root, content)
+	structFields := sameFileStructNamedFuncFields(pf.Root, content)
 	indexElemType := collectionIndexElemTypeFunc(pf.Root, content, funcColl)
 	// new(T).M / getA().M / (*pa).M under foreign same-leaf methods.
 	funcResults := sameFileFuncResultTypes(pf.Root, content)
@@ -3835,7 +4101,7 @@ func findComplexOperandSelectorEdits(file string, content []byte, oldLeaf, newLe
 			field := ingest.ChildByField(n, "field")
 			if field != nil && ingest.NodeText(field, content) == oldLeaf && operand != nil && !goOperandIsBareIdent(operand) {
 				ok := false
-				if typ := goComplexOperandType(operand, content, indexElemType, valueType, funcColl, funcResults, genericPeels); typ != "" {
+				if typ := goComplexOperandType(operand, content, indexElemType, valueType, funcColl, funcResults, genericPeels, namedColl, funcRetFunc, structFields); typ != "" {
 					typ = strings.TrimPrefix(typ, "*")
 					if ourReceivers[typ] {
 						ok = true
@@ -3954,6 +4220,12 @@ func collectionIndexElemTypeFunc(root *grammar.Node, content []byte, funcColl ma
 	namedFunc := sameFileNamedFuncCollectionResults(root, content)
 	// Named collection types: type AS []*A / type AM = map[K]*A.
 	namedColl := sameFileNamedCollectionResults(root, content)
+	// func getFA() FA / func getFA() func() []*A — result is callable with collection result.
+	funcRetFunc := sameFileFuncReturningFuncCollection(root, content)
+	// type Box struct { Fa FA } — field call peels.
+	structFields := sameFileStructNamedFuncFields(root, content)
+	// Concrete types for xa.Fa peels (params/locals like xa BoxA).
+	valueType := goIdentTypeAtFunc(root, content, sameFileFuncResultTypes(root, content))
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
 		if n == nil {
@@ -3998,7 +4270,7 @@ func collectionIndexElemTypeFunc(root *grammar.Node, content []byte, funcColl ma
 				}
 			}
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalCollectionElemBindings(body, content, &bindings, funcColl, namedFunc, namedColl)
+				collectLocalCollectionElemBindings(body, content, &bindings, funcColl, namedFunc, namedColl, funcRetFunc, structFields, valueType)
 			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -4032,9 +4304,10 @@ func collectionIndexElemTypeFunc(root *grammar.Node, content []byte, funcColl ma
 }
 
 // rangeSourceFromMakeCall reports element/value (and map key) type for
-// make(T, n[, cap]) when T is a slice, array, map, or channel type. Len/cap
-// args are ignored. expression_list peels to its first expression only.
-func rangeSourceFromMakeCall(n *grammar.Node, content []byte) (rangeSourceInfo, bool) {
+// make(T, n[, cap]) when T is a slice, array, map, channel, or same-file named
+// collection type (type AS []*A / type AM map[K]*A). Len/cap args are ignored.
+// expression_list peels to its first expression only. namedColl may be nil.
+func rangeSourceFromMakeCall(n *grammar.Node, content []byte, namedColl map[string]rangeSourceInfo) (rangeSourceInfo, bool) {
 	if n == nil {
 		return rangeSourceInfo{}, false
 	}
@@ -4044,7 +4317,7 @@ func rangeSourceFromMakeCall(n *grammar.Node, content []byte) (rangeSourceInfo, 
 			if c == nil || c.Type() == "," {
 				continue
 			}
-			return rangeSourceFromMakeCall(c, content)
+			return rangeSourceFromMakeCall(c, content, namedColl)
 		}
 		return rangeSourceInfo{}, false
 	}
@@ -4064,8 +4337,8 @@ func rangeSourceFromMakeCall(n *grammar.Node, content []byte) (rangeSourceInfo, 
 		if c == nil || c.Type() == "(" || c.Type() == ")" || c.Type() == "," {
 			continue
 		}
-		// First argument is the type: make([]*T, n) / make(map[K]*T).
-		return rangeSourceFromTypeNode(c, content)
+		// First argument is the type: make([]*T, n) / make(map[K]*T) / make(AS).
+		return collectionTypeOrNamedResult(c, content, namedColl)
 	}
 	return rangeSourceInfo{}, false
 }
@@ -4084,7 +4357,7 @@ func rangeSourceFromMakeCall(n *grammar.Node, content []byte) (rangeSourceInfo, 
 // Prefer rangeSourceFromCollectionExprIdent when the first append argument may
 // be a known collection param/local (append(as, x) where as []*A).
 func rangeSourceFromCollectionExpr(n *grammar.Node, content []byte) (rangeSourceInfo, bool) {
-	return rangeSourceFromCollectionExprIdent(n, content, nil, 0, nil)
+	return rangeSourceFromCollectionExprIdent(n, content, nil, 0, nil, nil, nil, nil, nil)
 }
 
 // rangeSourceFromCollectionExprIdent is rangeSourceFromCollectionExpr plus
@@ -4098,7 +4371,7 @@ func rangeSourceFromCollectionExpr(n *grammar.Node, content []byte) (rangeSource
 // func() []*A / func() map[K]*A (param or var).
 // Multi-result helpers (getA() ([]*A, error)) are not valid as a lone call
 // expression value — those bind via collectLocalCollectionElemBindings.
-func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identElem func(name string, at uint32) (string, bool), at uint32, funcColl map[string][]rangeSourceInfo) (rangeSourceInfo, bool) {
+func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identElem func(name string, at uint32) (string, bool), at uint32, funcColl map[string][]rangeSourceInfo, namedColl map[string]rangeSourceInfo, funcRetFunc map[string]rangeSourceInfo, structFields map[string]map[string]rangeSourceInfo, valueType func(string, uint32) (string, bool)) (rangeSourceInfo, bool) {
 	if n == nil {
 		return rangeSourceInfo{}, false
 	}
@@ -4108,7 +4381,7 @@ func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identEl
 			if c == nil || c.Type() == "," {
 				continue
 			}
-			return rangeSourceFromCollectionExprIdent(c, content, identElem, at, funcColl)
+			return rangeSourceFromCollectionExprIdent(c, content, identElem, at, funcColl, namedColl, funcRetFunc, structFields, valueType)
 		}
 		return rangeSourceInfo{}, false
 	}
@@ -4118,7 +4391,7 @@ func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identEl
 			if ch == nil || ch.Type() == "(" || ch.Type() == ")" {
 				continue
 			}
-			return rangeSourceFromCollectionExprIdent(ch, content, identElem, at, funcColl)
+			return rangeSourceFromCollectionExprIdent(ch, content, identElem, at, funcColl, namedColl, funcRetFunc, structFields, valueType)
 		}
 		return rangeSourceInfo{}, false
 	}
@@ -4177,14 +4450,14 @@ func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identEl
 				}
 				inner = in2
 			}
-			return rangeSourceFromCollectionExprIdent(inner, content, identElem, at, funcColl)
+			return rangeSourceFromCollectionExprIdent(inner, content, identElem, at, funcColl, namedColl, funcRetFunc, structFields, valueType)
 		}
 	}
 	// as[:n] / as[i:] / as[i:j] / as[:] — result has the same element type as
 	// the sliced collection (param, local, make/append/composite, nested slice).
 	if n.Type() == "slice_expression" {
 		if op := ingest.ChildByField(n, "operand"); op != nil {
-			return rangeSourceFromCollectionExprIdent(op, content, identElem, at, funcColl)
+			return rangeSourceFromCollectionExprIdent(op, content, identElem, at, funcColl, namedColl, funcRetFunc, structFields, valueType)
 		}
 		return rangeSourceInfo{}, false
 	}
@@ -4198,14 +4471,15 @@ func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identEl
 	}
 	if n.Type() == "composite_literal" {
 		if t := ingest.ChildByField(n, "type"); t != nil {
-			return rangeSourceFromTypeNode(t, content)
+			// []*T{…} / map[K]*T{…} / AS{…} / AM{…} with type AS []*A.
+			return collectionTypeOrNamedResult(t, content, namedColl)
 		}
 		return rangeSourceInfo{}, false
 	}
-	// x.([]*T) / x.(map[K]*T) / ([]*T)(x) — type field is the collection type.
+	// x.([]*T) / x.(AS) / x.(map[K]*T) / ([]*T)(x) / (AS)(x) — type field.
 	if n.Type() == "type_assertion_expression" || n.Type() == "type_conversion_expression" {
 		if t := ingest.ChildByField(n, "type"); t != nil {
-			return rangeSourceFromTypeNode(t, content)
+			return collectionTypeOrNamedResult(t, content, namedColl)
 		}
 		return rangeSourceInfo{}, false
 	}
@@ -4218,12 +4492,12 @@ func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identEl
 	}
 	switch ingest.NodeText(fn, content) {
 	case "make":
-		return rangeSourceFromMakeCall(n, content)
+		return rangeSourceFromMakeCall(n, content, namedColl)
 	case "new":
 		// new([n]*T) returns *[n]*T; Go allows indexing the pointer-to-array
 		// without dereference. new([]*T) / new(map[…]) return non-indexable
 		// pointers — only array type args count as collection sources.
-		return rangeSourceFromNewArrayCall(n, content)
+		return rangeSourceFromNewArrayCall(n, content, namedColl)
 	case "append":
 		args := ingest.ChildByField(n, "arguments")
 		if args == nil {
@@ -4236,7 +4510,7 @@ func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identEl
 			}
 			// First argument is the slice: append([]*T{}, …) / append(as, …) /
 			// append(make(...), …) / append(getA(), …).
-			return rangeSourceFromCollectionExprIdent(c, content, identElem, at, funcColl)
+			return rangeSourceFromCollectionExprIdent(c, content, identElem, at, funcColl, namedColl, funcRetFunc, structFields, valueType)
 		}
 		return rangeSourceInfo{}, false
 	}
@@ -4244,7 +4518,7 @@ func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identEl
 	//  1. Function-typed params/vars in scope: fa func() []*A / var fa func() map[K]*A
 	//     (registered in identElem with the *result* element type). Prefer these
 	//     over same-file helpers so params shadow file-level functions.
-	//  2. Same-file helper: getA() []*A / getM() map[K]*A.
+	//  2. Same-file helper: getA() []*A / getM() map[K]*A / getAS() AS.
 	// Multi-result signatures cannot appear as a lone call value (compile
 	// error); those bind positionally via short-var / var.
 	// Note: bare collection idents (as []*A) also live in identElem; as() is
@@ -4261,14 +4535,56 @@ func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identEl
 				return infos[0], true
 			}
 		}
+		// AS(x) — named type conversion parsed as call_expression (not
+		// type_conversion_expression). Prefer real funcs above; only peel when
+		// name is a same-file named collection type.
+		if info, ok := namedColl[name]; ok && info.elemType != "" {
+			return info, true
+		}
+	}
+	// (AS)(x) / (AM)(x) — parenthesized named type as call callee (tree-sitter-go).
+	// Inline ([]*A)(x) is type_conversion_expression (handled above).
+	if fn.Type() == "parenthesized_expression" && len(namedColl) > 0 {
+		for i := uint32(0); i < fn.ChildCount(); i++ {
+			ch := fn.Child(i)
+			if ch == nil || ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			// (AS) → identifier / type_identifier; (*AS) not a conversion form here.
+			if ch.Type() == "identifier" || ch.Type() == "type_identifier" {
+				if info, ok := namedColl[ingest.NodeText(ch, content)]; ok && info.elemType != "" {
+					return info, true
+				}
+			}
+			break
+		}
+	}
+	// getFA()() — nested call when getFA returns a function type with a single
+	// collection result (type FA func() []*A / inline func() []*A). Multi-result
+	// helpers fail closed (not in funcRetFunc).
+	if fn.Type() == "call_expression" && len(funcRetFunc) > 0 {
+		innerFn := ingest.ChildByField(fn, "function")
+		if innerFn != nil && innerFn.Type() == "identifier" {
+			if info, ok := funcRetFunc[ingest.NodeText(innerFn, content)]; ok && info.elemType != "" {
+				return info, true
+			}
+		}
+	}
+	// xa.Fa() — struct field of named/inline function type with collection result.
+	if fn.Type() == "selector_expression" {
+		if info, ok := selectorNamedFuncField(fn, content, valueType, structFields, at); ok && info.elemType != "" {
+			return info, true
+		}
 	}
 	return rangeSourceInfo{}, false
 }
 
-// rangeSourceFromNewArrayCall reports element type for new([n]T) when the type
-// argument is an array (possibly parenthesized). Len is ignored. new([]*T) and
-// other non-array type args return false (result is not indexable).
-func rangeSourceFromNewArrayCall(n *grammar.Node, content []byte) (rangeSourceInfo, bool) {
+// rangeSourceFromNewArrayCall reports element type for new([n]T) / new(AA) when
+// the type argument is an array (possibly parenthesized) or a same-file named
+// array type (type AA [n]*T with isArray). Len is ignored. new([]*T) / new(AS)
+// and other non-array type args return false (result is not indexable).
+// namedColl may be nil.
+func rangeSourceFromNewArrayCall(n *grammar.Node, content []byte, namedColl map[string]rangeSourceInfo) (rangeSourceInfo, bool) {
 	if n == nil {
 		return rangeSourceInfo{}, false
 	}
@@ -4278,7 +4594,7 @@ func rangeSourceFromNewArrayCall(n *grammar.Node, content []byte) (rangeSourceIn
 			if c == nil || c.Type() == "," {
 				continue
 			}
-			return rangeSourceFromNewArrayCall(c, content)
+			return rangeSourceFromNewArrayCall(c, content, namedColl)
 		}
 		return rangeSourceInfo{}, false
 	}
@@ -4311,10 +4627,20 @@ func rangeSourceFromNewArrayCall(n *grammar.Node, content []byte) (rangeSourceIn
 			}
 			c = inner
 		}
-		if c == nil || c.Type() != "array_type" {
+		if c == nil {
 			return rangeSourceInfo{}, false
 		}
-		return rangeSourceFromTypeNode(c, content)
+		if c.Type() == "array_type" {
+			return rangeSourceFromTypeNode(c, content)
+		}
+		// new(AA) with type AA [n]*T — only named arrays (isArray), not slices.
+		if c.Type() == "type_identifier" && len(namedColl) > 0 {
+			info, ok := namedColl[ingest.NodeText(c, content)]
+			if ok && info.elemType != "" && info.isArray {
+				return info, true
+			}
+		}
+		return rangeSourceInfo{}, false
 	}
 	return rangeSourceInfo{}, false
 }
@@ -4335,7 +4661,7 @@ func rangeSourceFromNewArrayCall(n *grammar.Node, content []byte) (rangeSourceIn
 // namedFunc maps same-file type names (type FA func() []*A) to collection
 // result element info (may be nil). namedColl maps type AS []*A / AM map[K]*A
 // (may be nil).
-func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bindings *[]identTypeBinding, funcColl map[string][]rangeSourceInfo, namedFunc map[string]rangeSourceInfo, namedColl map[string]rangeSourceInfo) {
+func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bindings *[]identTypeBinding, funcColl map[string][]rangeSourceInfo, namedFunc map[string]rangeSourceInfo, namedColl map[string]rangeSourceInfo, funcRetFunc map[string]rangeSourceInfo, structFields map[string]map[string]rangeSourceInfo, valueType func(string, uint32) (string, bool)) {
 	if body == nil {
 		return
 	}
@@ -4449,12 +4775,18 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 					if name == "" || name == "_" || i >= len(exprs) {
 						continue
 					}
-					if info, ok := rangeSourceFromCollectionExprIdent(exprs[i], content, lookupElem, n.StartByte(), funcColl); ok && info.elemType != "" {
+					if info, ok := rangeSourceFromCollectionExprIdent(exprs[i], content, lookupElem, n.StartByte(), funcColl, namedColl, funcRetFunc, structFields, valueType); ok && info.elemType != "" {
 						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
-					} else if infos := functionCollectionResults(exprs[i], content); len(infos) == 1 && infos[0].elemType != "" {
+					} else if infos := functionCollectionResults(exprs[i], content, namedColl); len(infos) == 1 && infos[0].elemType != "" {
 						// var fa = func() []*A { … } / var fm = func() map[K]*A { … }.
 						// Multi-result func literals fail closed (len != 1).
 						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, infos[0].elemType})
+					} else if info, ok := callReturningFuncCollection(exprs[i], content, funcRetFunc); ok {
+						// var fa = getFA() with getFA() FA / func() []*A.
+						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
+					} else if info, ok := selectorNamedFuncField(exprs[i], content, valueType, structFields, n.StartByte()); ok {
+						// var fa = xa.Fa with type Box struct { Fa FA }.
+						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
 					}
 				}
 			}
@@ -4462,6 +4794,7 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 			// as := make/append/getA()/[]*A{…}/append(ident,…) — same positional binding.
 			// as, err := getA() with getA() ([]*A, error) — multi-return slots.
 			// fa := func() []*A { … } / fa, fb := func() []*A{…}, func() []*B{…}.
+			// fa := getFA() / fa := xa.Fa — named func type returns / struct fields.
 			names := identListNames(ingest.ChildByField(n, "left"), content)
 			right := ingest.ChildByField(n, "right")
 			if bindMultiReturnCall(n.StartByte(), names, right) {
@@ -4472,12 +4805,18 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 				if name == "" || name == "_" || i >= len(exprs) {
 					continue
 				}
-				if info, ok := rangeSourceFromCollectionExprIdent(exprs[i], content, lookupElem, n.StartByte(), funcColl); ok && info.elemType != "" {
+				if info, ok := rangeSourceFromCollectionExprIdent(exprs[i], content, lookupElem, n.StartByte(), funcColl, namedColl, funcRetFunc, structFields, valueType); ok && info.elemType != "" {
 					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
-				} else if infos := functionCollectionResults(exprs[i], content); len(infos) == 1 && infos[0].elemType != "" {
+				} else if infos := functionCollectionResults(exprs[i], content, namedColl); len(infos) == 1 && infos[0].elemType != "" {
 					// fa := func() []*A { … } / fa := func() map[K]*A { … }.
 					// Single collection result only; multi-result func literals fail closed.
 					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, infos[0].elemType})
+				} else if info, ok := callReturningFuncCollection(exprs[i], content, funcRetFunc); ok {
+					// fa := getFA() with getFA() FA / func() []*A.
+					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
+				} else if info, ok := selectorNamedFuncField(exprs[i], content, valueType, structFields, n.StartByte()); ok {
+					// fa := xa.Fa with type Box struct { Fa FA }.
+					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
 				}
 			}
 		}
@@ -4493,7 +4832,7 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 // new(T), same-file getA(), (*pa) via valueType, and index expressions
 // (as[0] / m[k]) when indexElemType knows the collection.
 // indexElemType / valueType / funcColl / funcResults may be nil when unavailable.
-func goComplexOperandType(n *grammar.Node, content []byte, indexElemType, valueType func(name string, at uint32) (string, bool), funcColl map[string][]rangeSourceInfo, funcResults map[string][]string, genericPeels map[string]string) string {
+func goComplexOperandType(n *grammar.Node, content []byte, indexElemType, valueType func(name string, at uint32) (string, bool), funcColl map[string][]rangeSourceInfo, funcResults map[string][]string, genericPeels map[string]string, namedColl map[string]rangeSourceInfo, funcRetFunc map[string]rangeSourceInfo, structFields map[string]map[string]rangeSourceInfo) string {
 	if n == nil {
 		return ""
 	}
@@ -4512,7 +4851,7 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType, valueT
 			if ch.Type() == "(" || ch.Type() == ")" {
 				continue
 			}
-			return goComplexOperandType(ch, content, indexElemType, valueType, funcColl, funcResults, genericPeels)
+			return goComplexOperandType(ch, content, indexElemType, valueType, funcColl, funcResults, genericPeels, namedColl, funcRetFunc, structFields)
 		}
 	case "type_assertion_expression", "type_conversion_expression":
 		if t := ingest.ChildByField(n, "type"); t != nil {
@@ -4551,12 +4890,12 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType, valueT
 			// "arg":  Id(A{}).M — identity peels arg type.
 			// "elem": First([]A{{}}).M / At(xs, i).M — peels first-arg element type.
 			if mode := genericPeels[name]; mode == "arg" {
-				if t := goCallFirstArgType(n, content, indexElemType, valueType, funcColl, funcResults, genericPeels); t != "" {
+				if t := goCallFirstArgType(n, content, indexElemType, valueType, funcColl, funcResults, genericPeels, namedColl, funcRetFunc, structFields); t != "" {
 					return t
 				}
 				return ""
 			} else if mode == "elem" {
-				if t := goCallFirstArgElemType(n, content, indexElemType, funcColl); t != "" {
+				if t := goCallFirstArgElemType(n, content, indexElemType, funcColl, namedColl, funcRetFunc, structFields, valueType); t != "" {
 					return t
 				}
 				return ""
@@ -4590,7 +4929,7 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType, valueT
 		// tree-sitter-go parses these as call_expression too; peel the type from
 		// the parenthesized operand (unary *A / type_identifier A).
 		if fn != nil && fn.Type() == "parenthesized_expression" {
-			if t := goComplexOperandType(fn, content, indexElemType, valueType, funcColl, funcResults, genericPeels); t != "" {
+			if t := goComplexOperandType(fn, content, indexElemType, valueType, funcColl, funcResults, genericPeels, namedColl, funcRetFunc, structFields); t != "" {
 				return t
 			}
 		}
@@ -4627,7 +4966,7 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType, valueT
 				starIdent = ingest.NodeText(ch, content)
 				continue
 			}
-			if t := goComplexOperandType(ch, content, indexElemType, valueType, funcColl, funcResults, genericPeels); t != "" {
+			if t := goComplexOperandType(ch, content, indexElemType, valueType, funcColl, funcResults, genericPeels, namedColl, funcRetFunc, structFields); t != "" {
 				return t
 			}
 		}
@@ -4712,7 +5051,7 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType, valueT
 						return el
 					}
 				}
-				if info, ok := rangeSourceFromCollectionExprIdent(inner, content, indexElemType, n.StartByte(), funcColl); ok {
+				if info, ok := rangeSourceFromCollectionExprIdent(inner, content, indexElemType, n.StartByte(), funcColl, namedColl, funcRetFunc, structFields, valueType); ok {
 					return info.elemType
 				}
 			}
@@ -4726,7 +5065,7 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType, valueT
 		// append([]*A{}, x)[0] / append(as, x)[0] / map[string]*A{…}["k"] /
 		// x.([]*A)[0] / ([]*A)(x)[0] / as[:1][0] / make([]*A,n)[:1][0] /
 		// new([1]*A)[0] / getA()[0].
-		if info, ok := rangeSourceFromCollectionExprIdent(op, content, indexElemType, n.StartByte(), funcColl); ok {
+		if info, ok := rangeSourceFromCollectionExprIdent(op, content, indexElemType, n.StartByte(), funcColl, namedColl, funcRetFunc, structFields, valueType); ok {
 			return info.elemType
 		}
 	}
