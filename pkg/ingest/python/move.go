@@ -4395,10 +4395,28 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// preserve @nested leaf (scalar .copy peels via elemOf below).
 						// Foreign too for shadowing.
 						elemOf["@nested."+lname] = nest
+					} else if nest := pythonDictMergeNestedValueType(right, content, elemOf); nest != "" {
+						// ca = da | ea / da | {"j": [A()]} when da is nested mapping of A —
+						// preserve @nested leaf so ca["k"][0].run() peels.
+						// Foreign too for shadowing.
+						elemOf["@nested."+lname] = nest
+					} else if nest := pythonChainMapLocalNestedValueType(right, content, elemOf); nest != "" {
+						// ca = ChainMap(da) / ChainMap(da, ea) when da is nested mapping —
+						// preserve @nested leaf (literal ChainMap peels above).
+						// Foreign too for shadowing.
+						elemOf["@nested."+lname] = nest
 					} else if et := pythonHomogeneousDictValueCtorElem(right, content); et != "" {
 						// da = {"k": A()} / dict(k=A()) / OrderedDict(k=A()) /
 						// ChainMap({"k": A()}) / {k: A() for k in ...} — scalar values.
 						// Foreign too for shadowing (db = {"k": B()} after da).
+						elemOf[lname] = et
+					} else if et := pythonDictMergeValueType(right, content, elemOf); et != "" {
+						// ca = da | ea / da | {"j": A()} / {} | {"k": A()} — scalar merge.
+						// Foreign too for shadowing.
+						elemOf[lname] = et
+					} else if et := pythonChainMapLocalValueType(right, content, elemOf); et != "" {
+						// ca = ChainMap(da) when da is scalar mapping of A.
+						// Foreign too for shadowing.
 						elemOf[lname] = et
 					} else if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); et != "" {
 						elemOf[lname] = et
@@ -9114,7 +9132,13 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		// xs + [A()] / [A()] + xs / xs + ys — list concat element type when sides
 		// agree; empty list/tuple is a wildcard. Self-target untyped arms only in
 		// assignment path (pythonListConcatElemType with target name).
-		return pythonListConcatElemType(right, content, elemOf, egElems, typeOf, "")
+		if et := pythonListConcatElemType(right, content, elemOf, egElems, typeOf, ""); et != "" {
+			return et
+		}
+		// da | ea / da | {"j": A()} / {} | {"k": A()} — dict merge value leaf
+		// (PEP 584). Empty dict is a wildcard. Nested list values fail closed here
+		// (use pythonDictMergeNestedValueType / nested subscript peels).
+		return pythonDictMergeValueType(right, content, elemOf)
 	case "subscript":
 		// xs[:n] / xs[i:j] / xs[:] / xs[::step] — slice of a collection preserves
 		// element type (as_[:1][0].run() / sa = as_[:1]; sa[0].run()).
@@ -9143,6 +9167,17 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		// next(x for x in items) / for a in [x for x in items] — identity body only.
 		return pythonComprehensionElemType(right, content, elemOf, egElems, typeOf)
 	case "call":
+		// ChainMap(da) / ChainMap(da, ea) / ChainMap({"k": A()}) — mapping value
+		// leaf for subscript peels (same model as elemOf[da] for dict locals).
+		// Nested list-value maps fail closed here (pythonChainMapLocalNestedValueType).
+		if et := pythonChainMapLocalValueType(right, content, elemOf); et != "" {
+			return et
+		}
+		// Literal ChainMap({"k": A()}) / ChainMap(OrderedDict(k=A())) without locals.
+		if et := pythonHomogeneousDictValueCtorElem(right, content); et != "" &&
+			pythonSimpleCalleeName(ingest.ChildByField(right, "function"), content) == "ChainMap" {
+			return et
+		}
 		// reversed(xs) / sorted(xs) / list(xs) / tuple(xs) / set(xs) /
 		// frozenset(xs) / iter(xs) / deque(xs) / Counter(xs) — element type
 		// equals the wrapped iterable. Nested wrappers recurse.
@@ -9302,6 +9337,12 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 					if objN == nil || elemOf == nil {
 						return ""
 					}
+					for objN != nil && objN.Type() == "parenthesized_expression" {
+						objN = pythonParenInner(objN)
+					}
+					if objN == nil {
+						return ""
+					}
 					// d.values() when d is a bare mapping local.
 					// Scalar mapping values (dict[str, A]) stay on elemOf[d].
 					// Nested list values (defaultdict[str, list[A]]) are not scalar —
@@ -9317,18 +9358,38 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 					// la[0].values() when la: list[dict[str, A]] — la[0] peels as a
 					// mapping/container of A via @nested; values yield A under foreign
 					// same-leaf. {**da}.values() star-copy peels via dictionary case.
+					// (da | ea).values() / ChainMap(da).values() — scalar merge / ChainMap.
 					if objN.Type() == "subscript" || objN.Type() == "dictionary" {
 						return pythonIterableElemType(objN, content, elemOf, egElems, typeOf)
+					}
+					if objN.Type() == "binary_operator" {
+						return pythonDictMergeValueType(objN, content, elemOf)
+					}
+					if objN.Type() == "call" {
+						if et := pythonChainMapLocalValueType(objN, content, elemOf); et != "" {
+							return et
+						}
+						if et := pythonHomogeneousDictValueCtorElem(objN, content); et != "" &&
+							pythonSimpleCalleeName(ingest.ChildByField(objN, "function"), content) == "ChainMap" {
+							return et
+						}
 					}
 					return ""
 				case "get", "setdefault", "pop":
 					// da.get("k") / da.pop("k") when da: defaultdict[str, list[A]] —
 					// value is list of A; da.get("k")[0].run() peels via subscript.
 					// {**da}.get("k") / da.copy().get("k") — nested star-copy / copy.
+					// (da | ea).get("k") / ChainMap(da).get("k") — nested merge / ChainMap.
 					// Scalar dict[str, A] get stays on assignment/collection-access
 					// (elemOf leaf) — not an iterable of A here.
 					objN := ingest.ChildByField(fn, "object")
 					if objN == nil || elemOf == nil {
+						return ""
+					}
+					for objN != nil && objN.Type() == "parenthesized_expression" {
+						objN = pythonParenInner(objN)
+					}
+					if objN == nil {
 						return ""
 					}
 					switch objN.Type() {
@@ -9336,8 +9397,16 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 						return elemOf["@nested."+ingest.NodeText(objN, content)]
 					case "dictionary":
 						return pythonDictStarCopyNestedValueType(objN, content, elemOf)
+					case "binary_operator":
+						return pythonDictMergeNestedValueType(objN, content, elemOf)
 					case "call":
-						return pythonNestedMappingCopyCallType(objN, content, elemOf)
+						if nest := pythonNestedMappingCopyCallType(objN, content, elemOf); nest != "" {
+							return nest
+						}
+						if nest := pythonChainMapLocalNestedValueType(objN, content, elemOf); nest != "" {
+							return nest
+						}
+						return pythonNestedDictHomogeneousListCtorElem(objN, content)
 					}
 					return ""
 				case "fromkeys":
@@ -10868,6 +10937,307 @@ func pythonDictStarCopyNestedValueType(n *grammar.Node, content []byte, elemOf m
 	return found
 }
 
+// pythonDictMergeValueType recovers T from a dict merge expression (PEP 584 `|`)
+// whose every arm peels to the same scalar mapping value type T:
+//
+//	da | ea / da | {"j": A()} / {} | {"k": A()} / da | ea | {"m": A()}
+//
+// Empty dict literals are wildcards (same as list-concat empty arms). Enables
+// (da | ea)["j"].run() / ca = da | ea; ca["j"].run() under foreign same-leaf
+// (same leaf as da["k"] / {**da}["k"]). Nested dict[str, list[A]] merges use
+// pythonDictMergeNestedValueType. Mixed leaves / non-mapping arms fail closed.
+func pythonDictMergeValueType(n *grammar.Node, content []byte, elemOf map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		n = pythonParenInner(n)
+	}
+	if n == nil || n.Type() != "binary_operator" {
+		return ""
+	}
+	op := ingest.ChildByField(n, "operator")
+	if op == nil || ingest.NodeText(op, content) != "|" {
+		return ""
+	}
+	left := ingest.ChildByField(n, "left")
+	right := ingest.ChildByField(n, "right")
+	if left == nil || right == nil {
+		return ""
+	}
+	etL := pythonDictMergeArmValueType(left, content, elemOf)
+	etR := pythonDictMergeArmValueType(right, content, elemOf)
+	wildL := pythonDictMergeArmWildcard(left, content)
+	wildR := pythonDictMergeArmWildcard(right, content)
+	if etL != "" && etR != "" {
+		if etL == etR {
+			return etL
+		}
+		return ""
+	}
+	if etL != "" && wildR {
+		return etL
+	}
+	if etR != "" && wildL {
+		return etR
+	}
+	return ""
+}
+
+// pythonDictMergeArmValueType types one | arm as a scalar mapping value leaf:
+// nested |, typed mapping local, homogeneous dict ctor, star-copy, or "".
+func pythonDictMergeArmValueType(n *grammar.Node, content []byte, elemOf map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		n = pythonParenInner(n)
+	}
+	if n == nil {
+		return ""
+	}
+	if n.Type() == "binary_operator" {
+		return pythonDictMergeValueType(n, content, elemOf)
+	}
+	if n.Type() == "identifier" && elemOf != nil {
+		// Scalar only — nested list values live under @nested and are not a
+		// scalar value leaf for (da | ea)["k"].run().
+		name := ingest.NodeText(n, content)
+		if elemOf["@nested."+name] != "" {
+			return ""
+		}
+		return elemOf[name]
+	}
+	if et := pythonHomogeneousDictValueCtorElem(n, content); et != "" {
+		return et
+	}
+	if et := pythonDictStarCopyValueType(n, content, elemOf); et != "" {
+		return et
+	}
+	return ""
+}
+
+// pythonDictMergeArmWildcard reports empty dictionary literals ({} is a merge
+// identity for value-type peels).
+func pythonDictMergeArmWildcard(n *grammar.Node, content []byte) bool {
+	if n == nil {
+		return false
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		n = pythonParenInner(n)
+	}
+	if n == nil || n.Type() != "dictionary" {
+		return false
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		if ch == nil {
+			continue
+		}
+		switch ch.Type() {
+		case "{", "}", ",", "comment":
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// pythonDictMergeNestedValueType recovers T from a dict merge expression whose
+// every arm peels to the same nested mapping-of-list/set leaf T (@nested):
+//
+//	da | ea / da | {"j": [A()]} / {} | {"k": [A()]} when da/ea are nested
+//
+// Enables (da | ea)["j"][0].run() / ca = da | ea; ca["j"][0].run() under foreign
+// same-leaf. Scalar dict[str, A] stays on pythonDictMergeValueType. Empty dict
+// arms are wildcards; mixed leaves fail closed.
+func pythonDictMergeNestedValueType(n *grammar.Node, content []byte, elemOf map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		n = pythonParenInner(n)
+	}
+	if n == nil || n.Type() != "binary_operator" {
+		return ""
+	}
+	op := ingest.ChildByField(n, "operator")
+	if op == nil || ingest.NodeText(op, content) != "|" {
+		return ""
+	}
+	left := ingest.ChildByField(n, "left")
+	right := ingest.ChildByField(n, "right")
+	if left == nil || right == nil {
+		return ""
+	}
+	etL := pythonDictMergeArmNestedValueType(left, content, elemOf)
+	etR := pythonDictMergeArmNestedValueType(right, content, elemOf)
+	wildL := pythonDictMergeArmWildcard(left, content)
+	wildR := pythonDictMergeArmWildcard(right, content)
+	if etL != "" && etR != "" {
+		if etL == etR {
+			return etL
+		}
+		return ""
+	}
+	if etL != "" && wildR {
+		return etL
+	}
+	if etR != "" && wildL {
+		return etR
+	}
+	return ""
+}
+
+// pythonDictMergeArmNestedValueType types one | arm as a nested mapping leaf.
+func pythonDictMergeArmNestedValueType(n *grammar.Node, content []byte, elemOf map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		n = pythonParenInner(n)
+	}
+	if n == nil {
+		return ""
+	}
+	if n.Type() == "binary_operator" {
+		return pythonDictMergeNestedValueType(n, content, elemOf)
+	}
+	if n.Type() == "identifier" && elemOf != nil {
+		return elemOf["@nested."+ingest.NodeText(n, content)]
+	}
+	if et := pythonNestedDictHomogeneousListCtorElem(n, content); et != "" {
+		return et
+	}
+	if et := pythonDictStarCopyNestedValueType(n, content, elemOf); et != "" {
+		return et
+	}
+	return ""
+}
+
+// pythonChainMapLocalValueType recovers T from ChainMap(da[, ea...]) /
+// collections.ChainMap(da) when every positional is a typed scalar mapping
+// local (elemOf) of the same value leaf T. Enables ChainMap(da)["k"].run() /
+// ca = ChainMap(da); ca["k"].run() under foreign same-leaf. Nested list values
+// use pythonChainMapLocalNestedValueType. Literal / ctor maps stay on
+// pythonHomogeneousChainMapValueCtorElem. Empty / mixed / splat fail closed.
+func pythonChainMapLocalValueType(call *grammar.Node, content []byte, elemOf map[string]string) string {
+	if call == nil || call.Type() != "call" || elemOf == nil {
+		return ""
+	}
+	if pythonSimpleCalleeName(ingest.ChildByField(call, "function"), content) != "ChainMap" {
+		return ""
+	}
+	argList := ingest.ChildByField(call, "arguments")
+	if argList == nil {
+		return ""
+	}
+	found := ""
+	saw := false
+	for i := uint32(0); i < argList.ChildCount(); i++ {
+		ch := argList.Child(i)
+		if ch == nil {
+			continue
+		}
+		switch ch.Type() {
+		case "(", ")", ",", "comment":
+			continue
+		case "keyword_argument", "list_splat", "dictionary_splat", "parenthesized_list_splat":
+			return ""
+		case "identifier":
+			name := ingest.NodeText(ch, content)
+			if elemOf["@nested."+name] != "" {
+				// Nested mapping — not a scalar value leaf.
+				return ""
+			}
+			et := elemOf[name]
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				found = et
+				saw = true
+			} else if found != et {
+				return ""
+			}
+		default:
+			// Mix of locals + literals: peel literal arms too when they agree.
+			et := pythonHomogeneousDictValueCtorElem(ch, content)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				found = et
+				saw = true
+			} else if found != et {
+				return ""
+			}
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return found
+}
+
+// pythonChainMapLocalNestedValueType recovers T from ChainMap(da[, ea...]) when
+// every positional is a nested mapping local (@nested) or nested dict ctor of
+// the same list/set leaf T. Enables ChainMap(da)["k"][0].run() /
+// ca = ChainMap(da); ca["k"][0].run() under foreign same-leaf.
+func pythonChainMapLocalNestedValueType(call *grammar.Node, content []byte, elemOf map[string]string) string {
+	if call == nil || call.Type() != "call" || elemOf == nil {
+		return ""
+	}
+	if pythonSimpleCalleeName(ingest.ChildByField(call, "function"), content) != "ChainMap" {
+		return ""
+	}
+	argList := ingest.ChildByField(call, "arguments")
+	if argList == nil {
+		return ""
+	}
+	found := ""
+	saw := false
+	for i := uint32(0); i < argList.ChildCount(); i++ {
+		ch := argList.Child(i)
+		if ch == nil {
+			continue
+		}
+		switch ch.Type() {
+		case "(", ")", ",", "comment":
+			continue
+		case "keyword_argument", "list_splat", "dictionary_splat", "parenthesized_list_splat":
+			return ""
+		case "identifier":
+			et := elemOf["@nested."+ingest.NodeText(ch, content)]
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				found = et
+				saw = true
+			} else if found != et {
+				return ""
+			}
+		default:
+			et := pythonNestedDictHomogeneousListCtorElem(ch, content)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				found = et
+				saw = true
+			} else if found != et {
+				return ""
+			}
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return found
+}
+
 // pythonNestedMappingCopyCallType recovers T from da.copy() / da.deepcopy() /
 // {**da}.copy() when the receiver is a nested mapping of list/set of T.
 // Zero-arg only; other receivers / arity fail closed.
@@ -11666,7 +12036,8 @@ func pythonNestedCollectionIdentElemType(right *grammar.Node, content []byte, el
 // pythonNestedMappingItemsElemType recovers T from da.items() when da is a
 // mapping of list/set of T. Item values are list-of-T (not T); callers bind
 // elemOf[ga] = T for for k, ga in da.items(); ga[0].run().
-// Also {**da}.items() / da.copy().items() nested star-copy / copy receivers.
+// Also {**da}.items() / da.copy().items() nested star-copy / copy receivers,
+// (da | ea).items() nested merge, and ChainMap(da).items() of nested locals.
 func pythonNestedMappingItemsElemType(right *grammar.Node, content []byte, elemOf map[string]string) string {
 	if right == nil || right.Type() != "call" || elemOf == nil {
 		return ""
@@ -11680,13 +12051,27 @@ func pythonNestedMappingItemsElemType(right *grammar.Node, content []byte, elemO
 	if attr == nil || obj == nil || ingest.NodeText(attr, content) != "items" {
 		return ""
 	}
+	for obj != nil && obj.Type() == "parenthesized_expression" {
+		obj = pythonParenInner(obj)
+	}
+	if obj == nil {
+		return ""
+	}
 	switch obj.Type() {
 	case "identifier":
 		return elemOf["@nested."+ingest.NodeText(obj, content)]
 	case "dictionary":
 		return pythonDictStarCopyNestedValueType(obj, content, elemOf)
+	case "binary_operator":
+		return pythonDictMergeNestedValueType(obj, content, elemOf)
 	case "call":
-		return pythonNestedMappingCopyCallType(obj, content, elemOf)
+		if nest := pythonNestedMappingCopyCallType(obj, content, elemOf); nest != "" {
+			return nest
+		}
+		if nest := pythonChainMapLocalNestedValueType(obj, content, elemOf); nest != "" {
+			return nest
+		}
+		return pythonNestedDictHomogeneousListCtorElem(obj, content)
 	default:
 		return ""
 	}
@@ -11833,7 +12218,8 @@ func pythonDataAttrObjectIdent(n *grammar.Node, content []byte) string {
 // mapping of list/set of T (elemOf["@nested."+da]). The subscript expression
 // is a collection of T (not T itself). Also da.data["k"] when da is UserDict
 // of nested list values (underlying .data shares @nested leaf),
-// {**da}["k"] star-copy, and da.copy()["k"] zero-arg copy.
+// {**da}["k"] star-copy, da.copy()["k"] zero-arg copy,
+// (da | ea)["k"] nested merge, and ChainMap(da)["k"] of nested locals.
 func pythonNestedMappingSubscriptElemType(sub *grammar.Node, content []byte, elemOf map[string]string) string {
 	if sub == nil || sub.Type() != "subscript" || elemOf == nil {
 		return ""
@@ -11845,6 +12231,12 @@ func pythonNestedMappingSubscriptElemType(sub *grammar.Node, content []byte, ele
 		}
 	}
 	val := ingest.ChildByField(sub, "value")
+	if val == nil {
+		return ""
+	}
+	for val != nil && val.Type() == "parenthesized_expression" {
+		val = pythonParenInner(val)
+	}
 	if val == nil {
 		return ""
 	}
@@ -11865,9 +12257,19 @@ func pythonNestedMappingSubscriptElemType(sub *grammar.Node, content []byte, ele
 	case "dictionary":
 		// {**da}["k"] / {**da, "j": [A()]}["j"] — nested star-copy.
 		return pythonDictStarCopyNestedValueType(val, content, elemOf)
+	case "binary_operator":
+		// (da | ea)["k"] / (da | {"j": [A()]})["j"] — nested dict merge.
+		return pythonDictMergeNestedValueType(val, content, elemOf)
 	case "call":
 		// da.copy()["k"] / {**da}.copy()["k"] — zero-arg nested mapping copy.
-		return pythonNestedMappingCopyCallType(val, content, elemOf)
+		if nest := pythonNestedMappingCopyCallType(val, content, elemOf); nest != "" {
+			return nest
+		}
+		// ChainMap(da)["k"] / ChainMap({"k": [A()]})["k"] — nested ChainMap.
+		if nest := pythonChainMapLocalNestedValueType(val, content, elemOf); nest != "" {
+			return nest
+		}
+		return pythonNestedDictHomogeneousListCtorElem(val, content)
 	default:
 		return ""
 	}
@@ -11876,7 +12278,8 @@ func pythonNestedMappingSubscriptElemType(sub *grammar.Node, content []byte, ele
 // pythonNestedMappingValuesElemType recovers T from da.values() when da is a
 // mapping of list/set of T. Values yield list-of-T (not T); callers bind
 // elemOf[ga] = T for for ga in da.values(); ga[0].run().
-// Also {**da}.values() / da.copy().values() nested star-copy / copy receivers.
+// Also {**da}.values() / da.copy().values() nested star-copy / copy receivers,
+// (da | ea).values() nested merge, and ChainMap(da).values() of nested locals.
 func pythonNestedMappingValuesElemType(right *grammar.Node, content []byte, elemOf map[string]string) string {
 	if right == nil || right.Type() != "call" || elemOf == nil {
 		return ""
@@ -11890,13 +12293,27 @@ func pythonNestedMappingValuesElemType(right *grammar.Node, content []byte, elem
 	if attr == nil || obj == nil || ingest.NodeText(attr, content) != "values" {
 		return ""
 	}
+	for obj != nil && obj.Type() == "parenthesized_expression" {
+		obj = pythonParenInner(obj)
+	}
+	if obj == nil {
+		return ""
+	}
 	switch obj.Type() {
 	case "identifier":
 		return elemOf["@nested."+ingest.NodeText(obj, content)]
 	case "dictionary":
 		return pythonDictStarCopyNestedValueType(obj, content, elemOf)
+	case "binary_operator":
+		return pythonDictMergeNestedValueType(obj, content, elemOf)
 	case "call":
-		return pythonNestedMappingCopyCallType(obj, content, elemOf)
+		if nest := pythonNestedMappingCopyCallType(obj, content, elemOf); nest != "" {
+			return nest
+		}
+		if nest := pythonChainMapLocalNestedValueType(obj, content, elemOf); nest != "" {
+			return nest
+		}
+		return pythonNestedDictHomogeneousListCtorElem(obj, content)
 	default:
 		return ""
 	}
