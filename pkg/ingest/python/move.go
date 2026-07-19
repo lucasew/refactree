@@ -5259,8 +5259,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				if local, et := pythonDictSubscriptAssignValueType(left, right, content, funcReturns, typeOf, fieldOf); local != "" && et != "" {
 					elemOf[local] = et
 				}
-				if local, et := pythonListSliceAssignElemType(left, right, content); local != "" && et != "" {
-					// xs[:] = [A()] / xs[i:j] = [A()] — list slice assign element peel.
+				if local, et := pythonListSliceAssignElemType(left, right, content, funcReturns, typeOf, fieldOf); local != "" && et != "" {
+					// xs[:] = [A()] / xs[i:j] = [A()] /
+					// xs[:] = [ba.get()] — list slice assign element peel.
 					elemOf[local] = et
 				}
 			}
@@ -14222,10 +14223,12 @@ func pythonHomogeneousObjectElem(collection *grammar.Node, content []byte, funcR
 //	{"k": ba.get()} / {"k": ba.get(), "j": a}
 //	dict(k=ba.get()) / OrderedDict(k=ba.get()) / UserDict(k=ba.get())
 //	dict({"k": ba.get()}) / dict([("k", ba.get())])
+//	{k: ba.get() for k in ...}
 //
 // Enables {"k": ba.get()}["k"].run() / {"k": ba.get()}.get("k").run() /
-// dict(k=ba.get())["k"].run() / da = dict(k=ba.get()); da["k"].run() under
-// foreign same-leaf (Class()-only peels live in pythonHomogeneousDictValueCtorElem).
+// dict(k=ba.get())["k"].run() / da = dict(k=ba.get()); da["k"].run() /
+// da = {k: ba.get() for k in ...}; da["k"].run() under foreign same-leaf
+// (Class()-only peels live in pythonHomogeneousDictValueCtorElem).
 // Parenthesized / walrus wrappers accepted. Empty / mixed / splat / non-pair
 // fail closed. Call after nested dict peels on assign so {"k": frozenset([A()])}
 // / dict(k=frozenset([A()])) is not bound as scalar "frozenset".
@@ -14247,11 +14250,41 @@ peeled:
 	switch collection.Type() {
 	case "dictionary":
 		return pythonHomogeneousObjectDictLiteralValue(collection, content, funcReturns, typeOf, fieldOf)
+	case "dictionary_comprehension":
+		return pythonHomogeneousObjectDictCompValue(collection, content, funcReturns, typeOf, fieldOf)
 	case "call":
 		return pythonHomogeneousObjectDictCallValue(collection, content, funcReturns, typeOf, fieldOf)
 	default:
 		return ""
 	}
+}
+
+// pythonHomogeneousObjectDictCompValue recovers T from
+// `{k: ba.get() for k in ...}` when the pair value peels to a Class leaf via
+// pythonObjectLeafType. Nested fors / non-object values fail closed (mirrors
+// Class-only pythonHomogeneousDictCompValueCtorElem).
+func pythonHomogeneousObjectDictCompValue(comp *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if comp == nil || comp.Type() != "dictionary_comprehension" {
+		return ""
+	}
+	forCount := 0
+	var pair *grammar.Node
+	for i := uint32(0); i < comp.ChildCount(); i++ {
+		ch := comp.Child(i)
+		switch ch.Type() {
+		case "for_in_clause":
+			forCount++
+		case "pair":
+			if pair == nil {
+				pair = ch
+			}
+		}
+	}
+	// Nested fors fail closed (value type still recoverable, but keep product-solid).
+	if forCount != 1 || pair == nil {
+		return ""
+	}
+	return pythonObjectLeafType(ingest.ChildByField(pair, "value"), content, funcReturns, typeOf, fieldOf)
 }
 
 // pythonHomogeneousObjectDictLiteralValue recovers T from {"k": ba.get()} when
@@ -17547,11 +17580,12 @@ func pythonAsPatternIdentityCMBinding(n *grammar.Node, content []byte, typeOf, f
 }
 
 // pythonListSliceAssignElemType recovers (local, T) from xs[:] = [A()] /
-// xs[i:j] = [A()] / xs[:] = (A(),) when the RHS is a list/tuple of uniform Class()
-// elements and the left is a slice subscript of an identifier. Enables
-// xs[0].run() after slice assign under foreign same-leaf. Non-slice keys /
-// mixed RHS / non-Class elems fail closed.
-func pythonListSliceAssignElemType(left, right *grammar.Node, content []byte) (local, classType string) {
+// xs[i:j] = [A()] / xs[:] = (A(),) / xs[:] = [ba.get()] when the RHS is a
+// list/tuple of uniform Class leaves (ctor or method-return) and the left is a
+// slice subscript of an identifier. Enables xs[0].run() after slice assign
+// under foreign same-leaf. Non-slice keys / mixed RHS / non-object elems fail
+// closed.
+func pythonListSliceAssignElemType(left, right *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) (local, classType string) {
 	if left == nil || left.Type() != "subscript" || right == nil {
 		return "", ""
 	}
@@ -17569,7 +17603,7 @@ func pythonListSliceAssignElemType(left, right *grammar.Node, content []byte) (l
 	if val == nil || val.Type() != "identifier" {
 		return "", ""
 	}
-	// RHS: list/tuple of Class() with uniform type.
+	// RHS: list/tuple of Class() / method-return with uniform type.
 	if right.Type() != "list" && right.Type() != "tuple" {
 		return "", ""
 	}
@@ -17584,7 +17618,8 @@ func pythonListSliceAssignElemType(left, right *grammar.Node, content []byte) (l
 		case "[", "]", "(", ")", ",", "comment":
 			continue
 		}
-		et := pythonClassCtorName(ch, content)
+		// Class() / typed local / zero-arg method return (ba.get()).
+		et := pythonObjectLeafType(ch, content, funcReturns, typeOf, fieldOf)
 		if et == "" {
 			return "", ""
 		}
