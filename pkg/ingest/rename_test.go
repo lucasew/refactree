@@ -310,3 +310,27 @@ func TestApplyEdits_MissingFile(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestSymbolLeaf(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"helper", "helper"},
+		{"A.Run", "Run"},
+		{"*A.Run", "Run"},
+		{"*A", "A"},
+		{"Outer.Inner.field", "field"},
+		// TS/JS string property keys (astro content types: Render.'.md')
+		{"Render.'.md'", "'.md'"},
+		{`Render.".md"`, `".md"`},
+		{`Foo."a.b.c"`, `"a.b.c"`},
+		{"Type.'.astro'", "'.astro'"},
+		{"Outer.Inner.'.md'", "'.md'"},
+	}
+	for _, tc := range cases {
+		if got := ingest.SymbolLeaf(tc.in); got != tc.want {
+			t.Errorf("SymbolLeaf(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
