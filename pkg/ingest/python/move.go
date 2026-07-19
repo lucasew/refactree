@@ -2373,10 +2373,11 @@ peeled:
 		if et := pythonSubscriptElemType(obj, content, elemOf, nil, typeOf, pairSlots, nil, fieldOf); et != "" {
 			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 		}
-		// [ba.get()][0].run() / (ba.get(),)[0].run() — list/tuple of method-return
-		// or typed-local elements under foreign same-leaf (assigned
-		// xs = [ba.get()]; xs[0].run peels via elemOf after bind).
-		// Slices fail closed (same as pythonSubscriptElemType).
+		// [ba.get()][0].run() / (ba.get(),)[0].run() / {"k": ba.get()}["k"].run() /
+		// ([ba.get()] + [ba.get()])[0].run() / list([ba.get()])[0].run() /
+		// ([ba.get()] or [ba.get()])[0].run() — method-return / typed-local
+		// collection peels under foreign same-leaf (assigned forms peel via
+		// elemOf after bind). Slices fail closed (same as pythonSubscriptElemType).
 		hasSlice := false
 		for i := uint32(0); i < obj.ChildCount(); i++ {
 			if obj.Child(i).Type() == "slice" {
@@ -2386,19 +2387,13 @@ peeled:
 		}
 		if !hasSlice {
 			val := ingest.ChildByField(obj, "value")
-			for val != nil && !val.IsNull() {
-				switch val.Type() {
-				case "parenthesized_expression":
-					val = pythonParenInner(val)
-				case "named_expression":
-					// (xs := [ba.get()])[0].run() — walrus value is the collection.
-					val = ingest.ChildByField(val, "value")
-				default:
-					goto valPeeled
-				}
+			if et := pythonObjectCollectionElem(val, content, funcReturns, typeOf, fieldOf); et != "" {
+				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 			}
-		valPeeled:
-			if et := pythonHomogeneousObjectElem(val, content, funcReturns, typeOf, fieldOf); et != "" {
+			// {"k": ba.get()}["k"].run() — dict value peel (kept separate from
+			// pythonObjectCollectionElem so assign of {"k": frozenset([A()])}
+			// still hits nested peels before scalar dict binding).
+			if et := pythonHomogeneousObjectDictValue(val, content, funcReturns, typeOf, fieldOf); et != "" {
 				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 			}
 		}
@@ -4850,9 +4845,13 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						elemOf[lname] = et
 					} else if et := pythonHomogeneousCtorElem(right, content); et != "" {
 						elemOf[lname] = et
-					} else if et := pythonHomogeneousObjectElem(right, content, funcReturns, typeOf, fieldOf); et != "" {
-						// xs = [ba.get()] / xs = (ba.get(),) / xs = [a] — method-return
-						// or typed-local elements under foreign same-leaf.
+					} else if et := pythonObjectCollectionElem(right, content, funcReturns, typeOf, fieldOf); et != "" {
+						// xs = [ba.get()] / xs = (ba.get(),) /
+						// xs = [ba.get()] + [ba.get()] / xs = list([ba.get()]) /
+						// xs = [ba.get()] or [ba.get()] — method-return / typed-local
+						// collection peels under foreign same-leaf.
+						// Dict literals intentionally excluded (see
+						// pythonHomogeneousObjectDictValue after nested peels).
 						elemOf[lname] = et
 					} else if et := pythonListConcatElemType(right, content, elemOf, egElems, typeOf, lname); et != "" {
 						// xs = xs + [A()] / zs = xs + [A()] / xs = [] + [A()] —
@@ -4899,6 +4898,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// ca = ChainMap(da).new_child({"j": [A()]}) / ca.new_child() nested —
 						// preserve @nested leaf. Foreign too for shadowing.
 						elemOf["@nested."+lname] = nest
+					} else if et := pythonHomogeneousObjectDictValue(right, content, funcReturns, typeOf, fieldOf); et != "" {
+						// da = {"k": ba.get()} / da = {"k": a} — method-return /
+						// typed-local scalar dict values under foreign same-leaf.
+						// After nested peels so {"k": frozenset([A()])} stays @nested.
+						elemOf[lname] = et
 					} else if et := pythonHomogeneousDictValueCtorElem(right, content); et != "" {
 						// da = {"k": A()} / dict(k=A()) / OrderedDict(k=A()) /
 						// ChainMap({"k": A()}) / {k: A() for k in ...} — scalar values.
@@ -5105,8 +5109,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				lname := ingest.NodeText(left, content)
 				if et := pythonHomogeneousCtorElem(right, content); et != "" {
 					elemOf[lname] = et
-				} else if et := pythonHomogeneousObjectElem(right, content, funcReturns, typeOf, fieldOf); et != "" {
-					// xs += [ba.get()] — method-return elements under foreign same-leaf.
+				} else if et := pythonObjectCollectionElem(right, content, funcReturns, typeOf, fieldOf); et != "" {
+					// xs += [ba.get()] / xs += [ba.get()] + [ba.get()] — method-return
+					// elements under foreign same-leaf.
 					elemOf[lname] = et
 				} else if et := pythonListConcatElemType(right, content, elemOf, egElems, typeOf, lname); et != "" {
 					elemOf[lname] = et
@@ -5474,8 +5479,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// Scalar Class() / next / etc. already handled above (out/typeOf).
 			if et := pythonHomogeneousCtorElem(valueN, content); et != "" {
 				elemOf[lname] = et
-			} else if et := pythonHomogeneousObjectElem(valueN, content, funcReturns, typeOf, fieldOf); et != "" {
-				// xs := [ba.get()] / xs := (ba.get(),) — method-return elements.
+			} else if et := pythonObjectCollectionElem(valueN, content, funcReturns, typeOf, fieldOf); et != "" {
+				// xs := [ba.get()] / xs := [ba.get()] + … / xs := list([ba.get()]) —
+				// method-return collection peels (dict after nested peels below).
 				elemOf[lname] = et
 			} else if et := pythonListConcatElemType(valueN, content, elemOf, egElems, typeOf, lname); et != "" {
 				elemOf[lname] = et
@@ -5485,6 +5491,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				elemOf["@nested."+lname] = nest
 			} else if nest := pythonNestedDictHomogeneousListCtorElem(valueN, content); nest != "" {
 				elemOf["@nested."+lname] = nest
+			} else if et := pythonHomogeneousObjectDictValue(valueN, content, funcReturns, typeOf, fieldOf); et != "" {
+				// da := {"k": ba.get()} — after nested peels.
+				elemOf[lname] = et
 			} else if et := pythonHomogeneousDictValueCtorElem(valueN, content); et != "" {
 				elemOf[lname] = et
 			} else if nest := pythonNestedMappingSubscriptElemType(valueN, content, elemOf); nest != "" {
@@ -5590,9 +5599,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				}
 				if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 					out[ingest.NodeText(left, content)] = true
-				} else if et := pythonHomogeneousObjectElem(right, content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
-					// for x in [ba.get()] / for x in (ba.get(),) — method-return
-					// elements under foreign same-leaf (same leaf as xs=[ba.get()]; for x in xs).
+				} else if et := pythonObjectCollectionElem(right, content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
+					// for x in [ba.get()] / for x in (ba.get(),) /
+					// for x in list([ba.get()]) / for x in [ba.get()] + [ba.get()] —
+					// method-return elements under foreign same-leaf.
 					out[ingest.NodeText(left, content)] = true
 				} else if et := pythonDictViewValuesHomogeneousType(right, content, fieldOf); ourReceivers[et] {
 					// for x in asdict(box).values() / vars / __dict__ / d.values()
@@ -12668,6 +12678,118 @@ func pythonHomogeneousCtorElem(collection *grammar.Node, content []byte) string 
 	return elem
 }
 
+// pythonObjectCollectionElem recovers element type T from list/tuple/set
+// expressions built of method-return / typed-local / Class() object leaves
+// under foreign same-leaf:
+//
+//	[ba.get()] / (ba.get(),) / {ba.get()} / [a]
+//	[ba.get()] + [ba.get()] / [] + [ba.get()]  (empty list/tuple wildcard)
+//	[ba.get()] or [ba.get()] / [ba.get()] and [ba.get()]
+//	list([ba.get()]) / tuple(...) / set(...) / deque(...) / sorted(...)
+//	parenthesized / walrus / ternary when both arms agree
+//
+// Dict literals are intentionally excluded — use pythonHomogeneousObjectDictValue
+// after nested dict peels so da = {"k": frozenset([A()])} still binds @nested
+// (pythonClassCtorName would otherwise treat frozenset as a scalar leaf).
+//
+// Enables ([ba.get()]+[ba.get()])[0].run() / list([ba.get()])[0].run() /
+// ([ba.get()] or [ba.get()])[0].run() and assigned forms. Mixed leaves /
+// empty non-wildcard / non-object shapes fail closed.
+func pythonObjectCollectionElem(n *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	for n != nil && !n.IsNull() {
+		switch n.Type() {
+		case "parenthesized_expression":
+			n = pythonParenInner(n)
+		case "named_expression":
+			// (xs := [ba.get()])[0].run() — walrus value is the collection.
+			n = ingest.ChildByField(n, "value")
+		default:
+			goto peeled
+		}
+	}
+peeled:
+	if n == nil || n.IsNull() {
+		return ""
+	}
+	switch n.Type() {
+	case "list", "tuple", "set":
+		return pythonHomogeneousObjectElem(n, content, funcReturns, typeOf, fieldOf)
+	case "binary_operator":
+		// [ba.get()] + [ba.get()] / [] + [ba.get()] — list concat only (+).
+		op := ingest.ChildByField(n, "operator")
+		if op == nil || ingest.NodeText(op, content) != "+" {
+			return ""
+		}
+		left := ingest.ChildByField(n, "left")
+		right := ingest.ChildByField(n, "right")
+		etL := pythonObjectCollectionElem(left, content, funcReturns, typeOf, fieldOf)
+		etR := pythonObjectCollectionElem(right, content, funcReturns, typeOf, fieldOf)
+		wildL := pythonIsEmptyCollectionLiteral(left)
+		wildR := pythonIsEmptyCollectionLiteral(right)
+		if etL != "" && etR != "" {
+			if etL == etR {
+				return etL
+			}
+			return ""
+		}
+		if etL != "" && wildR {
+			return etL
+		}
+		if etR != "" && wildL {
+			return etR
+		}
+		return ""
+	case "boolean_operator":
+		// [ba.get()] or [ba.get()] / [ba.get()] and [ba.get()] — both arms
+		// agree (empty collection is a wildcard). Mixed fail closed.
+		left := ingest.ChildByField(n, "left")
+		right := ingest.ChildByField(n, "right")
+		etL := pythonObjectCollectionElem(left, content, funcReturns, typeOf, fieldOf)
+		etR := pythonObjectCollectionElem(right, content, funcReturns, typeOf, fieldOf)
+		emptyL := pythonIsEmptyCollectionLiteral(left)
+		emptyR := pythonIsEmptyCollectionLiteral(right)
+		if etL != "" && etR != "" {
+			if etL == etR {
+				return etL
+			}
+			return ""
+		}
+		if etL != "" && emptyR {
+			return etL
+		}
+		if etR != "" && emptyL {
+			return etR
+		}
+		return ""
+	case "call":
+		// list([ba.get()]) / tuple(...) / set(...) / deque(...) — wrappers
+		// preserve element type of the first positional arg.
+		fn := ingest.ChildByField(n, "function")
+		if fn == nil || fn.Type() != "identifier" {
+			return ""
+		}
+		switch ingest.NodeText(fn, content) {
+		case "list", "tuple", "set", "frozenset", "iter", "reversed", "sorted", "deque":
+			args, ok := pythonCallPositionalArgNodes(n)
+			if !ok || len(args) == 0 {
+				return ""
+			}
+			return pythonObjectCollectionElem(args[0], content, funcReturns, typeOf, fieldOf)
+		}
+		return ""
+	case "conditional_expression":
+		// ([ba.get()] if c else [ba.get()])[0].run() — both arms agree.
+		body, alt := pythonConditionalArms(n)
+		t1 := pythonObjectCollectionElem(body, content, funcReturns, typeOf, fieldOf)
+		t2 := pythonObjectCollectionElem(alt, content, funcReturns, typeOf, fieldOf)
+		if t1 != "" && t1 == t2 {
+			return t1
+		}
+		return ""
+	}
+	return ""
+}
+
 // pythonHomogeneousObjectElem recovers T from [ba.get()] / (ba.get(),) / [a]
 // when every element peels to the same Class leaf via Class() ctor, method/
 // factory return, typed local, or parenthesized/walrus/ternary forms. Enables
@@ -12707,6 +12829,67 @@ func pythonHomogeneousObjectElem(collection *grammar.Node, content []byte, funcR
 			if t != elem {
 				return ""
 			}
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return elem
+}
+
+// pythonHomogeneousObjectDictValue recovers T from {"k": ba.get()} /
+// {"k": ba.get(), "j": a} when every pair value peels to the same Class leaf
+// via pythonObjectLeafType. Enables {"k": ba.get()}["k"].run() /
+// da = {"k": ba.get()}; da["k"].run() under foreign same-leaf
+// (pythonHomogeneousDictLiteralValueCtorElem only peels Class() identifiers).
+// Parenthesized / walrus wrappers accepted. Empty / mixed / splat / non-pair
+// fail closed. Call after nested dict peels on assign so {"k": frozenset([A()])}
+// is not bound as scalar "frozenset".
+func pythonHomogeneousObjectDictValue(collection *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	for collection != nil && !collection.IsNull() {
+		switch collection.Type() {
+		case "parenthesized_expression":
+			collection = pythonParenInner(collection)
+		case "named_expression":
+			collection = ingest.ChildByField(collection, "value")
+		default:
+			goto peeled
+		}
+	}
+peeled:
+	if collection == nil || collection.IsNull() || collection.Type() != "dictionary" {
+		return ""
+	}
+	var elem string
+	saw := false
+	for i := uint32(0); i < collection.ChildCount(); i++ {
+		ch := collection.Child(i)
+		if ch == nil {
+			continue
+		}
+		switch ch.Type() {
+		case "{", "}", ",", "comment":
+			continue
+		case "pair":
+			val := ingest.ChildByField(ch, "value")
+			if val == nil {
+				return ""
+			}
+			t := pythonObjectLeafType(val, content, funcReturns, typeOf, fieldOf)
+			if t == "" {
+				return ""
+			}
+			if !saw {
+				elem = t
+				saw = true
+				continue
+			}
+			if t != elem {
+				return ""
+			}
+		default:
+			// Splat / comprehension / unknown — fail closed.
+			return ""
 		}
 	}
 	if !saw {
