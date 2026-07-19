@@ -1494,6 +1494,11 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// list.forEach / for (var a : list) / arr[i] / opt.ifPresent (not a scalar A).
 					// Also var ar = new AtomicReference<>(new A()) (Class holder peel).
 					elemOf[name] = et
+				} else if et := javaStaticCollectionOfObjectElemType(valN, content, compOf, typeMembers); et != "" {
+					// var xs = Stream.of(ba.get()).collect(toList()) /
+					// var xs = Collections.unmodifiableList(List.of(ba.get())) —
+					// method-return factory/pipeline peels under foreign same-leaf.
+					elemOf[name] = et
 				} else if et := javaReferenceHolderCreationObjectElemType(valN, content, compOf, typeMembers); et != "" {
 					// var ar = new AtomicReference<>(ba.get()) / WeakReference / SoftReference —
 					// method-return holder peels under foreign same-leaf (Class peels via
@@ -7015,6 +7020,42 @@ func javaStaticCollectionOfObjectElemType(obj *grammar.Node, content []byte, com
 			"peek", "onClose", "takeWhile", "dropWhile":
 			// Stream intermediate type-preserving stages.
 			obj = recv
+			continue
+		case "collect":
+			// Stream.of(ba.get()).collect(Collectors.toList()/toSet()/…) —
+			// type-preserving collector under foreign same-leaf (Class peels via
+			// javaStreamPipelineElemType). Other collectors fail closed.
+			if javaIsToListOrSetCollector(obj, content) {
+				obj = recv
+				continue
+			}
+			return ""
+		case "unmodifiableList", "synchronizedList", "checkedList",
+			"unmodifiableSet", "synchronizedSet", "checkedSet",
+			"unmodifiableSortedSet", "synchronizedSortedSet", "checkedSortedSet",
+			"unmodifiableNavigableSet", "synchronizedNavigableSet", "checkedNavigableSet",
+			"unmodifiableSequencedCollection", "synchronizedSequencedCollection",
+			"unmodifiableSequencedSet", "synchronizedSequencedSet",
+			"unmodifiableCollection", "synchronizedCollection", "checkedCollection",
+			"asLifoQueue", "checkedQueue",
+			"list", "enumeration",
+			"copyOf":
+			// Collections.unmodifiableList(List.of(ba.get())) / List.copyOf(…) —
+			// first-arg element type under foreign same-leaf.
+			if name == "copyOf" {
+				// List.copyOf / Set.copyOf only (Arrays.copyOf is array, not object peel).
+				rcvName := javaStaticFactoryReceiverName(recv, content)
+				if rcvName != "List" && rcvName != "Set" {
+					return ""
+				}
+			} else if javaStaticFactoryReceiverName(recv, content) != "Collections" {
+				return ""
+			}
+			first := javaFirstCallArg(obj)
+			if first == nil {
+				return ""
+			}
+			obj = first
 			continue
 		default:
 			return ""

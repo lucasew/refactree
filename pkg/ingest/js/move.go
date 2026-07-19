@@ -1539,8 +1539,9 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 		return jsRenameByTypeMaps(enclosingClass, ourReceivers, foreignReceivers, nil)
 	}
 	if obj.Type() == "new_expression" {
-		// new Proxy(a, {}) / new Proxy(new A(), {}) — identity of target.
-		if t := jsProxyTargetType(obj, content, typedLocals, factories); t != "" {
+		// new Proxy(a, {}) / new Proxy(new A(), {}) / new Proxy(new BoxA().get(), {}) —
+		// identity of target (method-return via Ex).
+		if t := jsProxyTargetTypeEx(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 		return jsRenameByTypeMaps(jsNewExpressionType(obj, content), ourReceivers, foreignReceivers, nil)
@@ -1559,7 +1560,7 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 		if t := jsPromiseRaceValueType(obj, content, typedLocals, factories); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
-		if t := jsIdentityCloneType(obj, content, typedLocals, factories); t != "" {
+		if t := jsIdentityCloneTypeEx(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 		if t := jsMapGetValueTypeEx(obj, content, typedLocals, factories, mapLocals, entryArrayLocals, classFields, methodReturns); t != "" {
@@ -1615,9 +1616,9 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 			// Promise.try(() => new A()) / await Promise.try(() => a) — sole-return peel.
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
-		if t := jsWeakRefDerefType(obj, content, typedLocals, factories, genLocals); t != "" {
-			// new WeakRef(new A()).deref() / wa.deref() after const wa = new WeakRef(...) —
-			// referent peel under foreign same-leaf.
+		if t := jsWeakRefDerefTypeEx(obj, content, typedLocals, factories, genLocals, classFields, methodReturns); t != "" {
+			// new WeakRef(new A()).deref() / new WeakRef(new BoxA().get()).deref() /
+			// wa.deref() after const wa = new WeakRef(...) — referent peel under foreign same-leaf.
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 		if t := jsReflectGetType(obj, content, typedLocals, factories, objValueLocals); t != "" {
@@ -1875,14 +1876,14 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// const a = ra.value after const [ra] = await Promise.allSettled([new A()])
 						// / const a = (await Promise.allSettled([new A()]))[0].value
 						out[ingest.NodeText(nameN, content)] = t
-					} else if t := jsIdentityCloneType(valN, content, out, factories); ourReceivers[t] {
+					} else if t := jsIdentityCloneTypeEx(valN, content, out, factories, classFields, methodReturns); ourReceivers[t] {
 						// const a = structuredClone(new A()) / Object.assign(new A()[, …]) /
 						// Object.create(a) / Object.create(new A())
 						out[ingest.NodeText(nameN, content)] = t
-					} else if t := jsProxyTargetType(valN, content, out, factories); ourReceivers[t] {
+					} else if t := jsProxyTargetTypeEx(valN, content, out, factories, classFields, methodReturns); ourReceivers[t] {
 						// const pa = new Proxy(a, {}) / new Proxy(new A(), {})
 						out[ingest.NodeText(nameN, content)] = t
-					} else if t := jsWeakRefTargetType(valN, content, out, factories); t != "" {
+					} else if t := jsWeakRefTargetTypeEx(valN, content, out, factories, classFields, methodReturns); t != "" {
 						// const wa = new WeakRef(new A()) / new WeakRef(a) — WeakRef holder;
 						// wa.deref() peels via genLocals["@weakref."+name]. Bind foreign too
 						// for shadowing (wb after wa).
@@ -2106,7 +2107,7 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 					} else if t := jsPromiseTryType(valN, content, out, factories); ourReceivers[t] {
 						// const a = await Promise.try(() => new A())
 						out[ingest.NodeText(nameN, content)] = t
-					} else if t := jsWeakRefDerefType(valN, content, out, factories, genLocals); ourReceivers[t] {
+					} else if t := jsWeakRefDerefTypeEx(valN, content, out, factories, genLocals, classFields, methodReturns); ourReceivers[t] {
 						// const a = new WeakRef(new A()).deref() / wa.deref() after
 						// const wa = new WeakRef(...)
 						out[ingest.NodeText(nameN, content)] = t
@@ -4139,8 +4140,9 @@ func jsArraySourceElemType(n *grammar.Node, content []byte, arrayLocals, typedLo
 	// array element source of T. Enables [...ma.values()][0].run() /
 	// Array.from(ma.values())[0].run() / [...ma.values()].at(0).run() /
 	// ma.values().forEach(a => a.run()) under foreign same-leaf (including
-	// after ma.set(k, new A())). Bare Map is not an element source of T.
-	if t := jsMapValuesYieldType(n, content, typedLocals, factories, extra.mapLocals, extra.entryArrayLocals); t != "" {
+	// after ma.set(k, new A()) / new Map([[k, new BoxA().get()]])).
+	// Bare Map is not an element source of T.
+	if t := jsMapValuesYieldTypeEx(n, content, typedLocals, factories, extra.mapLocals, extra.entryArrayLocals, extra.classFields, extra.methodReturns); t != "" {
 		return t
 	}
 	// xs.values() / xs.keys() / xs[Symbol.iterator]() — Set iterators yield T.
@@ -5197,8 +5199,9 @@ func jsArrayIdentityElemType(n *grammar.Node, content []byte, arrayLocals, typed
 	case "fill":
 		// arr.fill(val[, start[, end]]) overwrites selected slots with val.
 		// Element type is val's type (prior content discarded). Enables
-		// [null].fill(new A())[0].run() / new Array(1).fill(new A())[0].run()
-		// under foreign same-leaf. Non-concrete val fails closed.
+		// [null].fill(new A())[0].run() / new Array(1).fill(new A())[0].run() /
+		// Array(1).fill(new BoxA().get())[0].run() under foreign same-leaf.
+		// Non-concrete val fails closed.
 		var val *grammar.Node
 		pos := 0
 		if args != nil {
@@ -5216,7 +5219,8 @@ func jsArrayIdentityElemType(n *grammar.Node, content []byte, arrayLocals, typed
 		if pos < 1 || val == nil {
 			return ""
 		}
-		return jsExprConcreteType(val, content, typedLocals, factories)
+		// Class/typed-local via concrete path; method-return when extra.methodReturns set.
+		return jsExprLeafType(val, content, typedLocals, factories, extra.classFields, extra.methodReturns)
 	case "concat":
 		// [].concat([new A()]) / [new A()].concat() / as.concat([new A()]) —
 		// empty-array receiver is a wildcard (type from args). Mixed inserts fail closed.
@@ -7031,7 +7035,14 @@ func jsMapEntriesValueType(n *grammar.Node, content []byte, typedLocals, factori
 
 // jsMapValuesYieldType recovers T from map.values() when map peels to a Map of
 // uniform value type T. Zero-arg only. Yields T directly (not pairs).
+// Method-return Map values use jsMapValuesYieldTypeEx.
 func jsMapValuesYieldType(n *grammar.Node, content []byte, typedLocals, factories, mapLocals, entryArrayLocals map[string]string) string {
+	return jsMapValuesYieldTypeEx(n, content, typedLocals, factories, mapLocals, entryArrayLocals, nil, nil)
+}
+
+// jsMapValuesYieldTypeEx peels map.values() with method-return Map values
+// (new Map([[k, new BoxA().get()]]).values()) under foreign same-leaf.
+func jsMapValuesYieldTypeEx(n *grammar.Node, content []byte, typedLocals, factories, mapLocals, entryArrayLocals map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -7066,7 +7077,7 @@ func jsMapValuesYieldType(n *grammar.Node, content []byte, typedLocals, factorie
 	if obj != nil && obj.Type() == "identifier" && ingest.NodeText(obj, content) == "Object" {
 		return ""
 	}
-	return jsMapSourceValueType(obj, content, typedLocals, factories, mapLocals, entryArrayLocals)
+	return jsMapSourceValueTypeEx(obj, content, typedLocals, factories, mapLocals, entryArrayLocals, classFields, methodReturns)
 }
 
 // jsMapGetValueType recovers T from map.get(key) when map peels to a Map of
@@ -8358,17 +8369,23 @@ func jsArrayIteratorYieldType(n *grammar.Node, content []byte, arrayLocals, type
 // iter.take(n) / iter.drop(n) / iter.filter(pred) when the source peels to
 // uniform element/value type T.
 func jsIteratorSourceYieldType(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals map[string]string) string {
+	return jsIteratorSourceYieldTypeEx(n, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals, nil, nil)
+}
+
+// jsIteratorSourceYieldTypeEx threads methodReturns for Iterator.from / Map.values
+// method-return peels under foreign same-leaf.
+func jsIteratorSourceYieldTypeEx(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if t := jsGeneratorCallYieldType(n, content, generators, genLocals); t != "" {
 		return t
 	}
-	if t := jsIteratorFromYieldType(n, content, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals); t != "" {
-		// Iterator.from([new A()]) / Iterator.from(as) — iterable element peel.
+	if t := jsIteratorFromYieldType(n, content, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals, classFields, methodReturns); t != "" {
+		// Iterator.from([new A()]) / Iterator.from([new BoxA().get()]) — iterable peel.
 		return t
 	}
-	if t := jsArrayIteratorYieldType(n, content, arrayLocals, typedLocals, factories, jsExtraLocals{}); t != "" {
+	if t := jsArrayIteratorYieldType(n, content, arrayLocals, typedLocals, factories, jsExtraLocals{classFields: classFields, methodReturns: methodReturns}); t != "" {
 		return t
 	}
-	if t := jsMapValuesYieldType(n, content, typedLocals, factories, mapLocals, entryArrayLocals); t != "" {
+	if t := jsMapValuesYieldTypeEx(n, content, typedLocals, factories, mapLocals, entryArrayLocals, classFields, methodReturns); t != "" {
 		return t
 	}
 	if t := jsSetIteratorYieldType(n, content, arrayLocals, typedLocals, factories, setLocals); t != "" {
@@ -8968,7 +8985,7 @@ func jsIteratorToArrayElemType(n *grammar.Node, content []byte, arrayLocals, typ
 		return ""
 	}
 	obj := ingest.ChildByField(fn, "object")
-	return jsIteratorSourceYieldType(obj, content, nil, nil, arrayLocals, typedLocals, factories, extra.mapLocals, extra.entryArrayLocals, extra.setLocals)
+	return jsIteratorSourceYieldTypeEx(obj, content, nil, nil, arrayLocals, typedLocals, factories, extra.mapLocals, extra.entryArrayLocals, extra.setLocals, extra.classFields, extra.methodReturns)
 }
 
 // jsStructuredCloneObjectPropType recovers T from structuredClone({k: new T()}).k /
@@ -9083,6 +9100,12 @@ func jsStructuredCloneObjectValueType(n *grammar.Node, content []byte, typedLoca
 // descriptors (2nd arg) fails closed. Non-matching callees / missing first arg
 // fail closed.
 func jsIdentityCloneType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	return jsIdentityCloneTypeEx(n, content, typedLocals, factories, nil, nil)
+}
+
+// jsIdentityCloneTypeEx peels structuredClone(new BoxA().get()) / Object.assign /
+// freeze/seal with method-return first args under foreign same-leaf.
+func jsIdentityCloneTypeEx(n *grammar.Node, content []byte, typedLocals, factories map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -9097,7 +9120,7 @@ func jsIdentityCloneType(n *grammar.Node, content []byte, typedLocals, factories
 			arg = ch
 			break
 		}
-		return jsIdentityCloneType(arg, content, typedLocals, factories)
+		return jsIdentityCloneTypeEx(arg, content, typedLocals, factories, classFields, methodReturns)
 	}
 	for n != nil && n.Type() == "parenthesized_expression" {
 		var inner *grammar.Node
@@ -9165,7 +9188,8 @@ func jsIdentityCloneType(n *grammar.Node, content []byte, typedLocals, factories
 	if isCreate && posCount != 1 {
 		return ""
 	}
-	if t := jsExprConcreteType(first, content, typedLocals, factories); t != "" {
+	// Class/typed-local peels; method-return when methodReturns set.
+	if t := jsExprLeafType(first, content, typedLocals, factories, classFields, methodReturns); t != "" {
 		return t
 	}
 	// Object.create(A.prototype) — prototype of Class is identity for method peels.
@@ -9322,6 +9346,10 @@ func jsIdentityObjectValueType(n *grammar.Node, content []byte, typedLocals, fac
 // (new T() / typed local / factory). Used to bind WeakRef holder locals so
 // wa.deref() peels under foreign same-leaf. Non-WeakRef / missing target fail closed.
 func jsWeakRefTargetType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	return jsWeakRefTargetTypeEx(n, content, typedLocals, factories, nil, nil)
+}
+
+func jsWeakRefTargetTypeEx(n *grammar.Node, content []byte, typedLocals, factories map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -9369,15 +9397,20 @@ func jsWeakRefTargetType(n *grammar.Node, content []byte, typedLocals, factories
 	if first == nil {
 		return ""
 	}
-	return jsExprConcreteType(first, content, typedLocals, factories)
+	return jsExprLeafType(first, content, typedLocals, factories, classFields, methodReturns)
 }
 
 // jsWeakRefDerefType recovers T from new WeakRef(x).deref() when x peels to T
-// (new T() / typed local / factory), or wa.deref() after const wa = new WeakRef(...)
+// (new T() / typed local / factory / method-return), or wa.deref() after const wa = new WeakRef(...)
 // (referent stored under genLocals["@weakref."+name]). Zero-arg deref only.
-// Enables new WeakRef(new A()).deref().run() / wa.deref().run() /
-// const a = new WeakRef(new A()).deref() under foreign same-leaf methods.
+// Enables new WeakRef(new A()).deref().run() / new WeakRef(new BoxA().get()).deref().run() /
+// wa.deref().run() under foreign same-leaf methods.
 func jsWeakRefDerefType(n *grammar.Node, content []byte, typedLocals, factories, genLocals map[string]string) string {
+	return jsWeakRefDerefTypeEx(n, content, typedLocals, factories, genLocals, nil, nil)
+}
+
+// jsWeakRefDerefTypeEx peels WeakRef.deref with method-return targets.
+func jsWeakRefDerefTypeEx(n *grammar.Node, content []byte, typedLocals, factories, genLocals map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -9430,8 +9463,8 @@ func jsWeakRefDerefType(n *grammar.Node, content []byte, typedLocals, factories,
 		}
 		return genLocals["@weakref."+ingest.NodeText(obj, content)]
 	}
-	// new WeakRef(x).deref() — peel target inline.
-	return jsWeakRefTargetType(obj, content, typedLocals, factories)
+	// new WeakRef(x).deref() — peel target inline (method-return via Ex).
+	return jsWeakRefTargetTypeEx(obj, content, typedLocals, factories, classFields, methodReturns)
 }
 
 // jsReflectGetType recovers T from Reflect.get(obj, key) when obj peels to a
@@ -9522,9 +9555,11 @@ func jsReflectGetType(n *grammar.Node, content []byte, typedLocals, factories, o
 
 // jsIteratorFromYieldType recovers T from Iterator.from(iterable) when the first
 // positional arg peels as an array source of T. Enables
-// Iterator.from([new A()]).next().value.run() under foreign same-leaf.
+// Iterator.from([new A()]).next().value.run() /
+// Iterator.from([new BoxA().get()]).toArray()[0].run() under foreign same-leaf.
 // Non-Iterator callees / missing iterable fail closed.
-func jsIteratorFromYieldType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals map[string]string) string {
+// Method-return iterable elements need classFields/methodReturns (may be nil).
+func jsIteratorFromYieldType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -9570,7 +9605,10 @@ func jsIteratorFromYieldType(n *grammar.Node, content []byte, arrayLocals, typed
 	if first == nil {
 		return ""
 	}
-	extra := jsExtraLocals{mapLocals: mapLocals, setLocals: setLocals, entryArrayLocals: entryArrayLocals}
+	extra := jsExtraLocals{
+		mapLocals: mapLocals, setLocals: setLocals, entryArrayLocals: entryArrayLocals,
+		classFields: classFields, methodReturns: methodReturns,
+	}
 	return jsArraySourceElemType(first, content, arrayLocals, typedLocals, factories, extra)
 }
 
@@ -9616,6 +9654,11 @@ func jsArrayIsNullishOnly(n *grammar.Node, content []byte) bool {
 // const pa = new Proxy(a, {}); pa.run() under foreign same-leaf. Missing target
 // / non-Proxy constructors fail closed. Handler ignored.
 func jsProxyTargetType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	return jsProxyTargetTypeEx(n, content, typedLocals, factories, nil, nil)
+}
+
+// jsProxyTargetTypeEx peels new Proxy(new BoxA().get(), {}) method-return targets.
+func jsProxyTargetTypeEx(n *grammar.Node, content []byte, typedLocals, factories map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -9664,7 +9707,7 @@ func jsProxyTargetType(n *grammar.Node, content []byte, typedLocals, factories m
 	if first == nil {
 		return ""
 	}
-	return jsExprConcreteType(first, content, typedLocals, factories)
+	return jsExprLeafType(first, content, typedLocals, factories, classFields, methodReturns)
 }
 
 // jsPrototypeClassType recovers Class from Class.prototype member access.

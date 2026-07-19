@@ -2180,6 +2180,11 @@ peeled:
 			if et := pythonPartialCallResultType(obj, content); et != "" {
 				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 			}
+			// partial(ba.get)().run() / functools.partial(ba.get)() — bound-method
+			// partial under foreign same-leaf (Class peels via partial(A) above).
+			if et := pythonPartialBoundMethodCallResultType(obj, content, funcReturns, typeOf, fieldOf); et != "" {
+				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+			}
 			// pa().run() after pa = partial(A) — factory local call yields A.
 			if et := pythonPartialFactoryLocalResultType(obj, content, factoryOf); et != "" {
 				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
@@ -2316,6 +2321,11 @@ peeled:
 			// single-index getter on a known collection (same leaf as assignment).
 			// Multi-index / string-key itemgetter use field path or fail closed.
 			if et := pythonItemgetterElemType(obj, content, elemOf, nil, typeOf); et != "" {
+				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+			}
+			// itemgetter(0)([ba.get()]).run() / itemgetter("k")({"k": ba.get()}).run() —
+			// method-return collection / object-dict under foreign same-leaf.
+			if et := pythonItemgetterObjectElemType(obj, content, funcReturns, typeOf, fieldOf); et != "" {
 				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 			}
 			// getitem(items, i).run() / operator.getitem(items, i).run() —
@@ -4457,7 +4467,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					// pa = partial(A) / functools.partial(A) — factory local (not an A
 					// instance). Call result pa() is A under foreign same-leaf.
 					// Foreign factories too for shadowing (pb = partial(B)).
+					// pa = partial(ba.get) — bound-method partial; pa() yields A.
 					if et := pythonPartialFactoryClassType(right, content); et != "" {
+						factoryOf[lname] = et
+					} else if et := pythonPartialBoundMethodReturnType(right, content, funcReturns, typeOf, fieldOf); et != "" {
 						factoryOf[lname] = et
 					}
 					// ra = weakref.ref(a) — factory local; ra() peels as A.
@@ -4835,6 +4848,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					} else if types := pythonItemgetterPairSlots(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
 						pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 					} else if et := pythonItemgetterElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
+						out[lname] = true
+					} else if et := pythonItemgetterObjectElemType(right, content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
+						// a = itemgetter(0)([ba.get()]) / itemgetter("k")({"k": ba.get()})
 						out[lname] = true
 					}
 					// a = getitem(items, i) / operator.getitem(items, i) /
@@ -5605,6 +5621,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				} else if types := pythonItemgetterPairSlots(valueN, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
 					pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 				} else if et := pythonItemgetterElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
+					out[lname] = true
+				} else if et := pythonItemgetterObjectElemType(valueN, content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
+					// a := itemgetter(0)([ba.get()]) / itemgetter("k")({"k": ba.get()})
 					out[lname] = true
 				}
 				// a := getitem(items, i) / operator.getitem(items, i) —
@@ -10425,6 +10444,154 @@ func pythonItemgetterElemType(call *grammar.Node, content []byte, elemOf, egElem
 		return ""
 	}
 	return pythonIterableElemType(collArgs[0], content, elemOf, egElems, typeOf)
+}
+
+// pythonItemgetterObjectElemType recovers T from itemgetter(i)([ba.get()]) /
+// operator.itemgetter(i)([ba.get()]) / itemgetter("k")({"k": ba.get()}) when the
+// collection peels as an object iterable or homogeneous object-dict under foreign
+// same-leaf (Class()-only peels via pythonItemgetterElemType).
+func pythonItemgetterObjectElemType(call *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "call" {
+		return ""
+	}
+	innerFn := ingest.ChildByField(fn, "function")
+	if innerFn == nil {
+		return ""
+	}
+	switch innerFn.Type() {
+	case "identifier":
+		if ingest.NodeText(innerFn, content) != "itemgetter" {
+			return ""
+		}
+	case "attribute":
+		attr := ingest.ChildByField(innerFn, "attribute")
+		obj := ingest.ChildByField(innerFn, "object")
+		if attr == nil || ingest.NodeText(attr, content) != "itemgetter" {
+			return ""
+		}
+		if obj == nil || obj.Type() != "identifier" || ingest.NodeText(obj, content) != "operator" {
+			return ""
+		}
+	default:
+		return ""
+	}
+	idxArgs, ok := pythonCallPositionalArgNodes(fn)
+	if !ok || len(idxArgs) != 1 {
+		return ""
+	}
+	collArgs, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(collArgs) != 1 {
+		return ""
+	}
+	if et := pythonObjectIterableElemType(collArgs[0], content, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
+	// itemgetter("k")({"k": ba.get()}) — homogeneous object-dict values (same
+	// leaf as Class dict peels via pythonDictStarCopyValueType pair Class()).
+	return pythonHomogeneousObjectDictValue(collArgs[0], content, funcReturns, typeOf, fieldOf)
+}
+
+// pythonPartialBoundMethodReturnType recovers T from partial(ba.get) /
+// functools.partial(ba.get) when ba is a typed local and get is a known instance
+// method return (funcReturns). Used by partial(ba.get)().run() and
+// pa = partial(ba.get); pa().run() under foreign same-leaf. Extra partial args
+// fail closed; Class partial peels stay on pythonPartialFactoryClassType.
+func pythonPartialBoundMethodReturnType(call *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if call == nil || call.Type() != "call" || funcReturns == nil {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil {
+		return ""
+	}
+	switch fn.Type() {
+	case "identifier":
+		if ingest.NodeText(fn, content) != "partial" {
+			return ""
+		}
+	case "attribute":
+		attr := ingest.ChildByField(fn, "attribute")
+		obj := ingest.ChildByField(fn, "object")
+		if attr == nil || ingest.NodeText(attr, content) != "partial" {
+			return ""
+		}
+		if obj == nil || obj.Type() != "identifier" || ingest.NodeText(obj, content) != "functools" {
+			return ""
+		}
+	default:
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	// Sole bound-method arg: partial(ba.get) — no pre-bound call args.
+	if !ok || len(args) != 1 || args[0].Type() != "attribute" {
+		return ""
+	}
+	// Reconstruct ba.get() return type (attribute is the bound method, not a call).
+	// Reuse pythonCallFuncReturnType by wrapping as a zero-arg call shape is hard;
+	// peel attribute receiver + method name against typeOf / funcReturns.
+	attrN := args[0]
+	obj := ingest.ChildByField(attrN, "object")
+	attr := ingest.ChildByField(attrN, "attribute")
+	if obj == nil || attr == nil || attr.Type() != "identifier" {
+		return ""
+	}
+	mname := ingest.NodeText(attr, content)
+	if mname == "" {
+		return ""
+	}
+	for obj != nil && !obj.IsNull() {
+		switch obj.Type() {
+		case "parenthesized_expression":
+			obj = pythonParenInner(obj)
+		case "named_expression":
+			obj = ingest.ChildByField(obj, "value")
+		default:
+			goto partialObjPeeled
+		}
+	}
+partialObjPeeled:
+	if obj == nil || obj.IsNull() {
+		return ""
+	}
+	if obj.Type() == "identifier" {
+		oname := ingest.NodeText(obj, content)
+		if rt := funcReturns[oname+"."+mname]; rt != "" {
+			return rt
+		}
+		if typeOf != nil {
+			if tn := typeOf[oname]; tn != "" {
+				if rt := funcReturns[tn+"."+mname]; rt != "" {
+					return rt
+				}
+			}
+		}
+	}
+	if obj.Type() == "call" {
+		if rt := pythonCallFuncReturnType(obj, content, funcReturns, typeOf, fieldOf); rt != "" {
+			if t := funcReturns[rt+"."+mname]; t != "" {
+				return t
+			}
+		}
+	}
+	return ""
+}
+
+// pythonPartialBoundMethodCallResultType recovers T from partial(ba.get)() /
+// functools.partial(ba.get)() under foreign same-leaf (outer zero-arg apply of
+// a bound-method partial factory).
+func pythonPartialBoundMethodCallResultType(call *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "call" {
+		return ""
+	}
+	return pythonPartialBoundMethodReturnType(fn, content, funcReturns, typeOf, fieldOf)
 }
 
 // pythonSubscriptElemType recovers the element type of items[i] / d[k] when the
