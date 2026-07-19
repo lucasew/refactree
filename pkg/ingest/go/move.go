@@ -1790,6 +1790,10 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 	genericPeels := sameFileGenericPeelFuncs(pf.Root, content)
 	// Named collection types: type AS []*A / type AM = map[K]*A — param peels.
 	namedColl := sameFileNamedCollectionResults(pf.Root, content)
+	// Named-struct fields: ba := wa.BA binds BoxA so ba.Get().Run peels dual-class.
+	structFields := sameFileStructNamedFuncFields(pf.Root, content)
+	// Method single named results: a := ba.Get() / xa := ba.Self() dual-class binds.
+	methodNamed := sameFileMethodNamedResults(pf.Root, content)
 
 	// Collect method/function scopes and local typed bindings.
 	var walk func(n *grammar.Node)
@@ -1811,7 +1815,7 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 			// Named results: func (r *T) M() (a *A, b *B) — a/b used in body.
 			collectResultParameterBindings(n, content, &bindings, rangeSrc, namedColl)
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl, structFields, methodNamed)
 			}
 		case "function_declaration":
 			rangeSrc := map[string]rangeSourceInfo{}
@@ -1822,7 +1826,7 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 			// Without this, same-leaf foreign methods are fail-open rewritten.
 			collectResultParameterBindings(n, content, &bindings, rangeSrc, namedColl)
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl, structFields, methodNamed)
 			}
 		case "func_literal":
 			// Nested / package-level func literals: func(a *A, b *B) { a.Run(); b.Run() }.
@@ -1833,7 +1837,7 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 			}
 			collectResultParameterBindings(n, content, &bindings, rangeSrc, namedColl)
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl, structFields, methodNamed)
 			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -3639,7 +3643,7 @@ func methodDeclReceiverType(method *grammar.Node, content []byte) string {
 // funcResults maps same-file function names to positional concrete result types
 // for multi-return call binding (a, b := makeAB()).
 // namedColl maps same-file type AS []*A / AM map[K]*A (may be nil).
-func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo, funcResults map[string][]string, genericPeels map[string]string, namedColl map[string]rangeSourceInfo) {
+func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo, funcResults map[string][]string, genericPeels map[string]string, namedColl map[string]rangeSourceInfo, structFields map[string]map[string]rangeSourceInfo, methodNamed map[string]map[string]string) {
 	if node == nil {
 		return
 	}
@@ -3652,6 +3656,30 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 			return strings.TrimPrefix(info.elemType, "*"), true
 		}
 		return "", false
+	}
+	// valueType from bindings already collected (params + prior locals) so
+	// ba := wa.BA peels when wa is a typed param/local.
+	valueType := func(name string, at uint32) (string, bool) {
+		if name == "" || name == "_" || bindings == nil {
+			return "", false
+		}
+		var best *identTypeBinding
+		for i := range *bindings {
+			b := &(*bindings)[i]
+			if b.name != name {
+				continue
+			}
+			if at < b.start || at >= b.end {
+				continue
+			}
+			if best == nil || (b.end-b.start) < (best.end-best.start) {
+				best = b
+			}
+		}
+		if best == nil {
+			return "", false
+		}
+		return best.typ, true
 	}
 	scopeEnd := node.EndByte()
 	var walk func(n *grammar.Node)
@@ -3669,6 +3697,8 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 			// Index of known collection: sa := sas[0] / a := as[0] / sa, ok := mas["k"]
 			// binds element/value type so sa.Items and a.Run peel dual-class (no
 			// fail-open rewrite of foreign same-leaf).
+			// Named-struct field: ba := wa.BA / ba := &wa.BA binds BoxA so
+			// ba.Get().Run peels under foreign same-leaf (inline wa.BA.Get already works).
 			names := identListNames(ingest.ChildByField(n, "left"), content)
 			right := ingest.ChildByField(n, "right")
 			if chTyp, ok := channelReceiveElemType(right, content, rangeSrc); ok {
@@ -3710,6 +3740,27 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 				if len(names) > 0 && names[0] != "" && names[0] != "_" {
 					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, names[0], typ})
 				}
+			} else if types := typeNamesFromNamedStructFieldRHS(right, content, valueType, structFields, n.StartByte(), rangeElem, namedColl, funcResults); len(types) > 0 {
+				// ba := wa.BA / ba, bb := wa.BA, wb.BB — named-struct field peels.
+				for i, name := range names {
+					if name == "" || name == "_" {
+						continue
+					}
+					if i < len(types) && types[i] != "" {
+						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, types[i]})
+					}
+				}
+			} else if types := typeNamesFromMethodCallRHS(right, content, valueType, structFields, methodNamed, n.StartByte(), rangeElem, namedColl, funcResults); len(types) > 0 {
+				// a := ba.Get() / xa := ba.Self() — single named method results.
+				// Prevents fail-open OVER on foreign same-leaf (b := bb.Get(); b.Run).
+				for i, name := range names {
+					if name == "" || name == "_" {
+						continue
+					}
+					if i < len(types) && types[i] != "" {
+						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, types[i]})
+					}
+				}
 			}
 			// Register collection short-vars into rangeSrc so later sa := sas[0]
 			// and range clauses peel under foreign same-leaf (sas := make([]SA,n)
@@ -3734,6 +3785,12 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 					if len(types) == 0 {
 						types = typeNamesFromFuncLiteralResults(valueN, content)
 					}
+					if len(types) == 0 {
+						types = typeNamesFromNamedStructFieldRHS(valueN, content, valueType, structFields, n.StartByte(), rangeElem, namedColl, funcResults)
+					}
+					if len(types) == 0 {
+						types = typeNamesFromMethodCallRHS(valueN, content, valueType, structFields, methodNamed, n.StartByte(), rangeElem, namedColl, funcResults)
+					}
 					if len(types) > 0 {
 						for i, name := range names {
 							if name == "" || name == "_" {
@@ -3753,6 +3810,12 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 				} else if el, ok := elemTypeFromIndexExpr(valueN, content, rangeSrc, namedColl); ok {
 					// var sa = sas[0] / var a = as[0] — element/value type.
 					typ = el
+				} else if fieldTypes := typeNamesFromNamedStructFieldRHS(valueN, content, valueType, structFields, n.StartByte(), rangeElem, namedColl, funcResults); len(fieldTypes) == 1 && fieldTypes[0] != "" {
+					// var ba = wa.BA / var ba = &wa.BA — named-struct field peel.
+					typ = fieldTypes[0]
+				} else if methodTypes := typeNamesFromMethodCallRHS(valueN, content, valueType, structFields, methodNamed, n.StartByte(), rangeElem, namedColl, funcResults); len(methodTypes) == 1 && methodTypes[0] != "" {
+					// var a = ba.Get() / var xa = ba.Self() — method named result.
+					typ = methodTypes[0]
 				} else {
 					typ = typeNameFromRHS(valueN, content)
 				}
@@ -5065,6 +5128,156 @@ func typeNamesFromCallResults(n *grammar.Node, content []byte, funcResults map[s
 	return out
 }
 
+// typeNamesFromNamedStructFieldRHS returns position-wise named struct types for
+// short-var / var RHS that are field selectors of a typed struct:
+//
+//	ba := wa.BA          // WA{BA BoxA} → BoxA
+//	ba := &wa.BA         // address-of same field
+//	ba, bb := wa.BA, wb.BB
+//
+// Enables ba.Get().Run under foreign same-leaf when inline wa.BA.Get().Run
+// already peels via selectorOperandStructType. Unknown / non-field RHS yield
+// empty strings; all-empty → nil (fail closed).
+func typeNamesFromNamedStructFieldRHS(n *grammar.Node, content []byte, valueType func(string, uint32) (string, bool), structFields map[string]map[string]rangeSourceInfo, at uint32, indexElem func(string, uint32) (string, bool), namedColl map[string]rangeSourceInfo, funcResults map[string][]string) []string {
+	if n == nil || len(structFields) == 0 {
+		return nil
+	}
+	var exprs []*grammar.Node
+	if n.Type() == "expression_list" {
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			exprs = append(exprs, c)
+		}
+	} else {
+		exprs = []*grammar.Node{n}
+	}
+	out := make([]string, len(exprs))
+	any := false
+	for i, e := range exprs {
+		e = peelAmpParenForFieldType(e, content)
+		if e == nil {
+			continue
+		}
+		if t, ok := selectorOperandStructType(e, content, valueType, structFields, at, indexElem, namedColl, funcResults, nil); ok && t != "" {
+			out[i] = t
+			any = true
+		}
+	}
+	if !any {
+		return nil
+	}
+	return out
+}
+
+// peelAmpParenForFieldType peels outer parenthesized_expression and unary & so
+// ba := &wa.BA / ba := (wa.BA) resolve like ba := wa.BA.
+func peelAmpParenForFieldType(n *grammar.Node, content []byte) *grammar.Node {
+	for n != nil {
+		switch n.Type() {
+		case "parenthesized_expression":
+			var inner *grammar.Node
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch == nil || ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+			n = inner
+		case "unary_expression":
+			// &wa.BA — take operand; other unaries (<-, *) fail closed for field bind.
+			op := ingest.ChildByField(n, "operator")
+			if op == nil || ingest.NodeText(op, content) != "&" {
+				return n
+			}
+			n = ingest.ChildByField(n, "operand")
+		default:
+			return n
+		}
+	}
+	return n
+}
+
+// typeNamesFromMethodCallRHS returns position-wise single named method result
+// types for short-var / var RHS:
+//
+//	a := ba.Get()           // (*BoxA).Get() *A → A
+//	xa := ba.Self()         // (*BoxA).Self() *BoxA → BoxA
+//	a, b := ba.Get(), bb.Get()
+//
+// Uses sameFileMethodNamedResults (concrete + iface single results). Multi-result
+// methods are absent from methodNamed (fail closed). Fixes fail-open OVER when
+// a/b stay unbound under foreign same-leaf methods.
+func typeNamesFromMethodCallRHS(n *grammar.Node, content []byte, valueType func(string, uint32) (string, bool), structFields map[string]map[string]rangeSourceInfo, methodNamed map[string]map[string]string, at uint32, indexElem func(string, uint32) (string, bool), namedColl map[string]rangeSourceInfo, funcResults map[string][]string) []string {
+	if n == nil || len(methodNamed) == 0 {
+		return nil
+	}
+	var exprs []*grammar.Node
+	if n.Type() == "expression_list" {
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			exprs = append(exprs, c)
+		}
+	} else {
+		exprs = []*grammar.Node{n}
+	}
+	out := make([]string, len(exprs))
+	any := false
+	for i, e := range exprs {
+		e = peelAmpParenForFieldType(e, content)
+		if e == nil || e.Type() != "call_expression" {
+			continue
+		}
+		fn := ingest.ChildByField(e, "function")
+		if fn == nil || fn.Type() != "selector_expression" {
+			continue
+		}
+		op := ingest.ChildByField(fn, "operand")
+		field := ingest.ChildByField(fn, "field")
+		if op == nil || field == nil {
+			continue
+		}
+		mname := ingest.NodeText(field, content)
+		if mname == "" {
+			continue
+		}
+		recvType := ""
+		// Bare / (*ba) receiver via valueType.
+		op2 := peelSelectorOperand(op, content)
+		if op2 != nil && op2.Type() == "identifier" && valueType != nil {
+			if t, ok := valueType(ingest.NodeText(op2, content), at); ok && t != "" {
+				recvType = strings.TrimPrefix(t, "*")
+			}
+		}
+		// Nested field path: wa.BA.Get() assign form.
+		if recvType == "" && len(structFields) > 0 {
+			if t, ok := selectorOperandStructType(op, content, valueType, structFields, at, indexElem, namedColl, funcResults, methodNamed); ok && t != "" {
+				recvType = strings.TrimPrefix(t, "*")
+			}
+		}
+		if recvType == "" {
+			continue
+		}
+		if methods := methodNamed[recvType]; methods != nil {
+			if t := methods[mname]; t != "" {
+				out[i] = t
+				any = true
+			}
+		}
+	}
+	if !any {
+		return nil
+	}
+	return out
+}
+
 // typeNameFromRHS extracts T from &T{}, T{}, new(T), (*T)(nil)-ish forms.
 // For expression_list, only the first expression is considered (legacy); prefer
 // typeNamesFromMultiRHS when binding multiple names.
@@ -5544,6 +5757,8 @@ func goIdentTypeAtFunc(root *grammar.Node, content []byte, funcResults map[strin
 	}
 	genericPeels := sameFileGenericPeelFuncs(root, content)
 	namedColl := sameFileNamedCollectionResults(root, content)
+	structFields := sameFileStructNamedFuncFields(root, content)
+	methodNamed := sameFileMethodNamedResults(root, content)
 	var bindings []identTypeBinding
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
@@ -5563,7 +5778,7 @@ func goIdentTypeAtFunc(root *grammar.Node, content []byte, funcResults map[strin
 			}
 			collectResultParameterBindings(n, content, &bindings, rangeSrc, namedColl)
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl, structFields, methodNamed)
 			}
 		case "function_declaration", "func_literal":
 			rangeSrc := map[string]rangeSourceInfo{}
@@ -5572,7 +5787,7 @@ func goIdentTypeAtFunc(root *grammar.Node, content []byte, funcResults map[strin
 			}
 			collectResultParameterBindings(n, content, &bindings, rangeSrc, namedColl)
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl, structFields, methodNamed)
 			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
