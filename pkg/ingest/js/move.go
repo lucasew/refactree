@@ -5258,8 +5258,9 @@ func jsArrayIdentityElemType(n *grammar.Node, content []byte, arrayLocals, typed
 			}
 			return jsNestedArrayFlatElemType(obj, content, arrayLocals, typedLocals, factories, extra)
 		}
-		// Non-identity sole-return array of uniform T: [0].flatMap(() => [new A()]).
-		if t := jsFlatMapSoleArrayReturnElemType(cb, content, typedLocals, factories); t != "" {
+		// Non-identity sole-return array of uniform T: [0].flatMap(() => [new A()]) /
+		// [0].flatMap(() => [new BoxA().get()]) method-return under foreign same-leaf.
+		if t := jsFlatMapSoleArrayReturnElemType(cb, content, typedLocals, factories, extra.classFields, extra.methodReturns); t != "" {
 			return t
 		}
 		return ""
@@ -8776,16 +8777,18 @@ func jsIteratorHelperYieldType(n *grammar.Node, content []byte, generators, genL
 		// (receiver ignored for sole-return type; same leaf as Array.flatMap sole return).
 		// Array.prototype.flatMap stays on jsArrayIdentityElemType so
 		// const as = [0].flatMap(() => [new A()]) binds as arrayLocals (as[0].run()).
+		// methodReturns peels [new BoxA().get()].values().flatMap(x => [x]) and
+		// iter.flatMap(() => [new BoxA().get()]) under foreign same-leaf.
 		if firstArg == nil {
 			return ""
 		}
-		if !jsLooksLikeIteratorReceiver(obj, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals) {
+		if !jsLooksLikeIteratorReceiver(obj, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals, classFields, methodReturns) {
 			return ""
 		}
 		if jsIsIdentityArrayCallback(firstArg, content) {
 			return jsIteratorSourceYieldTypeEx(obj, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals, classFields, methodReturns)
 		}
-		if t := jsFlatMapSoleArrayReturnElemType(firstArg, content, typedLocals, factories); t != "" {
+		if t := jsFlatMapSoleArrayReturnElemType(firstArg, content, typedLocals, factories, classFields, methodReturns); t != "" {
 			return t
 		}
 		return ""
@@ -8800,7 +8803,8 @@ func jsIteratorHelperYieldType(n *grammar.Node, content []byte, generators, genL
 // Iterator.from(...).flatMap / values().flatMap peels as iterator helpers.
 // Structural: Iterator.from, generator/array-iterator/map.values/set locals,
 // identity iterator helpers — even when the yield leaf is non-class (numbers).
-func jsLooksLikeIteratorReceiver(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals map[string]string) bool {
+// methodReturns peels [new BoxA().get()].values() under foreign same-leaf.
+func jsLooksLikeIteratorReceiver(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals map[string]string, classFields, methodReturns map[string]map[string]string) bool {
 	if n == nil {
 		return false
 	}
@@ -8833,13 +8837,15 @@ func jsLooksLikeIteratorReceiver(n *grammar.Node, content []byte, generators, ge
 	if t := jsGeneratorCallYieldType(n, content, generators, genLocals); t != "" {
 		return true
 	}
-	if t := jsArrayIteratorYieldType(n, content, arrayLocals, typedLocals, factories, jsExtraLocals{}); t != "" {
+	if t := jsArrayIteratorYieldType(n, content, arrayLocals, typedLocals, factories, jsExtraLocals{classFields: classFields, methodReturns: methodReturns}); t != "" {
 		return true
 	}
-	if t := jsMapValuesYieldType(n, content, typedLocals, factories, mapLocals, entryArrayLocals); t != "" {
+	if t := jsMapValuesYieldTypeEx(n, content, typedLocals, factories, mapLocals, entryArrayLocals, classFields, methodReturns); t != "" {
 		return true
 	}
-	if t := jsSetIteratorYieldType(n, content, arrayLocals, typedLocals, factories, setLocals); t != "" {
+	if t := jsSetIteratorYieldTypeEx(n, content, arrayLocals, typedLocals, factories, setLocals, jsExtraLocals{
+		setLocals: setLocals, classFields: classFields, methodReturns: methodReturns,
+	}); t != "" {
 		return true
 	}
 	// Chained identity helpers: iter.take(n).flatMap(...).
@@ -8850,7 +8856,7 @@ func jsLooksLikeIteratorReceiver(n *grammar.Node, content []byte, generators, ge
 			if prop != nil {
 				switch ingest.NodeText(prop, content) {
 				case "take", "drop", "filter", "map", "flatMap":
-					return jsLooksLikeIteratorReceiver(ingest.ChildByField(fn, "object"), content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals)
+					return jsLooksLikeIteratorReceiver(ingest.ChildByField(fn, "object"), content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals, classFields, methodReturns)
 				}
 			}
 		}
@@ -10085,10 +10091,11 @@ func jsIsIdentityArrayCallback(cb *grammar.Node, content []byte) bool {
 
 // jsFlatMapSoleArrayReturnElemType recovers T from a flatMap callback whose sole
 // return is an array of uniform concrete T: () => [new A()] / (_v) => [a0] /
-// () => { return [new A()] }. One-level flatten yields T (receiver ignored —
-// same leaf as Array.from({length}, () => new A())). Empty / mixed / non-array
-// sole returns fail closed.
-func jsFlatMapSoleArrayReturnElemType(cb *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+// () => { return [new A()] } / () => [new BoxA().get()] method-return.
+// One-level flatten yields T (receiver ignored — same leaf as
+// Array.from({length}, () => new A())). Empty / mixed / non-array sole returns
+// fail closed. methodReturns peels method-return inserts under foreign same-leaf.
+func jsFlatMapSoleArrayReturnElemType(cb *grammar.Node, content []byte, typedLocals, factories map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	ret := jsCallbackSoleReturnExpr(cb, content)
 	if ret == nil {
 		return ""
@@ -10115,7 +10122,8 @@ func jsFlatMapSoleArrayReturnElemType(cb *grammar.Node, content []byte, typedLoc
 		if ch == nil || ch.Type() == "[" || ch.Type() == "]" || ch.Type() == "," {
 			continue
 		}
-		t := jsExprConcreteType(ch, content, typedLocals, factories)
+		// Class/typed-local via concrete path; method-return when methodReturns set.
+		t := jsExprLeafType(ch, content, typedLocals, factories, classFields, methodReturns)
 		if t == "" {
 			return ""
 		}
