@@ -1549,15 +1549,15 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 	if obj.Type() == "identifier" {
 		return jsRenameByTypeMaps(ingest.NodeText(obj, content), ourReceivers, foreignReceivers, typedLocals)
 	}
-	// await Promise.resolve(new A() / a / makeA()) / Promise.resolve(...) — identity peels
-	// under foreign same-leaf methods (same leaf as const a = await …; a.run()).
-	// Also Promise.race/any([new A()]) value peels (uniform array element type).
+	// await Promise.resolve(new A() / a / makeA() / ba.get()) / Promise.resolve(...) —
+	// identity peels under foreign same-leaf methods (same leaf as const a = await …; a.run()).
+	// Also Promise.race/any([new A() / ba.get()]) value peels (uniform array element type).
 	// structuredClone(new A()) / Object.assign(new A()) — identity first-arg peels.
 	if obj.Type() == "await_expression" || obj.Type() == "call_expression" {
-		if t := jsPromiseResolveArgType(obj, content, typedLocals, factories); t != "" {
+		if t := jsPromiseResolveArgTypeEx(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
-		if t := jsPromiseRaceValueType(obj, content, typedLocals, factories); t != "" {
+		if t := jsPromiseRaceValueTypeEx(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 		if t := jsIdentityCloneTypeEx(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
@@ -1643,7 +1643,7 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 	// Object.fromEntries([[k, new A()]])["k"].run() / o["k"].run() —
 	// element / entries-value / fromEntries-prop peel under foreign same-leaf.
 	if obj.Type() == "subscript_expression" {
-		if t := jsPromiseAllSubscriptType(obj, content, typedLocals, factories); t != "" {
+		if t := jsPromiseAllSubscriptTypeEx(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 		if t := jsObjectEntriesPairValueTypeEx(obj, content, typedLocals, factories, entryLocals, entryArrayLocals, entryNextLocals, arrayLocals, mapLocals, setLocals, objValueLocals, extra); t != "" {
@@ -1665,7 +1665,7 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 	// Object.fromEntries([[k, new BoxA().get()]]).k.run() method-return peels —
 	// value peel under foreign same-leaf methods.
 	if obj.Type() == "member_expression" || obj.Type() == "member_expression_optional" || obj.Type() == "optional_chain" {
-		if t := jsPromiseAllSettledValueType(obj, content, typedLocals, settledOf, factories); t != "" {
+		if t := jsPromiseAllSettledValueTypeEx(obj, content, typedLocals, settledOf, factories, classFields, methodReturns); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 		if t := jsGeneratorNextValueTypeEx(obj, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals, classFields, methodReturns); t != "" {
@@ -1869,18 +1869,18 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// const a = new Proxy({k: new A()}, {}).k / Object.freeze({k: new A()}).k /
 						// Object.create({k: ba.get()}).k — method-return prop peels.
 						out[ingest.NodeText(nameN, content)] = t
-					} else if t := jsPromiseResolveArgType(valN, content, out, factories); ourReceivers[t] {
-						// await Promise.resolve(new A() / a / makeA()) — resolved value is A.
+					} else if t := jsPromiseResolveArgTypeEx(valN, content, out, factories, classFields, methodReturns); ourReceivers[t] {
+						// await Promise.resolve(new A() / a / makeA() / ba.get()) — resolved value is A.
 						out[ingest.NodeText(nameN, content)] = t
-					} else if t := jsPromiseRaceValueType(valN, content, out, factories); ourReceivers[t] {
-						// await Promise.race/any([new A()]) — value is A when elems agree.
+					} else if t := jsPromiseRaceValueTypeEx(valN, content, out, factories, classFields, methodReturns); ourReceivers[t] {
+						// await Promise.race/any([new A() / ba.get()]) — value is A when elems agree.
 						out[ingest.NodeText(nameN, content)] = t
-					} else if t := jsPromiseAllSettledSubscriptType(valN, content, out, factories); ourReceivers[t] {
-						// const r = (await Promise.allSettled([new A()]))[0]
+					} else if t := jsPromiseAllSettledSubscriptTypeEx(valN, content, out, factories, classFields, methodReturns); ourReceivers[t] {
+						// const r = (await Promise.allSettled([new A() / ba.get()]))[0]
 						settledOf[ingest.NodeText(nameN, content)] = t
-					} else if t := jsPromiseAllSettledValueType(valN, content, out, settledOf, factories); ourReceivers[t] {
+					} else if t := jsPromiseAllSettledValueTypeEx(valN, content, out, settledOf, factories, classFields, methodReturns); ourReceivers[t] {
 						// const a = ra.value after const [ra] = await Promise.allSettled([new A()])
-						// / const a = (await Promise.allSettled([new A()]))[0].value
+						// / const a = (await Promise.allSettled([new A() / ba.get()]))[0].value
 						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsIdentityCloneTypeEx(valN, content, out, factories, classFields, methodReturns); ourReceivers[t] {
 						// const a = structuredClone(new A()) / Object.assign(new A()[, …]) /
@@ -2137,11 +2137,11 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						out[ingest.NodeText(nameN, content)] = t
 					}
 				} else if nameN.Type() == "array_pattern" {
-					// const [a] = await Promise.all([new A()]) — bind pattern names to elem type.
-					if t := jsPromiseAllElemType(valN, content, out, factories); ourReceivers[t] {
+					// const [a] = await Promise.all([new A() / ba.get()]) — bind pattern names to elem type.
+					if t := jsPromiseAllElemTypeEx(valN, content, out, factories, classFields, methodReturns); ourReceivers[t] {
 						jsBindArrayPatternNames(nameN, content, t, out)
-					} else if t := jsPromiseAllSettledElemType(valN, content, out, factories); ourReceivers[t] {
-						// const [r] = await Promise.allSettled([new A()])
+					} else if t := jsPromiseAllSettledElemTypeEx(valN, content, out, factories, classFields, methodReturns); ourReceivers[t] {
+						// const [r] = await Promise.allSettled([new A() / ba.get()])
 						// const [{value: a}] / [{value}] = await Promise.allSettled([new A()])
 						jsBindAllSettledArrayPattern(nameN, content, t, out, settledOf)
 					} else if t := jsObjectEntriesPairSubscriptTypeEx(valN, content, out, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals, extra); ourReceivers[t] {
@@ -2270,9 +2270,9 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 		case "formal_parameters":
 			// plain JS has no types; walk children for TS parameters
 		case "call_expression":
-			// Promise.resolve(new A() / a / makeA()).then(a => a.run()) — bind then callback param.
-			// Promise.allSettled([new A()]).then(([r]) => r.value.run()) — settled params.
-			jsBindPromiseThenParams(n, content, ourReceivers, out, settledOf, factories)
+			// Promise.resolve(new A() / a / makeA() / ba.get()).then(a => a.run()) — bind then callback param.
+			// Promise.allSettled([new A() / ba.get()]).then(([r]) => r.value.run()) — settled params.
+			jsBindPromiseThenParams(n, content, ourReceivers, out, settledOf, factories, classFields, methodReturns)
 			// new Map([[k, new A()]]).forEach((v) => v.run()) /
 			// [new A()].forEach((v) => v.run()) — bind forEach value/elem param.
 			jsBindForEachParams(n, content, ourReceivers, out, arrayLocals, factories, mapLocals, entryArrayLocals, setLocals, extra)
@@ -2912,7 +2912,15 @@ func jsFactoryCallReturnType(call *grammar.Node, content []byte, factories map[s
 // Non-Promise receivers / multi-arg / unknown args fail closed.
 // typedLocals maps local → type leaf (may be nil).
 // factories maps factory name → class leaf (may be nil).
+// Class()/local/factory only — method-return peels via Ex.
 func jsPromiseResolveArgType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	return jsPromiseResolveArgTypeEx(n, content, typedLocals, factories, nil, nil)
+}
+
+// jsPromiseResolveArgTypeEx also peels Promise.resolve(new BoxA().get()) /
+// Promise.resolve(ba.get()) method-return args under foreign same-leaf
+// (Class peels via non-Ex path).
+func jsPromiseResolveArgTypeEx(n *grammar.Node, content []byte, typedLocals, factories map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -2927,7 +2935,7 @@ func jsPromiseResolveArgType(n *grammar.Node, content []byte, typedLocals, facto
 			arg = ch
 			break
 		}
-		return jsPromiseResolveArgType(arg, content, typedLocals, factories)
+		return jsPromiseResolveArgTypeEx(arg, content, typedLocals, factories, classFields, methodReturns)
 	}
 	if n.Type() == "parenthesized_expression" {
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -2935,7 +2943,7 @@ func jsPromiseResolveArgType(n *grammar.Node, content []byte, typedLocals, facto
 			if ch.Type() == "(" || ch.Type() == ")" {
 				continue
 			}
-			return jsPromiseResolveArgType(ch, content, typedLocals, factories)
+			return jsPromiseResolveArgTypeEx(ch, content, typedLocals, factories, classFields, methodReturns)
 		}
 		return ""
 	}
@@ -2976,22 +2984,8 @@ func jsPromiseResolveArgType(n *grammar.Node, content []byte, typedLocals, facto
 	if count != 1 || first == nil {
 		return ""
 	}
-	if t := jsNewExpressionType(first, content); t != "" {
-		return t
-	}
-	// Promise.resolve(a) after const a = new A() — peel typed local.
-	if first.Type() == "identifier" && typedLocals != nil {
-		if t := typedLocals[ingest.NodeText(first, content)]; t != "" {
-			return t
-		}
-	}
-	// Promise.resolve(makeA()) after function makeA(){ return new A() }.
-	if first.Type() == "call_expression" && factories != nil {
-		if t := jsFactoryCallReturnType(first, content, factories); t != "" {
-			return t
-		}
-	}
-	return ""
+	// new T() / typed local / factory / zero-arg method-return (ba.get()).
+	return jsExprLeafType(first, content, typedLocals, factories, classFields, methodReturns)
 }
 
 // jsBindForEachParams types the first parameter of array/Map/Set element
@@ -3110,14 +3104,14 @@ func jsCallbackFirstParam(cb *grammar.Node) *grammar.Node {
 }
 
 // jsBindPromiseThenParams types the first parameter of
-// Promise.resolve(new A() / a / makeA()).then(x => …) / .then(function(x) { … })
-// and Promise.all([new A()]).then(([a]) => …) array-destructure params when the
+// Promise.resolve(new A() / a / makeA() / ba.get()).then(x => …) / .then(function(x) { … })
+// and Promise.all([new A() / ba.get()]).then(([a]) => …) array-destructure params when the
 // call receiver peels to a concrete our-receiver type. Also
-// Promise.allSettled([new A()]).then(([r]) => r.value.run()) /
+// Promise.allSettled([new A() / ba.get()]).then(([r]) => r.value.run()) /
 // .then(([{value}]) => value.run()) settled peels. Under foreign same-leaf
 // methods, only our-receiver resolved values bind so B is preserved.
 // out maps param name → type leaf; settledOf maps settled-result locals → value type.
-func jsBindPromiseThenParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, out, settledOf, factories map[string]string) {
+func jsBindPromiseThenParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, out, settledOf, factories map[string]string, classFields, methodReturns map[string]map[string]string) {
 	if call == nil || call.Type() != "call_expression" || out == nil {
 		return
 	}
@@ -3130,8 +3124,8 @@ func jsBindPromiseThenParams(call *grammar.Node, content []byte, ourReceivers ma
 		return
 	}
 	obj := ingest.ChildByField(fn, "object")
-	// Promise.resolve(new T() / typed local / factory) → scalar param type.
-	resolveT := jsPromiseResolveArgType(obj, content, out, factories)
+	// Promise.resolve(new T() / typed local / factory / method-return) → scalar param type.
+	resolveT := jsPromiseResolveArgTypeEx(obj, content, out, factories, classFields, methodReturns)
 	// Promise.try(() => new T()) / Promise.try(() => a) → scalar param type.
 	if resolveT == "" {
 		resolveT = jsPromiseTryType(obj, content, out, factories)
@@ -3147,12 +3141,12 @@ func jsBindPromiseThenParams(call *grammar.Node, content []byte, ourReceivers ma
 	if resolveT == "" {
 		resolveT = jsPromiseCatchType(obj, content, out, factories)
 	}
-	// Promise.race/any([new T(), …]) → scalar value type when elems agree.
-	raceT := jsPromiseRaceValueType(obj, content, out, factories)
-	// Promise.all([new T(), …]) → array element type for [a] destructure.
-	allT := jsPromiseAllElemType(obj, content, out, factories)
-	// Promise.allSettled([new T(), …]) → fulfilled value type for [r] / [{value}].
-	settledT := jsPromiseAllSettledElemType(obj, content, out, factories)
+	// Promise.race/any([new T() / ba.get(), …]) → scalar value type when elems agree.
+	raceT := jsPromiseRaceValueTypeEx(obj, content, out, factories, classFields, methodReturns)
+	// Promise.all([new T() / ba.get(), …]) → array element type for [a] destructure.
+	allT := jsPromiseAllElemTypeEx(obj, content, out, factories, classFields, methodReturns)
+	// Promise.allSettled([new T() / ba.get(), …]) → fulfilled value type for [r] / [{value}].
+	settledT := jsPromiseAllSettledElemTypeEx(obj, content, out, factories, classFields, methodReturns)
 	if !ourReceivers[resolveT] && !ourReceivers[raceT] && !ourReceivers[allT] && !ourReceivers[settledT] {
 		return
 	}
@@ -3285,8 +3279,15 @@ func jsBindArrayPatternNames(pattern *grammar.Node, content []byte, typeLeaf str
 // Promise.all([new A()]).then(([a]) => a.run()), const [a] = await Promise.all([new A()]),
 // and (await Promise.all([new A()]))[0].run() under foreign same-leaf methods.
 // Non-Promise.all / non-array / mixed / empty args fail closed.
+// Class()/local/factory only — method-return peels via Ex.
 func jsPromiseAllElemType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
-	return jsPromiseArrayElemType(n, content, typedLocals, factories, "all")
+	return jsPromiseAllElemTypeEx(n, content, typedLocals, factories, nil, nil)
+}
+
+// jsPromiseAllElemTypeEx also peels Promise.all([new BoxA().get()]) method-return
+// elements under foreign same-leaf.
+func jsPromiseAllElemTypeEx(n *grammar.Node, content []byte, typedLocals, factories map[string]string, classFields, methodReturns map[string]map[string]string) string {
+	return jsPromiseArrayElemTypeEx(n, content, typedLocals, factories, "all", classFields, methodReturns)
 }
 
 // jsPromiseAllSettledElemType recovers T from Promise.allSettled([new T(), …])
@@ -3296,8 +3297,15 @@ func jsPromiseAllElemType(n *grammar.Node, content []byte, typedLocals, factorie
 // const [r] = await Promise.allSettled([new A()]); r.value.run(), and
 // (await Promise.allSettled([new A()]))[0].value.run() under foreign same-leaf.
 // Non-allSettled / non-array / mixed / empty args fail closed.
+// Class()/local/factory only — method-return peels via Ex.
 func jsPromiseAllSettledElemType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
-	return jsPromiseArrayElemType(n, content, typedLocals, factories, "allSettled")
+	return jsPromiseAllSettledElemTypeEx(n, content, typedLocals, factories, nil, nil)
+}
+
+// jsPromiseAllSettledElemTypeEx also peels Promise.allSettled([ba.get()])
+// method-return elements under foreign same-leaf.
+func jsPromiseAllSettledElemTypeEx(n *grammar.Node, content []byte, typedLocals, factories map[string]string, classFields, methodReturns map[string]map[string]string) string {
+	return jsPromiseArrayElemTypeEx(n, content, typedLocals, factories, "allSettled", classFields, methodReturns)
 }
 
 // jsPromiseRaceValueType recovers T from Promise.race([new T(), …]) /
@@ -3305,16 +3313,30 @@ func jsPromiseAllSettledElemType(n *grammar.Node, content []byte, typedLocals, f
 // The settled value is T (scalar), not an array — unlike Promise.all.
 // Enables Promise.race([new A()]).then(a => a.run()) and
 // (await Promise.race([new A()])).run() under foreign same-leaf methods.
+// Class()/local/factory only — method-return peels via Ex.
 func jsPromiseRaceValueType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
-	if t := jsPromiseArrayElemType(n, content, typedLocals, factories, "race"); t != "" {
+	return jsPromiseRaceValueTypeEx(n, content, typedLocals, factories, nil, nil)
+}
+
+// jsPromiseRaceValueTypeEx also peels Promise.race/any([new BoxA().get()])
+// method-return elements under foreign same-leaf.
+func jsPromiseRaceValueTypeEx(n *grammar.Node, content []byte, typedLocals, factories map[string]string, classFields, methodReturns map[string]map[string]string) string {
+	if t := jsPromiseArrayElemTypeEx(n, content, typedLocals, factories, "race", classFields, methodReturns); t != "" {
 		return t
 	}
-	return jsPromiseArrayElemType(n, content, typedLocals, factories, "any")
+	return jsPromiseArrayElemTypeEx(n, content, typedLocals, factories, "any", classFields, methodReturns)
 }
 
 // jsPromiseArrayElemType recovers the uniform element type of
-// Promise.<method>([…]) for method in {all, race, any}.
+// Promise.<method>([…]) for method in {all, race, any, allSettled}.
+// Class()/local/factory only — method-return peels via Ex.
 func jsPromiseArrayElemType(n *grammar.Node, content []byte, typedLocals, factories map[string]string, method string) string {
+	return jsPromiseArrayElemTypeEx(n, content, typedLocals, factories, method, nil, nil)
+}
+
+// jsPromiseArrayElemTypeEx also peels method-return array elements
+// (new BoxA().get() / ba.get()) under foreign same-leaf.
+func jsPromiseArrayElemTypeEx(n *grammar.Node, content []byte, typedLocals, factories map[string]string, method string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil || method == "" {
 		return ""
 	}
@@ -3328,7 +3350,7 @@ func jsPromiseArrayElemType(n *grammar.Node, content []byte, typedLocals, factor
 			arg = ch
 			break
 		}
-		return jsPromiseArrayElemType(arg, content, typedLocals, factories, method)
+		return jsPromiseArrayElemTypeEx(arg, content, typedLocals, factories, method, classFields, methodReturns)
 	}
 	if n.Type() == "parenthesized_expression" {
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -3336,7 +3358,7 @@ func jsPromiseArrayElemType(n *grammar.Node, content []byte, typedLocals, factor
 			if ch.Type() == "(" || ch.Type() == ")" {
 				continue
 			}
-			return jsPromiseArrayElemType(ch, content, typedLocals, factories, method)
+			return jsPromiseArrayElemTypeEx(ch, content, typedLocals, factories, method, classFields, methodReturns)
 		}
 		return ""
 	}
@@ -3378,7 +3400,7 @@ func jsPromiseArrayElemType(n *grammar.Node, content []byte, typedLocals, factor
 		return ""
 	}
 	// All array elements must peel to the same concrete type.
-	// Promise.resolve(new T()) / Promise.resolve(a) is accepted as an element of
+	// Promise.resolve(new T() / ba.get()) is accepted as an element of
 	// race/any/all (thenable of T) — same leaf as bare new T() under foreign same-leaf.
 	found := ""
 	saw := false
@@ -3387,9 +3409,9 @@ func jsPromiseArrayElemType(n *grammar.Node, content []byte, typedLocals, factor
 		if el == nil || el.Type() == "[" || el.Type() == "]" || el.Type() == "," {
 			continue
 		}
-		t := jsExprConcreteType(el, content, typedLocals, factories)
+		t := jsExprLeafType(el, content, typedLocals, factories, classFields, methodReturns)
 		if t == "" {
-			t = jsPromiseResolveArgType(el, content, typedLocals, factories)
+			t = jsPromiseResolveArgTypeEx(el, content, typedLocals, factories, classFields, methodReturns)
 		}
 		if t == "" {
 			return ""
@@ -3410,7 +3432,14 @@ func jsPromiseArrayElemType(n *grammar.Node, content []byte, typedLocals, factor
 // jsPromiseAllSubscriptType recovers T from (await Promise.all([new T()]))[i]
 // when the indexed object peels to a uniform Promise.all element type. Index
 // must be a numeric literal (any index; elems already agree).
+// Class()/local/factory only — method-return peels via Ex.
 func jsPromiseAllSubscriptType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	return jsPromiseAllSubscriptTypeEx(n, content, typedLocals, factories, nil, nil)
+}
+
+// jsPromiseAllSubscriptTypeEx also peels (await Promise.all([ba.get()]))[i]
+// method-return elements under foreign same-leaf.
+func jsPromiseAllSubscriptTypeEx(n *grammar.Node, content []byte, typedLocals, factories map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil || n.Type() != "subscript_expression" {
 		return ""
 	}
@@ -3419,13 +3448,19 @@ func jsPromiseAllSubscriptType(n *grammar.Node, content []byte, typedLocals, fac
 		return ""
 	}
 	obj := ingest.ChildByField(n, "object")
-	return jsPromiseAllElemType(obj, content, typedLocals, factories)
+	return jsPromiseAllElemTypeEx(obj, content, typedLocals, factories, classFields, methodReturns)
 }
 
 // jsPromiseAllSettledSubscriptType recovers T from
 // (await Promise.allSettled([new T()]))[i] when the indexed object peels to a
 // uniform allSettled value type. Index must be a numeric literal.
+// Class()/local/factory only — method-return peels via Ex.
 func jsPromiseAllSettledSubscriptType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	return jsPromiseAllSettledSubscriptTypeEx(n, content, typedLocals, factories, nil, nil)
+}
+
+// jsPromiseAllSettledSubscriptTypeEx also peels method-return allSettled elems.
+func jsPromiseAllSettledSubscriptTypeEx(n *grammar.Node, content []byte, typedLocals, factories map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil || n.Type() != "subscript_expression" {
 		return ""
 	}
@@ -3434,13 +3469,19 @@ func jsPromiseAllSettledSubscriptType(n *grammar.Node, content []byte, typedLoca
 		return ""
 	}
 	obj := ingest.ChildByField(n, "object")
-	return jsPromiseAllSettledElemType(obj, content, typedLocals, factories)
+	return jsPromiseAllSettledElemTypeEx(obj, content, typedLocals, factories, classFields, methodReturns)
 }
 
 // jsPromiseAllSettledValueType recovers T from r.value /
 // (await Promise.allSettled([new T()]))[i].value when the object peels to a
 // settled result of fulfilled value type T. Property must be bare "value".
+// Class()/local/factory only — method-return peels via Ex.
 func jsPromiseAllSettledValueType(n *grammar.Node, content []byte, typedLocals, settledOf, factories map[string]string) string {
+	return jsPromiseAllSettledValueTypeEx(n, content, typedLocals, settledOf, factories, nil, nil)
+}
+
+// jsPromiseAllSettledValueTypeEx also peels method-return allSettled value.
+func jsPromiseAllSettledValueTypeEx(n *grammar.Node, content []byte, typedLocals, settledOf, factories map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -3476,8 +3517,8 @@ func jsPromiseAllSettledValueType(n *grammar.Node, content []byte, typedLocals, 
 			return t
 		}
 	}
-	// (await Promise.allSettled([new A()]))[0].value
-	if t := jsPromiseAllSettledSubscriptType(obj, content, typedLocals, factories); t != "" {
+	// (await Promise.allSettled([new A() / ba.get()]))[0].value
+	if t := jsPromiseAllSettledSubscriptTypeEx(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
 		return t
 	}
 	return ""
