@@ -16247,27 +16247,50 @@ func pythonChainMapMapsIndexObjectValueType(sub *grammar.Node, content []byte, e
 }
 
 // pythonCopyCallMappingValueType recovers T from bare copy(mapping) /
-// deepcopy(mapping) (from copy import copy, deepcopy) when the sole positional
-// peels to scalar mapping value leaf T via object-dict / Class dict peels:
+// deepcopy(mapping) (from copy import copy, deepcopy) and module-qualified
+// copy.copy(mapping) / copy.deepcopy(mapping) when the sole positional peels
+// to scalar mapping value leaf T via object-dict / Class dict peels:
 //
 //	deepcopy({"k": ba.get()})["k"] / copy({"k": ba.get()}).get("k")
-//	da = deepcopy({"k": ba.get()}); da["k"].run()
+//	copy.deepcopy({"k": ba.get()})["k"] / copy.copy({"k": ba.get()}).get("k")
+//	da = copy.deepcopy({"k": ba.get()}); da["k"].run()
 //
 // Class forms peel via pythonIterableElemType star-copy of Class() pairs;
 // this mirrors under foreign same-leaf for method-return dict values.
-// Module-qualified copy.deepcopy / OrderedDict/dict-ctor args that stay
-// Class-also-UNDER are not extended here. Wrong arity fails closed.
+// Nested list-value / .values() module-qualified forms that stay
+// Class-also-UNDER are not extended here (scalar mapping only). Wrong arity
+// / other modules fail closed.
 func pythonCopyCallMappingValueType(call *grammar.Node, content []byte, elemOf, funcReturns, typeOf, fieldOf map[string]string) string {
 	if call == nil || call.Type() != "call" {
 		return ""
 	}
 	fn := ingest.ChildByField(call, "function")
-	if fn == nil || fn.Type() != "identifier" {
-		// Bare from-import only (copy.deepcopy dict remains Class-also-UNDER).
+	if fn == nil {
 		return ""
 	}
-	name := ingest.NodeText(fn, content)
-	if name != "copy" && name != "deepcopy" {
+	switch fn.Type() {
+	case "identifier":
+		// copy(x) / deepcopy(x) — from copy import copy, deepcopy.
+		name := ingest.NodeText(fn, content)
+		if name != "copy" && name != "deepcopy" {
+			return ""
+		}
+	case "attribute":
+		// copy.copy(x) / copy.deepcopy(x) — module-qualified (mirrors
+		// pythonCopyCallObjectType / pythonObjectCollectionElem).
+		attr := ingest.ChildByField(fn, "attribute")
+		obj := ingest.ChildByField(fn, "object")
+		if attr == nil || obj == nil || obj.Type() != "identifier" {
+			return ""
+		}
+		method := ingest.NodeText(attr, content)
+		if method != "copy" && method != "deepcopy" {
+			return ""
+		}
+		if ingest.NodeText(obj, content) != "copy" {
+			return ""
+		}
+	default:
 		return ""
 	}
 	args, ok := pythonCallPositionalArgNodes(call)
