@@ -15078,6 +15078,12 @@ peeled:
 	if et := pythonCopyCallMappingValueType(obj, content, nil, funcReturns, typeOf, fieldOf); et != "" {
 		return et
 	}
+	// ({"k": ba.get()} | {}).values() / ({} | {"k": ba.get()}).values() —
+	// object-dict merge value leaf under foreign same-leaf (Class peels via
+	// pythonDictMergeValueType on iterable path).
+	if et := pythonObjectDictMergeValueType(obj, content, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
 	// MappingProxyType({"k": ba.get()}).values() — proxy value leaf.
 	return pythonMappingProxyObjectValueType(obj, content, nil, funcReturns, typeOf, fieldOf)
 }
@@ -15212,6 +15218,16 @@ peeled:
 					return ""
 				}
 				return pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf)
+			case "choices", "sample":
+				// choices([ba.get()], k=n) / sample([ba.get()], k) from random —
+				// yield elements of population (1st arg); weights/k ignored.
+				// Class peels via pythonIterableElemType; enables
+				// random.sample([ba.get()], 1)[0].run() / for x in choices(...).
+				args, ok := pythonCallPositionalArgNodes(n)
+				if !ok || len(args) == 0 {
+					return ""
+				}
+				return pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf)
 			case "repeat":
 				// repeat(ba.get()[, times]) — yields the object (not an iterable of it).
 				// times ignored. Class()/typed-local peels via pythonIterableElemType.
@@ -15243,6 +15259,19 @@ peeled:
 						return ""
 					}
 					return pythonObjectIterableElemType(args[1], content, funcReturns, typeOf, fieldOf)
+				case "choices", "sample":
+					// random.choices([ba.get()], k=n) / random.sample([ba.get()], k) —
+					// population element under foreign same-leaf (Class peels via
+					// pythonIterableElemType random.choices/sample).
+					objN := ingest.ChildByField(fn, "object")
+					if objN == nil || objN.Type() != "identifier" || ingest.NodeText(objN, content) != "random" {
+						return ""
+					}
+					args, ok := pythonCallPositionalArgNodes(n)
+					if !ok || len(args) == 0 {
+						return ""
+					}
+					return pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf)
 				case "cycle", "islice", "accumulate", "compress":
 					args, ok := pythonCallPositionalArgNodes(n)
 					if !ok || len(args) == 0 {
