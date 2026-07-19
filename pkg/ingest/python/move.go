@@ -3683,16 +3683,18 @@ func pythonIsSuperCall(n *grammar.Node, content []byte) bool {
 
 // pythonSameFileFuncReturnTypes maps same-file function names to concrete return
 // type leaves from annotations: def make_a() -> A / @lru_cache def make_a() -> A.
-// When no return annotation is present, recovers T from body-only `return T()`
-// when every return in the function body is a call of the same bare identifier
-// (def make_a(): return A()) or `return x` after a local `x = T()` assignment
-// (def make_a(): a = A(); return a). Decorated definitions (lru_cache /
-// functools.lru_cache / cache / etc.) peel through to the nested
+// When no return annotation is present, recovers T from body-only returns:
+// `return T()` / `return ba.get()` (typed param method-return) /
+// `return x` after `x = T()` or `x = ba.get()`. Decorated definitions
+// (lru_cache / functools.lru_cache / cache / etc.) peel through to the nested
 // function_definition. Nested functions inside bodies are included (same-file
 // name → last wins). Missing / mixed / non-simple returns fail closed.
+// Nested free-var method-return bodies (def make(): return ba.get() with outer
+// ba: BoxA) rebind during typedLocals with enclosing typeOf.
 //
 // Also records:
 //   - make_a = lambda: A() — zero-arg expression-bodied lambda factory locals
+//     (method-return free-var lambdas rebind in typedLocals)
 //   - A.make / A.create — @staticmethod / @classmethod factories that return
 //     A() or cls() (keys are "Class.method" for A.make().run() peels)
 func pythonSameFileFuncReturnTypes(root *grammar.Node, content []byte) map[string]string {
@@ -3716,8 +3718,10 @@ func pythonSameFileFuncReturnTypes(root *grammar.Node, content []byte) map[strin
 						if tn := pythonTypeName(retN, content); tn != "" {
 							out[name] = tn
 						}
-					} else if tn := pythonFuncBodyReturnCtor(n, content); tn != "" {
-						// Body-only factory: def make_a(): return A()
+					} else if tn := pythonFuncBodyReturnCtor(n, content, out, nil); tn != "" {
+						// Body-only factory: def make_a(): return A() /
+						// def make_ma(ba: BoxA): return ba.get() method-return
+						// (funcReturns=out peels BoxA.get after class harvest).
 						out[name] = tn
 					}
 				}
@@ -3729,7 +3733,9 @@ func pythonSameFileFuncReturnTypes(root *grammar.Node, content []byte) map[strin
 			if left != nil && left.Type() == "identifier" && right != nil && right.Type() == "lambda" {
 				lname := ingest.NodeText(left, content)
 				if lname != "" {
-					if tn := pythonLambdaFactoryReturnCtor(right, content); tn != "" {
+					// Class: lambda: A(). Method-return free-var peels rebind
+					// later in typedLocals with enclosing typeOf.
+					if tn := pythonLambdaFactoryReturnCtor(right, content, out, nil); tn != "" {
 						out[lname] = tn
 					}
 				}
@@ -3751,8 +3757,11 @@ func pythonSameFileFuncReturnTypes(root *grammar.Node, content []byte) map[strin
 }
 
 // pythonLambdaFactoryReturnCtor recovers T from a zero-arg expression-bodied
-// lambda whose body is a Class() call: lambda: A(). Other shapes fail closed.
-func pythonLambdaFactoryReturnCtor(lam *grammar.Node, content []byte) string {
+// lambda whose body is a Class() call or method-return / typed-local leaf:
+// lambda: A() / lambda: ba.get() (typeOf[ba]=BoxA, funcReturns[BoxA.get]=A).
+// Other shapes fail closed. typeOf may be nil for Class()-only same-file harvest;
+// typedLocals rebinds free-var method-return lambdas with enclosing typeOf.
+func pythonLambdaFactoryReturnCtor(lam *grammar.Node, content []byte, funcReturns, typeOf map[string]string) string {
 	if lam == nil || lam.Type() != "lambda" {
 		return ""
 	}
@@ -3769,10 +3778,18 @@ func pythonLambdaFactoryReturnCtor(lam *grammar.Node, content []byte) string {
 		}
 	}
 	body := ingest.ChildByField(lam, "body")
-	if body == nil || body.Type() != "call" {
+	if body == nil {
 		return ""
 	}
-	return pythonExprClassType(body, content)
+	// Class() / method-return / typed-local leaf (same leaf as submit lambda body).
+	if t := pythonObjectLeafType(body, content, funcReturns, typeOf, nil); t != "" {
+		return t
+	}
+	// Class-only fallback when body is A() and ObjectLeafType maps are nil.
+	if body.Type() == "call" {
+		return pythonExprClassType(body, content)
+	}
+	return ""
 }
 
 // pythonHarvestClassInstanceMethodReturns records Class.method → T for
@@ -3880,7 +3897,7 @@ func pythonHarvestClassFactoryReturns(classDef *grammar.Node, content []byte, ou
 			continue
 		}
 		ret := ""
-		if tn := pythonFuncBodyReturnCtor(fn, content); tn == className {
+		if tn := pythonFuncBodyReturnCtor(fn, content, out, nil); tn == className {
 			// @staticmethod def make(): return A() / @classmethod … return A()
 			ret = className
 		} else if kind == "classmethod" && pythonFuncBodyReturnsCls(fn, content) {
@@ -4067,11 +4084,17 @@ func pythonCallFuncReturnType(call *grammar.Node, content []byte, funcReturns, t
 }
 
 // pythonFuncBodyReturnCtor recovers T when every return in fn's body is
-// `return T(...)` (call of a bare identifier) or `return x` after a local
-// assignment `x = T()` / `x = T(...)` of that same bare identifier in the
-// function body (def make_a(): a = A(); return a). Nested function/class/lambda
-// bodies are skipped. Zero, mixed, or non-ctor returns fail closed ("").
-func pythonFuncBodyReturnCtor(fn *grammar.Node, content []byte) string {
+// `return T(...)` / `return ba.get()` (typed param or outer typeOf local) /
+// `return x` after a local `x = T()` or `x = ba.get()` assignment.
+// Nested function/class/lambda bodies are skipped. Zero, mixed, or non-leaf
+// returns fail closed ("").
+//
+// funcReturns peels method-return returns under foreign same-leaf (BoxA.get → A;
+// may be nil for Class()-only paths). typeOf seeds free-var peels from an
+// enclosing scope (nested def make(): return ba.get() with outer ba: BoxA);
+// same-file harvest passes nil typeOf and relies on the function's own typed
+// parameters (def make_ma(ba: BoxA): return ba.get()).
+func pythonFuncBodyReturnCtor(fn *grammar.Node, content []byte, funcReturns, typeOf map[string]string) string {
 	if fn == nil {
 		return ""
 	}
@@ -4079,8 +4102,37 @@ func pythonFuncBodyReturnCtor(fn *grammar.Node, content []byte) string {
 	if body == nil {
 		return ""
 	}
-	// Local name → ctor type from simple assignments x = T() in this body.
+	// Seed free vars from enclosing typeOf, then own typed params + assignments.
 	localCtor := map[string]string{}
+	for k, v := range typeOf {
+		if k != "" && v != "" {
+			localCtor[k] = v
+		}
+	}
+	// Harvest annotated parameters so return ba.get() peels under foreign same-leaf.
+	if params := ingest.ChildByField(fn, "parameters"); params != nil {
+		for i := uint32(0); i < params.ChildCount(); i++ {
+			ch := params.Child(i)
+			if ch == nil {
+				continue
+			}
+			if ch.Type() != "typed_parameter" && ch.Type() != "typed_default_parameter" {
+				continue
+			}
+			nameN := ingest.ChildByField(ch, "name")
+			typeN := ingest.ChildByField(ch, "type")
+			if nameN == nil {
+				nameN = ingest.ChildByType(ch, "identifier")
+			}
+			if nameN != nil && typeN != nil {
+				if tn := pythonTypeName(typeN, content); tn != "" {
+					if name := ingest.NodeText(nameN, content); name != "" {
+						localCtor[name] = tn
+					}
+				}
+			}
+		}
+	}
 	const fail = "-"
 	found := ""
 	saw := false
@@ -4094,15 +4146,22 @@ func pythonFuncBodyReturnCtor(fn *grammar.Node, content []byte) string {
 			// Nested scopes: do not harvest their returns for the outer factory.
 			return
 		case "assignment":
-			// x = T() / x = T(...) — track local → ctor for return x peels.
+			// x = T() / x = ba.get() / x = BoxA().get() — track local for return x.
 			left := ingest.ChildByField(n, "left")
 			right := ingest.ChildByField(n, "right")
-			if left != nil && left.Type() == "identifier" && right != nil && right.Type() == "call" {
-				if f := ingest.ChildByField(right, "function"); f != nil && f.Type() == "identifier" {
-					name := ingest.NodeText(left, content)
-					ctor := ingest.NodeText(f, content)
-					if name != "" && ctor != "" {
-						localCtor[name] = ctor
+			if left != nil && left.Type() == "identifier" && right != nil {
+				name := ingest.NodeText(left, content)
+				if name == "" {
+					break
+				}
+				if t := pythonObjectLeafType(right, content, funcReturns, localCtor, nil); t != "" {
+					localCtor[name] = t
+				} else if right.Type() == "call" {
+					if f := ingest.ChildByField(right, "function"); f != nil && f.Type() == "identifier" {
+						ctor := ingest.NodeText(f, content)
+						if ctor != "" {
+							localCtor[name] = ctor
+						}
 					}
 				}
 			}
@@ -4117,13 +4176,17 @@ func pythonFuncBodyReturnCtor(fn *grammar.Node, content []byte) string {
 				break
 			}
 			t := ""
-			if expr != nil && expr.Type() == "call" {
-				if f := ingest.ChildByField(expr, "function"); f != nil && f.Type() == "identifier" {
-					t = ingest.NodeText(f, content)
+			if expr != nil {
+				// Class() / method-return / typed local leaf.
+				t = pythonObjectLeafType(expr, content, funcReturns, localCtor, nil)
+				if t == "" && expr.Type() == "call" {
+					if f := ingest.ChildByField(expr, "function"); f != nil && f.Type() == "identifier" {
+						t = ingest.NodeText(f, content)
+					}
+				} else if t == "" && expr.Type() == "identifier" {
+					// return a after a = A() / a = ba.get()
+					t = localCtor[ingest.NodeText(expr, content)]
 				}
-			} else if expr != nil && expr.Type() == "identifier" {
-				// return a after a = A()
-				t = localCtor[ingest.NodeText(expr, content)]
 			}
 			if t == "" {
 				found = fail
@@ -4548,6 +4611,21 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			return
 		}
 		switch n.Type() {
+		case "function_definition", "async_function_definition":
+			// Re-peel body-only factory returns with enclosing typeOf so nested
+			// def make_mna(): return ba.get() (free-var ba: BoxA) and param-body
+			// factories bind into funcReturns under foreign same-leaf. Annotated
+			// returns already live in funcReturns from same-file harvest.
+			nameN := ingest.ChildByField(n, "name")
+			if nameN != nil && nameN.Type() == "identifier" {
+				name := ingest.NodeText(nameN, content)
+				retN := ingest.ChildByField(n, "return_type")
+				if name != "" && retN == nil {
+					if tn := pythonFuncBodyReturnCtor(n, content, funcReturns, typeOf); tn != "" {
+						funcReturns[name] = tn
+					}
+				}
+			}
 		case "parameters", "lambda_parameters":
 			// function params: (self, b: Box) / (b: "Box") / (items: list[Box])
 			for i := uint32(0); i < n.ChildCount(); i++ {
@@ -4600,6 +4678,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			}
 			if left != nil && left.Type() == "identifier" {
 				lname := ingest.NodeText(left, content)
+				// mfa = lambda: ba.get() / cfa = lambda: A() — factory lambda local
+				// with enclosing typeOf so free-var method-return peels under foreign
+				// same-leaf (same-file harvest is Class-only for free vars).
+				if right != nil && right.Type() == "lambda" && lname != "" {
+					if tn := pythonLambdaFactoryReturnCtor(right, content, funcReturns, typeOf); tn != "" {
+						funcReturns[lname] = tn
+					}
+				}
 				if typeN != nil {
 					if tn := pythonTypeName(typeN, content); tn != "" {
 						// x: A / x: B = ... — foreign too for shadowing.
