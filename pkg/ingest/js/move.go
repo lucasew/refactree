@@ -2311,10 +2311,11 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 					arrayLocals[name] = t
 				}
 			}
-			// xs[0] = new A() — index assign binds arrayLocals so xs[0].run() /
-			// for (const a of xs) peel under foreign same-leaf. Numeric index only;
-			// non-ident receivers / non-concrete RHS fail closed. Foreign too.
-			if local, et := jsArrayIndexAssignElemType(n, content, out, factories); local != "" && et != "" {
+			// xs[0] = new A() / xs[0] = new BoxA().get() — index assign binds
+			// arrayLocals so xs[0].run() / for (const a of xs) peel under foreign
+			// same-leaf. Numeric index only; non-ident receivers / non-concrete
+			// RHS fail closed. Foreign too. Method-return via extra.
+			if local, et := jsArrayIndexAssignElemTypeEx(n, content, out, factories, classFields, methodReturns); local != "" && et != "" {
 				arrayLocals[local] = et
 			}
 		}
@@ -5122,7 +5123,8 @@ func jsArraySpreadElemTypeSelf(n *grammar.Node, content []byte, arrayLocals, typ
 			}
 			t = jsArraySourceElemType(arg, content, arrayLocals, typedLocals, factories, extra)
 		} else {
-			t = jsExprConcreteType(el, content, typedLocals, factories)
+			// Class() / typed local / factory / method-return (new BoxA().get()).
+			t = jsExprLeafType(el, content, typedLocals, factories, extra.classFields, extra.methodReturns)
 		}
 		if t == "" {
 			return ""
@@ -8346,8 +8348,14 @@ func jsArrayWithElemType(obj, args *grammar.Node, content []byte, arrayLocals, t
 // left is a numeric-index subscript of an identifier and the RHS peels to a
 // concrete class leaf. Enables xs[0].run() / for (const a of xs) under foreign
 // same-leaf after index assign. Non-numeric index / non-ident receiver /
-// non-concrete RHS fail closed.
+// non-concrete RHS fail closed. Method-return peels use jsArrayIndexAssignElemTypeEx.
 func jsArrayIndexAssignElemType(assign *grammar.Node, content []byte, typedLocals, factories map[string]string) (local, classType string) {
+	return jsArrayIndexAssignElemTypeEx(assign, content, typedLocals, factories, nil, nil)
+}
+
+// jsArrayIndexAssignElemTypeEx also peels xs[i] = new BoxA().get() / xs[i] = ba.get()
+// method-return RHS under foreign same-leaf.
+func jsArrayIndexAssignElemTypeEx(assign *grammar.Node, content []byte, typedLocals, factories map[string]string, classFields, methodReturns map[string]map[string]string) (local, classType string) {
 	if assign == nil || assign.Type() != "assignment_expression" {
 		return "", ""
 	}
@@ -8361,7 +8369,8 @@ func jsArrayIndexAssignElemType(assign *grammar.Node, content []byte, typedLocal
 	if obj == nil || obj.Type() != "identifier" || !jsIsNumericIndexArg(idx, content) {
 		return "", ""
 	}
-	t := jsExprConcreteType(right, content, typedLocals, factories)
+	// Class() / typed local / factory / method-return (new BoxA().get()).
+	t := jsExprLeafType(right, content, typedLocals, factories, classFields, methodReturns)
 	if t == "" {
 		return "", ""
 	}

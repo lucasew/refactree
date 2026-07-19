@@ -3235,9 +3235,10 @@ func pythonDictLiteralHomogeneousValueClass(n *grammar.Node, content []byte) str
 }
 
 // pythonDictSubscriptAssignValueType recovers (local, T) from da["k"] = A() /
-// da[k] = A() when the value is Class() and the key is not a slice.
+// da[k] = A() / xs[0] = A() when the value is Class() and the key is not a slice.
+// Also peels method-return RHS: da["k"] = ba.get() / xs[0] = ba.get().
 // Foreign values bind too for shadowing under dual-class same-leaf.
-func pythonDictSubscriptAssignValueType(left, right *grammar.Node, content []byte) (local, classType string) {
+func pythonDictSubscriptAssignValueType(left, right *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) (local, classType string) {
 	if left == nil || left.Type() != "subscript" || right == nil {
 		return "", ""
 	}
@@ -3250,7 +3251,8 @@ func pythonDictSubscriptAssignValueType(left, right *grammar.Node, content []byt
 	if val == nil || val.Type() != "identifier" {
 		return "", ""
 	}
-	et := pythonClassCtorName(right, content)
+	// Class() / typed local / zero-arg method return (ba.get()).
+	et := pythonObjectLeafType(right, content, funcReturns, typeOf, fieldOf)
 	if et == "" {
 		return "", ""
 	}
@@ -5248,11 +5250,13 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					}
 				}
 			}
-			// da["k"] = A() / da[k] = A() — unannotated mapping value assign.
-			// Bind elemOf so da["k"].run() peels under foreign same-leaf.
+			// da["k"] = A() / da[k] = A() / xs[0] = A() —
+			// da["k"] = ba.get() / xs[0] = ba.get() — unannotated subscript assign.
+			// Bind elemOf so da["k"].run() / xs[0].run() peels under foreign same-leaf.
 			// Non-slice key only; foreign values too for shadowing.
+			// Method-return peels via pythonObjectLeafType.
 			if left != nil && left.Type() == "subscript" && right != nil {
-				if local, et := pythonDictSubscriptAssignValueType(left, right, content); local != "" && et != "" {
+				if local, et := pythonDictSubscriptAssignValueType(left, right, content, funcReturns, typeOf, fieldOf); local != "" && et != "" {
 					elemOf[local] = et
 				}
 				if local, et := pythonListSliceAssignElemType(left, right, content); local != "" && et != "" {
