@@ -1561,6 +1561,11 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					valN := ingest.ChildByField(n, "value")
 					if et := javaStreamPipelineElemType(valN, content, elemOf, valOf); ourReceivers[et] {
 						out[name] = true
+					} else if et := javaStaticCollectionOfObjectElemType(valN, content, compOf, typeMembers); ourReceivers[et] {
+						// for (var xa : List.of(ba.get())) / Collections.nCopies(n, ba.get()) /
+						// Stream.of(ba.get()).toList() — method-return factory peels under
+						// foreign same-leaf (Class peels via javaStreamPipelineElemType).
+						out[name] = true
 					}
 					// for (var ga : sa) when sa: Set<List<A>> / List<List<A>> —
 					// ga is List of A (elemOf), not scalar A.
@@ -1621,7 +1626,9 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 			// m.merge((v1,v2) -> v1.m()) / m.entrySet().forEach(e -> e.getValue().m()) /
 			// collect(groupingBy|partitioningBy).values().forEach(g -> g.forEach(a -> a.m())) —
 			// untyped lambda params (and entryValOf for entrySet / elemOf for groups).
-			javaBindStreamLambdaParams(n, content, ourReceivers, elemOf, valOf, entryValOf, groupValOf, entryGroupOf, windowStreamOf, out)
+			// List.of(ba.get()).forEach / Collections.nCopies(n, ba.get()).forEach —
+			// method-return factory peels via typeMembers under foreign same-leaf.
+			javaBindStreamLambdaParams(n, content, ourReceivers, elemOf, valOf, entryValOf, groupValOf, entryGroupOf, windowStreamOf, compOf, typeMembers, out)
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			walk(n.Child(i))
@@ -2300,8 +2307,10 @@ func javaTypeArgNames(typeN *grammar.Node, content []byte) []string {
 // or Map bi-lambdas (forEach/computeIfPresent/compute/replaceAll/merge) when the map
 // value type is ours. entrySet pipelines bind entryValOf for e.getValue().m().
 // groupingBy/partitioningBy maps bind elemOf for value-list params (List<T> groups).
+// Method-return static factories (List.of(ba.get()).forEach / nCopies(n, ba.get()).forEach)
+// peel via javaStaticCollectionOfObjectElemType under foreign same-leaf.
 // Typed (A a) -> params are already handled via formal_parameter.
-func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, elemOf, valOf, entryValOf, groupValOf, entryGroupOf, windowStreamOf map[string]string, out map[string]bool) {
+func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers map[string]bool, elemOf, valOf, entryValOf, groupValOf, entryGroupOf, windowStreamOf, compOf map[string]string, typeMembers map[string]map[string]string, out map[string]bool) {
 	if call == nil || call.Type() != "method_invocation" || out == nil {
 		return
 	}
@@ -2413,6 +2422,14 @@ func javaBindStreamLambdaParams(call *grammar.Node, content []byte, ourReceivers
 			// Unary: stream/collection element or map.values() element.
 			et := javaStreamPipelineElemType(obj, content, elemOf, valOf)
 			if et != "" && ourReceivers[et] {
+				out[params[0]] = true
+			} else if et := javaStaticCollectionOfObjectElemType(obj, content, compOf, typeMembers); et != "" && ourReceivers[et] {
+				// List.of(ba.get()).forEach(xa -> xa.m()) /
+				// Stream.of(ba.get()).forEach(xa -> xa.m()) /
+				// Collections.nCopies(n, ba.get()).forEach(xa -> xa.m()) /
+				// Arrays.asList(ba.get()).forEach / singletonList(ba.get()).forEach —
+				// method-return factory peels under foreign same-leaf (Class peels via
+				// javaStreamPipelineElemType above).
 				out[params[0]] = true
 			} else if nest := javaStreamNestedCollectionElemType(obj, content, elemOf); nest != "" {
 				// nestedA.stream().map(row -> row.get(0).m()) when nestedA: List<List<A>> —
@@ -7472,6 +7489,7 @@ func javaHomogeneousObjectElem(args *grammar.Node, content []byte, compOf map[st
 //
 //	List.of(ba.get()) / Arrays.asList(ba.get()) / Set.of(ba.get())
 //	Collections.singletonList(ba.get()) / Collections.singleton(ba.get())
+//	Collections.nCopies(n, ba.get()) — List of T from second-arg method-return
 //	Stream.of(ba.get()) / Stream.of(ba.get()).findFirst() / .toList()
 //	Optional.of(ba.get()) / ofNullable(ba.get())
 //	CompletableFuture.completedFuture(ba.get())
@@ -7479,8 +7497,8 @@ func javaHomogeneousObjectElem(args *grammar.Node, content []byte, compOf map[st
 //	new ArrayList<>(List.of(ba.get())) / new HashSet<>(List.of(ba.get())) —
 //	  Collection copy ctor with method-return source
 //
-// Class()-only peels live in javaStaticCollectionOfElemType. Mixed / unknown
-// methods / non-homogeneous args fail closed.
+// Class()-only peels live in javaStaticCollectionOfElemType / javaCollectionsNCopiesElemType.
+// Mixed / unknown methods / non-homogeneous args fail closed.
 func javaStaticCollectionOfObjectElemType(obj *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
 	for obj != nil && !obj.IsNull() {
 		for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
@@ -7550,6 +7568,12 @@ func javaStaticCollectionOfObjectElemType(obj *grammar.Node, content []byte, com
 				}
 			}
 			return javaHomogeneousObjectElem(args, content, compOf, typeMembers)
+		case "nCopies":
+			// Collections.nCopies(n, ba.get()) — List of T from second-arg method-return.
+			// Enables .get(0) / .iterator().next() / .stream().findFirst() / forEach /
+			// for (var xa : nCopies(...)) / var al = nCopies(...) under foreign same-leaf.
+			// Class peels live in javaStreamPipelineElemType / javaCollectionsNCopiesElemType.
+			return javaCollectionsNCopiesObjectElemType(obj, content, compOf, typeMembers)
 		case "values", "sequencedValues":
 			// Map.of(k, ba.get()).values().iterator().next() /
 			// Map.of(k, ba.get()).values().stream().findFirst().get() —
