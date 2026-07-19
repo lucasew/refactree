@@ -2547,6 +2547,16 @@ peeled:
 		if nest := pythonChainMapNewChildObjectNestedValueType(val, content, elemOf, funcReturns, typeOf, fieldOf); nest != "" {
 			return pythonRenameByTypeMaps(nest, ourReceivers, foreignReceivers, nil)
 		}
+		// ChainMap({"k": ba.get()}).maps[0]["k"] — maps index object scalar
+		// (Class peels via pythonChainMapMapsIndexValueType / iterable).
+		if et := pythonChainMapMapsIndexObjectValueType(val, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
+			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+		}
+		// deepcopy({"k": ba.get()})["k"] / copy({"k": ba.get()})["k"] —
+		// bare copy/deepcopy of object-dict (Class peels via iterable star-copy).
+		if et := pythonCopyCallMappingValueType(val, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
+			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+		}
 		return len(foreignReceivers) == 0
 	}
 	// (a if c else x).run() — both arms agree on Class leaf (typed local / Class()).
@@ -2679,6 +2689,15 @@ func pythonCollectionAccessElemType(call *grammar.Node, content []byte, elemOf, 
 			// ChainMap({"k": ba.get()}).new_child().get("k") — scalar object new_child
 			// (Class solid via pythonIterableElemType; nested .get stays Class-also-UNDER).
 			if et := pythonChainMapNewChildObjectValueType(obj, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
+				return et
+			}
+			// ChainMap({"k": ba.get()}).maps[0].get("k") — maps index object scalar.
+			if et := pythonChainMapMapsIndexObjectValueType(obj, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
+				return et
+			}
+			// deepcopy({"k": ba.get()}).get("k") / copy({"k": ba.get()}).get("k") —
+			// bare copy/deepcopy of object-dict under foreign same-leaf.
+			if et := pythonCopyCallMappingValueType(obj, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
 				return et
 			}
 			if et := pythonHomogeneousDictValueCtorElem(obj, content); et != "" {
@@ -5358,6 +5377,16 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// ca = ChainMap({"k": ba.get()}).new_child({"j": ba.get()}) —
 						// method-return scalar new_child under foreign same-leaf
 						// (Class peels above). Foreign too for shadowing.
+						elemOf[lname] = et
+					} else if et := pythonChainMapMapsIndexObjectValueType(right, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
+						// ma = ChainMap({"k": ba.get()}).maps[0] — maps index object
+						// scalar under foreign same-leaf (Class peels via iterable).
+						// Foreign too for shadowing.
+						elemOf[lname] = et
+					} else if et := pythonCopyCallMappingValueType(right, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
+						// da = deepcopy({"k": ba.get()}) / copy({"k": ba.get()}) —
+						// bare copy/deepcopy of object-dict under foreign same-leaf
+						// (Class peels via iterable star-copy). Foreign too for shadowing.
 						elemOf[lname] = et
 					} else if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); et != "" {
 						elemOf[lname] = et
@@ -14298,7 +14327,16 @@ func pythonObjectSubscriptElemType(sub *grammar.Node, content []byte, funcReturn
 		return et
 	}
 	// ChainMap({"k": [ba.get()]}).new_child()["k"] — nested object new_child row.
-	return pythonChainMapNewChildObjectNestedValueType(val, content, nil, funcReturns, typeOf, fieldOf)
+	if nest := pythonChainMapNewChildObjectNestedValueType(val, content, nil, funcReturns, typeOf, fieldOf); nest != "" {
+		return nest
+	}
+	// ChainMap({"k": ba.get()}).maps[0]["k"] — maps index object scalar assign.
+	if et := pythonChainMapMapsIndexObjectValueType(val, content, nil, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
+	// deepcopy({"k": ba.get()})["k"] / copy({"k": ba.get()})["k"] — bare
+	// copy/deepcopy of object-dict under foreign same-leaf.
+	return pythonCopyCallMappingValueType(val, content, nil, funcReturns, typeOf, fieldOf)
 }
 
 // pythonObjectCollectionElem recovers element type T from list/tuple/set
@@ -14943,6 +14981,14 @@ peeled:
 	}
 	// dict.fromkeys(keys, ba.get()).values() — value leaf under foreign same-leaf.
 	if et := pythonDictFromkeysObjectValueType(obj, content, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
+	// ChainMap({"k": ba.get()}).maps[0].values() — maps index object scalar.
+	if et := pythonChainMapMapsIndexObjectValueType(obj, content, nil, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
+	// deepcopy({"k": ba.get()}).values() / copy({"k": ba.get()}).values().
+	if et := pythonCopyCallMappingValueType(obj, content, nil, funcReturns, typeOf, fieldOf); et != "" {
 		return et
 	}
 	// MappingProxyType({"k": ba.get()}).values() — proxy value leaf.
@@ -16061,6 +16107,17 @@ func pythonObjectDictMergeArmNestedValueType(n *grammar.Node, content []byte, fu
 // maps[0].get("k").run() / ma = maps[0]; ma["k"].run() peel under foreign
 // same-leaf. Nested list-value maps / non-.maps receivers / slices fail closed.
 func pythonChainMapMapsIndexValueType(sub *grammar.Node, content []byte, elemOf map[string]string) string {
+	return pythonChainMapMapsIndexObjectValueType(sub, content, elemOf, nil, nil, nil)
+}
+
+// pythonChainMapMapsIndexObjectValueType recovers T from
+// ChainMap({"k": ba.get()}).maps[i] / collections.ChainMap(...).maps[0] /
+// ChainMap(OrderedDict(k=ba.get())).maps[0] /
+// ChainMap({"k": ba.get()}).new_child().maps[1] when the ChainMap expression
+// has scalar object mapping value leaf T (method-return / Class() / typed
+// local). Mirrors Class pythonChainMapMapsIndexValueType under foreign
+// same-leaf. Nested list-value maps / non-.maps / slices fail closed.
+func pythonChainMapMapsIndexObjectValueType(sub *grammar.Node, content []byte, elemOf, funcReturns, typeOf, fieldOf map[string]string) string {
 	if sub == nil || sub.Type() != "subscript" {
 		return ""
 	}
@@ -16081,7 +16138,63 @@ func pythonChainMapMapsIndexValueType(sub *grammar.Node, content []byte, elemOf 
 		return ""
 	}
 	obj := ingest.ChildByField(val, "object")
+	// Object peels first (method-return ChainMap / new_child); Class scalar
+	// falls through via pythonChainMapExprObjectScalarValueType helpers.
+	if et := pythonChainMapExprObjectScalarValueType(obj, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
 	return pythonChainMapExprScalarValueType(obj, content, elemOf)
+}
+
+// pythonCopyCallMappingValueType recovers T from bare copy(mapping) /
+// deepcopy(mapping) (from copy import copy, deepcopy) when the sole positional
+// peels to scalar mapping value leaf T via object-dict / Class dict peels:
+//
+//	deepcopy({"k": ba.get()})["k"] / copy({"k": ba.get()}).get("k")
+//	da = deepcopy({"k": ba.get()}); da["k"].run()
+//
+// Class forms peel via pythonIterableElemType star-copy of Class() pairs;
+// this mirrors under foreign same-leaf for method-return dict values.
+// Module-qualified copy.deepcopy / OrderedDict/dict-ctor args that stay
+// Class-also-UNDER are not extended here. Wrong arity fails closed.
+func pythonCopyCallMappingValueType(call *grammar.Node, content []byte, elemOf, funcReturns, typeOf, fieldOf map[string]string) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "identifier" {
+		// Bare from-import only (copy.deepcopy dict remains Class-also-UNDER).
+		return ""
+	}
+	name := ingest.NodeText(fn, content)
+	if name != "copy" && name != "deepcopy" {
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) != 1 {
+		return ""
+	}
+	arg := args[0]
+	// Object-dict first (method-return / typed-local values).
+	if et := pythonHomogeneousObjectDictValue(arg, content, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
+	// Class() dict literals / ctors (assign path may hit before iterable).
+	if et := pythonHomogeneousDictValueCtorElem(arg, content); et != "" {
+		return et
+	}
+	// {**da} / typed mapping local star-copy.
+	if et := pythonDictStarCopyValueType(arg, content, elemOf); et != "" {
+		return et
+	}
+	// MappingProxyType / object merge as copy arg (product wrappers).
+	if et := pythonMappingProxyObjectValueType(arg, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
+	if et := pythonObjectDictMergeValueType(arg, content, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
+	return ""
 }
 
 // pythonChainMapLocalValueType recovers T from ChainMap(da[, ea...]) /
