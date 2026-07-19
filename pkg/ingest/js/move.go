@@ -1657,6 +1657,17 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 		if t := jsObjectSpreadPropType(obj, content, typedLocals, factories, objValueLocals); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
+		// structuredClone({k: new A()}).k / structuredClone(oa).k — clone preserves
+		// uniform object value type (same leaf as oa.k / {...oa}.k).
+		if t := jsStructuredCloneObjectPropType(obj, content, typedLocals, factories, objValueLocals); t != "" {
+			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
+	}
+	// structuredClone({k: new A()})["k"] — bracket form of object-prop clone peel.
+	if obj.Type() == "subscript_expression" {
+		if t := jsStructuredCloneObjectPropType(obj, content, typedLocals, factories, objValueLocals); t != "" {
+			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
 	}
 	// Complex receivers: only when the method leaf is unique project-wide.
 	switch obj.Type() {
@@ -1765,6 +1776,9 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// const a = {...{k: new A()}}.k / {...oa}.k — uniform spread value T.
 						// Bind foreign too for shadowing.
 						out[ingest.NodeText(nameN, content)] = t
+					} else if t := jsStructuredCloneObjectPropType(valN, content, out, factories, objValueLocals); t != "" {
+						// const a = structuredClone({k: new A()}).k / structuredClone(oa).k
+						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsPromiseResolveArgType(valN, content, out, factories); ourReceivers[t] {
 						// await Promise.resolve(new A() / a / makeA()) — resolved value is A.
 						out[ingest.NodeText(nameN, content)] = t
@@ -1774,6 +1788,10 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 					} else if t := jsPromiseAllSettledSubscriptType(valN, content, out, factories); ourReceivers[t] {
 						// const r = (await Promise.allSettled([new A()]))[0]
 						settledOf[ingest.NodeText(nameN, content)] = t
+					} else if t := jsPromiseAllSettledValueType(valN, content, out, settledOf, factories); ourReceivers[t] {
+						// const a = ra.value after const [ra] = await Promise.allSettled([new A()])
+						// / const a = (await Promise.allSettled([new A()]))[0].value
+						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsIdentityCloneType(valN, content, out, factories); ourReceivers[t] {
 						// const a = structuredClone(new A()) / Object.assign(new A()[, …])
 						out[ingest.NodeText(nameN, content)] = t
@@ -7737,6 +7755,107 @@ func jsIteratorToArrayElemType(n *grammar.Node, content []byte, arrayLocals, typ
 	}
 	obj := ingest.ChildByField(fn, "object")
 	return jsIteratorSourceYieldType(obj, content, nil, nil, arrayLocals, typedLocals, factories, extra.mapLocals, extra.entryArrayLocals, extra.setLocals)
+}
+
+// jsStructuredCloneObjectPropType recovers T from structuredClone({k: new T()}).k /
+// structuredClone(oa).k / structuredClone({k: new T()})["k"] when the clone arg
+// peels as a uniform-value object of T (literal / objValue local). Non-clone /
+// non-prop / mixed values fail closed.
+func jsStructuredCloneObjectPropType(n *grammar.Node, content []byte, typedLocals, factories, objValueLocals map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	var obj *grammar.Node
+	switch n.Type() {
+	case "member_expression", "member_expression_optional", "optional_chain", "subscript_expression":
+		obj = ingest.ChildByField(n, "object")
+	default:
+		return ""
+	}
+	if obj == nil {
+		return ""
+	}
+	// structuredClone(x) — peel await/parens via jsStructuredCloneObjectValueType.
+	return jsStructuredCloneObjectValueType(obj, content, typedLocals, factories, objValueLocals)
+}
+
+// jsStructuredCloneObjectValueType recovers uniform property value T from
+// structuredClone(objectLiteral | objValueLocal). Scalar clone peels stay on
+// jsIdentityCloneType. Non-object args fail closed.
+func jsStructuredCloneObjectValueType(n *grammar.Node, content []byte, typedLocals, factories, objValueLocals map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	// await structuredClone(...)
+	if n.Type() == "await_expression" {
+		var arg *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch == nil || ch.Type() == "await" {
+				continue
+			}
+			arg = ch
+			break
+		}
+		return jsStructuredCloneObjectValueType(arg, content, typedLocals, factories, objValueLocals)
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	args := ingest.ChildByField(n, "arguments")
+	if fn == nil || args == nil {
+		return ""
+	}
+	if fn.Type() != "identifier" || ingest.NodeText(fn, content) != "structuredClone" {
+		return ""
+	}
+	var first *grammar.Node
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		first = ch
+		break
+	}
+	if first == nil {
+		return ""
+	}
+	for first != nil && first.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < first.ChildCount(); i++ {
+			ch := first.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		first = inner
+	}
+	if first == nil {
+		return ""
+	}
+	if first.Type() == "object" {
+		return jsObjectLiteralValueType(first, content, typedLocals, factories)
+	}
+	if first.Type() == "identifier" && objValueLocals != nil {
+		return objValueLocals[ingest.NodeText(first, content)]
+	}
+	return ""
 }
 
 // jsIdentityCloneType recovers T from structuredClone(x) / Object.assign(x[, …])

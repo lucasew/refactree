@@ -1088,10 +1088,15 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 		return false
 	}
 	// switch (n) { default -> a; } / default -> new A() — construction arms via
-	// javaInferSwitchExprType; typed-local-only arms fail closed here.
+	// javaInferSwitchExprType; typed-local arms agree like dual-class ternary.
 	if obj.Type() == "switch_expression" {
 		if t := javaInferSwitchExprType(obj, content); t != "" {
 			return javaRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
+		// Typed-local-only arms: every arm must rename as ours (disagree / foreign
+		// fail closed). Mirrors ternary dual-class peels under foreign same-leaf.
+		if javaSwitchExprAllArmsRename(obj, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, implementsEdges) {
+			return true
 		}
 		return false
 	}
@@ -1362,6 +1367,13 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 				// fall through so ba.a() / box.a bind via member access.
 				inferred := javaInferExprType(valN, content)
 				if ourReceivers[inferred] {
+					out[name] = true
+				} else if valN != nil && valN.Type() == "switch_expression" && javaSwitchExprTypedLocalType(valN, content, out) {
+					// var xa = switch (c) { case 0 -> a; default -> x; } when a/x are
+					// typed locals of our receiver (dual-class under-rename).
+					out[name] = true
+				} else if valN != nil && valN.Type() == "ternary_expression" && javaTernaryTypedLocalType(valN, content, out) {
+					// var xa = c ? a : x — both arms typed locals of our receiver.
 					out[name] = true
 				} else if recordIndex[inferred] != nil || fieldIndex[inferred] != nil {
 					// var ba = new BoxA(...) / var box = new Box() — track members when
@@ -7665,6 +7677,148 @@ func javaInferSwitchExprType(sw *grammar.Node, content []byte) string {
 		return ""
 	}
 	return elem
+}
+
+// javaSwitchExprAllArmsRename reports whether every switch arm's result should
+// rename as ours under foreign same-leaf methods (typed-local / construction
+// arms that javaShouldRenameMemberAccess accepts). Empty / uninferable arms
+// fail closed.
+func javaSwitchExprAllArmsRename(sw *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf map[string]string, implementsEdges map[string]map[string]bool) bool {
+	if sw == nil || sw.Type() != "switch_expression" {
+		return false
+	}
+	body := ingest.ChildByField(sw, "body")
+	if body == nil {
+		for i := uint32(0); i < sw.ChildCount(); i++ {
+			if sw.Child(i).Type() == "switch_block" {
+				body = sw.Child(i)
+				break
+			}
+		}
+	}
+	if body == nil {
+		return false
+	}
+	saw := false
+	for i := uint32(0); i < body.ChildCount(); i++ {
+		ch := body.Child(i)
+		var armExpr *grammar.Node
+		switch ch.Type() {
+		case "switch_rule":
+			armExpr = javaSwitchRuleResult(ch)
+		case "switch_block_statement_group":
+			armExpr = javaSwitchGroupYieldExpr(ch)
+		default:
+			continue
+		}
+		if armExpr == nil {
+			return false
+		}
+		if !javaShouldRenameMemberAccess(armExpr, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, implementsEdges) {
+			return false
+		}
+		saw = true
+	}
+	return saw
+}
+
+// javaSwitchExprTypedLocalType recovers T when every switch arm is an identifier
+// already bound in typedLocals (our receivers). Used for var xa = switch (...) {
+// case 0 -> a; default -> x; } under foreign same-leaf. Mixed / foreign / empty fail closed.
+func javaSwitchExprTypedLocalType(sw *grammar.Node, content []byte, typedLocals map[string]bool) bool {
+	if sw == nil || sw.Type() != "switch_expression" || typedLocals == nil {
+		return false
+	}
+	body := ingest.ChildByField(sw, "body")
+	if body == nil {
+		for i := uint32(0); i < sw.ChildCount(); i++ {
+			if sw.Child(i).Type() == "switch_block" {
+				body = sw.Child(i)
+				break
+			}
+		}
+	}
+	if body == nil {
+		return false
+	}
+	saw := false
+	for i := uint32(0); i < body.ChildCount(); i++ {
+		ch := body.Child(i)
+		var armExpr *grammar.Node
+		switch ch.Type() {
+		case "switch_rule":
+			armExpr = javaSwitchRuleResult(ch)
+		case "switch_block_statement_group":
+			armExpr = javaSwitchGroupYieldExpr(ch)
+		default:
+			continue
+		}
+		if armExpr == nil {
+			return false
+		}
+		// Unwrap parens.
+		for armExpr != nil && armExpr.Type() == "parenthesized_expression" {
+			inner := ingest.ChildByField(armExpr, "expression")
+			if inner == nil {
+				for j := uint32(0); j < armExpr.ChildCount(); j++ {
+					c := armExpr.Child(j)
+					if c.Type() == "(" || c.Type() == ")" {
+						continue
+					}
+					inner = c
+					break
+				}
+			}
+			armExpr = inner
+		}
+		if armExpr == nil || armExpr.Type() != "identifier" {
+			return false
+		}
+		if !typedLocals[ingest.NodeText(armExpr, content)] {
+			return false
+		}
+		saw = true
+	}
+	return saw
+}
+
+
+// javaTernaryTypedLocalType reports whether both ternary arms are identifiers
+// bound in typedLocals (our receivers). Used for var xa = c ? a : x under
+// foreign same-leaf methods. Mixed / foreign fail closed.
+func javaTernaryTypedLocalType(n *grammar.Node, content []byte, typedLocals map[string]bool) bool {
+	if n == nil || n.Type() != "ternary_expression" || typedLocals == nil {
+		return false
+	}
+	cons := ingest.ChildByField(n, "consequence")
+	alt := ingest.ChildByField(n, "alternative")
+	return javaIdentInTypedLocals(cons, content, typedLocals) && javaIdentInTypedLocals(alt, content, typedLocals)
+}
+
+// javaIdentInTypedLocals reports whether n (after paren unwrap) is an identifier
+// present in typedLocals.
+func javaIdentInTypedLocals(n *grammar.Node, content []byte, typedLocals map[string]bool) bool {
+	if n == nil || typedLocals == nil {
+		return false
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(n, "expression")
+		if inner == nil {
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "identifier" {
+		return false
+	}
+	return typedLocals[ingest.NodeText(n, content)]
 }
 
 // javaSwitchRuleResult returns the result expression of a switch_rule arm.

@@ -2149,6 +2149,10 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 			if ft := pythonCopyCallObjectType(obj, content, typeOf, fieldOf); ft != "" {
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 			}
+			// weakref.proxy(a).run() / weakref.ref(a)().run() — identity of referent.
+			if ft := pythonWeakrefCallObjectType(obj, content, typeOf); ft != "" {
+				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
+			}
 			// partial(A)().run() / functools.partial(A)().run() — before Class() path.
 			if et := pythonPartialCallResultType(obj, content); et != "" {
 				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
@@ -2341,12 +2345,36 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 		}
 		return len(foreignReceivers) == 0
 	}
+	// await qa.get() — peel through await so Queue/collection accessors type.
+	if obj.Type() == "await" {
+		inner := pythonAwaitArg(obj)
+		if inner != nil {
+			return pythonShouldRenameAttr(inner, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf, funcReturns)
+		}
+		return len(foreignReceivers) == 0
+	}
 	// Complex receivers without static type: unique-leaf only.
 	switch obj.Type() {
-	case "binary_operator", "boolean_operator", "await":
+	case "binary_operator", "boolean_operator":
 		return len(foreignReceivers) == 0
 	}
 	return false
+}
+
+// pythonAwaitArg returns the expression under await (await qa.get() → qa.get()).
+// Missing arg → nil.
+func pythonAwaitArg(n *grammar.Node) *grammar.Node {
+	if n == nil || n.Type() != "await" {
+		return nil
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		if ch == nil || ch.Type() == "await" {
+			continue
+		}
+		return ch
+	}
+	return nil
 }
 
 // pythonCollectionAccessElemType recovers the element type of a collection/
@@ -2371,9 +2399,10 @@ func pythonCollectionAccessElemType(call *grammar.Node, content []byte, elemOf m
 		return ""
 	}
 	switch ingest.NodeText(attr, content) {
-	case "pop", "popleft", "get", "setdefault", "__next__", "__getitem__":
+	case "pop", "popleft", "get", "get_nowait", "setdefault", "__next__", "__getitem__":
 		// Element/value type of the receiver collection (default args ignored).
 		// __getitem__(i) is the same leaf as items[i] / d[k].
+		// get_nowait is asyncio.Queue / queue.Queue non-blocking get (same E as get).
 		return pythonIterableElemType(ingest.ChildByField(fn, "object"), content, elemOf, nil, nil)
 	}
 	return ""
@@ -3965,6 +3994,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			left := ingest.ChildByField(n, "left")
 			right := ingest.ChildByField(n, "right")
 			typeN := ingest.ChildByField(n, "type")
+			// a = await qa.get() — peel await so collection/object peels apply.
+			for right != nil && right.Type() == "await" {
+				right = pythonAwaitArg(right)
+			}
 			if left != nil && left.Type() == "identifier" {
 				lname := ingest.NodeText(left, content)
 				if typeN != nil {
@@ -4009,6 +4042,21 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					// Foreign factories too for shadowing (pb = partial(B)).
 					if et := pythonPartialFactoryClassType(right, content); et != "" {
 						factoryOf[lname] = et
+					}
+					// ra = weakref.ref(a) — factory local; ra() peels as A.
+					// Foreign too for shadowing (rb = weakref.ref(b)).
+					if et := pythonWeakrefRefFactoryType(right, content, typeOf); et != "" {
+						factoryOf[lname] = et
+					}
+					// pa = weakref.proxy(a) — referent object type (not a factory).
+					if et := pythonWeakrefFactoryName(right, content); et == "proxy" {
+						if tn := pythonWeakrefCallObjectType(right, content, typeOf); tn != "" {
+							typeOf[lname] = tn
+							bindFields(lname, tn)
+							if ourReceivers[tn] {
+								out[lname] = true
+							}
+						}
 					}
 					// ga = attrgetter("a") / operator.attrgetter("a") /
 					// gi = itemgetter(0) / itemgetter("a") — stored operator getter
@@ -4203,11 +4251,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 									typeOf[lname] = et
 									bindFields(lname, et)
 								}
-							case "pop", "popleft", "get", "setdefault":
+							case "pop", "popleft", "get", "get_nowait", "setdefault":
 								// a = items.pop() / items.pop(0) / d.pop(k) / list(items).pop()
 								// a = items.popleft() (deque) — element type of receiver.
 								// a = d.get(k) / d.get(k, default) — element/value type of
 								// the receiver collection (dict value leaf via elemOf).
+								// a = qa.get_nowait() / await qa.get() — Queue element (same E).
 								// a = box.get("a") / box.pop("a") / box.setdefault("a") —
 								// TypedDict/record string-key value via fieldOf (key-specific).
 								// a = d.setdefault(k) / d.setdefault(k, default) — same.
@@ -4846,10 +4895,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							if tn := pythonCastTypeArg(valueN, content); ourReceivers[tn] {
 								out[lname] = true
 							}
-						case "pop", "popleft", "get", "setdefault":
+						case "pop", "popleft", "get", "get_nowait", "setdefault":
 							// a := items.pop() / items.pop(0) / d.pop(k)
 							// a := items.popleft() (deque)
-							// a := d.get(k) / d.get(k, default)
+							// a := d.get(k) / d.get(k, default) / qa.get_nowait()
 							// a := box.get("a") / box.pop("a") — TypedDict/record key (fieldOf).
 							// a := d.setdefault(k) / d.setdefault(k, default)
 							// pair := pairs.pop() when pairs is a pair-iter (pairSlots + shared elemOf).
@@ -6440,6 +6489,83 @@ func pythonCopyCallObjectType(call *grammar.Node, content []byte, typeOf map[str
 		return ft
 	}
 	return ""
+}
+
+// pythonWeakrefCallObjectType recovers T from:
+//
+//	weakref.proxy(a).run() / weakref.proxy(A())
+//	weakref.ref(a)().run()  — outer call of a ref factory
+//	ra() after ra = weakref.ref(a) is handled via factoryOf, not here.
+//
+// Referent type is the single positional arg's object type (typeOf / Class()).
+// Other modules / arity / non-proxy/ref fail closed.
+func pythonWeakrefCallObjectType(call *grammar.Node, content []byte, typeOf map[string]string) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil {
+		return ""
+	}
+	// weakref.ref(a)() — function is itself a call.
+	if fn.Type() == "call" {
+		if pythonWeakrefFactoryName(fn, content) != "ref" {
+			return ""
+		}
+		args, ok := pythonCallPositionalArgNodes(fn)
+		if !ok || len(args) != 1 {
+			return ""
+		}
+		return pythonObjectExprType(args[0], content, typeOf)
+	}
+	// weakref.proxy(a)
+	if pythonWeakrefFactoryName(call, content) != "proxy" {
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) != 1 {
+		return ""
+	}
+	return pythonObjectExprType(args[0], content, typeOf)
+}
+
+// pythonWeakrefFactoryName returns "ref" / "proxy" for weakref.ref / weakref.proxy
+// calls (module-qualified only). Other shapes return "".
+func pythonWeakrefFactoryName(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "attribute" {
+		return ""
+	}
+	attr := ingest.ChildByField(fn, "attribute")
+	obj := ingest.ChildByField(fn, "object")
+	if attr == nil || obj == nil || obj.Type() != "identifier" {
+		return ""
+	}
+	if ingest.NodeText(obj, content) != "weakref" {
+		return ""
+	}
+	name := ingest.NodeText(attr, content)
+	if name == "ref" || name == "proxy" {
+		return name
+	}
+	return ""
+}
+
+// pythonWeakrefRefFactoryType recovers T from weakref.ref(a) for factory-local
+// binding (ra = weakref.ref(a); ra().run()). Proxy is not a factory (returns T
+// directly). Non-ref / wrong arity fail closed.
+func pythonWeakrefRefFactoryType(call *grammar.Node, content []byte, typeOf map[string]string) string {
+	if pythonWeakrefFactoryName(call, content) != "ref" {
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) != 1 {
+		return ""
+	}
+	return pythonObjectExprType(args[0], content, typeOf)
 }
 
 // pythonReplaceCallObjectType recovers T from replace(x) / dataclasses.replace(x)
@@ -9321,6 +9447,11 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		if et := pythonChainMapLocalValueType(right, content, elemOf); et != "" {
 			return et
 		}
+		// MappingProxyType(da) / types.MappingProxyType(da) — read-only mapping of
+		// same value leaf as da (or homogeneous dict literal of Class()).
+		if et := pythonMappingProxyValueType(right, content, elemOf); et != "" {
+			return et
+		}
 		// ChainMap(da).new_child() / ChainMap(da).new_child({"j": A()}) scalar.
 		if et := pythonChainMapNewChildValueType(right, content, elemOf); et != "" {
 			return et
@@ -9525,6 +9656,9 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 					}
 					if objN.Type() == "call" {
 						if et := pythonChainMapLocalValueType(objN, content, elemOf); et != "" {
+							return et
+						}
+						if et := pythonMappingProxyValueType(objN, content, elemOf); et != "" {
 							return et
 						}
 						if et := pythonHomogeneousDictValueCtorElem(objN, content); et != "" &&
@@ -11714,6 +11848,46 @@ func pythonChainMapLocalValueType(call *grammar.Node, content []byte, elemOf map
 	return found
 }
 
+// pythonMappingProxyValueType recovers T from MappingProxyType(da) /
+// types.MappingProxyType(da) when the sole positional is a typed scalar mapping
+// local (elemOf) or a homogeneous dict literal of Class() values. Enables
+// MappingProxyType(da)["k"].run() / pa = MappingProxyType(da); pa["k"].run() /
+// MappingProxyType({"k": A()})["k"].run() under foreign same-leaf. Nested list
+// values / multi-arg / kwargs / splat fail closed.
+func pythonMappingProxyValueType(call *grammar.Node, content []byte, elemOf map[string]string) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	if pythonSimpleCalleeName(ingest.ChildByField(call, "function"), content) != "MappingProxyType" {
+		return ""
+	}
+	// types.MappingProxyType — require module ident "types" when attribute form.
+	fn := ingest.ChildByField(call, "function")
+	if fn != nil && fn.Type() == "attribute" {
+		obj := ingest.ChildByField(fn, "object")
+		if obj == nil || obj.Type() != "identifier" || ingest.NodeText(obj, content) != "types" {
+			return ""
+		}
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) != 1 {
+		return ""
+	}
+	arg := args[0]
+	if arg.Type() == "identifier" {
+		if elemOf == nil {
+			return ""
+		}
+		name := ingest.NodeText(arg, content)
+		if elemOf["@nested."+name] != "" {
+			return ""
+		}
+		return elemOf[name]
+	}
+	// MappingProxyType({"k": A()}) — homogeneous Class() values.
+	return pythonHomogeneousDictValueCtorElem(arg, content)
+}
+
 // pythonChainMapLocalNestedValueType recovers T from ChainMap(da[, ea...]) when
 // every positional is a nested mapping local (@nested) or nested dict ctor of
 // the same list/set leaf T. Enables ChainMap(da)["k"][0].run() /
@@ -12936,6 +13110,82 @@ func pythonBindMatchSubjectTypeCaptures(n *grammar.Node, content []byte, tn stri
 	}
 }
 
+// pythonSubscriptContainerElemType recovers T from asyncio.Queue[A] /
+// collections.deque[A] written as a subscript node (attribute/ident + [T]).
+// Single type-arg containers only; mapping forms with two args return the value
+// arg. Empty / unknown fail closed.
+func pythonSubscriptContainerElemType(typeN *grammar.Node, content []byte) string {
+	if typeN == nil || typeN.Type() != "subscript" {
+		return ""
+	}
+	var contName string
+	var args []string
+	for i := uint32(0); i < typeN.ChildCount(); i++ {
+		ch := typeN.Child(i)
+		if ch == nil {
+			continue
+		}
+		switch ch.Type() {
+		case "[", "]", ",", "comment":
+			continue
+		case "identifier":
+			if contName == "" {
+				contName = ingest.NodeText(ch, content)
+			} else {
+				// Type arg as bare identifier (asyncio.Queue[A]).
+				args = append(args, ingest.NodeText(ch, content))
+			}
+		case "attribute":
+			if contName == "" {
+				if attr := ingest.ChildByField(ch, "attribute"); attr != nil {
+					contName = ingest.NodeText(attr, content)
+				} else {
+					for j := uint32(0); j < ch.ChildCount(); j++ {
+						c := ch.Child(j)
+						if c != nil && c.Type() == "identifier" {
+							contName = ingest.NodeText(c, content)
+						}
+					}
+				}
+			}
+		case "type":
+			if tn := pythonTypeName(ch, content); tn != "" {
+				args = append(args, tn)
+			}
+		default:
+			if contName != "" {
+				if tn := pythonTypeName(ch, content); tn != "" {
+					args = append(args, tn)
+				} else {
+					return ""
+				}
+			}
+		}
+	}
+	if contName == "" || len(args) == 0 {
+		return ""
+	}
+	switch contName {
+	case "dict", "Dict", "Mapping", "MutableMapping", "OrderedDict", "defaultdict", "DefaultDict",
+		"ChainMap":
+		if len(args) == 2 {
+			return args[1]
+		}
+		return ""
+	default:
+		if len(args) == 1 {
+			return args[0]
+		}
+		first := args[0]
+		for _, a := range args[1:] {
+			if a != first {
+				return ""
+			}
+		}
+		return first
+	}
+}
+
 // pythonContainerElemType extracts the element type leaf from container annotations:
 // list[A], List[A], Iterable[A], set[A], tuple[A, ...], dict[K, A] (value).
 // Returns "" when the annotation is not a resolvable single-element container.
@@ -12950,6 +13200,11 @@ func pythonContainerElemType(typeN *grammar.Node, content []byte) string {
 	if typeN.Type() == "string" {
 		s := strings.Trim(ingest.NodeText(typeN, content), `"'`)
 		return pythonParseContainerElemString(s)
+	}
+	// asyncio.Queue[A] / collections.deque[A] — tree-sitter uses subscript
+	// (attribute/ident + [T]) rather than generic_type for dotted containers.
+	if typeN.Type() == "subscript" {
+		return pythonSubscriptContainerElemType(typeN, content)
 	}
 	if typeN.Type() != "generic_type" {
 		return ""
@@ -13196,9 +13451,10 @@ func pythonDottedNameLeaf(n *grammar.Node, content []byte) string {
 
 // pythonUnwrapOptionalTypeNode peels Optional[T] / Union[T, None] / T | None to the
 // non-None arm type node so container peels see list[A] under Optional[list[A]] and
-// list[A] | None. Multi non-None arms fail closed (returns nil). Non-optional
-// annotations return typeN unchanged (after a single type wrapper peel).
-// Used for elemOf / @nested recording; pythonTypeName still unwraps scalar leaves.
+// list[A] | None (tree-sitter union_type or binary_operator). Multi non-None arms
+// fail closed (returns nil). Non-optional annotations return typeN unchanged
+// (after a single type wrapper peel). Used for elemOf / @nested recording;
+// pythonTypeName still unwraps scalar leaves.
 func pythonUnwrapOptionalTypeNode(typeN *grammar.Node, content []byte) *grammar.Node {
 	if typeN == nil {
 		return nil
@@ -13275,6 +13531,26 @@ func pythonUnwrapOptionalTypeNode(typeN *grammar.Node, content []byte) *grammar.
 		default:
 			return typeN
 		}
+	case "union_type":
+		// list[A] | None — tree-sitter-python uses union_type (not binary_operator).
+		// Exactly one non-None arm → that type; multi non-None fails closed.
+		var only *grammar.Node
+		count := 0
+		for i := uint32(0); i < typeN.ChildCount(); i++ {
+			ch := typeN.Child(i)
+			if ch == nil || ch.Type() == "|" || ch.Type() == "comment" {
+				continue
+			}
+			if pythonIsNoneTypeNode(ch, content) {
+				continue
+			}
+			count++
+			only = ch
+		}
+		if count == 1 && only != nil {
+			return pythonUnwrapOptionalTypeNode(only, content)
+		}
+		return nil
 	case "binary_operator":
 		// T | None / None | T — exactly one non-None arm.
 		arms := pythonPipeUnionArmNodes(typeN, content)
