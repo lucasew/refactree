@@ -2168,8 +2168,9 @@ peeled:
 			if ft := pythonCopyCallObjectType(obj, content, typeOf, fieldOf, funcReturns); ft != "" {
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 			}
-			// weakref.proxy(a).run() / weakref.ref(a)().run() — identity of referent.
-			if ft := pythonWeakrefCallObjectType(obj, content, typeOf); ft != "" {
+			// weakref.proxy(a).run() / weakref.ref(a)().run() /
+			// weakref.proxy(ba.get()).run() — identity of referent (method-return too).
+			if ft := pythonWeakrefCallObjectType(obj, content, typeOf, funcReturns, fieldOf); ft != "" {
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 			}
 			// cast(A, x).run() / typing.cast(A, x).run() — type-arg peel under foreign same-leaf.
@@ -2410,7 +2411,7 @@ peeled:
 		if ft := pythonFieldAccessType(obj, content, fieldOf, funcReturns, typeOf); ft != "" {
 			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 		}
-		if ft := pythonReplaceFieldAccessType(obj, content, fieldOf); ft != "" {
+		if ft := pythonReplaceFieldAccessType(obj, content, fieldOf, funcReturns, typeOf); ft != "" {
 			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 		}
 		if ft := pythonNamedtupleReplaceFieldAccessType(obj, content, fieldOf); ft != "" {
@@ -4485,9 +4486,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					if et := pythonWeakrefRefFactoryType(right, content, typeOf); et != "" {
 						factoryOf[lname] = et
 					}
-					// pa = weakref.proxy(a) — referent object type (not a factory).
+					// pa = weakref.proxy(a) / weakref.proxy(ba.get()) — referent object type
+					// (not a factory; method-return peels under foreign same-leaf).
 					if et := pythonWeakrefFactoryName(right, content); et == "proxy" {
-						if tn := pythonWeakrefCallObjectType(right, content, typeOf); tn != "" {
+						if tn := pythonWeakrefCallObjectType(right, content, typeOf, funcReturns, fieldOf); tn != "" {
 							typeOf[lname] = tn
 							bindFields(lname, tn)
 							if ourReceivers[tn] {
@@ -5034,7 +5036,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						if ourReceivers[ft] {
 							out[lname] = true
 						}
-					} else if ft := pythonReplaceFieldAccessType(right, content, fieldOf); ft != "" {
+					} else if ft := pythonReplaceFieldAccessType(right, content, fieldOf, funcReturns, typeOf); ft != "" {
 						typeOf[lname] = ft
 						bindFields(lname, ft)
 						if ourReceivers[ft] {
@@ -5824,7 +5826,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					if ourReceivers[ft] {
 						out[lname] = true
 					}
-				} else if ft := pythonReplaceFieldAccessType(valueN, content, fieldOf); ft != "" {
+				} else if ft := pythonReplaceFieldAccessType(valueN, content, fieldOf, funcReturns, typeOf); ft != "" {
 					typeOf[lname] = ft
 					bindFields(lname, ft)
 					if ourReceivers[ft] {
@@ -7535,7 +7537,7 @@ func pythonCopyCallObjectType(call *grammar.Node, content []byte, typeOf, fieldO
 	if ft := pythonFieldAccessType(args[0], content, fieldOf, nil, nil); ft != "" {
 		return ft
 	}
-	if ft := pythonReplaceFieldAccessType(args[0], content, fieldOf); ft != "" {
+	if ft := pythonReplaceFieldAccessType(args[0], content, fieldOf, funcReturns, typeOf); ft != "" {
 		return ft
 	}
 	// copy.copy(asdict(box)["a"]) / copy.copy(asdict(box).get("a")) /
@@ -7558,13 +7560,14 @@ func pythonCopyCallObjectType(call *grammar.Node, content []byte, typeOf, fieldO
 
 // pythonWeakrefCallObjectType recovers T from:
 //
-//	weakref.proxy(a).run() / weakref.proxy(A())
+//	weakref.proxy(a).run() / weakref.proxy(A()) / weakref.proxy(ba.get())
 //	weakref.ref(a)().run()  — outer call of a ref factory
 //	ra() after ra = weakref.ref(a) is handled via factoryOf, not here.
 //
-// Referent type is the single positional arg's object type (typeOf / Class()).
+// Referent type is the single positional arg's object type (typeOf / Class() /
+// zero-arg method return via pythonObjectLeafType under foreign same-leaf).
 // Other modules / arity / non-proxy/ref fail closed.
-func pythonWeakrefCallObjectType(call *grammar.Node, content []byte, typeOf map[string]string) string {
+func pythonWeakrefCallObjectType(call *grammar.Node, content []byte, typeOf, funcReturns, fieldOf map[string]string) string {
 	if call == nil || call.Type() != "call" {
 		return ""
 	}
@@ -7581,9 +7584,12 @@ func pythonWeakrefCallObjectType(call *grammar.Node, content []byte, typeOf map[
 		if !ok || len(args) != 1 {
 			return ""
 		}
-		return pythonObjectExprType(args[0], content, typeOf)
+		if tn := pythonObjectExprType(args[0], content, typeOf); tn != "" {
+			return tn
+		}
+		return pythonObjectLeafType(args[0], content, funcReturns, typeOf, fieldOf)
 	}
-	// weakref.proxy(a)
+	// weakref.proxy(a) / weakref.proxy(ba.get())
 	if pythonWeakrefFactoryName(call, content) != "proxy" {
 		return ""
 	}
@@ -7591,7 +7597,12 @@ func pythonWeakrefCallObjectType(call *grammar.Node, content []byte, typeOf map[
 	if !ok || len(args) != 1 {
 		return ""
 	}
-	return pythonObjectExprType(args[0], content, typeOf)
+	if tn := pythonObjectExprType(args[0], content, typeOf); tn != "" {
+		return tn
+	}
+	// weakref.proxy(ba.get()) — zero-arg method return under foreign same-leaf
+	// (Class/typed-local peels above via pythonObjectExprType).
+	return pythonObjectLeafType(args[0], content, funcReturns, typeOf, fieldOf)
 }
 
 // pythonWeakrefFactoryName returns "ref" / "proxy" for weakref.ref / weakref.proxy
@@ -9152,12 +9163,13 @@ func pythonDictViewObjectLocal(n *grammar.Node, content []byte) string {
 }
 
 // pythonReplaceFieldAccessType recovers T from replace(box).a /
-// dataclasses.replace(box).a / replace(box, a=A()).a when box is a typed local
-// with annotated field a of type T (fieldOf; same leaf as box.a), or when a
-// keyword override is a Class() ctor (override wins — same leaf as
-// ba._replace(a=A()).a). First positional must be an identifier local for
+// dataclasses.replace(box).a / replace(box, a=A()).a / replace(box, a=ba.get()).a
+// when box is a typed local with annotated field a of type T (fieldOf; same leaf
+// as box.a), or when a keyword override peels to Class() or zero-arg method
+// return (override wins — same leaf as ba._replace(a=A()).a /
+// ba._replace(a=ba.get()).a). First positional must be an identifier local for
 // fieldOf fallback; keyword-only object / non-replace callees fail closed.
-func pythonReplaceFieldAccessType(attr *grammar.Node, content []byte, fieldOf map[string]string) string {
+func pythonReplaceFieldAccessType(attr *grammar.Node, content []byte, fieldOf, funcReturns, typeOf map[string]string) string {
 	if attr == nil || attr.Type() != "attribute" {
 		return ""
 	}
@@ -9174,7 +9186,8 @@ func pythonReplaceFieldAccessType(attr *grammar.Node, content []byte, fieldOf ma
 	if fname == "" {
 		return ""
 	}
-	// Keyword override: replace(box, a=A()).a → A (same as namedtuple _replace).
+	// Keyword override: replace(box, a=A()).a / replace(box, a=ba.get()).a → A
+	// (same as namedtuple _replace; method-return under foreign same-leaf).
 	argList := ingest.ChildByField(obj, "arguments")
 	if argList != nil {
 		for i := uint32(0); i < argList.ChildCount(); i++ {
@@ -9188,6 +9201,9 @@ func pythonReplaceFieldAccessType(attr *grammar.Node, content []byte, fieldOf ma
 				continue
 			}
 			if et := pythonExprClassType(valN, content); et != "" {
+				return et
+			}
+			if et := pythonObjectLeafType(valN, content, funcReturns, typeOf, fieldOf); et != "" {
 				return et
 			}
 		}

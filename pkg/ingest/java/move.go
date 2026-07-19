@@ -1466,13 +1466,14 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 				} else if id := javaFunctionIdentityApplyArgIdent(valN, content); id != "" && out[id] {
 					// var xa = Function.identity().apply(a) when a is a typed local.
 					out[name] = true
-				} else if vt := javaEntryExprValueType(valN, content, elemOf, valOf, entryValOf); vt != "" {
-					// var ea = Map.entry(k, new A()) / am.firstEntry() /
-					// am.pollLastEntry() / am.floorEntry(k) /
+				} else if vt := javaEntryExprValueTypeEx(valN, content, elemOf, valOf, entryValOf, compOf, typeMembers); vt != "" {
+					// var ea = Map.entry(k, new A()) / Map.entry(k, ba.get()) /
+					// new AbstractMap.SimpleEntry<>(k, ba.get()) /
+					// am.firstEntry() / am.pollLastEntry() / am.floorEntry(k) /
 					// as.entrySet().iterator().next() /
 					// as.entrySet().stream().findFirst().get() — Entry of V;
 					// track value T for later ea.getValue().m() / ea.setValue(v).m()
-					// (entry is not A itself).
+					// (entry is not A itself; method-return peels under foreign same-leaf).
 					entryValOf[name] = vt
 				} else if et := javaWindowGatherStreamElemType(valN, content, elemOf, valOf, windowStreamOf); et != "" {
 					// var s = stream.gather(Gatherers.windowFixed(n)) /
@@ -1517,6 +1518,19 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// var m = new HashMap<>(Map.of("k", ba.get())) — method-return map
 					// copy ctor under foreign same-leaf (Class peels via
 					// javaMapPipelineValueType above).
+					valOf[name] = et
+				} else if et := javaMapOfEntriesObjectValueType(valN, content, compOf, typeMembers); et != "" {
+					// var m = Map.ofEntries(Map.entry("k", ba.get())) — method-return
+					// ofEntries under foreign same-leaf (Class peels via
+					// javaMapPipelineValueType above).
+					valOf[name] = et
+				} else if et := javaCollectionsSingletonMapObjectValueType(valN, content, compOf, typeMembers); et != "" {
+					// var m = Collections.singletonMap("k", ba.get()) — method-return
+					// singletonMap under foreign same-leaf.
+					valOf[name] = et
+				} else if et := javaMapOfObjectValueType(valN, content, compOf, typeMembers); et != "" {
+					// var m = Map.of("k", ba.get()) — method-return Map.of values
+					// under foreign same-leaf (Class peels via javaMapPipelineValueType).
 					valOf[name] = et
 				} else if et := javaGroupingByCollectElemType(valN, content, elemOf, valOf); et != "" {
 					// var m = as.stream().collect(Collectors.groupingBy/partitioningBy(...)) —
@@ -6451,7 +6465,17 @@ func javaCollectionsMapWrapperValueType(call *grammar.Node, content []byte, elem
 // Collections.singletonMap(k, new T(...)). Key is ignored; only the second arg's
 // creation type matters. Non-Collections receivers, wrong arity, or non-creation
 // value args fail closed.
+// Method-return values (singletonMap(k, ba.get())) use
+// javaCollectionsSingletonMapObjectValueType.
 func javaCollectionsSingletonMapValueType(call *grammar.Node, content []byte) string {
+	return javaCollectionsSingletonMapObjectValueType(call, content, nil, nil)
+}
+
+// javaCollectionsSingletonMapObjectValueType recovers T from
+// Collections.singletonMap(k, new T(...)) / Collections.singletonMap(k, ba.get()).
+// Key is ignored; value peels via javaObjectArgType under foreign same-leaf.
+// Non-Collections receivers, wrong arity, or non-object values fail closed.
+func javaCollectionsSingletonMapObjectValueType(call *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
 	if call == nil || call.Type() != "method_invocation" {
 		return ""
 	}
@@ -6462,9 +6486,18 @@ func javaCollectionsSingletonMapValueType(call *grammar.Node, content []byte) st
 	if javaStaticFactoryReceiverName(recvN, content) != "Collections" {
 		return ""
 	}
+	if javaMethodInvocationName(call, content) != "singletonMap" {
+		return ""
+	}
 	args := javaCallArgs(call)
 	if len(args) != 2 {
 		return ""
+	}
+	// Prefer method-return / Class() object peels when typeMembers available.
+	if typeMembers != nil {
+		if t := javaObjectArgType(args[1], content, compOf, typeMembers); t != "" {
+			return t
+		}
 	}
 	arg := args[1]
 	if arg.Type() != "object_creation_expression" {
@@ -6529,7 +6562,16 @@ func javaMapOfValueType(call *grammar.Node, content []byte) string {
 // Map.ofEntries(Map.entry(k1, new T(...)), Map.entry(k2, new T(...)), …)
 // when every entry arg is Map.entry(k, new T(...)) with the same T. Empty
 // ofEntries(), non-Map receivers, non-entry args, and non-creation values fail closed.
+// Method-return entry values (Map.entry(k, ba.get())) use javaMapOfEntriesObjectValueType.
 func javaMapOfEntriesValueType(call *grammar.Node, content []byte) string {
+	return javaMapOfEntriesObjectValueType(call, content, nil, nil)
+}
+
+// javaMapOfEntriesObjectValueType recovers T from
+// Map.ofEntries(Map.entry(k, new T(...)), …) / Map.ofEntries(Map.entry(k, ba.get()), …)
+// when every entry arg peels to the same value leaf via javaMapEntryObjectValueType.
+// Empty ofEntries(), non-Map receivers, non-entry args, and mixed leaves fail closed.
+func javaMapOfEntriesObjectValueType(call *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
 	if call == nil || call.Type() != "method_invocation" {
 		return ""
 	}
@@ -6540,6 +6582,9 @@ func javaMapOfEntriesValueType(call *grammar.Node, content []byte) string {
 	if javaStaticFactoryReceiverName(recvN, content) != "Map" {
 		return ""
 	}
+	if javaMethodInvocationName(call, content) != "ofEntries" {
+		return ""
+	}
 	args := javaCallArgs(call)
 	if len(args) == 0 {
 		return ""
@@ -6547,7 +6592,7 @@ func javaMapOfEntriesValueType(call *grammar.Node, content []byte) string {
 	var elem string
 	saw := false
 	for _, arg := range args {
-		tn := javaMapEntryCreationValueType(arg, content)
+		tn := javaMapEntryObjectValueType(arg, content, compOf, typeMembers)
 		if tn == "" {
 			return ""
 		}
@@ -6629,9 +6674,10 @@ func javaEntryExprValueTypeEx(obj *grammar.Node, content []byte, elemOf, valOf, 
 		return ""
 	case "object_creation_expression":
 		// new AbstractMap.SimpleEntry<>(k, new T(...)) /
-		// new AbstractMap.SimpleImmutableEntry<>(k, new T(...)) —
-		// same V leaf as Map.entry (constructor value arg / declared type args).
-		return javaSimpleEntryCreationValueType(obj, content)
+		// new AbstractMap.SimpleImmutableEntry<>(k, new T(...)) /
+		// new SimpleEntry<>(k, ba.get()) — same V leaf as Map.entry
+		// (constructor value arg / declared type args / method-return).
+		return javaSimpleEntryCreationObjectValueType(obj, content, compOf, typeMembers)
 	case "method_invocation":
 		nameN := ingest.ChildByField(obj, "name")
 		if nameN == nil {
@@ -6951,7 +6997,19 @@ func javaReferenceHolderCreationObjectElemType(call *grammar.Node, content []byt
 // Prefers declared type args when present; diamond/raw recover V from the second
 // constructor arg when it is new T(...). Other types / arities / non-creation
 // values fail closed.
+// Method-return values (new SimpleEntry<>(k, ba.get())) use
+// javaSimpleEntryCreationObjectValueType.
 func javaSimpleEntryCreationValueType(call *grammar.Node, content []byte) string {
+	return javaSimpleEntryCreationObjectValueType(call, content, nil, nil)
+}
+
+// javaSimpleEntryCreationObjectValueType recovers V from
+// new AbstractMap.SimpleEntry<>(k, new T(...)) / new SimpleEntry<>(k, ba.get()) /
+// SimpleImmutableEntry under foreign same-leaf when typeMembers is provided.
+// Prefers declared type args; diamond peels the second ctor arg via
+// javaObjectArgType (Class() or zero-arg method return). Other types / arities
+// fail closed.
+func javaSimpleEntryCreationObjectValueType(call *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
 	if call == nil || call.Type() != "object_creation_expression" {
 		return ""
 	}
@@ -6974,6 +7032,12 @@ func javaSimpleEntryCreationValueType(call *grammar.Node, content []byte) string
 	args := javaCallArgs(call)
 	if len(args) != 2 {
 		return ""
+	}
+	// Prefer method-return / Class() object peels when typeMembers available.
+	if typeMembers != nil {
+		if t := javaObjectArgType(args[1], content, compOf, typeMembers); t != "" {
+			return t
+		}
 	}
 	arg := args[1]
 	if arg.Type() != "object_creation_expression" {
@@ -8119,6 +8183,8 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 			// Map.copyOf(m).get(k) / Collections.unmodifiableMap(m).get(k) /
 			// stream.collect(toMap(...)).get(k) — and remove(k) → V.
 			// Map.of(k, ba.get()).get(k) — method-return map value peels.
+			// Map.ofEntries(Map.entry(k, ba.get())).get(k) — method-return ofEntries.
+			// Collections.singletonMap(k, ba.get()).get(k) — method-return singleton.
 			// new HashMap<>(Map.of(k, ba.get())).get(k) — map copy ctor method-return.
 			// getFirst/getLast/set/queue endpoints / CF join stay list/deque/CF-only.
 			if method == "get" || method == "remove" {
@@ -8126,6 +8192,12 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 					return vt
 				}
 				if vt := javaMapCopyCreationObjectValueType(obj, content, compOf, typeMembers); vt != "" {
+					return vt
+				}
+				if vt := javaMapOfEntriesObjectValueType(obj, content, compOf, typeMembers); vt != "" {
+					return vt
+				}
+				if vt := javaCollectionsSingletonMapObjectValueType(obj, content, compOf, typeMembers); vt != "" {
 					return vt
 				}
 				return javaMapOfObjectValueType(obj, content, compOf, typeMembers)
