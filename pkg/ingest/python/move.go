@@ -2153,6 +2153,10 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 			if ft := pythonWeakrefCallObjectType(obj, content, typeOf); ft != "" {
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 			}
+			// cast(A, x).run() / typing.cast(A, x).run() — type-arg peel under foreign same-leaf.
+			if ft := pythonCastCallType(obj, content); ft != "" {
+				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
+			}
 			// partial(A)().run() / functools.partial(A)().run() — before Class() path.
 			if et := pythonPartialCallResultType(obj, content); et != "" {
 				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
@@ -4672,6 +4676,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				if local, et := pythonDictSubscriptAssignValueType(left, right, content); local != "" && et != "" {
 					elemOf[local] = et
 				}
+				if local, et := pythonListSliceAssignElemType(left, right, content); local != "" && et != "" {
+					// xs[:] = [A()] / xs[i:j] = [A()] — list slice assign element peel.
+					elemOf[local] = et
+				}
 			}
 			// a, b = A(), B() / (a, b) = A(), B() / a, b = (A(), B()) /
 			// [a, b] = [A(), B()] /
@@ -5432,6 +5440,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// alias is the yielded instance, not the CM object.
 			if name, typ := pythonAsPatternCMYieldBinding(n, content, cmYieldOf); name != "" {
 				typeOf[name] = typ
+				if ourReceivers[typ] {
+					out[name] = true
+				}
+			}
+			// with nullcontext(a) as xa / closing(A()) as xa — identity CM peels.
+			if name, typ := pythonAsPatternIdentityCMBinding(n, content, typeOf); name != "" {
+				typeOf[name] = typ
+				bindFields(name, typ)
 				if ourReceivers[typ] {
 					out[name] = true
 				}
@@ -13889,6 +13905,162 @@ func pythonIsNoneTypeNode(n *grammar.Node, content []byte) bool {
 		return ingest.NodeText(n, content) == "None"
 	}
 	return false
+}
+
+// pythonCastCallType recovers T from cast(T, x) / typing.cast(T, x) when the
+// first type arg peels to a class leaf. Enables cast(A, x).run() under foreign
+// same-leaf (assignment form already binds typed locals). Non-cast callees fail closed.
+func pythonCastCallType(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil {
+		return ""
+	}
+	switch fn.Type() {
+	case "identifier":
+		if ingest.NodeText(fn, content) != "cast" {
+			return ""
+		}
+	case "attribute":
+		attr := ingest.ChildByField(fn, "attribute")
+		if attr == nil || ingest.NodeText(attr, content) != "cast" {
+			return ""
+		}
+		// typing.cast / module.cast — module name unchecked (product: typing.cast).
+	default:
+		return ""
+	}
+	return pythonCastTypeArg(call, content)
+}
+
+// pythonAsPatternIdentityCMBinding recovers (alias, T) from
+// `with nullcontext(x) as a` / `with closing(x) as a` /
+// `with contextlib.nullcontext(x) as a` when x peels to T (typed local / Class()).
+// Same-file @contextmanager factories stay on pythonAsPatternCMYieldBinding.
+// Other CM names / arity fail closed.
+func pythonAsPatternIdentityCMBinding(n *grammar.Node, content []byte, typeOf map[string]string) (name, typ string) {
+	if n == nil || n.Type() != "as_pattern" {
+		return "", ""
+	}
+	var left *grammar.Node
+	var alias *grammar.Node
+	seenAs := false
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		if ch.Type() == "as" {
+			seenAs = true
+			continue
+		}
+		if !seenAs {
+			left = ch
+			continue
+		}
+		switch ch.Type() {
+		case "as_pattern_target":
+			if id := ingest.ChildByType(ch, "identifier"); id != nil {
+				alias = id
+			}
+		case "identifier":
+			alias = ch
+		}
+	}
+	if left == nil || alias == nil || left.Type() != "call" {
+		return "", ""
+	}
+	fn := ingest.ChildByField(left, "function")
+	if fn == nil {
+		return "", ""
+	}
+	ok := false
+	switch fn.Type() {
+	case "identifier":
+		switch ingest.NodeText(fn, content) {
+		case "nullcontext", "closing":
+			ok = true
+		}
+	case "attribute":
+		attr := ingest.ChildByField(fn, "attribute")
+		obj := ingest.ChildByField(fn, "object")
+		if attr != nil && obj != nil && obj.Type() == "identifier" &&
+			ingest.NodeText(obj, content) == "contextlib" {
+			switch ingest.NodeText(attr, content) {
+			case "nullcontext", "closing":
+				ok = true
+			}
+		}
+	}
+	if !ok {
+		return "", ""
+	}
+	args, okArgs := pythonCallPositionalArgNodes(left)
+	if !okArgs || len(args) != 1 {
+		return "", ""
+	}
+	tn := pythonObjectExprType(args[0], content, typeOf)
+	if tn == "" {
+		tn = pythonClassCtorName(args[0], content)
+	}
+	if tn == "" {
+		return "", ""
+	}
+	return ingest.NodeText(alias, content), tn
+}
+
+// pythonListSliceAssignElemType recovers (local, T) from xs[:] = [A()] /
+// xs[i:j] = [A()] / xs[:] = (A(),) when the RHS is a list/tuple of uniform Class()
+// elements and the left is a slice subscript of an identifier. Enables
+// xs[0].run() after slice assign under foreign same-leaf. Non-slice keys /
+// mixed RHS / non-Class elems fail closed.
+func pythonListSliceAssignElemType(left, right *grammar.Node, content []byte) (local, classType string) {
+	if left == nil || left.Type() != "subscript" || right == nil {
+		return "", ""
+	}
+	hasSlice := false
+	for i := uint32(0); i < left.ChildCount(); i++ {
+		if left.Child(i).Type() == "slice" {
+			hasSlice = true
+			break
+		}
+	}
+	if !hasSlice {
+		return "", ""
+	}
+	val := ingest.ChildByField(left, "value")
+	if val == nil || val.Type() != "identifier" {
+		return "", ""
+	}
+	// RHS: list/tuple of Class() with uniform type.
+	if right.Type() != "list" && right.Type() != "tuple" {
+		return "", ""
+	}
+	found := ""
+	saw := false
+	for i := uint32(0); i < right.ChildCount(); i++ {
+		ch := right.Child(i)
+		if ch == nil {
+			continue
+		}
+		switch ch.Type() {
+		case "[", "]", "(", ")", ",", "comment":
+			continue
+		}
+		et := pythonClassCtorName(ch, content)
+		if et == "" {
+			return "", ""
+		}
+		if !saw {
+			found = et
+			saw = true
+		} else if found != et {
+			return "", ""
+		}
+	}
+	if !saw {
+		return "", ""
+	}
+	return ingest.NodeText(val, content), found
 }
 
 // pythonCastTypeArg returns the type leaf of cast(T, x) / typing.cast(T, x)
