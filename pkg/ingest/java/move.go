@@ -1064,11 +1064,128 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 		if id := javaObjectsRequireNonNullArgIdent(obj, content); id != "" {
 			return javaRenameByTypeMaps(id, ourReceivers, foreignReceivers, typedLocals)
 		}
+		// Optional.of(a).get() / ofNullable(a).orElseThrow() when a is a typed local —
+		// unwrap peels the ident's type under foreign same-leaf methods.
+		if id := javaOptionalOfIdentUnwrap(obj, content); id != "" {
+			return javaRenameByTypeMaps(id, ourReceivers, foreignReceivers, typedLocals)
+		}
 		// Unknown method receivers: unique-leaf only.
 		return len(foreignReceivers) == 0
 	}
+	// (c ? a : x).run() / (c ? new A() : A.make()).run() — both arms agree on T.
+	if obj.Type() == "ternary_expression" {
+		if t := javaInferExprType(obj, content); t != "" {
+			return javaRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
+		cons := ingest.ChildByField(obj, "consequence")
+		alt := ingest.ChildByField(obj, "alternative")
+		// Typed-local arms: both must rename as ours (disagree / foreign fail closed).
+		if cons != nil && alt != nil &&
+			javaShouldRenameMemberAccess(cons, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, implementsEdges) &&
+			javaShouldRenameMemberAccess(alt, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, implementsEdges) {
+			return true
+		}
+		return false
+	}
+	// switch (n) { default -> a; } / default -> new A() — construction arms via
+	// javaInferSwitchExprType; typed-local-only arms fail closed here.
+	if obj.Type() == "switch_expression" {
+		if t := javaInferSwitchExprType(obj, content); t != "" {
+			return javaRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
+		return false
+	}
 	// Unknown / complex receivers without recoverable static type: unique-leaf only.
 	return len(foreignReceivers) == 0
+}
+
+// javaOptionalOfIdentUnwrap recovers the identifier name from
+// Optional.of(a).get() / ofNullable(a).orElseThrow() / of(a).orElseGet(...) when
+// the Optional factory wraps a bare identifier. Used with typedLocals so
+// Optional.ofNullable(a).get().run() peels under foreign same-leaf methods.
+// Non-Optional receivers / non-ident args / multi-arg fail closed ("").
+func javaOptionalOfIdentUnwrap(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	nameN := ingest.ChildByField(call, "name")
+	if nameN == nil {
+		return ""
+	}
+	switch ingest.NodeText(nameN, content) {
+	case "get", "orElseThrow", "orElse", "orElseGet":
+		// ok — Optional unwrap
+	default:
+		return ""
+	}
+	// get/orElseThrow must be zero-arg for Optional unwrap (List.get(i) has args).
+	method := ingest.NodeText(nameN, content)
+	if method == "get" || method == "orElseThrow" {
+		if !javaCallIsZeroArg(call) {
+			return ""
+		}
+	}
+	opt := ingest.ChildByField(call, "object")
+	for opt != nil && !opt.IsNull() && opt.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(opt, "expression")
+		if inner == nil {
+			for i := uint32(0); i < opt.ChildCount(); i++ {
+				ch := opt.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		opt = inner
+	}
+	if opt == nil || opt.Type() != "method_invocation" {
+		return ""
+	}
+	optName := ingest.ChildByField(opt, "name")
+	optRecv := ingest.ChildByField(opt, "object")
+	if optName == nil || optRecv == nil {
+		return ""
+	}
+	switch ingest.NodeText(optName, content) {
+	case "of", "ofNullable":
+		// ok
+	default:
+		return ""
+	}
+	if javaStaticFactoryReceiverName(optRecv, content) != "Optional" {
+		return ""
+	}
+	// Single positional arg must be identifier.
+	var args *grammar.Node
+	for i := uint32(0); i < opt.ChildCount(); i++ {
+		if opt.Child(i).Type() == "argument_list" {
+			args = opt.Child(i)
+			break
+		}
+	}
+	if args == nil {
+		return ""
+	}
+	var ident string
+	count := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		count++
+		if ch.Type() == "identifier" && ident == "" {
+			ident = ingest.NodeText(ch, content)
+		} else {
+			return ""
+		}
+	}
+	if count != 1 || ident == "" {
+		return ""
+	}
+	return ident
 }
 
 // javaFieldAccessRoot returns the leftmost identifier of a field_access chain

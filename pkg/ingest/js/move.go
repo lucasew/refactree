@@ -1645,6 +1645,19 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 	}
+	// (c ? new A() : new A()).run() / (c ? a : x).run() — both arms agree on T.
+	if obj.Type() == "ternary_expression" {
+		if t := jsTernaryExprType(obj, content, typedLocals, factories); t != "" {
+			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
+	}
+	// {...{k: new A()}}.k.run() / {...oa}.k.run() — object spread property peels
+	// when spread sources agree on uniform value T (same leaf as Object.assign).
+	if obj.Type() == "member_expression" || obj.Type() == "member_expression_optional" || obj.Type() == "optional_chain" {
+		if t := jsObjectSpreadPropType(obj, content, typedLocals, factories, objValueLocals); t != "" {
+			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
+	}
 	// Complex receivers: only when the method leaf is unique project-wide.
 	switch obj.Type() {
 	case "call_expression", "await_expression", "ternary_expression",
@@ -1744,6 +1757,14 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 				if nameN.Type() == "identifier" {
 					if ctor := jsNewExpressionType(valN, content); ourReceivers[ctor] {
 						out[ingest.NodeText(nameN, content)] = ctor
+					} else if t := jsTernaryExprType(valN, content, out, factories); t != "" {
+						// const xa = c ? a : x / c ? new A() : new A() — both arms agree.
+						// Bind foreign too so dual-class B rebinds fail closed.
+						out[ingest.NodeText(nameN, content)] = t
+					} else if t := jsObjectSpreadPropType(valN, content, out, factories, objValueLocals); t != "" {
+						// const a = {...{k: new A()}}.k / {...oa}.k — uniform spread value T.
+						// Bind foreign too for shadowing.
+						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsPromiseResolveArgType(valN, content, out, factories); ourReceivers[t] {
 						// await Promise.resolve(new A() / a / makeA()) — resolved value is A.
 						out[ingest.NodeText(nameN, content)] = t
@@ -1993,6 +2014,20 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// / after const e = [new A()].entries().next().value
 						if t := entryLocals[ingest.NodeText(valN, content)]; ourReceivers[t] {
 							jsBindEntriesArrayPattern(nameN, content, t, out)
+						}
+					}
+				} else if nameN.Type() == "object_pattern" {
+					// const {k: a} = {k: new A()} / const {k: a} = oa after
+					// objValue local of uniform property value T.
+					// Bind foreign too so dual-class B rebinds fail closed.
+					if t := jsObjectLiteralValueType(valN, content, out, factories); t != "" {
+						jsBindObjectPatternUniformValues(nameN, content, t, out)
+					} else if t := jsObjectSpreadValueType(valN, content, out, factories, objValueLocals); t != "" {
+						// const {k: a} = {...{k: new A()}} / {...oa}
+						jsBindObjectPatternUniformValues(nameN, content, t, out)
+					} else if valN.Type() == "identifier" && objValueLocals != nil {
+						if t := objValueLocals[ingest.NodeText(valN, content)]; t != "" {
+							jsBindObjectPatternUniformValues(nameN, content, t, out)
 						}
 					}
 				}
@@ -2927,7 +2962,7 @@ func jsBindAllSettledValueObjectPattern(pattern *grammar.Node, content []byte, v
 	}
 }
 
-// jsExprConcreteType peels new T() / typed local / factory call to a class leaf.
+// jsExprConcreteType peels new T() / typed local / factory call / ternary to a class leaf.
 func jsExprConcreteType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
 	if n == nil {
 		return ""
@@ -2953,7 +2988,158 @@ func jsExprConcreteType(n *grammar.Node, content []byte, typedLocals, factories 
 	if n.Type() == "call_expression" {
 		return jsFactoryCallReturnType(n, content, factories)
 	}
+	if n.Type() == "ternary_expression" {
+		return jsTernaryExprType(n, content, typedLocals, factories)
+	}
 	return ""
+}
+
+// jsTernaryExprType recovers T from (c ? a : b) when both arms peel to the same
+// Class leaf (new T() / typed local / factory / nested ternary). Mixed fail closed.
+func jsTernaryExprType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	if n == nil || n.Type() != "ternary_expression" {
+		return ""
+	}
+	cons := ingest.ChildByField(n, "consequence")
+	alt := ingest.ChildByField(n, "alternative")
+	t1 := jsExprConcreteType(cons, content, typedLocals, factories)
+	t2 := jsExprConcreteType(alt, content, typedLocals, factories)
+	if t1 != "" && t1 == t2 {
+		return t1
+	}
+	return ""
+}
+
+// jsBindObjectPatternUniformValues binds each simple property binding in an
+// object_pattern to the same value type T when the RHS is a uniform-value object
+// (object literal / spread / objValue local). Shorthand {k} and {k: a} both bind.
+// Nested / rest / default patterns fail closed for that slot only.
+func jsBindObjectPatternUniformValues(pattern *grammar.Node, content []byte, valueType string, out map[string]string) {
+	if pattern == nil || pattern.Type() != "object_pattern" || valueType == "" || out == nil {
+		return
+	}
+	for i := uint32(0); i < pattern.ChildCount(); i++ {
+		ch := pattern.Child(i)
+		if ch == nil || ch.Type() == "{" || ch.Type() == "}" || ch.Type() == "," {
+			continue
+		}
+		switch ch.Type() {
+		case "shorthand_property_identifier_pattern":
+			// {a} — local name is property name.
+			name := ingest.NodeText(ch, content)
+			if name != "" && name != "_" {
+				out[name] = valueType
+			}
+		case "pair_pattern":
+			// {k: a}
+			val := ingest.ChildByField(ch, "value")
+			if val != nil && val.Type() == "identifier" {
+				name := ingest.NodeText(val, content)
+				if name != "" && name != "_" {
+					out[name] = valueType
+				}
+			}
+		}
+		// rest_pattern / nested object_pattern / assignment_pattern — skip slot.
+	}
+}
+
+// jsObjectSpreadValueType recovers T from {...{k: new T()}} / {...oa} when every
+// spread source peels to the same uniform property value type T. Non-spread
+// properties / mixed leaves / empty fail closed.
+func jsObjectSpreadValueType(n *grammar.Node, content []byte, typedLocals, factories, objValueLocals map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "object" {
+		return ""
+	}
+	found := ""
+	saw := false
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		if ch == nil || ch.Type() == "{" || ch.Type() == "}" || ch.Type() == "," {
+			continue
+		}
+		if ch.Type() != "spread_element" {
+			// Non-spread property — fail closed (mixed shape).
+			return ""
+		}
+		// spread_element: "..." + expression
+		var arg *grammar.Node
+		for j := uint32(0); j < ch.ChildCount(); j++ {
+			c := ch.Child(j)
+			if c == nil || c.Type() == "..." {
+				continue
+			}
+			arg = c
+			break
+		}
+		if arg == nil {
+			return ""
+		}
+		t := ""
+		if arg.Type() == "object" {
+			t = jsObjectLiteralValueType(arg, content, typedLocals, factories)
+		} else if arg.Type() == "identifier" {
+			if typedLocals != nil {
+				// plain typed local is not object-of-T; prefer objValueLocals.
+			}
+			if objValueLocals != nil {
+				t = objValueLocals[ingest.NodeText(arg, content)]
+			}
+		}
+		if t == "" {
+			// Also peel nested spreads / Object.assign sources.
+			if arg.Type() == "object" {
+				t = jsObjectSpreadValueType(arg, content, typedLocals, factories, objValueLocals)
+			}
+		}
+		if t == "" {
+			return ""
+		}
+		if !saw {
+			found = t
+			saw = true
+		} else if found != t {
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return found
+}
+
+// jsObjectSpreadPropType recovers T from {...src}.prop / {...src}["k"] when the
+// object peels via jsObjectSpreadValueType to uniform value T. Property key shape
+// is free (any identifier / string); value type is T for all keys when uniform.
+func jsObjectSpreadPropType(n *grammar.Node, content []byte, typedLocals, factories, objValueLocals map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	var obj *grammar.Node
+	switch n.Type() {
+	case "member_expression", "member_expression_optional", "optional_chain":
+		obj = ingest.ChildByField(n, "object")
+	case "subscript_expression":
+		obj = ingest.ChildByField(n, "object")
+	default:
+		return ""
+	}
+	return jsObjectSpreadValueType(obj, content, typedLocals, factories, objValueLocals)
 }
 
 // jsTypeName extracts a simple class name from a TS type annotation node.

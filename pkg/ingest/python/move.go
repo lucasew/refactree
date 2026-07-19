@@ -2333,10 +2333,17 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 		}
 		return len(foreignReceivers) == 0
 	}
+	// (a if c else x).run() — both arms agree on Class leaf (typed local / Class()).
+	// Under foreign same-leaf methods when arms peel to the same T.
+	if obj.Type() == "conditional_expression" {
+		if t := pythonConditionalExprType(obj, content, typeOf); t != "" {
+			return pythonRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
+		return len(foreignReceivers) == 0
+	}
 	// Complex receivers without static type: unique-leaf only.
 	switch obj.Type() {
-	case "conditional_expression",
-		"binary_operator", "boolean_operator", "await":
+	case "binary_operator", "boolean_operator", "await":
 		return len(foreignReceivers) == 0
 	}
 	return false
@@ -2726,8 +2733,20 @@ func pythonDictUpdateValueClassType(call *grammar.Node, content []byte) string {
 			} else if found != et {
 				return ""
 			}
+		case "list", "tuple":
+			// [("k", A())] / (("k", A()),) — homogeneous Class() pair values.
+			et := pythonDictUpdatePairsValueClass(ch, content)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				found = et
+				saw = true
+			} else if found != et {
+				return ""
+			}
 		default:
-			// positional list/set/other — not mapping-value update.
+			// positional set/other — not mapping-value update.
 			return ""
 		}
 	}
@@ -2735,6 +2754,81 @@ func pythonDictUpdateValueClassType(call *grammar.Node, content []byte) string {
 		return ""
 	}
 	return found
+}
+
+// pythonDictUpdatePairsValueClass recovers T from [("k", A()), ("j", A())] /
+// (("k", A()),) / [["k", A()]] when every element is a 2-slot list/tuple whose
+// second slot is Class() of the same leaf. Empty / mixed / non-pair fail closed.
+func pythonDictUpdatePairsValueClass(n *grammar.Node, content []byte) string {
+	if n == nil {
+		return ""
+	}
+	switch n.Type() {
+	case "list", "tuple":
+		// ok
+	default:
+		return ""
+	}
+	found := ""
+	saw := false
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		if ch == nil {
+			continue
+		}
+		switch ch.Type() {
+		case "[", "]", "(", ")", ",", "comment":
+			continue
+		case "list", "tuple":
+			et := pythonPairSecondClassCtor(ch, content)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				found = et
+				saw = true
+			} else if found != et {
+				return ""
+			}
+		default:
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return found
+}
+
+// pythonPairSecondClassCtor recovers T from (k, A()) / [k, A()] when the second
+// positional element is Class(). Other shapes / length fail closed.
+func pythonPairSecondClassCtor(n *grammar.Node, content []byte) string {
+	if n == nil {
+		return ""
+	}
+	switch n.Type() {
+	case "list", "tuple":
+		// ok
+	default:
+		return ""
+	}
+	var elems []*grammar.Node
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		if ch == nil {
+			continue
+		}
+		switch ch.Type() {
+		case "[", "]", "(", ")", ",", "comment":
+			continue
+		default:
+			elems = append(elems, ch)
+		}
+	}
+	if len(elems) != 2 {
+		return ""
+	}
+	return pythonClassCtorName(elems[1], content)
 }
 
 // pythonDictLiteralHomogeneousValueClass recovers T from {"k": A(), "j": A()}
@@ -3895,6 +3989,17 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						elemOf["@nested."+lname] = nest
 					} else if nest := pythonCollectionNestedListElemType(ann, content); nest != "" {
 						elemOf["@nested."+lname] = nest
+					}
+				}
+				// xa = a if c else x / xa = A() if c else A() — both arms agree on T.
+				// Foreign too for shadowing (xb = b if c else y).
+				if right != nil {
+					if tn := pythonObjectExprType(right, content, typeOf); tn != "" {
+						typeOf[lname] = tn
+						bindFields(lname, tn)
+						if ourReceivers[tn] {
+							out[lname] = true
+						}
 					}
 				}
 				if right != nil && right.Type() == "call" {
@@ -9202,6 +9307,10 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		left := ingest.ChildByField(right, "left")
 		rightN := ingest.ChildByField(right, "right")
 		return pythonBoolOpElemType(left, rightN, content, elemOf, egElems, typeOf)
+	case "conditional_expression":
+		// (aa if c else ca)[0] / for a in (aa if c else ca) — both arms agree on
+		// collection element type under foreign same-leaf methods.
+		return pythonConditionalIterableElemType(right, content, elemOf, egElems, typeOf)
 	case "generator_expression", "list_comprehension", "set_comprehension":
 		// next(x for x in items) / for a in [x for x in items] — identity body only.
 		return pythonComprehensionElemType(right, content, elemOf, egElems, typeOf)
@@ -9263,6 +9372,8 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 				return pythonIterableElemType(args[1], content, elemOf, egElems, typeOf)
 			case "map", "starmap":
 				// map(A, iterable) / starmap(A, pairs) — Class-as-callable yields A.
+				// map(lambda x: x, iterable) — identity lambda preserves iterable element type
+				// (list(map(lambda x: x, items))[0].run() under foreign same-leaf).
 				// Other callables fail closed (unknown result type).
 				args, ok := pythonCallPositionalArgNodes(right)
 				if !ok || len(args) == 0 {
@@ -9270,6 +9381,10 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 				}
 				if args[0].Type() == "identifier" {
 					return ingest.NodeText(args[0], content)
+				}
+				// Identity map only (not starmap — multi-arg unpack is not identity of one elem).
+				if ingest.NodeText(fn, content) == "map" && len(args) >= 2 && pythonIsIdentityLambda(args[0], content) {
+					return pythonIterableElemType(args[1], content, elemOf, egElems, typeOf)
 				}
 				return ""
 			case "repeat":
@@ -10726,7 +10841,8 @@ func pythonClassCtorName(n *grammar.Node, content []byte) string {
 
 // pythonObjectExprType recovers the Class leaf of an object expression used as a
 // value (not an iterable): typed local identifier (item: A → "A"), Class() call
-// (A() → "A"), or parenthesized form. Other shapes fail closed.
+// (A() → "A"), conditional when both arms agree, or parenthesized form.
+// Other shapes fail closed.
 func pythonObjectExprType(n *grammar.Node, content []byte, typeOf map[string]string) string {
 	if n == nil {
 		return ""
@@ -10739,10 +10855,121 @@ func pythonObjectExprType(n *grammar.Node, content []byte, typeOf map[string]str
 		return typeOf[ingest.NodeText(n, content)]
 	case "call":
 		return pythonClassCtorName(n, content)
+	case "conditional_expression":
+		return pythonConditionalExprType(n, content, typeOf)
 	case "parenthesized_expression":
 		return pythonObjectExprType(pythonParenInner(n), content, typeOf)
 	}
 	return ""
+}
+
+// pythonConditionalArms returns (body, alternative) of a conditional_expression.
+// tree-sitter python has no named fields — children are positional:
+// body, "if", condition, "else", alternative.
+func pythonConditionalArms(n *grammar.Node) (body, alt *grammar.Node) {
+	if n == nil || n.Type() != "conditional_expression" {
+		return nil, nil
+	}
+	seenIf, seenElse := false, false
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		if ch == nil {
+			continue
+		}
+		switch ch.Type() {
+		case "if":
+			seenIf = true
+		case "else":
+			seenElse = true
+		case "comment":
+			continue
+		default:
+			if !seenIf && body == nil {
+				body = ch
+			} else if seenIf && !seenElse {
+				// condition — ignore
+			} else if seenElse && alt == nil {
+				alt = ch
+			}
+		}
+	}
+	return body, alt
+}
+
+// pythonConditionalExprType recovers T from (a if c else x) when both arms peel
+// to the same Class leaf via typed locals / Class() / nested conditionals.
+// Mixed / untyped arms fail closed.
+func pythonConditionalExprType(n *grammar.Node, content []byte, typeOf map[string]string) string {
+	body, alt := pythonConditionalArms(n)
+	t1 := pythonObjectExprType(body, content, typeOf)
+	t2 := pythonObjectExprType(alt, content, typeOf)
+	if t1 != "" && t1 == t2 {
+		return t1
+	}
+	return ""
+}
+
+// pythonConditionalIterableElemType recovers collection element type from
+// (aa if c else ca) when both arms share the same element leaf. Used for
+// (aa if c else ca)[0].run() / for a in (aa if c else ca) under foreign same-leaf.
+func pythonConditionalIterableElemType(n *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
+	body, alt := pythonConditionalArms(n)
+	t1 := pythonIterableElemType(body, content, elemOf, egElems, typeOf)
+	t2 := pythonIterableElemType(alt, content, elemOf, egElems, typeOf)
+	if t1 != "" && t1 == t2 {
+		return t1
+	}
+	return ""
+}
+
+// pythonIsIdentityLambda reports whether n is `lambda x: x` / `lambda x: (x)`
+// (single param; body is that param, optionally parenthesized). Other shapes
+// fail closed (defaults / multi-param / transforming body).
+func pythonIsIdentityLambda(n *grammar.Node, content []byte) bool {
+	if n == nil || n.Type() != "lambda" {
+		return false
+	}
+	params := ingest.ChildByField(n, "parameters")
+	body := ingest.ChildByField(n, "body")
+	if body == nil {
+		return false
+	}
+	// Single identifier param only.
+	var paramName string
+	if params != nil {
+		count := 0
+		for i := uint32(0); i < params.ChildCount(); i++ {
+			ch := params.Child(i)
+			if ch == nil {
+				continue
+			}
+			switch ch.Type() {
+			case ",", "comment":
+				continue
+			case "identifier":
+				count++
+				if count == 1 {
+					paramName = ingest.NodeText(ch, content)
+				}
+			default:
+				// default_parameter / typed / splat — fail closed.
+				return false
+			}
+		}
+		if count != 1 || paramName == "" {
+			return false
+		}
+	} else {
+		return false
+	}
+	// Unwrap parenthesized body: lambda x: (x)
+	for body != nil && body.Type() == "parenthesized_expression" {
+		body = pythonParenInner(body)
+	}
+	if body == nil || body.Type() != "identifier" {
+		return false
+	}
+	return ingest.NodeText(body, content) == paramName
 }
 
 // pythonCallPositionalArgNodes returns positional argument nodes of a call.
