@@ -4626,6 +4626,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						if fname == "min" || fname == "max" {
 							if types := pythonMinMaxPairSlots(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
 								pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+							} else if types := pythonObjectMinMaxPairSlots(right, content, funcReturns, typeOf, fieldOf); len(types) > 0 {
+								// pair = min(list(zip([ba.get()], …))) — object pair under foreign same-leaf.
+								pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 							} else if types := pythonItemsCallPairSlots(right, content, elemOf, fieldOf); len(types) > 0 {
 								// p = min(asdict(pair).items(), key=...) / max(d.items()) —
 								// pair local (same path as next(...items())).
@@ -4645,6 +4648,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						if fname == "choice" {
 							if types := pythonChoicePairSlots(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
 								pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+							} else if types := pythonObjectChoicePairSlots(right, content, funcReturns, typeOf, fieldOf); len(types) > 0 {
+								// pair = choice(list(zip([ba.get()], …))) — object pair under foreign same-leaf.
+								pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 							} else if et := pythonRandomChoiceElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
 							} else if args, ok := pythonCallPositionalArgNodes(right); ok && len(args) > 0 {
@@ -4660,6 +4666,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// elemOf), not an element; use pair[i] / unpack / nested for.
 						if fname == "heappop" || fname == "heappushpop" || fname == "heapreplace" {
 							if types := pythonHeappopPairSlots(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+								pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+							} else if types := pythonObjectHeappopPairSlots(right, content, funcReturns, typeOf, fieldOf); len(types) > 0 {
+								// pair = heappop(list(zip([ba.get()], …))) — object pair under foreign same-leaf.
 								pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 							} else if et := pythonHeappopElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
@@ -5478,6 +5487,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					if fname == "min" || fname == "max" {
 						if types := pythonMinMaxPairSlots(valueN, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
 							pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+						} else if types := pythonObjectMinMaxPairSlots(valueN, content, funcReturns, typeOf, fieldOf); len(types) > 0 {
+							// pair := min(list(zip([ba.get()], …))) — object pair under foreign same-leaf.
+							pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 						} else if types := pythonItemsCallPairSlots(valueN, content, elemOf, fieldOf); len(types) > 0 {
 							pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 						} else if et := pythonMinMaxElemType(valueN, content, elemOf, egElems, typeOf, fieldOf); ourReceivers[et] {
@@ -5494,6 +5506,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					if fname == "choice" {
 						if types := pythonChoicePairSlots(valueN, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
 							pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+						} else if types := pythonObjectChoicePairSlots(valueN, content, funcReturns, typeOf, fieldOf); len(types) > 0 {
+							// pair := choice(list(zip([ba.get()], …))) — object pair under foreign same-leaf.
+							pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 						} else if et := pythonRandomChoiceElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 							out[lname] = true
 						} else if args, ok := pythonCallPositionalArgNodes(valueN); ok && len(args) > 0 {
@@ -5507,6 +5522,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					// pair := heappop(pairs) when pairs is a pair-iter (pairSlots + shared elemOf).
 					if fname == "heappop" || fname == "heappushpop" || fname == "heapreplace" {
 						if types := pythonHeappopPairSlots(valueN, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+							pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+						} else if types := pythonObjectHeappopPairSlots(valueN, content, funcReturns, typeOf, fieldOf); len(types) > 0 {
+							// pair := heappop(list(zip([ba.get()], …))) — object pair under foreign same-leaf.
 							pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 						} else if et := pythonHeappopElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 							out[lname] = true

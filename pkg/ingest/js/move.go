@@ -1588,12 +1588,13 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 			// identity reduce/reduceRight peels to element T under foreign same-leaf.
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
-		if t := jsIteratorFindElemType(obj, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals); t != "" {
-			// Iterator.from([new A()]).find(pred) / iter.findLast(pred) — yield peel.
+		if t := jsIteratorFindElemType(obj, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals, classFields, methodReturns); t != "" {
+			// Iterator.from([new A()]).find(pred) / Iterator.from([new BoxA().get()]).find —
+			// yield peel under foreign same-leaf (method-return via methodReturns).
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
-		if t := jsIteratorReduceElemType(obj, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals); t != "" {
-			// Iterator.from([new A()]).reduce((a,x) => x) — identity reduce yield peel.
+		if t := jsIteratorReduceElemType(obj, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals, classFields, methodReturns); t != "" {
+			// Iterator.from([new A()]).reduce((a,x) => x) / method-return yield peel.
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 		if t := jsPromiseThenIdentityType(obj, content, typedLocals, factories); t != "" {
@@ -2090,11 +2091,13 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 					} else if t := jsArrayReduceElemType(valN, content, arrayLocals, out, factories, extra); ourReceivers[t] {
 						// const a = [new A()].reduce((a,b)=>a) / as.reduce((a,b)=>b)
 						out[ingest.NodeText(nameN, content)] = t
-					} else if t := jsIteratorFindElemType(valN, content, generators, genLocals, arrayLocals, out, factories, mapLocals, entryArrayLocals, setLocals); ourReceivers[t] {
-						// const a = Iterator.from([new A()]).find(pred)
+					} else if t := jsIteratorFindElemType(valN, content, generators, genLocals, arrayLocals, out, factories, mapLocals, entryArrayLocals, setLocals, classFields, methodReturns); ourReceivers[t] {
+						// const a = Iterator.from([new A()]).find(pred) /
+						// Iterator.from([new BoxA().get()]).find(pred)
 						out[ingest.NodeText(nameN, content)] = t
-					} else if t := jsIteratorReduceElemType(valN, content, generators, genLocals, arrayLocals, out, factories, mapLocals, entryArrayLocals, setLocals); ourReceivers[t] {
-						// const a = Iterator.from([new A()]).reduce((a,x) => x)
+					} else if t := jsIteratorReduceElemType(valN, content, generators, genLocals, arrayLocals, out, factories, mapLocals, entryArrayLocals, setLocals, classFields, methodReturns); ourReceivers[t] {
+						// const a = Iterator.from([new A()]).reduce((a,x) => x) /
+						// Iterator.from([new BoxA().get()]).reduce(...)
 						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsPromiseThenIdentityType(valN, content, out, factories); ourReceivers[t] {
 						// const a = await Promise.resolve(new A()).then(x => x)
@@ -4163,9 +4166,10 @@ func jsArraySourceElemType(n *grammar.Node, content []byte, arrayLocals, typedLo
 	if t := jsIteratorToArrayElemType(n, content, arrayLocals, typedLocals, factories, extra); t != "" {
 		return t
 	}
-	// arr.values().take(n) / .drop(n) / .filter(pred) as array source of T
-	// (spread / Array.from of iterator helpers).
-	if t := jsIteratorHelperYieldType(n, content, nil, nil, arrayLocals, typedLocals, factories, extra.mapLocals, extra.entryArrayLocals, extra.setLocals); t != "" {
+	// arr.values().take(n) / .drop(n) / .filter(pred) / .flatMap(x => [x]) as
+	// array source of T (spread / Array.from / toArray of iterator helpers),
+	// including Iterator.from([new BoxA().get()]).flatMap(...).toArray().
+	if t := jsIteratorHelperYieldType(n, content, nil, nil, arrayLocals, typedLocals, factories, extra.mapLocals, extra.entryArrayLocals, extra.setLocals, extra.classFields, extra.methodReturns); t != "" {
 		return t
 	}
 	return ""
@@ -8409,8 +8413,9 @@ func jsIteratorSourceYieldTypeEx(n *grammar.Node, content []byte, generators, ge
 	if t := jsSetIteratorYieldType(n, content, arrayLocals, typedLocals, factories, setLocals); t != "" {
 		return t
 	}
-	// arr.values().take(1) / .drop(0) / .filter(pred) — identity iterator helpers.
-	return jsIteratorHelperYieldType(n, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals)
+	// arr.values().take(1) / .drop(0) / .filter(pred) / flatMap — identity iterator
+	// helpers (method-return via classFields/methodReturns).
+	return jsIteratorHelperYieldType(n, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals, classFields, methodReturns)
 }
 
 // jsForOfElemType recovers T from the right-hand side of for…of / for await…of:
@@ -8558,7 +8563,8 @@ func jsStructuredCloneArrayElemType(n *grammar.Node, content []byte, arrayLocals
 // iter.filter(pred) / iter.map(x => x) / iter.flatMap(() => [new T()]) when the
 // receiver peels as an iterator yielding T (or flatMap sole-return peels T).
 // Limit / predicate args ignored (not type-changing). Unknown receivers fail closed.
-func jsIteratorHelperYieldType(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals map[string]string) string {
+// methodReturns peels Iterator.from([new BoxA().get()]).flatMap(x => [x]).
+func jsIteratorHelperYieldType(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -8627,7 +8633,7 @@ func jsIteratorHelperYieldType(n *grammar.Node, content []byte, generators, genL
 			return ""
 		}
 		if jsIsIdentityArrayCallback(firstArg, content) {
-			return jsIteratorSourceYieldType(obj, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals)
+			return jsIteratorSourceYieldTypeEx(obj, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals, classFields, methodReturns)
 		}
 		if t := jsFlatMapSoleArrayReturnElemType(firstArg, content, typedLocals, factories); t != "" {
 			return t
@@ -8636,7 +8642,7 @@ func jsIteratorHelperYieldType(n *grammar.Node, content []byte, generators, genL
 	default:
 		return ""
 	}
-	return jsIteratorSourceYieldType(obj, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals)
+	return jsIteratorSourceYieldTypeEx(obj, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals, classFields, methodReturns)
 }
 
 // jsLooksLikeIteratorReceiver reports whether n is an iterator source (not a
@@ -8723,8 +8729,9 @@ func jsIsIteratorFromCall(n *grammar.Node, content []byte) bool {
 // jsIteratorFindElemType recovers T from iter.find(pred) / iter.findLast(pred)
 // when the receiver peels as an iterator yielding T. Predicate ignored (not
 // type-changing for uniform yields). Enables
-// Iterator.from([new A()]).find(x => true).run() under foreign same-leaf.
-func jsIteratorFindElemType(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals map[string]string) string {
+// Iterator.from([new A()]).find(x => true).run() /
+// Iterator.from([new BoxA().get()]).find(x => true).run() under foreign same-leaf.
+func jsIteratorFindElemType(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -8770,7 +8777,7 @@ func jsIteratorFindElemType(n *grammar.Node, content []byte, generators, genLoca
 	if count < 1 {
 		return ""
 	}
-	return jsIteratorSourceYieldType(ingest.ChildByField(fn, "object"), content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals)
+	return jsIteratorSourceYieldTypeEx(ingest.ChildByField(fn, "object"), content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals, classFields, methodReturns)
 }
 
 // jsIteratorReduceElemType recovers T from iter.reduce((a,x) => x) /
@@ -8778,7 +8785,7 @@ func jsIteratorFindElemType(n *grammar.Node, content []byte, generators, genLoca
 // and the callback is identity of first or second formal (same shapes as
 // Array.prototype.reduce). Enables Iterator.from([new A()]).reduce((a,x) => x).run()
 // under foreign same-leaf. Non-identity reducers fail closed.
-func jsIteratorReduceElemType(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals map[string]string) string {
+func jsIteratorReduceElemType(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -8830,16 +8837,16 @@ func jsIteratorReduceElemType(n *grammar.Node, content []byte, generators, genLo
 	if idx != 0 && idx != 1 {
 		return ""
 	}
-	t := jsIteratorSourceYieldType(ingest.ChildByField(fn, "object"), content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals)
+	t := jsIteratorSourceYieldTypeEx(ingest.ChildByField(fn, "object"), content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals, classFields, methodReturns)
 	if t == "" {
 		if init != nil && idx == 0 {
-			if it := jsExprConcreteType(init, content, typedLocals, factories); it != "" {
+			if it := jsExprLeafType(init, content, typedLocals, factories, classFields, methodReturns); it != "" {
 				return it
 			}
 		}
 		return ""
 	}
-	if init != nil && jsExprConcreteType(init, content, typedLocals, factories) != t {
+	if init != nil && jsExprLeafType(init, content, typedLocals, factories, classFields, methodReturns) != t {
 		return ""
 	}
 	return t
@@ -10206,15 +10213,17 @@ func jsArrayReduceElemType(n *grammar.Node, content []byte, arrayLocals, typedLo
 	t := jsArraySourceElemType(ingest.ChildByField(fn, "object"), content, arrayLocals, typedLocals, factories, extra)
 	if t == "" {
 		// Empty/unknown array: peel from init when callback returns accumulator
-		// (param 0). Enables [].reduce((a,b)=>a, new A()).run() under dual-class.
+		// (param 0). Enables [].reduce((a,b)=>a, new A()).run() /
+		// [].reduce((a,b)=>a, new BoxA().get()).run() under dual-class.
 		if init != nil && idx == 0 {
-			if it := jsExprConcreteType(init, content, typedLocals, factories); it != "" {
+			if it := jsExprLeafType(init, content, typedLocals, factories, extra.classFields, extra.methodReturns); it != "" {
 				return it
 			}
 		}
 		return ""
 	}
-	if init != nil && jsExprConcreteType(init, content, typedLocals, factories) != t {
+	// init must agree with element T when present (Class or method-return peels).
+	if init != nil && jsExprLeafType(init, content, typedLocals, factories, extra.classFields, extra.methodReturns) != t {
 		return ""
 	}
 	return t

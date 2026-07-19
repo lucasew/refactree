@@ -4468,6 +4468,32 @@ func javaStreamConcatElemType(call *grammar.Node, content []byte, elemOf, valOf 
 	return et1
 }
 
+// javaStreamConcatObjectElemType recovers T from Stream.concat(s1, s2) when both
+// stream args peel via method-return object factories (Stream.of(ba.get())).
+// Class peels live in javaStreamConcatElemType. Mismatched / unknown args fail closed.
+func javaStreamConcatObjectElemType(call *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	recvN := ingest.ChildByField(call, "object")
+	if recvN == nil || javaStaticFactoryReceiverName(recvN, content) != "Stream" {
+		return ""
+	}
+	args := javaCallArgs(call)
+	if len(args) != 2 {
+		return ""
+	}
+	et1 := javaStaticCollectionOfObjectElemType(args[0], content, compOf, typeMembers)
+	if et1 == "" {
+		return ""
+	}
+	et2 := javaStaticCollectionOfObjectElemType(args[1], content, compOf, typeMembers)
+	if et2 == "" || et1 != et2 {
+		return ""
+	}
+	return et1
+}
+
 // javaStreamGenerateElemType recovers T from Stream.generate(() -> new T(...)).
 // Supplier must be an expression-bodied lambda whose body is object creation.
 // Blocks, method refs, and non-creation bodies fail closed.
@@ -5115,6 +5141,37 @@ func javaIsIdentityMapCall(call *grammar.Node, content []byte) bool {
 	if name := javaMethodInvocationName(call, content); name != "map" {
 		return false
 	}
+	return javaCallHasSoleIdentityLambda(call, content)
+}
+
+// javaIsIdentityThenApplyCall reports CF thenApply/thenApplyAsync(a -> a[, executor])
+// with a unary identity Function among args. Used by method-return object peels so
+// completedFuture(ba.get()).thenApply(x -> x).join() preserves T under foreign
+// same-leaf. Type-changing Functions fail closed.
+func javaIsIdentityThenApplyCall(call *grammar.Node, content []byte) bool {
+	if call == nil || call.Type() != "method_invocation" {
+		return false
+	}
+	switch javaMethodInvocationName(call, content) {
+	case "thenApply", "thenApplyAsync":
+	default:
+		return false
+	}
+	// First lambda among args (thenApplyAsync may have Executor after Function).
+	for _, a := range javaCallArgs(call) {
+		if a.Type() == "lambda_expression" {
+			return javaIsIdentityLambda(a, content)
+		}
+	}
+	return false
+}
+
+// javaCallHasSoleIdentityLambda reports a call with exactly one positional arg
+// that is a unary identity lambda a -> a.
+func javaCallHasSoleIdentityLambda(call *grammar.Node, content []byte) bool {
+	if call == nil {
+		return false
+	}
 	var args *grammar.Node
 	for i := uint32(0); i < call.ChildCount(); i++ {
 		if call.Child(i).Type() == "argument_list" {
@@ -5138,6 +5195,20 @@ func javaIsIdentityMapCall(call *grammar.Node, content []byte) bool {
 		}
 	}
 	return count == 1 && javaIsIdentityLambda(first, content)
+}
+
+// javaCallIsUnaryReduce reports stream.reduce(BinaryOperator) — one positional
+// arg (returns Optional). Multi-arg reduce(identity, op[, comb]) returns T/U.
+func javaCallIsUnaryReduce(call *grammar.Node) bool {
+	if call == nil {
+		return false
+	}
+	n := 0
+	for _, a := range javaCallArgs(call) {
+		_ = a
+		n++
+	}
+	return n == 1
 }
 
 // javaIsIdentityFlatMapRewrapCall reports flatMap mappers that rewrap T as
@@ -7134,12 +7205,21 @@ func javaStaticCollectionOfObjectElemType(obj *grammar.Node, content []byte, com
 			"stream", "parallelStream", "iterator", "listIterator",
 			"descendingIterator", "spliterator",
 			"reversed", "sequencedCollection",
-			"filter", // Optional.filter — type-preserving when present
+			"filter", // Optional.filter / Stream.filter — type-preserving when present
 			"or",     // Optional.or(Supplier) — always same T
 			"orElseThrow",
+			// Stream.min/max/reduce(BinaryOperator) return Optional of stream T —
+			// preserve element for .get() / orElse under foreign same-leaf.
+			"min", "max", "reduce",
 			"join", "getNow", "resultNow",
 			"get": // zero-arg Optional/CF get on pipeline
 			if name == "get" && !javaCallIsZeroArg(obj) {
+				return ""
+			}
+			// reduce(identity, op) returns T directly (not Optional) — only peel as
+			// Optional-preserving stage when one-arg (BinaryOperator). Multi-arg
+			// reduce is handled below via identity-arg peel on the call itself.
+			if name == "reduce" && !javaCallIsUnaryReduce(obj) {
 				return ""
 			}
 			// Type-preserving stage — peel receiver.
@@ -7156,6 +7236,15 @@ func javaStaticCollectionOfObjectElemType(obj *grammar.Node, content []byte, com
 			// already type-preserve; non-identity mappers fail closed here so
 			// type-changing map stays unbound on the Class pipeline path).
 			if javaIsIdentityMapCall(obj, content) {
+				obj = recv
+				continue
+			}
+			return ""
+		case "thenApply", "thenApplyAsync":
+			// CompletableFuture.completedFuture(ba.get()).thenApply(x -> x).join() —
+			// identity Function preserves method-return CF result under foreign
+			// same-leaf (Class peels via javaStreamPipelineElemType).
+			if javaIsIdentityThenApplyCall(obj, content) {
 				obj = recv
 				continue
 			}
@@ -7179,6 +7268,10 @@ func javaStaticCollectionOfObjectElemType(obj *grammar.Node, content []byte, com
 				continue
 			}
 			return ""
+		case "concat":
+			// Stream.concat(Stream.of(ba.get()), Stream.of(ba.get())) — both args
+			// share method-return element type under foreign same-leaf.
+			return javaStreamConcatObjectElemType(obj, content, compOf, typeMembers)
 		case "unmodifiableList", "synchronizedList", "checkedList",
 			"unmodifiableSet", "synchronizedSet", "checkedSet",
 			"unmodifiableSortedSet", "synchronizedSortedSet", "checkedSortedSet",
@@ -7735,7 +7828,8 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// (T for BinaryOperator; U for the 3-arg form when identity is U — we recover
 		// the stream element type, which matches the common T-identity product case).
 		// One-arg reduce(BinaryOperator) returns Optional<T> — fail closed here.
-		return javaStreamReduceIdentityElemType(val, obj, content, elemOf, valOf)
+		// Stream.of(ba.get()).reduce(ba.get(), (a,b)->a) — method-return stream peels.
+		return javaStreamReduceIdentityElemTypeEx(val, obj, content, elemOf, valOf, compOf, typeMembers)
 	case "collect":
 		// Stream.collect(Collectors.reducing(identity, op[, mapper])) returns T when
 		// the collector is identity reducing (2-arg or identity-mapper 3-arg).
@@ -8491,6 +8585,12 @@ func javaSameFileMethodReturns(root *grammar.Node, content []byte) map[string]ma
 // Identity forms have ≥2 args and a non-lambda first arg. One-arg reduce returns
 // Optional and is handled via pipeline orElse/ifPresent instead.
 func javaStreamReduceIdentityElemType(call, obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	return javaStreamReduceIdentityElemTypeEx(call, obj, content, elemOf, valOf, nil, nil)
+}
+
+// javaStreamReduceIdentityElemTypeEx also peels method-return stream sources
+// (Stream.of(ba.get()).reduce(ba.get(), (a,b)->a)) under foreign same-leaf.
+func javaStreamReduceIdentityElemTypeEx(call, obj *grammar.Node, content []byte, elemOf, valOf map[string]string, compOf map[string]string, typeMembers map[string]map[string]string) string {
 	if call == nil || obj == nil {
 		return ""
 	}
@@ -8522,7 +8622,16 @@ func javaStreamReduceIdentityElemType(call, obj *grammar.Node, content []byte, e
 	if nReal < 2 || first == nil || first.Type() == "lambda_expression" {
 		return ""
 	}
-	return javaStreamPipelineElemType(obj, content, elemOf, valOf)
+	if et := javaStreamPipelineElemType(obj, content, elemOf, valOf); et != "" {
+		return et
+	}
+	// Stream.of(ba.get()).reduce(ba.get(), (a,b)->a) — method-return stream peel.
+	if typeMembers != nil {
+		if et := javaStaticCollectionOfObjectElemType(obj, content, compOf, typeMembers); et != "" {
+			return et
+		}
+	}
+	return ""
 }
 
 // javaIsReducingMaxMinCollector reports Stream.collect args that yield Optional<T>
