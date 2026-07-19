@@ -1643,7 +1643,7 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 		if t := jsPromiseAllSubscriptType(obj, content, typedLocals, factories); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
-		if t := jsObjectEntriesPairValueType(obj, content, typedLocals, factories, entryLocals, entryArrayLocals, entryNextLocals, arrayLocals, mapLocals, setLocals, objValueLocals); t != "" {
+		if t := jsObjectEntriesPairValueTypeEx(obj, content, typedLocals, factories, entryLocals, entryArrayLocals, entryNextLocals, arrayLocals, mapLocals, setLocals, objValueLocals, extra); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 		if t := jsArrayElemSubscriptType(obj, content, arrayLocals, typedLocals, factories, extra); t != "" {
@@ -1919,13 +1919,13 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// Array.of(new A()) / Object.values({k: new A()}) —
 						// array local of element type A.
 						arrayLocals[ingest.NodeText(nameN, content)] = t
-					} else if t := jsObjectEntriesPairValueType(valN, content, out, factories, entryLocals, entryArrayLocals, entryNextLocals, arrayLocals, mapLocals, setLocals, objValueLocals); ourReceivers[t] {
+					} else if t := jsObjectEntriesPairValueTypeEx(valN, content, out, factories, entryLocals, entryArrayLocals, entryNextLocals, arrayLocals, mapLocals, setLocals, objValueLocals, extra); ourReceivers[t] {
 						// const a = Object.entries({k: new A()})[0][1] /
 						// const a = es[0][1] / [...Object.entries(...)][0][1] /
 						// const a = e[1] after entry-local e /
 						// const a = [new A()].entries().next().value[1]
 						out[ingest.NodeText(nameN, content)] = t
-					} else if t := jsObjectEntriesPairSubscriptType(valN, content, out, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals); t != "" {
+					} else if t := jsObjectEntriesPairSubscriptTypeEx(valN, content, out, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals, extra); t != "" {
 						// const e = Object.entries({k: new A()})[0] /
 						// const e = es[0] after entries-array local /
 						// const e = [...Object.entries(...)][0] — pair local;
@@ -1933,7 +1933,7 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// so dual-class B rebinds overwrite a prior A under the same name
 						// (rename path fails closed via foreignReceivers).
 						entryLocals[ingest.NodeText(nameN, content)] = t
-					} else if t := jsObjectEntriesPairAtType(valN, content, out, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals); t != "" {
+					} else if t := jsObjectEntriesPairAtTypeEx(valN, content, out, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals, extra); t != "" {
 						// const e = [...ma].at(0) / es.at(0) — pair local of value T
 						// (same leaf as es[0]); e[1].run() peels via entryLocals.
 						// Bind foreign too so dual-class B rebinds fail closed.
@@ -1957,7 +1957,7 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// mapLocals empty so ma.get(k) under-renames.
 						// Bind foreign too so dual-class B rebinds fail closed.
 						mapLocals[ingest.NodeText(nameN, content)] = t
-					} else if t := jsObjectEntriesArraySourceType(valN, content, out, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals); t != "" {
+					} else if t := jsObjectEntriesArraySourceTypeEx(valN, content, out, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals, extra); t != "" {
 						// const es = Object.entries({k: new A()}) /
 						// const es = [...Object.entries({k: new A()})] /
 						// const es = [...ma] after map local —
@@ -2128,7 +2128,7 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// const [r] = await Promise.allSettled([new A()])
 						// const [{value: a}] / [{value}] = await Promise.allSettled([new A()])
 						jsBindAllSettledArrayPattern(nameN, content, t, out, settledOf)
-					} else if t := jsObjectEntriesPairSubscriptType(valN, content, out, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals); ourReceivers[t] {
+					} else if t := jsObjectEntriesPairSubscriptTypeEx(valN, content, out, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals, extra); ourReceivers[t] {
 						// const [, a] = Object.entries({k: new A()})[0] /
 						// const [, a] = es[0] / [...Object.entries(...)][0] — value slot is A.
 						jsBindEntriesArrayPattern(nameN, content, t, out)
@@ -2210,7 +2210,7 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 					// (not scalar entryLocals — pair value is T[], not T).
 					// Bind foreign too so dual-class B rebinds fail closed.
 					groupEntryLocals[ingest.NodeText(left, content)] = t
-				} else if t := jsEntriesIterableValueType(right, content, out, factories, arrayLocals, entryArrayLocals, mapLocals, setLocals, objValueLocals); t != "" {
+				} else if t := jsEntriesIterableValueTypeEx(right, content, out, factories, arrayLocals, entryArrayLocals, mapLocals, setLocals, objValueLocals, extra); t != "" {
 					// for (const e of Object.entries({k: new A()})) /
 					// for (const e of es) / for (const e of [new A()].entries()) /
 					// for (const e of new Map([[k, new A()]]).entries()) /
@@ -2232,7 +2232,7 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 					// g is array of T; g[0].run() peels via arrayLocals.
 					// Bind foreign too so dual-class B rebinds fail closed.
 					jsBindEntriesArrayPattern(left, content, t, arrayLocals)
-				} else if t := jsEntriesIterableValueType(right, content, out, factories, arrayLocals, entryArrayLocals, mapLocals, setLocals, objValueLocals); ourReceivers[t] {
+				} else if t := jsEntriesIterableValueTypeEx(right, content, out, factories, arrayLocals, entryArrayLocals, mapLocals, setLocals, objValueLocals, extra); ourReceivers[t] {
 					jsBindEntriesArrayPattern(left, content, t, out)
 				}
 			}
@@ -6023,7 +6023,13 @@ func jsObjectFromEntriesPropType(n *grammar.Node, content []byte, typedLocals, f
 // and Object.entries(o) when o is an objValueLocal (assign / fromEntries) — dual of
 // Object.values peels under foreign same-leaf methods.
 func jsObjectEntriesValueType(n *grammar.Node, content []byte, typedLocals, factories, objValueLocals map[string]string) string {
-	if t := jsObjectStaticValuesCallType(n, content, typedLocals, factories, "entries"); t != "" {
+	return jsObjectEntriesValueTypeEx(n, content, typedLocals, factories, objValueLocals, jsExtraLocals{})
+}
+
+// jsObjectEntriesValueTypeEx peels Object.entries({k: new BoxA().get()}) via
+// method-return property values (same leaf as Object.values method-return).
+func jsObjectEntriesValueTypeEx(n *grammar.Node, content []byte, typedLocals, factories, objValueLocals map[string]string, extra jsExtraLocals) string {
+	if t := jsObjectStaticValuesCallTypeEx(n, content, typedLocals, factories, "entries", extra); t != "" {
 		return t
 	}
 	// Object.entries(Object.assign(...)) / Object.entries(Object.fromEntries(...)) /
@@ -6204,6 +6210,10 @@ func jsObjectStaticValuesCallTypeEx(n *grammar.Node, content []byte, typedLocals
 // when the pair value type is T. Index must be a numeric literal. The pair
 // itself is not T — use for destructure binding (const [, a] = …[i]) only.
 func jsObjectEntriesPairSubscriptType(n *grammar.Node, content []byte, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals map[string]string) string {
+	return jsObjectEntriesPairSubscriptTypeEx(n, content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals, jsExtraLocals{})
+}
+
+func jsObjectEntriesPairSubscriptTypeEx(n *grammar.Node, content []byte, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals map[string]string, extra jsExtraLocals) string {
 	if n == nil || n.Type() != "subscript_expression" {
 		return ""
 	}
@@ -6211,7 +6221,7 @@ func jsObjectEntriesPairSubscriptType(n *grammar.Node, content []byte, typedLoca
 	if idx == nil || idx.Type() != "number" {
 		return ""
 	}
-	return jsObjectEntriesArraySourceType(ingest.ChildByField(n, "object"), content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals)
+	return jsObjectEntriesArraySourceTypeEx(ingest.ChildByField(n, "object"), content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals, extra)
 }
 
 // jsObjectEntriesArraySourceType recovers value type T from an expression that
@@ -6226,6 +6236,11 @@ func jsObjectEntriesPairSubscriptType(n *grammar.Node, content []byte, typedLoca
 // Bare Map is intentionally NOT an array-element source of T (pairs, not values);
 // only entries peels ([…ma][i][1] / Array.from(ma)[i][1]) use this path.
 func jsObjectEntriesArraySourceType(n *grammar.Node, content []byte, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals map[string]string) string {
+	return jsObjectEntriesArraySourceTypeEx(n, content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals, jsExtraLocals{})
+}
+
+// jsObjectEntriesArraySourceTypeEx peels Object.entries method-return values via extra.
+func jsObjectEntriesArraySourceTypeEx(n *grammar.Node, content []byte, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals map[string]string, extra jsExtraLocals) string {
 	if n == nil {
 		return ""
 	}
@@ -6244,10 +6259,10 @@ func jsObjectEntriesArraySourceType(n *grammar.Node, content []byte, typedLocals
 	if n == nil {
 		return ""
 	}
-	if t := jsObjectEntriesValueType(n, content, typedLocals, factories, objValueLocals); t != "" {
+	if t := jsObjectEntriesValueTypeEx(n, content, typedLocals, factories, objValueLocals, extra); t != "" {
 		return t
 	}
-	if t := jsArrayEntriesValueType(n, content, arrayLocals, typedLocals, factories, jsExtraLocals{}); t != "" {
+	if t := jsArrayEntriesValueType(n, content, arrayLocals, typedLocals, factories, extra); t != "" {
 		return t
 	}
 	if t := jsMapEntriesValueType(n, content, typedLocals, factories, mapLocals, entryArrayLocals); t != "" {
@@ -6276,7 +6291,7 @@ func jsObjectEntriesArraySourceType(n *grammar.Node, content []byte, typedLocals
 	// identity mapfn only. First arg peels as entries source (bare Map, .entries(),
 	// Object.entries, pair array, …). Non-entries first args fail closed here
 	// (array-element Array.from stays on jsArrayFromElemType).
-	if t := jsArrayFromEntriesSourceType(n, content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals); t != "" {
+	if t := jsArrayFromEntriesSourceTypeEx(n, content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals, extra); t != "" {
 		return t
 	}
 	// [...Object.entries({…})] / [...es] / [...arr.entries()] / [...map.entries()] /
@@ -6311,7 +6326,7 @@ func jsObjectEntriesArraySourceType(n *grammar.Node, content []byte, typedLocals
 		if count != 1 || spreadArg == nil {
 			return ""
 		}
-		return jsObjectEntriesArraySourceType(spreadArg, content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals)
+		return jsObjectEntriesArraySourceTypeEx(spreadArg, content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals, extra)
 	}
 	return ""
 }
@@ -6322,6 +6337,10 @@ func jsObjectEntriesArraySourceType(n *grammar.Node, content []byte, typedLocals
 // Enables Array.from(ma)[0][1].run() under foreign same-leaf. Non-entries
 // first args fail closed (element Array.from stays on jsArrayFromElemType).
 func jsArrayFromEntriesSourceType(n *grammar.Node, content []byte, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals map[string]string) string {
+	return jsArrayFromEntriesSourceTypeEx(n, content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals, jsExtraLocals{})
+}
+
+func jsArrayFromEntriesSourceTypeEx(n *grammar.Node, content []byte, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals map[string]string, extra jsExtraLocals) string {
 	if n == nil || n.Type() != "call_expression" {
 		return ""
 	}
@@ -6367,7 +6386,7 @@ func jsArrayFromEntriesSourceType(n *grammar.Node, content []byte, typedLocals, 
 	default:
 		return ""
 	}
-	return jsObjectEntriesArraySourceType(first, content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals)
+	return jsObjectEntriesArraySourceTypeEx(first, content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals, extra)
 }
 
 // jsEntriesIterableValueType recovers T from an iterable of [key, value] pairs
@@ -6376,7 +6395,11 @@ func jsArrayFromEntriesSourceType(n *grammar.Node, content []byte, typedLocals, 
 // Map source (new Map([[k, new T()]]) / map local — default iterator yields
 // entries).
 func jsEntriesIterableValueType(n *grammar.Node, content []byte, typedLocals, factories, arrayLocals, entryArrayLocals, mapLocals, setLocals, objValueLocals map[string]string) string {
-	if t := jsObjectEntriesArraySourceType(n, content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals); t != "" {
+	return jsEntriesIterableValueTypeEx(n, content, typedLocals, factories, arrayLocals, entryArrayLocals, mapLocals, setLocals, objValueLocals, jsExtraLocals{})
+}
+
+func jsEntriesIterableValueTypeEx(n *grammar.Node, content []byte, typedLocals, factories, arrayLocals, entryArrayLocals, mapLocals, setLocals, objValueLocals map[string]string, extra jsExtraLocals) string {
+	if t := jsObjectEntriesArraySourceTypeEx(n, content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals, extra); t != "" {
 		return t
 	}
 	return jsMapSourceValueType(n, content, typedLocals, factories, mapLocals, entryArrayLocals)
@@ -7103,6 +7126,10 @@ func jsMapSymbolIteratorEntriesType(n *grammar.Node, content []byte, typedLocals
 // of value T (not T) — use for entryLocals and pair-value peels via [1].
 // Enables [...ma].at(0)[1].run() under foreign same-leaf (es[0][1] already worked).
 func jsObjectEntriesPairAtType(n *grammar.Node, content []byte, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals map[string]string) string {
+	return jsObjectEntriesPairAtTypeEx(n, content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals, jsExtraLocals{})
+}
+
+func jsObjectEntriesPairAtTypeEx(n *grammar.Node, content []byte, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals map[string]string, extra jsExtraLocals) string {
 	if n == nil {
 		return ""
 	}
@@ -7148,7 +7175,7 @@ func jsObjectEntriesPairAtType(n *grammar.Node, content []byte, typedLocals, fac
 	if count != 1 || first == nil || !jsIsNumericIndexArg(first, content) {
 		return ""
 	}
-	return jsObjectEntriesArraySourceType(ingest.ChildByField(fn, "object"), content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals)
+	return jsObjectEntriesArraySourceTypeEx(ingest.ChildByField(fn, "object"), content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals, extra)
 }
 
 // jsNullishOrDefaultType recovers T from left ?? right / left || right / left && right
@@ -7440,6 +7467,10 @@ func jsEntriesNextPairType(n *grammar.Node, content []byte, typedLocals, factori
 // [new A()].entries().next().value[1].run() under foreign same-leaf methods.
 // Key slot e[0] fails closed.
 func jsObjectEntriesPairValueType(n *grammar.Node, content []byte, typedLocals, factories, entryLocals, entryArrayLocals, entryNextLocals, arrayLocals, mapLocals, setLocals, objValueLocals map[string]string) string {
+	return jsObjectEntriesPairValueTypeEx(n, content, typedLocals, factories, entryLocals, entryArrayLocals, entryNextLocals, arrayLocals, mapLocals, setLocals, objValueLocals, jsExtraLocals{})
+}
+
+func jsObjectEntriesPairValueTypeEx(n *grammar.Node, content []byte, typedLocals, factories, entryLocals, entryArrayLocals, entryNextLocals, arrayLocals, mapLocals, setLocals, objValueLocals map[string]string, extra jsExtraLocals) string {
 	if n == nil || n.Type() != "subscript_expression" {
 		return ""
 	}
@@ -7460,10 +7491,10 @@ func jsObjectEntriesPairValueType(n *grammar.Node, content []byte, typedLocals, 
 		return t
 	}
 	// [...ma].at(0)[1] / es.at(i)[1] — pair from entries-array .at (same leaf as es[i][1]).
-	if t := jsObjectEntriesPairAtType(obj, content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals); t != "" {
+	if t := jsObjectEntriesPairAtTypeEx(obj, content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals, extra); t != "" {
 		return t
 	}
-	return jsObjectEntriesPairSubscriptType(obj, content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals)
+	return jsObjectEntriesPairSubscriptTypeEx(obj, content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals, extra)
 }
 
 // jsBindEntriesArrayPattern binds the value slot (index 1) of an array_pattern

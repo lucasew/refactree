@@ -5120,6 +5120,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						elemOf[lname] = et
 					} else if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); et != "" {
 						elemOf[lname] = et
+					} else if et := pythonObjectIterableElemType(right, content, funcReturns, typeOf, fieldOf); et != "" {
+						// it = repeat(ba.get()) / it = cycle([ba.get()]) /
+						// it = list(repeat(ba.get(), 1)) — method-return object
+						// iterables under foreign same-leaf (Class peels above).
+						// Enables next(it) / for x in it after bind.
+						elemOf[lname] = et
 					} else if et := pythonDictViewValuesHomogeneousType(right, content, fieldOf); et != "" {
 						// xs = asdict(box).values() / list(asdict(box).values()) —
 						// homogeneous field values only (mixed fail closed).
@@ -5748,6 +5754,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// row := aa[0] / row := [[A()]][0] when nested — row is list of nest leaf.
 				elemOf[lname] = nest
 			} else if et := pythonIterableElemType(valueN, content, elemOf, egElems, typeOf); et != "" {
+				elemOf[lname] = et
+			} else if et := pythonObjectIterableElemType(valueN, content, funcReturns, typeOf, fieldOf); et != "" {
+				// it := repeat(ba.get()) / it := cycle([ba.get()]) — method-return
+				// object iterables under foreign same-leaf (Class peels above).
 				elemOf[lname] = et
 			}
 		case "except_clause":
@@ -13663,10 +13673,12 @@ peeled:
 //	dict(k=ba.get()).values() / {"k": ba.get()}.values() /
 //	ChainMap({"k": ba.get()}).values()
 //	list(dict(k=ba.get()).values()) / iter(...values())
+//	repeat(ba.get()) / itertools.repeat(ba.get()[, times])
 //
 // Enables next(iter([ba.get()])).run() / min([ba.get()], key=...).run() /
 // for x in dict(k=ba.get()).values(): x.run() /
-// for x in cycle([ba.get()]): x.run() / next(x for x in [ba.get()]).run()
+// for x in cycle([ba.get()]): x.run() / next(x for x in [ba.get()]).run() /
+// next(repeat(ba.get())).run() / for x in repeat(ba.get()): x.run()
 // under foreign same-leaf.
 func pythonObjectIterableElemType(n *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
 	for n != nil && !n.IsNull() {
@@ -13740,6 +13752,14 @@ peeled:
 					return ""
 				}
 				return pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf)
+			case "repeat":
+				// repeat(ba.get()[, times]) — yields the object (not an iterable of it).
+				// times ignored. Class()/typed-local peels via pythonIterableElemType.
+				args, ok := pythonCallPositionalArgNodes(n)
+				if !ok || len(args) == 0 {
+					return ""
+				}
+				return pythonObjectLeafType(args[0], content, funcReturns, typeOf, fieldOf)
 			case "chain", "merge":
 				// chain([ba.get()], [ba.get()]) — shared object element when all agree.
 				return pythonObjectChainElemType(n, content, funcReturns, typeOf, fieldOf)
@@ -13769,6 +13789,13 @@ peeled:
 						return ""
 					}
 					return pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf)
+				case "repeat":
+					// itertools.repeat(ba.get()[, times]) — object leaf of 1st arg.
+					args, ok := pythonCallPositionalArgNodes(n)
+					if !ok || len(args) == 0 {
+						return ""
+					}
+					return pythonObjectLeafType(args[0], content, funcReturns, typeOf, fieldOf)
 				case "chain", "merge":
 					return pythonObjectChainElemType(n, content, funcReturns, typeOf, fieldOf)
 				case "takewhile", "dropwhile", "filterfalse":
