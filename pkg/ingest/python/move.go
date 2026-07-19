@@ -2168,6 +2168,12 @@ peeled:
 			if ft := pythonCopyCallObjectType(obj, content, typeOf, fieldOf, funcReturns); ft != "" {
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 			}
+			// replace(box).run() / dataclasses.replace(box).run() /
+			// replace(ba.get()).run() / replace(A()).run() — same object type as
+			// first positional arg (method-return under foreign same-leaf).
+			if ft := pythonReplaceCallObjectType(obj, content, typeOf, fieldOf, funcReturns); ft != "" {
+				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
+			}
 			// weakref.proxy(a).run() / weakref.ref(a)().run() /
 			// weakref.proxy(ba.get()).run() — identity of referent (method-return too).
 			if ft := pythonWeakrefCallObjectType(obj, content, typeOf, funcReturns, fieldOf); ft != "" {
@@ -4951,8 +4957,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					}
 					// new = replace(box) / dataclasses.replace(box) — same object type
 					// as first positional arg (fieldOf for new.a.run() under foreign
-					// same-leaf methods). Keyword field rewrites stay in ExtraRename.
-					if tn := pythonReplaceCallObjectType(right, content, typeOf); tn != "" {
+					// same-leaf methods). Method-return first arg (replace(ba.get()))
+					// peels via funcReturns (Class peels via ctor). Keyword field
+					// rewrites stay in ExtraRename.
+					if tn := pythonReplaceCallObjectType(right, content, typeOf, fieldOf, funcReturns); tn != "" {
 						typeOf[lname] = tn
 						bindFields(lname, tn)
 						if ourReceivers[tn] {
@@ -5796,8 +5804,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					}
 				}
 				// new := replace(box) / dataclasses.replace(box) — same object type as
-				// first positional arg (fieldOf for new.a.run()).
-				if tn := pythonReplaceCallObjectType(valueN, content, typeOf); tn != "" {
+				// first positional arg (fieldOf for new.a.run()). Method-return first
+				// arg (replace(ba.get())) peels via funcReturns.
+				if tn := pythonReplaceCallObjectType(valueN, content, typeOf, fieldOf, funcReturns); tn != "" {
 					typeOf[lname] = tn
 					bindFields(lname, tn)
 					if ourReceivers[tn] {
@@ -7730,10 +7739,10 @@ func pythonWeakrefRefFactoryType(call *grammar.Node, content []byte, typeOf map[
 
 // pythonReplaceCallObjectType recovers T from replace(x) / dataclasses.replace(x)
 // (leaf name "replace", same as pythonReplaceKeywordEdits) when the first
-// positional arg is a typed object local or Class() ctor. Return type is the
-// same as that arg (dataclasses.replace). Keywords after the object are ignored
-// for typing. Non-identifier/non-ctor first args and other callees fail closed.
-func pythonReplaceCallObjectType(call *grammar.Node, content []byte, typeOf map[string]string) string {
+// positional arg is a typed object local, Class() ctor, or method-return
+// (ba.get()). Return type is the same as that arg (dataclasses.replace).
+// Keywords after the object are ignored for typing. Other callees fail closed.
+func pythonReplaceCallObjectType(call *grammar.Node, content []byte, typeOf, fieldOf, funcReturns map[string]string) string {
 	if call == nil || call.Type() != "call" {
 		return ""
 	}
@@ -7745,7 +7754,10 @@ func pythonReplaceCallObjectType(call *grammar.Node, content []byte, typeOf map[
 	if !ok || len(args) == 0 {
 		return ""
 	}
-	return pythonObjectExprType(args[0], content, typeOf)
+	// Typed local / Class() / conditional arms, then method-return (ba.get()).
+	// Class assign already peels via ctor; method-return was UNDER under foreign
+	// same-leaf (same leaf as copy.copy(ba.get())).
+	return pythonObjectLeafType(args[0], content, funcReturns, typeOf, fieldOf)
 }
 
 // pythonNamedtupleReplaceObjectLocal recovers ba from ba._replace(...).
@@ -8078,8 +8090,10 @@ func pythonAstupleCallObjectType(call *grammar.Node, content []byte, typeOf map[
 		return ""
 	}
 	// replace(box) before Class() ctor peel: bare replace(x) is an identifier
-	// call and would otherwise look like a ctor named "replace".
-	if tn := pythonReplaceCallObjectType(args[0], content, typeOf); tn != "" {
+	// call and would otherwise look like a ctor named "replace". fieldOf /
+	// funcReturns nil here — method-return first args fail closed on this path
+	// (astuple(replace(ba.get())) not required; Class/typed-local peels).
+	if tn := pythonReplaceCallObjectType(args[0], content, typeOf, nil, nil); tn != "" {
 		return tn
 	}
 	return pythonObjectExprType(args[0], content, typeOf)
