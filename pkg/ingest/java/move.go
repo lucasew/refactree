@@ -1492,7 +1492,16 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// var s = as.stream() / var opt = as.stream().findFirst() —
 					// track collection/stream/Optional/array element type for later
 					// list.forEach / for (var a : list) / arr[i] / opt.ifPresent (not a scalar A).
+					// Also var ar = new AtomicReference<>(new A()) (Class holder peel).
 					elemOf[name] = et
+				} else if et := javaReferenceHolderCreationObjectElemType(valN, content, compOf, typeMembers); et != "" {
+					// var ar = new AtomicReference<>(ba.get()) / WeakReference / SoftReference —
+					// method-return holder peels under foreign same-leaf (Class peels via
+					// javaStreamPipelineElemType above).
+					elemOf[name] = et
+					if ourReceivers[et] {
+						out[name] = true
+					}
 				} else if et := javaMapPipelineValueType(valN, content, elemOf, valOf); et != "" {
 					// var m = as.stream().collect(Collectors.toMap(k, a -> a[, …])) /
 					// Collections.unmodifiableMap(as) / Collections.singletonMap(k, new A()) /
@@ -6421,7 +6430,16 @@ func javaCompletableFutureCreationElemType(call *grammar.Node, content []byte) s
 // Enables new AtomicReference<>(new A()).get().m() and
 // var ar = new AtomicReference<>(new A()); ar.get().m() under foreign
 // same-leaf methods (pipeline peel + elemOf bind).
+// Method-return referents (ba.get()) use javaReferenceHolderCreationObjectElemType.
 func javaReferenceHolderCreationElemType(call *grammar.Node, content []byte) string {
+	return javaReferenceHolderCreationObjectElemType(call, content, nil, nil)
+}
+
+// javaReferenceHolderCreationObjectElemType recovers V from
+// new AtomicReference<>(new T(...)) / new AtomicReference<>(ba.get()) /
+// WeakReference / SoftReference under foreign same-leaf when typeMembers is
+// provided (zero-arg method return). Class()-only peels work with nil maps.
+func javaReferenceHolderCreationObjectElemType(call *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
 	if call == nil || call.Type() != "object_creation_expression" {
 		return ""
 	}
@@ -6450,6 +6468,12 @@ func javaReferenceHolderCreationElemType(call *grammar.Node, content []byte) str
 	if len(args) < 1 || len(args) > 2 {
 		return ""
 	}
+	// new AtomicReference<>(new A()) / new AtomicReference<>(ba.get()) —
+	// Class creation or zero-arg method return under foreign same-leaf.
+	if tn := javaObjectArgType(args[0], content, compOf, typeMembers); tn != "" {
+		return tn
+	}
+	// Class-only fallback when typeMembers is nil (stream-pipeline path).
 	arg := args[0]
 	if arg.Type() != "object_creation_expression" {
 		return ""
@@ -7395,6 +7419,12 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 				return et
 			}
 			if et := javaCollectionsNCopiesObjectElemType(obj, content, compOf, typeMembers); et != "" {
+				return et
+			}
+			// new AtomicReference<>(ba.get()).get() / WeakReference / SoftReference —
+			// method-return holder peels under foreign same-leaf (Class peels via
+			// javaStreamPipelineElemType / javaReferenceHolderCreationElemType).
+			if et := javaReferenceHolderCreationObjectElemType(obj, content, compOf, typeMembers); et != "" {
 				return et
 			}
 			// stream.gather(windowFixed|windowSliding).findFirst().get().get(0) /

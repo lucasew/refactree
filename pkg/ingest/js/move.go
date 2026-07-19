@@ -1995,9 +1995,11 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// property values T; o.k peels via objValueLocals.
 						// Bind foreign too so dual-class B rebinds fail closed.
 						objValueLocals[ingest.NodeText(nameN, content)] = t
-					} else if t := jsObjectAssignValueType(valN, content, out, factories, objValueLocals); t != "" {
-						// const o = Object.assign({}, {k: new A()}, …) — plain object of
-						// uniform property values T; Object.values(o) peels via objValueLocals.
+					} else if t := jsObjectAssignValueTypeEx(valN, content, out, factories, objValueLocals, classFields, methodReturns); t != "" {
+						// const o = Object.assign({}, {k: new A()}, …) /
+						// Object.assign({}, {k: new BoxA().get()}) — plain object of
+						// uniform property values T (method-return via methodReturns);
+						// Object.values(o) peels via objValueLocals.
 						// Bind foreign too so dual-class B rebinds fail closed.
 						objValueLocals[ingest.NodeText(nameN, content)] = t
 					} else if t := jsIdentityObjectValueType(valN, content, out, factories, objValueLocals); t != "" {
@@ -5690,7 +5692,7 @@ func jsObjectValuesAssignType(n *grammar.Node, content []byte, typedLocals, fact
 	if count != 1 || first == nil {
 		return ""
 	}
-	return jsObjectAssignValueType(first, content, typedLocals, factories, extra.objValue)
+	return jsObjectAssignValueTypeEx(first, content, typedLocals, factories, extra.objValue, extra.classFields, extra.methodReturns)
 }
 
 // jsObjectAssignValueType recovers T from Object.assign(…sources) when every
@@ -5702,7 +5704,15 @@ func jsObjectValuesAssignType(n *grammar.Node, content []byte, typedLocals, fact
 // Enables Object.values(Object.assign({}, {k: new A()}))[0].run() and
 // Object.assign(oa).k.run() under foreign same-leaf methods. Object.assign(new A())
 // identity target peels stay in jsIdentityCloneType (first-arg return).
+// Method-return property values use jsObjectAssignValueTypeEx.
 func jsObjectAssignValueType(n *grammar.Node, content []byte, typedLocals, factories, objValueLocals map[string]string) string {
+	return jsObjectAssignValueTypeEx(n, content, typedLocals, factories, objValueLocals, nil, nil)
+}
+
+// jsObjectAssignValueTypeEx peels Object.assign({}, {k: new BoxA().get()}) via
+// method-return property values under foreign same-leaf (Class peels via
+// jsObjectAssignValueType / jsExprConcreteType).
+func jsObjectAssignValueTypeEx(n *grammar.Node, content []byte, typedLocals, factories, objValueLocals map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -5807,7 +5817,9 @@ func jsObjectAssignValueType(n *grammar.Node, content []byte, typedLocals, facto
 					t = typedLocals[ingest.NodeText(val, content)]
 				}
 			} else {
-				t = jsExprConcreteType(val, content, typedLocals, factories)
+				// Class/typed-local peels via jsExprConcreteType path inside
+				// jsExprLeafType; method-return ba.get() when methodReturns set.
+				t = jsExprLeafType(val, content, typedLocals, factories, classFields, methodReturns)
 			}
 			if t == "" {
 				return ""
@@ -6026,8 +6038,9 @@ func jsObjectFromEntriesPropTypeEx(n *grammar.Node, content []byte, typedLocals,
 	if t := jsObjectFromEntriesValueTypeEx(obj, content, typedLocals, factories, entryArrayLocals, mapLocals, classFields, methodReturns); t != "" {
 		return t
 	}
-	// Object.assign({}, {k: new A()}) / Object.assign(oa) — property values T.
-	if t := jsObjectAssignValueType(obj, content, typedLocals, factories, objValueLocals); t != "" {
+	// Object.assign({}, {k: new A()}) / Object.assign({}, {k: new BoxA().get()}) /
+	// Object.assign(oa) — property values T (method-return via methodReturns).
+	if t := jsObjectAssignValueTypeEx(obj, content, typedLocals, factories, objValueLocals, classFields, methodReturns); t != "" {
 		return t
 	}
 	if obj.Type() == "identifier" && objValueLocals != nil {
@@ -6060,7 +6073,7 @@ func jsObjectEntriesValueTypeEx(n *grammar.Node, content []byte, typedLocals, fa
 	if first == nil {
 		return ""
 	}
-	if t := jsObjectAssignValueType(first, content, typedLocals, factories, objValueLocals); t != "" {
+	if t := jsObjectAssignValueTypeEx(first, content, typedLocals, factories, objValueLocals, extra.classFields, extra.methodReturns); t != "" {
 		return t
 	}
 	if t := jsObjectFromEntriesValueType(first, content, typedLocals, factories, nil, nil); t != "" {

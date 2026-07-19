@@ -2162,9 +2162,10 @@ peeled:
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 			}
 			// copy.copy(item).run() / copy.copy(box.a).run() /
-			// copy.copy(asdict(box)["a"]).run() / copy.deepcopy(...) — preserve
-			// object type of the single arg (typed local / field / dict-view key).
-			if ft := pythonCopyCallObjectType(obj, content, typeOf, fieldOf); ft != "" {
+			// copy.copy(asdict(box)["a"]).run() / copy.deepcopy(...) —
+			// copy.copy(ba.get()).run() — preserve object type of the single arg
+			// (typed local / field / dict-view key / method-return).
+			if ft := pythonCopyCallObjectType(obj, content, typeOf, fieldOf, funcReturns); ft != "" {
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 			}
 			// weakref.proxy(a).run() / weakref.ref(a)().run() — identity of referent.
@@ -4664,9 +4665,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// a = copy(item) / deepcopy(item) — from copy import copy, deepcopy;
 						// preserve object type of the single arg (same as copy.copy(item)).
 						// a = copy(box.a) / copy(asdict(box)["a"]) — field / dict-view key (fieldOf).
+						// a = copy(ba.get()) — method-return under foreign same-leaf.
 						// Collection form xs = copy(items) is handled via elemOf below.
 						if fname == "copy" || fname == "deepcopy" {
-							if tn := pythonCopyCallObjectType(right, content, typeOf, fieldOf); tn != "" {
+							if tn := pythonCopyCallObjectType(right, content, typeOf, fieldOf, funcReturns); tn != "" {
 								typeOf[lname] = tn
 								bindFields(lname, tn)
 								if ourReceivers[tn] {
@@ -4764,8 +4766,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								// type of the single arg (typed local / Class()).
 								// a = copy.copy(box.a) / copy.copy(replace(box).a) — field leaf.
 								// a = copy.copy(asdict(box)["a"]) — dict-view field key (fieldOf).
+								// a = copy.copy(ba.get()) — method-return under foreign same-leaf.
 								// Collection form xs = copy.copy(items) is handled via elemOf below.
-								if tn := pythonCopyCallObjectType(right, content, typeOf, fieldOf); tn != "" {
+								if tn := pythonCopyCallObjectType(right, content, typeOf, fieldOf, funcReturns); tn != "" {
 									typeOf[lname] = tn
 									bindFields(lname, tn)
 									if ourReceivers[tn] {
@@ -5468,8 +5471,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					}
 					// a := copy(item) / deepcopy(item) — from copy import copy, deepcopy.
 					// a := copy(asdict(box)["a"]) — dict-view field key (fieldOf).
+					// a := copy(ba.get()) — method-return under foreign same-leaf.
 					if fname == "copy" || fname == "deepcopy" {
-						if tn := pythonCopyCallObjectType(valueN, content, typeOf, fieldOf); tn != "" {
+						if tn := pythonCopyCallObjectType(valueN, content, typeOf, fieldOf, funcReturns); tn != "" {
 							typeOf[lname] = tn
 							bindFields(lname, tn)
 							if ourReceivers[tn] {
@@ -5541,7 +5545,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						case "copy", "deepcopy":
 							// a := copy.copy(item) / copy.deepcopy(item) — object type of arg.
 							// a := copy.copy(asdict(box)["a"]) — dict-view field key (fieldOf).
-							if tn := pythonCopyCallObjectType(valueN, content, typeOf, fieldOf); tn != "" {
+							// a := copy.copy(ba.get()) — method-return under foreign same-leaf.
+							if tn := pythonCopyCallObjectType(valueN, content, typeOf, fieldOf, funcReturns); tn != "" {
 								typeOf[lname] = tn
 								bindFields(lname, tn)
 								if ourReceivers[tn] {
@@ -7269,11 +7274,13 @@ func pythonStoredOperatorGetterType(call *grammar.Node, content []byte, getterOf
 // replace(box).a (fieldOf; same leaf as box.a), a dict-view field key
 // access asdict(box)["a"] / vars(box)["a"] / box.__dict__["a"] / .get("a")
 // (fieldOf; same leaf as xa = asdict(box)["a"]), next(iter(vars(...).values())) /
-// next(asdict(...).values()) first dict-view field, or
+// next(asdict(...).values()) first dict-view field,
 // list/tuple(vars(...).values())[i] declaration-order index (same leaf as
-// next(...values()).run() / list(...values())[i].run()). Collection copies use
-// pythonIterableElemType instead. Wrong arity / other modules fail closed.
-func pythonCopyCallObjectType(call *grammar.Node, content []byte, typeOf map[string]string, fieldOf map[string]string) string {
+// next(...values()).run() / list(...values())[i].run()), or a zero-arg
+// method return ba.get() under foreign same-leaf (funcReturns; same leaf as
+// ba.get().run()). Collection copies use pythonIterableElemType /
+// pythonObjectCollectionElem instead. Wrong arity / other modules fail closed.
+func pythonCopyCallObjectType(call *grammar.Node, content []byte, typeOf, fieldOf, funcReturns map[string]string) string {
 	if call == nil || call.Type() != "call" {
 		return ""
 	}
@@ -7364,8 +7371,13 @@ func pythonCopyCallObjectType(call *grammar.Node, content []byte, typeOf map[str
 	if ft := pythonDictViewKeyAccessType(args[0], content, fieldOf); ft != "" {
 		return ft
 	}
-	// Typed local / Class() ctor last (after next/getattr/subscript peels above).
+	// Typed local / Class() ctor (after next/getattr/subscript peels above).
 	if tn := pythonObjectExprType(args[0], content, typeOf); tn != "" {
+		return tn
+	}
+	// copy.copy(ba.get()) / copy.deepcopy(ba.get()) — zero-arg method return
+	// under foreign same-leaf (Class/typed-local peels above).
+	if tn := pythonObjectLeafType(args[0], content, funcReturns, typeOf, fieldOf); tn != "" {
 		return tn
 	}
 	return ""
@@ -13201,8 +13213,10 @@ peeled:
 		}
 		return ""
 	case "call":
-		// list([ba.get()]) / tuple(...) / set(...) / deque(...) / UserList(...) —
-		// wrappers preserve element type of the first positional arg.
+		// list([ba.get()]) / tuple(...) / set(...) / deque(...) / UserList(...) /
+		// copy([ba.get()]) / deepcopy([ba.get()]) — wrappers preserve element
+		// type of the first positional arg.
+		// copy.copy([ba.get()]) / copy.deepcopy([ba.get()]) — module-qualified.
 		// [ba.get()].copy() — zero-arg shallow copy preserves element type.
 		fn := ingest.ChildByField(n, "function")
 		if fn == nil {
@@ -13210,9 +13224,13 @@ peeled:
 		}
 		if fn.Type() == "identifier" {
 			switch ingest.NodeText(fn, content) {
-			case "list", "tuple", "set", "frozenset", "iter", "reversed", "sorted", "deque", "UserList":
+			case "list", "tuple", "set", "frozenset", "iter", "reversed", "sorted", "deque", "UserList", "copy", "deepcopy":
 				args, ok := pythonCallPositionalArgNodes(n)
 				if !ok || len(args) == 0 {
+					return ""
+				}
+				// copy/deepcopy require exactly one positional arg.
+				if name := ingest.NodeText(fn, content); (name == "copy" || name == "deepcopy") && len(args) != 1 {
 					return ""
 				}
 				return pythonObjectCollectionElem(args[0], content, funcReturns, typeOf, fieldOf)
@@ -13221,14 +13239,30 @@ peeled:
 		}
 		if fn.Type() == "attribute" {
 			attr := ingest.ChildByField(fn, "attribute")
-			if attr == nil || ingest.NodeText(attr, content) != "copy" {
+			if attr == nil {
+				return ""
+			}
+			method := ingest.NodeText(attr, content)
+			obj := ingest.ChildByField(fn, "object")
+			// copy.copy([ba.get()]) / copy.deepcopy([ba.get()]) — module-qualified
+			// collection copy (element type of the single arg).
+			if (method == "copy" || method == "deepcopy") &&
+				obj != nil && obj.Type() == "identifier" &&
+				ingest.NodeText(obj, content) == "copy" {
+				args, ok := pythonCallPositionalArgNodes(n)
+				if !ok || len(args) != 1 {
+					return ""
+				}
+				return pythonObjectCollectionElem(args[0], content, funcReturns, typeOf, fieldOf)
+			}
+			// [ba.get()].copy() — zero-arg shallow copy preserves element type.
+			if method != "copy" {
 				return ""
 			}
 			args, ok := pythonCallPositionalArgNodes(n)
 			if !ok || len(args) != 0 {
 				return ""
 			}
-			obj := ingest.ChildByField(fn, "object")
 			return pythonObjectCollectionElem(obj, content, funcReturns, typeOf, fieldOf)
 		}
 		return ""
