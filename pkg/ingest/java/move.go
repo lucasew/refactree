@@ -9248,16 +9248,18 @@ func javaFunctionIdentityApplyArgIdent(call *grammar.Node, content []byte) strin
 }
 
 // javaRecordComponentAccessType recovers T from ba.a() when ba is a record local
-// with component a of type T (zero-arg accessor only; fail closed on args).
-// Also peels same-file zero-arg methods (ba.get() / ba.self().a()) via typeMembers
-// under foreign same-leaf methods.
+// with component a of type T (zero-arg accessor only for bare record components;
+// with-arg calls peel only via typeMembers factories).
+// Also peels same-file methods (ba.get() / A.fromBox(ba) / ba.self().a()) via
+// typeMembers under foreign same-leaf methods.
 func javaRecordComponentAccessType(call, obj *grammar.Node, method string, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
 	if call == nil || method == "" || obj == nil {
 		return ""
 	}
-	if javaMethodCallArgCount(call) != 0 {
-		return ""
-	}
+	argCount := javaMethodCallArgCount(call)
+	// Record component accessors are zero-arg only; with-arg peels use typeMembers
+	// factories below (A.fromBox(ba).run() under foreign same-leaf).
+	zeroArg := argCount == 0
 	// Peel (ba.self()).get() — parenthesized zero-arg method receiver under
 	// foreign same-leaf (bare ba.self().get already peels).
 	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
@@ -9277,8 +9279,10 @@ func javaRecordComponentAccessType(call, obj *grammar.Node, method string, conte
 	if obj == nil || obj.IsNull() {
 		return ""
 	}
-	// ba.a() / ba.get() when ba is a known record/class local.
-	// A.create() — static/instance zero-arg method on class name (typeMembers["A"]).
+	// ba.a() / ba.get() / ia.fromBoxI(ba) when ba/ia is a known record/class local
+	// (compOf filled from typeMembers via javaBindRecordLocalComps — with-arg
+	// factories included when return type is a concrete class leaf).
+	// A.create() / A.fromBox(ba) — static/instance method on class name (typeMembers["A"]).
 	if (obj.Type() == "identifier" || obj.Type() == "type_identifier") && (compOf != nil || typeMembers != nil) {
 		name := ingest.NodeText(obj, content)
 		if compOf != nil {
@@ -9286,8 +9290,9 @@ func javaRecordComponentAccessType(call, obj *grammar.Node, method string, conte
 				return t
 			}
 		}
-		// Class-qualified static factory: A.create() → typeMembers[A][create].
-		// Prefer local compOf above so shadowed locals stay local peels.
+		// Class-qualified static/instance factory: A.create() / A.fromBox(ba) →
+		// typeMembers[A][create|fromBox]. Prefer local compOf above so shadowed
+		// locals stay local peels. With-arg allowed when method is indexed.
 		if typeMembers != nil {
 			if comps := typeMembers[name]; comps != nil {
 				if t := comps[method]; t != "" {
@@ -9295,6 +9300,34 @@ func javaRecordComponentAccessType(call, obj *grammar.Node, method string, conte
 				}
 			}
 		}
+	}
+	// Remaining peels (new T().m / cast / field / nested call) are zero-arg only
+	// unless typeMembers resolves the method (handled per-branch below).
+	if !zeroArg {
+		// With-arg: only typeMembers peels above (and nested method_invocation
+		// receiver peels that re-enter this function). Fail closed for bare
+		// record components / unindexed calls.
+		// Nested: new A().fromBoxI(ba) — object_creation receiver + with-arg method.
+		if obj.Type() == "object_creation_expression" && typeMembers != nil {
+			if typeN := ingest.ChildByField(obj, "type"); typeN != nil {
+				tn := javaTypeName(typeN, content)
+				if tn != "" {
+					if comps := typeMembers[tn]; comps != nil {
+						return comps[method]
+					}
+				}
+			}
+		}
+		// Nested: ba.self().fromBoxI(x) — peel zero-arg receiver then with-arg method.
+		if obj.Type() == "method_invocation" && typeMembers != nil {
+			if rt := javaRecordComponentAccessType(obj, ingest.ChildByField(obj, "object"),
+				javaMethodInvocationName(obj, content), content, compOf, typeMembers); rt != "" {
+				if comps := typeMembers[rt]; comps != nil {
+					return comps[method]
+				}
+			}
+		}
+		return ""
 	}
 	// new BoxA(new A()).a() — component type from same-file record/class header.
 	// Under foreign same-leaf methods (assigned ba.a() already peels via compOf).
@@ -9434,14 +9467,17 @@ func javaOptionalOfMethodReturnType(call *grammar.Node, content []byte, compOf m
 		javaMethodInvocationName(first, content), content, compOf, typeMembers)
 }
 
-// javaSameFileMethodReturns maps same-file class/record type → zero-arg method
-// name → concrete return type leaf:
+// javaSameFileMethodReturns maps same-file class/record type → method name →
+// concrete return type leaf (from the method's declared return type):
 //
 //	class HolderA { A get() { return item; } }
 //	record BoxA(A a) { BoxA self() { return this; } }
+//	class A { static A fromBox(BoxA ba) { return ba.get(); } }
 //
-// Enables ba.get().run() / ba.self().a().run() under foreign same-leaf methods.
-// Methods with parameters fail closed (not a lone product accessor).
+// Enables ba.get().run() / ba.self().a().run() / A.fromBox(ba).run() under
+// foreign same-leaf methods. Primitive/void returns fail closed. Methods with
+// parameters are indexed when the return type is a concrete class leaf
+// (static/instance factories); unknown callees still fail closed at use.
 func javaSameFileMethodReturns(root *grammar.Node, content []byte) map[string]map[string]string {
 	out := map[string]map[string]string{}
 	if root == nil {
@@ -9462,36 +9498,6 @@ func javaSameFileMethodReturns(root *grammar.Node, content []byte) map[string]ma
 					ch := body.Child(i)
 					if ch == nil || ch.Type() != "method_declaration" {
 						continue
-					}
-					// Zero formal parameters only.
-					params := ingest.ChildByField(ch, "parameters")
-					if params == nil {
-						// Some grammars use formal_parameters.
-						for j := uint32(0); j < ch.ChildCount(); j++ {
-							c := ch.Child(j)
-							if c != nil && (c.Type() == "formal_parameters" || c.Type() == "parameters") {
-								params = c
-								break
-							}
-						}
-					}
-					if params != nil {
-						hasParam := false
-						for j := uint32(0); j < params.ChildCount(); j++ {
-							c := params.Child(j)
-							if c == nil {
-								continue
-							}
-							switch c.Type() {
-							case "(", ")", ",", "comment":
-								continue
-							default:
-								hasParam = true
-							}
-						}
-						if hasParam {
-							continue
-						}
 					}
 					retN := ingest.ChildByField(ch, "type")
 					mNameN := ingest.ChildByField(ch, "name")
