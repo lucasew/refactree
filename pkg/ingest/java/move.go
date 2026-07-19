@@ -6810,6 +6810,238 @@ func javaHomogeneousCreationElem(args *grammar.Node, content []byte) string {
 	return elem
 }
 
+// javaObjectArgType recovers T from a factory argument that is either `new T(...)`
+// or a same-file zero-arg method return (ba.get() → A) under foreign same-leaf.
+// Other shapes fail closed.
+func javaObjectArgType(arg *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
+	if arg == nil {
+		return ""
+	}
+	for arg != nil && !arg.IsNull() && arg.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(arg, "expression")
+		if inner == nil {
+			for i := uint32(0); i < arg.ChildCount(); i++ {
+				ch := arg.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		arg = inner
+	}
+	if arg == nil || arg.IsNull() {
+		return ""
+	}
+	if arg.Type() == "object_creation_expression" {
+		typeN := ingest.ChildByField(arg, "type")
+		if typeN == nil {
+			return ""
+		}
+		return javaTypeName(typeN, content)
+	}
+	if arg.Type() == "method_invocation" {
+		return javaRecordComponentAccessType(arg, ingest.ChildByField(arg, "object"),
+			javaMethodInvocationName(arg, content), content, compOf, typeMembers)
+	}
+	return ""
+}
+
+// javaHomogeneousObjectElem returns T when every argument peels to the same Class
+// leaf via new T(...) or zero-arg method return (ba.get()). Enables
+// List.of(ba.get()) / Stream.of(ba.get()) / Arrays.asList(ba.get()) under foreign
+// same-leaf (Class()-only peels live in javaHomogeneousCreationElem).
+func javaHomogeneousObjectElem(args *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
+	if args == nil || args.Type() != "argument_list" {
+		return ""
+	}
+	var elem string
+	saw := false
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		switch ch.Type() {
+		case "(", ")", ",", "comment":
+			continue
+		default:
+			tn := javaObjectArgType(ch, content, compOf, typeMembers)
+			if tn == "" {
+				return ""
+			}
+			if !saw {
+				elem = tn
+				saw = true
+				continue
+			}
+			if tn != elem {
+				return ""
+			}
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return elem
+}
+
+// javaStaticCollectionOfObjectElemType recovers T from static collection/stream
+// factories whose args peel via javaHomogeneousObjectElem, including type-
+// preserving pipeline stages under foreign same-leaf:
+//
+//	List.of(ba.get()) / Arrays.asList(ba.get()) / Set.of(ba.get())
+//	Collections.singletonList(ba.get()) / Collections.singleton(ba.get())
+//	Stream.of(ba.get()) / Stream.of(ba.get()).findFirst() / .toList()
+//	Optional.of(ba.get()) / ofNullable(ba.get())
+//	CompletableFuture.completedFuture(ba.get())
+//
+// Class()-only peels live in javaStaticCollectionOfElemType. Mixed / unknown
+// methods / non-homogeneous args fail closed.
+func javaStaticCollectionOfObjectElemType(obj *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
+	for obj != nil && !obj.IsNull() {
+		for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
+			inner := ingest.ChildByField(obj, "expression")
+			if inner == nil {
+				for i := uint32(0); i < obj.ChildCount(); i++ {
+					ch := obj.Child(i)
+					if ch.Type() == "(" || ch.Type() == ")" {
+						continue
+					}
+					inner = ch
+					break
+				}
+			}
+			obj = inner
+		}
+		if obj == nil || obj.IsNull() || obj.Type() != "method_invocation" {
+			return ""
+		}
+		name := javaMethodInvocationName(obj, content)
+		recv := ingest.ChildByField(obj, "object")
+		switch name {
+		case "of", "ofNullable", "asList", "singletonList", "singleton", "completedFuture", "completedStage":
+			// Factory leaf — peel homogeneous object args.
+			var args *grammar.Node
+			for i := uint32(0); i < obj.ChildCount(); i++ {
+				if obj.Child(i).Type() == "argument_list" {
+					args = obj.Child(i)
+					break
+				}
+			}
+			// Restrict receivers like javaStaticCollectionOfElemType.
+			recvName := javaStaticFactoryReceiverName(recv, content)
+			switch name {
+			case "of":
+				switch recvName {
+				case "List", "Stream", "Set", "Optional":
+					// ok
+				default:
+					return ""
+				}
+			case "ofNullable":
+				if recvName != "Optional" && recvName != "Stream" {
+					return ""
+				}
+			case "completedFuture", "completedStage":
+				if recvName != "CompletableFuture" {
+					return ""
+				}
+			case "asList":
+				if recvName != "Arrays" {
+					return ""
+				}
+			case "singletonList", "singleton":
+				if recvName != "Collections" {
+					return ""
+				}
+			}
+			return javaHomogeneousObjectElem(args, content, compOf, typeMembers)
+		case "findFirst", "findAny", "toList", "toSet",
+			"stream", "parallelStream", "iterator", "listIterator",
+			"descendingIterator", "spliterator",
+			"reversed", "sequencedCollection",
+			"filter", // Optional.filter — type-preserving when present
+			"orElseThrow",
+			"join", "getNow", "resultNow",
+			"get": // zero-arg Optional/CF get on pipeline
+			if name == "get" && !javaCallIsZeroArg(obj) {
+				return ""
+			}
+			// Type-preserving stage — peel receiver.
+			obj = recv
+			continue
+		case "limit", "skip", "sorted", "distinct", "unordered", "sequential", "parallel",
+			"peek", "onClose", "takeWhile", "dropWhile":
+			// Stream intermediate type-preserving stages.
+			obj = recv
+			continue
+		default:
+			return ""
+		}
+	}
+	return ""
+}
+
+// javaCollectionsNCopiesObjectElemType recovers T from Collections.nCopies(n, ba.get())
+// when the second arg peels via javaObjectArgType. Class()-only peels live in
+// javaCollectionsNCopiesElemType.
+func javaCollectionsNCopiesObjectElemType(obj *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
+	if obj == nil || obj.Type() != "method_invocation" {
+		return ""
+	}
+	if javaMethodInvocationName(obj, content) != "nCopies" {
+		return ""
+	}
+	recvN := ingest.ChildByField(obj, "object")
+	if javaStaticFactoryReceiverName(recvN, content) != "Collections" {
+		return ""
+	}
+	args := javaCallArgs(obj)
+	if len(args) != 2 {
+		return ""
+	}
+	return javaObjectArgType(args[1], content, compOf, typeMembers)
+}
+
+// javaMapOfObjectValueType recovers T from Map.of(k, ba.get()) / Map.of(k, new A())
+// when every value arg peels to the same Class leaf via javaObjectArgType.
+// Class()-only peels live in javaMapOfValueType.
+func javaMapOfObjectValueType(obj *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
+	if obj == nil || obj.Type() != "method_invocation" {
+		return ""
+	}
+	if javaMethodInvocationName(obj, content) != "of" {
+		return ""
+	}
+	recvN := ingest.ChildByField(obj, "object")
+	if javaStaticFactoryReceiverName(recvN, content) != "Map" {
+		return ""
+	}
+	args := javaCallArgs(obj)
+	if len(args) < 2 || len(args)%2 != 0 {
+		return ""
+	}
+	var elem string
+	saw := false
+	for i := 1; i < len(args); i += 2 {
+		tn := javaObjectArgType(args[i], content, compOf, typeMembers)
+		if tn == "" {
+			return ""
+		}
+		if !saw {
+			elem = tn
+			saw = true
+			continue
+		}
+		if tn != elem {
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return elem
+}
+
 // javaInferredLambdaParamNames returns parameter names for untyped lambdas:
 // a -> … and (a, b) -> …. Typed (A a) -> uses formal_parameters and returns nil.
 func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string {
@@ -7077,10 +7309,11 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 				return elemOf[id]
 			}
 		}
-		// Function.identity().apply(new A()) / Function.<A>identity().apply(a) —
-		// identity Function peels apply arg to T under foreign same-leaf.
+		// Function.identity().apply(new A()) / Function.<A>identity().apply(a) /
+		// Function.identity().apply(ba.get()) — identity Function peels apply arg
+		// to T under foreign same-leaf (method-return via typeMembers).
 		if method == "apply" {
-			if t := javaFunctionIdentityApplyType(val, content, elemOf, valOf); t != "" {
+			if t := javaFunctionIdentityApplyType(val, content, elemOf, valOf, compOf, typeMembers); t != "" {
 				return t
 			}
 		}
@@ -7133,6 +7366,19 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 			if et := javaStreamPipelineElemType(obj, content, elemOf, valOf); et != "" {
 				return et
 			}
+			// List.of(ba.get()).get(0) / Arrays.asList(ba.get()).get(0) /
+			// Collections.singletonList(ba.get()).get(0) /
+			// Stream.of(ba.get()).findFirst().get() / toList().get(0) /
+			// Collections.nCopies(n, ba.get()).get(0) /
+			// CompletableFuture.completedFuture(ba.get()).join() —
+			// method-return static factory peels under foreign same-leaf
+			// (Class() peels via javaStreamPipelineElemType / javaHomogeneousCreationElem).
+			if et := javaStaticCollectionOfObjectElemType(obj, content, compOf, typeMembers); et != "" {
+				return et
+			}
+			if et := javaCollectionsNCopiesObjectElemType(obj, content, compOf, typeMembers); et != "" {
+				return et
+			}
 			// stream.gather(windowFixed|windowSliding).findFirst().get().get(0) /
 			// s.findFirst().get().get(0) after var s = gather(window*) /
 			// oa.get().get(0) after var oa = s.findFirst() /
@@ -7175,9 +7421,13 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 			// Collections.singletonMap(k, new A()).get(k) /
 			// Map.copyOf(m).get(k) / Collections.unmodifiableMap(m).get(k) /
 			// stream.collect(toMap(...)).get(k) — and remove(k) → V.
+			// Map.of(k, ba.get()).get(k) — method-return map value peels.
 			// getFirst/getLast/set/queue endpoints / CF join stay list/deque/CF-only.
 			if method == "get" || method == "remove" {
-				return javaMapPipelineValueType(obj, content, elemOf, valOf)
+				if vt := javaMapPipelineValueType(obj, content, elemOf, valOf); vt != "" {
+					return vt
+				}
+				return javaMapOfObjectValueType(obj, content, compOf, typeMembers)
 			}
 			return ""
 		}
@@ -7204,7 +7454,11 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// ea.nextElement() / vs.elements().nextElement() /
 		// Collections.enumeration(as).nextElement() — same E (Enumeration).
 		// elements()/enumeration() are type-preserving in javaStreamPipelineElemType.
-		return javaStreamPipelineElemType(obj, content, elemOf, valOf)
+		// List.of(ba.get()).iterator().next() — method-return factory peels.
+		if et := javaStreamPipelineElemType(obj, content, elemOf, valOf); et != "" {
+			return et
+		}
+		return javaStaticCollectionOfObjectElemType(obj, content, compOf, typeMembers)
 	case "orElse", "orElseGet", "orElseThrow":
 		// Optional.orElse / orElseGet / orElseThrow return T; receiver may be
 		// Optional<A> local or a pipeline that yields Optional
@@ -7212,7 +7466,11 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// does not change the value type leaf.
 		// Prefer pipeline T; fall back to orElseGet/orElse supplier/default
 		// creation peels when the Optional source is untyped (Optional.empty()).
+		// Stream.of(ba.get()).findFirst().orElse(…) — method-return factory peels.
 		if t := javaStreamPipelineElemType(obj, content, elemOf, valOf); t != "" {
+			return t
+		}
+		if t := javaStaticCollectionOfObjectElemType(obj, content, compOf, typeMembers); t != "" {
 			return t
 		}
 		return javaOptionalOrElseFallbackType(val, content)
@@ -7595,7 +7853,7 @@ func javaFirstMethodArg(call *grammar.Node) *grammar.Node {
 // Function<T,T> so apply returns the arg type. Enables
 // Function.identity().apply(new A()).run() under foreign same-leaf.
 // Non-identity / multi-arg apply fail closed.
-func javaFunctionIdentityApplyType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+func javaFunctionIdentityApplyType(call *grammar.Node, content []byte, elemOf, valOf, compOf map[string]string, typeMembers map[string]map[string]string) string {
 	if call == nil || call.Type() != "method_invocation" {
 		return ""
 	}
@@ -7643,8 +7901,11 @@ func javaFunctionIdentityApplyType(call *grammar.Node, content []byte, elemOf, v
 	if idObj == nil || !javaIsFunctionTypeName(idObj, content) {
 		return ""
 	}
-	// Apply arg: new A() / typed local / collection access / pipeline.
-	if t := javaCollectionAccessElemType(firstArg, content, elemOf, valOf, nil, nil, nil, nil, nil, nil, nil); t != "" {
+	// Apply arg: new A() / ba.get() / typed local / collection access / pipeline.
+	if t := javaObjectArgType(firstArg, content, compOf, typeMembers); t != "" {
+		return t
+	}
+	if t := javaCollectionAccessElemType(firstArg, content, elemOf, valOf, nil, compOf, nil, nil, nil, nil, typeMembers); t != "" {
 		return t
 	}
 	if t := javaInferExprType(firstArg, content); t != "" {

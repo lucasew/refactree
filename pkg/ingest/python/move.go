@@ -2431,10 +2431,13 @@ peeled:
 		// [ba.get()][0].run() / (ba.get(),)[0].run() / {"k": ba.get()}["k"].run() /
 		// dict(k=ba.get())["k"].run() / ([ba.get()] + [ba.get()])[0].run() /
 		// ([ba.get()] * 2)[0].run() / [*[ba.get()]][0].run() /
-		// list([ba.get()])[0].run() / ([ba.get()] or [ba.get()])[0].run() —
+		// list([ba.get()])[0].run() / ([ba.get()] or [ba.get()])[0].run() /
+		// list({"k": ba.get()}.values())[0].run() / [ba.get()][:][0].run() /
+		// [ba.get()].copy()[0].run() / UserList([ba.get()])[0].run() /
+		// ({"k": ba.get()} | {"j": ba.get()})["j"].run() —
 		// method-return / typed-local collection peels under foreign same-leaf
-		// (assigned forms peel via elemOf after bind). Slices fail closed
-		// (same as pythonSubscriptElemType).
+		// (assigned forms peel via elemOf after bind).
+		val := ingest.ChildByField(obj, "value")
 		hasSlice := false
 		for i := uint32(0); i < obj.ChildCount(); i++ {
 			if obj.Child(i).Type() == "slice" {
@@ -2442,17 +2445,31 @@ peeled:
 				break
 			}
 		}
-		if !hasSlice {
-			val := ingest.ChildByField(obj, "value")
+		if hasSlice {
+			// [ba.get()][:][0] — slice preserves object-collection element type
+			// (Class() peels via pythonIterableElemType / pythonSubscriptElemType).
 			if et := pythonObjectCollectionElem(val, content, funcReturns, typeOf, fieldOf); et != "" {
 				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 			}
-			// {"k": ba.get()}["k"].run() — dict value peel (kept separate from
-			// pythonObjectCollectionElem so assign of {"k": frozenset([A()])}
-			// still hits nested peels before scalar dict binding).
-			if et := pythonHomogeneousObjectDictValue(val, content, funcReturns, typeOf, fieldOf); et != "" {
-				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
-			}
+			return len(foreignReceivers) == 0
+		}
+		if et := pythonObjectCollectionElem(val, content, funcReturns, typeOf, fieldOf); et != "" {
+			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+		}
+		// list({"k": ba.get()}.values())[0] / list(dict(k=ba.get()).values())[0] —
+		// object-dict values via iterable peels (collection peels miss .values()).
+		if et := pythonObjectIterableElemType(val, content, funcReturns, typeOf, fieldOf); et != "" {
+			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+		}
+		// {"k": ba.get()}["k"].run() — dict value peel (kept separate from
+		// pythonObjectCollectionElem so assign of {"k": frozenset([A()])}
+		// still hits nested peels before scalar dict binding).
+		if et := pythonHomogeneousObjectDictValue(val, content, funcReturns, typeOf, fieldOf); et != "" {
+			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+		}
+		// ({"k": ba.get()} | {"j": ba.get()})["j"] — object-dict merge value.
+		if et := pythonObjectDictMergeValueType(val, content, funcReturns, typeOf, fieldOf); et != "" {
+			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 		}
 		return len(foreignReceivers) == 0
 	}
@@ -2547,6 +2564,12 @@ func pythonCollectionAccessElemType(call *grammar.Node, content []byte, elemOf, 
 		// get_nowait is asyncio.Queue / queue.Queue non-blocking get (same E as get).
 		obj := ingest.ChildByField(fn, "object")
 		if et := pythonIterableElemType(obj, content, elemOf, nil, typeOf); et != "" {
+			return et
+		}
+		// deque([ba.get()]).popleft() / [ba.get()].pop() / list([ba.get()]).pop() —
+		// method-return object collections under foreign same-leaf (Class()-only
+		// peels via pythonIterableElemType; assigned forms peel via elemOf).
+		if et := pythonObjectIterableElemType(obj, content, funcReturns, typeOf, fieldOf); et != "" {
 			return et
 		}
 		// {"k": ba.get()}.get("k") / dict(k=ba.get()).get("k") /
@@ -4660,6 +4683,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								}
 								if et := pythonIterableElemType(obj, content, elemOf, egElems, typeOf); ourReceivers[et] {
 									out[lname] = true
+								} else if et := pythonObjectIterableElemType(obj, content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
+									// a = deque([ba.get()]).popleft() / [ba.get()].pop() —
+									// method-return object collection element under foreign same-leaf.
+									out[lname] = true
+									typeOf[lname] = et
+									bindFields(lname, et)
 								} else if et := pythonHomogeneousObjectDictValue(obj, content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
 									// a = {"k": ba.get()}.get("k") / dict(k=ba.get()).get("k")
 									out[lname] = true
@@ -12930,19 +12959,35 @@ peeled:
 		}
 		return ""
 	case "call":
-		// list([ba.get()]) / tuple(...) / set(...) / deque(...) — wrappers
-		// preserve element type of the first positional arg.
+		// list([ba.get()]) / tuple(...) / set(...) / deque(...) / UserList(...) —
+		// wrappers preserve element type of the first positional arg.
+		// [ba.get()].copy() — zero-arg shallow copy preserves element type.
 		fn := ingest.ChildByField(n, "function")
-		if fn == nil || fn.Type() != "identifier" {
+		if fn == nil {
 			return ""
 		}
-		switch ingest.NodeText(fn, content) {
-		case "list", "tuple", "set", "frozenset", "iter", "reversed", "sorted", "deque":
-			args, ok := pythonCallPositionalArgNodes(n)
-			if !ok || len(args) == 0 {
+		if fn.Type() == "identifier" {
+			switch ingest.NodeText(fn, content) {
+			case "list", "tuple", "set", "frozenset", "iter", "reversed", "sorted", "deque", "UserList":
+				args, ok := pythonCallPositionalArgNodes(n)
+				if !ok || len(args) == 0 {
+					return ""
+				}
+				return pythonObjectCollectionElem(args[0], content, funcReturns, typeOf, fieldOf)
+			}
+			return ""
+		}
+		if fn.Type() == "attribute" {
+			attr := ingest.ChildByField(fn, "attribute")
+			if attr == nil || ingest.NodeText(attr, content) != "copy" {
 				return ""
 			}
-			return pythonObjectCollectionElem(args[0], content, funcReturns, typeOf, fieldOf)
+			args, ok := pythonCallPositionalArgNodes(n)
+			if !ok || len(args) != 0 {
+				return ""
+			}
+			obj := ingest.ChildByField(fn, "object")
+			return pythonObjectCollectionElem(obj, content, funcReturns, typeOf, fieldOf)
 		}
 		return ""
 	case "conditional_expression":
@@ -12954,6 +12999,93 @@ peeled:
 			return t1
 		}
 		return ""
+	case "subscript":
+		// [ba.get()][:] / [ba.get()][i:j] — slice preserves element type so
+		// [ba.get()][:][0].run() peels under foreign same-leaf (Class() peels
+		// via pythonIterableElemType on the slice value).
+		hasSlice := false
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			if n.Child(i).Type() == "slice" {
+				hasSlice = true
+				break
+			}
+		}
+		if !hasSlice {
+			return ""
+		}
+		return pythonObjectCollectionElem(ingest.ChildByField(n, "value"), content, funcReturns, typeOf, fieldOf)
+	}
+	return ""
+}
+
+// pythonObjectDictMergeValueType recovers T from a dict merge expression whose
+// arms peel to the same object-dict value leaf via pythonHomogeneousObjectDictValue:
+//
+//	{"k": ba.get()} | {"j": ba.get()} / {} | {"k": ba.get()}
+//	dict(k=ba.get()) | {"j": a}
+//
+// Enables ({"k": ba.get()} | {"j": ba.get()})["j"].run() under foreign same-leaf
+// (Class()-only peels live in pythonDictMergeValueType). Empty dict is a
+// wildcard. Mixed leaves / non-object-dict arms fail closed.
+func pythonObjectDictMergeValueType(n *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		n = pythonParenInner(n)
+	}
+	if n == nil || n.Type() != "binary_operator" {
+		return ""
+	}
+	op := ingest.ChildByField(n, "operator")
+	if op == nil || ingest.NodeText(op, content) != "|" {
+		return ""
+	}
+	left := ingest.ChildByField(n, "left")
+	right := ingest.ChildByField(n, "right")
+	if left == nil || right == nil {
+		return ""
+	}
+	etL := pythonObjectDictMergeArmValueType(left, content, funcReturns, typeOf, fieldOf)
+	etR := pythonObjectDictMergeArmValueType(right, content, funcReturns, typeOf, fieldOf)
+	wildL := pythonDictMergeArmWildcard(left, content)
+	wildR := pythonDictMergeArmWildcard(right, content)
+	if etL != "" && etR != "" {
+		if etL == etR {
+			return etL
+		}
+		return ""
+	}
+	if etL != "" && wildR {
+		return etL
+	}
+	if etR != "" && wildL {
+		return etR
+	}
+	return ""
+}
+
+// pythonObjectDictMergeArmValueType types one | arm as an object-dict value leaf:
+// nested |, object-dict ctor/literal, or "".
+func pythonObjectDictMergeArmValueType(n *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		n = pythonParenInner(n)
+	}
+	if n == nil {
+		return ""
+	}
+	if n.Type() == "binary_operator" {
+		return pythonObjectDictMergeValueType(n, content, funcReturns, typeOf, fieldOf)
+	}
+	if typeOf != nil && n.Type() == "identifier" {
+		// Typed local of Class leaf is a scalar value, not a mapping arm.
+		return ""
+	}
+	if et := pythonHomogeneousObjectDictValue(n, content, funcReturns, typeOf, fieldOf); et != "" {
+		return et
 	}
 	return ""
 }
