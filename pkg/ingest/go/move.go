@@ -1787,6 +1787,8 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 	// methods on b are not fail-open rewritten.
 	funcResults := sameFileFuncResultTypes(pf.Root, content)
 	genericPeels := sameFileGenericPeelFuncs(pf.Root, content)
+	// Named collection types: type AS []*A / type AM = map[K]*A — param peels.
+	namedColl := sameFileNamedCollectionResults(pf.Root, content)
 
 	// Collect method/function scopes and local typed bindings.
 	var walk func(n *grammar.Node)
@@ -1803,34 +1805,34 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 			}
 			rangeSrc := map[string]rangeSourceInfo{}
 			if params := ingest.ChildByField(n, "parameters"); params != nil {
-				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &bindings, rangeSrc)
+				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &bindings, rangeSrc, namedColl)
 			}
 			// Named results: func (r *T) M() (a *A, b *B) — a/b used in body.
-			collectResultParameterBindings(n, content, &bindings, rangeSrc)
+			collectResultParameterBindings(n, content, &bindings, rangeSrc, namedColl)
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl)
 			}
 		case "function_declaration":
 			rangeSrc := map[string]rangeSourceInfo{}
 			if params := ingest.ChildByField(n, "parameters"); params != nil {
-				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &bindings, rangeSrc)
+				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &bindings, rangeSrc, namedColl)
 			}
 			// Named results: func Use() (a *A, b *B) { a.Run(); b.Run() }.
 			// Without this, same-leaf foreign methods are fail-open rewritten.
-			collectResultParameterBindings(n, content, &bindings, rangeSrc)
+			collectResultParameterBindings(n, content, &bindings, rangeSrc, namedColl)
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl)
 			}
 		case "func_literal":
 			// Nested / package-level func literals: func(a *A, b *B) { a.Run(); b.Run() }.
 			// Without param bindings, foreign same-leaf call sites are rewritten (fail-open).
 			rangeSrc := map[string]rangeSourceInfo{}
 			if params := ingest.ChildByField(n, "parameters"); params != nil {
-				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &bindings, rangeSrc)
+				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &bindings, rangeSrc, namedColl)
 			}
-			collectResultParameterBindings(n, content, &bindings, rangeSrc)
+			collectResultParameterBindings(n, content, &bindings, rangeSrc, namedColl)
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl)
 			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -1876,7 +1878,8 @@ type rangeSourceInfo struct {
 // collectResultParameterBindings records named result params from a
 // function/method/func-literal declaration (result field is a parameter_list).
 // Unnamed results (func f() *A) have no identifiers and are skipped.
-func collectResultParameterBindings(decl *grammar.Node, content []byte, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo) {
+// namedColl may be nil (see collectParameterListBindings).
+func collectResultParameterBindings(decl *grammar.Node, content []byte, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo, namedColl map[string]rangeSourceInfo) {
 	if decl == nil {
 		return
 	}
@@ -1884,12 +1887,14 @@ func collectResultParameterBindings(decl *grammar.Node, content []byte, bindings
 	if result == nil || result.Type() != "parameter_list" {
 		return
 	}
-	collectParameterListBindings(result, content, decl.StartByte(), decl.EndByte(), bindings, rangeSrc)
+	collectParameterListBindings(result, content, decl.StartByte(), decl.EndByte(), bindings, rangeSrc, namedColl)
 }
 
 // collectParameterListBindings records concrete-typed params (a *A, a, b *A)
 // and container params usable as range sources (as []*A, m map[K]*B, c ...T).
-func collectParameterListBindings(paramList *grammar.Node, content []byte, scopeStart, scopeEnd uint32, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo) {
+// namedColl maps same-file type names (type AS []*A) to collection element
+// info so params typed as AS / *AS / AM peel under foreign same-leaf (may be nil).
+func collectParameterListBindings(paramList *grammar.Node, content []byte, scopeStart, scopeEnd uint32, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo, namedColl map[string]rangeSourceInfo) {
 	if paramList == nil {
 		return
 	}
@@ -1917,6 +1922,14 @@ func collectParameterListBindings(paramList *grammar.Node, content []byte, scope
 					}
 					rangeSrc[name] = info
 				}
+			} else if info, ok := collectionTypeOrNamedResult(typeN, content, namedColl); ok {
+				// as AS / pas *AS / am AM with type AS []*A / AM map[K]*A.
+				for _, name := range names {
+					if name == "" || name == "_" {
+						continue
+					}
+					rangeSrc[name] = info
+				}
 			}
 		case "variadic_parameter_declaration":
 			// c ...*T — c is a []T-like range source; element type is T.
@@ -1934,6 +1947,9 @@ func collectParameterListBindings(paramList *grammar.Node, content []byte, scope
 			typeN := ingest.ChildByField(p, "type")
 			if typ := typeNameFromTypeNode(typeN, content); typ != "" {
 				rangeSrc[name] = rangeSourceInfo{elemType: typ, isMap: false}
+			} else if info, ok := collectionTypeOrNamedResult(typeN, content, namedColl); ok {
+				// c ...AS with type AS []*A — element type is A (same as ...*A).
+				rangeSrc[name] = info
 			}
 		}
 	}
@@ -2107,6 +2123,140 @@ func functionTypeSingleCollectionResult(typeN *grammar.Node, content []byte) (ra
 	return rangeSourceFromTypeNode(result, content)
 }
 
+// sameFileNamedFuncCollectionResults maps same-file type names whose underlying
+// type is a function type with a single collection result:
+//
+//	type FA func() []*A
+//	type FMA = func() map[K]*A
+//	type FPA = func() ([]*A)
+//
+// Multi-result function types fail closed (same as inline function_type peels).
+// Only direct function_type RHS is peeled — chained aliases (type FA = FB) are
+// left unresolved.
+func sameFileNamedFuncCollectionResults(root *grammar.Node, content []byte) map[string]rangeSourceInfo {
+	out := map[string]rangeSourceInfo{}
+	if root == nil {
+		return out
+	}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil {
+			return
+		}
+		switch n.Type() {
+		case "type_spec", "type_alias":
+			nameN := ingest.ChildByField(n, "name")
+			typeN := ingest.ChildByField(n, "type")
+			if nameN == nil || typeN == nil {
+				break
+			}
+			name := ingest.NodeText(nameN, content)
+			if name == "" {
+				break
+			}
+			if info, ok := functionTypeSingleCollectionResult(typeN, content); ok && info.elemType != "" {
+				out[name] = info
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	return out
+}
+
+// sameFileNamedCollectionResults maps same-file type names whose underlying
+// type is a slice/array/map/channel (or pointer-to-those):
+//
+//	type AS []*A
+//	type AM = map[string]*A
+//	type CA chan *A
+//	type AA [1]*A
+//	type PAS *[]*A
+//
+// Only direct collection RHS is peeled — chained aliases (type AS = BS) left unresolved.
+func sameFileNamedCollectionResults(root *grammar.Node, content []byte) map[string]rangeSourceInfo {
+	out := map[string]rangeSourceInfo{}
+	if root == nil {
+		return out
+	}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil {
+			return
+		}
+		switch n.Type() {
+		case "type_spec", "type_alias":
+			nameN := ingest.ChildByField(n, "name")
+			typeN := ingest.ChildByField(n, "type")
+			if nameN == nil || typeN == nil {
+				break
+			}
+			name := ingest.NodeText(nameN, content)
+			if name == "" {
+				break
+			}
+			if info, ok := rangeSourceFromTypeNode(typeN, content); ok && info.elemType != "" {
+				out[name] = info
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	return out
+}
+
+// functionTypeOrNamedCollectionResult peels an inline function_type or a
+// same-file named type alias/def whose RHS is such a function type
+// (type FA func() []*A / type FA = func() map[K]*A).
+func functionTypeOrNamedCollectionResult(typeN *grammar.Node, content []byte, named map[string]rangeSourceInfo) (rangeSourceInfo, bool) {
+	if info, ok := functionTypeSingleCollectionResult(typeN, content); ok {
+		return info, true
+	}
+	if typeN == nil || typeN.Type() != "type_identifier" || len(named) == 0 {
+		return rangeSourceInfo{}, false
+	}
+	info, ok := named[ingest.NodeText(typeN, content)]
+	if !ok || info.elemType == "" {
+		return rangeSourceInfo{}, false
+	}
+	return info, true
+}
+
+// collectionTypeOrNamedResult peels an inline collection type or a same-file
+// named type alias/def whose RHS is a collection (type AS []*A / type AM = map[K]*A).
+// Also peels *AS when AS is a named collection.
+func collectionTypeOrNamedResult(typeN *grammar.Node, content []byte, named map[string]rangeSourceInfo) (rangeSourceInfo, bool) {
+	if info, ok := rangeSourceFromTypeNode(typeN, content); ok && info.elemType != "" {
+		return info, true
+	}
+	if typeN == nil || len(named) == 0 {
+		return rangeSourceInfo{}, false
+	}
+	// *AS / *AM when AS/AM is a named collection.
+	if typeN.Type() == "pointer_type" {
+		for i := uint32(0); i < typeN.ChildCount(); i++ {
+			c := typeN.Child(i)
+			if c == nil || c.Type() == "*" {
+				continue
+			}
+			return collectionTypeOrNamedResult(c, content, named)
+		}
+		return rangeSourceInfo{}, false
+	}
+	if typeN.Type() != "type_identifier" {
+		return rangeSourceInfo{}, false
+	}
+	info, ok := named[ingest.NodeText(typeN, content)]
+	if !ok || info.elemType == "" {
+		return rangeSourceInfo{}, false
+	}
+	return info, true
+}
+
 // selectorReceiverIdent returns the identifier immediately before '.' at leafStart.
 func selectorReceiverIdent(content []byte, leafStart uint32) string {
 	if leafStart == 0 {
@@ -2211,7 +2361,8 @@ func methodDeclReceiverType(method *grammar.Node, content []byte) string {
 // (params/vars) to their range element/value/key types and channel payloads.
 // funcResults maps same-file function names to positional concrete result types
 // for multi-return call binding (a, b := makeAB()).
-func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo, funcResults map[string][]string, genericPeels map[string]string) {
+// namedColl maps same-file type AS []*A / AM map[K]*A (may be nil).
+func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo, funcResults map[string][]string, genericPeels map[string]string, namedColl map[string]rangeSourceInfo) {
 	if node == nil {
 		return
 	}
@@ -2318,6 +2469,13 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 				}
 			}
 			if info, ok := rangeSourceFromTypeNode(typeN, content); ok {
+				for _, name := range names {
+					if name != "" && name != "_" {
+						rangeSrc[name] = info
+					}
+				}
+			} else if info, ok := collectionTypeOrNamedResult(typeN, content, namedColl); ok {
+				// var xa AS / var pas *AS with type AS []*A.
 				for _, name := range names {
 					if name != "" && name != "_" {
 						rangeSrc[name] = info
@@ -3714,6 +3872,7 @@ func goIdentTypeAtFunc(root *grammar.Node, content []byte, funcResults map[strin
 		return func(string, uint32) (string, bool) { return "", false }
 	}
 	genericPeels := sameFileGenericPeelFuncs(root, content)
+	namedColl := sameFileNamedCollectionResults(root, content)
 	var bindings []identTypeBinding
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
@@ -3729,20 +3888,20 @@ func goIdentTypeAtFunc(root *grammar.Node, content []byte, funcResults map[strin
 			}
 			rangeSrc := map[string]rangeSourceInfo{}
 			if params := ingest.ChildByField(n, "parameters"); params != nil {
-				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &bindings, rangeSrc)
+				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &bindings, rangeSrc, namedColl)
 			}
-			collectResultParameterBindings(n, content, &bindings, rangeSrc)
+			collectResultParameterBindings(n, content, &bindings, rangeSrc, namedColl)
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl)
 			}
 		case "function_declaration", "func_literal":
 			rangeSrc := map[string]rangeSourceInfo{}
 			if params := ingest.ChildByField(n, "parameters"); params != nil {
-				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &bindings, rangeSrc)
+				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &bindings, rangeSrc, namedColl)
 			}
-			collectResultParameterBindings(n, content, &bindings, rangeSrc)
+			collectResultParameterBindings(n, content, &bindings, rangeSrc, namedColl)
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl)
 			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -3791,6 +3950,10 @@ func goOperandIsBareIdent(n *grammar.Node) bool {
 // (may be nil).
 func collectionIndexElemTypeFunc(root *grammar.Node, content []byte, funcColl map[string][]rangeSourceInfo) func(name string, at uint32) (string, bool) {
 	var bindings []identTypeBinding
+	// Named function types: type FA func() []*A / type FA = func() map[K]*A.
+	namedFunc := sameFileNamedFuncCollectionResults(root, content)
+	// Named collection types: type AS []*A / type AM = map[K]*A.
+	namedColl := sameFileNamedCollectionResults(root, content)
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
 		if n == nil {
@@ -3801,7 +3964,7 @@ func collectionIndexElemTypeFunc(root *grammar.Node, content []byte, funcColl ma
 			rangeSrc := map[string]rangeSourceInfo{}
 			var dummy []identTypeBinding
 			if params := ingest.ChildByField(n, "parameters"); params != nil {
-				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &dummy, rangeSrc)
+				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &dummy, rangeSrc, namedColl)
 			}
 			// Receiver is not a collection; skip. Bind collection params to
 			// the whole decl so as[0] inside the body resolves.
@@ -3812,9 +3975,9 @@ func collectionIndexElemTypeFunc(root *grammar.Node, content []byte, funcColl ma
 				bindings = append(bindings, identTypeBinding{n.StartByte(), n.EndByte(), name, info.elemType})
 			}
 			// Function-typed params with a single collection result:
-			// fa func() []*A / fm func() map[K]*A — bind fa→A so fa()[0].M and
-			// as := fa(); as[0].M resolve under foreign same-leaf methods.
-			// Multi-result func types fail closed (functionTypeSingleCollectionResult).
+			// fa func() []*A / fm func() map[K]*A / fa FA with type FA func() []*A —
+			// bind fa→A so fa()[0].M and as := fa(); as[0].M resolve under foreign
+			// same-leaf methods. Multi-result func types fail closed.
 			if params := ingest.ChildByField(n, "parameters"); params != nil {
 				for i := uint32(0); i < params.ChildCount(); i++ {
 					p := params.Child(i)
@@ -3822,7 +3985,7 @@ func collectionIndexElemTypeFunc(root *grammar.Node, content []byte, funcColl ma
 						continue
 					}
 					typeN := ingest.ChildByField(p, "type")
-					info, ok := functionTypeSingleCollectionResult(typeN, content)
+					info, ok := functionTypeOrNamedCollectionResult(typeN, content, namedFunc)
 					if !ok || info.elemType == "" {
 						continue
 					}
@@ -3835,7 +3998,7 @@ func collectionIndexElemTypeFunc(root *grammar.Node, content []byte, funcColl ma
 				}
 			}
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalCollectionElemBindings(body, content, &bindings, funcColl)
+				collectLocalCollectionElemBindings(body, content, &bindings, funcColl, namedFunc, namedColl)
 			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -4158,8 +4321,8 @@ func rangeSourceFromNewArrayCall(n *grammar.Node, content []byte) (rangeSourceIn
 
 // collectLocalCollectionElemBindings records slice/array/map locals from
 // var_spec with an explicit type (var as []*A / var m map[K]*B), function-typed
-// vars with a single collection result (var fa func() []*A), and from
-// collection short-var / untyped var initializers:
+// vars with a single collection result (var fa func() []*A / var fa FA with
+// type FA func() []*A), and from collection short-var / untyped var initializers:
 // make(T, …), new([n]T), append([]*T{}, …) / append(ident, …), []*T{…} /
 // map[K]*T{…}, x.([]*T) / ([]*T)(x), as[:n] / as[i:], same-file getA() []*A /
 // multi-return as, err := getA() with getA() ([]*A, error), fa() when fa is a
@@ -4169,7 +4332,10 @@ func rangeSourceFromNewArrayCall(n *grammar.Node, content []byte) (rangeSourceIn
 // append(ident, …) and slice of ident resolve against params and earlier
 // collection bindings already recorded in *bindings. funcColl maps same-file
 // function names to positional collection result element types (may be nil).
-func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bindings *[]identTypeBinding, funcColl map[string][]rangeSourceInfo) {
+// namedFunc maps same-file type names (type FA func() []*A) to collection
+// result element info (may be nil). namedColl maps type AS []*A / AM map[K]*A
+// (may be nil).
+func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bindings *[]identTypeBinding, funcColl map[string][]rangeSourceInfo, namedFunc map[string]rangeSourceInfo, namedColl map[string]rangeSourceInfo) {
 	if body == nil {
 		return
 	}
@@ -4263,8 +4429,12 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 			typeN := ingest.ChildByField(n, "type")
 			if info, ok := rangeSourceFromTypeNode(typeN, content); ok && info.elemType != "" {
 				bindElem(n.StartByte(), names, info)
-			} else if info, ok := functionTypeSingleCollectionResult(typeN, content); ok && info.elemType != "" {
-				// var fa func() []*A / var fm func() map[K]*A — fa() peels to result elem.
+			} else if info, ok := collectionTypeOrNamedResult(typeN, content, namedColl); ok && info.elemType != "" {
+				// var xa AS / var pas *AS with type AS []*A.
+				bindElem(n.StartByte(), names, info)
+			} else if info, ok := functionTypeOrNamedCollectionResult(typeN, content, namedFunc); ok && info.elemType != "" {
+				// var fa func() []*A / var fa FA (type FA func() []*A) —
+				// fa() peels to result elem.
 				bindElem(n.StartByte(), names, info)
 			} else {
 				valueN := ingest.ChildByField(n, "value")
