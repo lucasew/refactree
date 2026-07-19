@@ -2552,6 +2552,11 @@ peeled:
 		if et := pythonChainMapMapsIndexObjectValueType(val, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
 			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 		}
+		// ChainMap({"k": ba.get()}, {"j": ba.get()}).parents["k"] — parents
+		// object scalar (Class peels via pythonIterableElemType parents attr).
+		if et := pythonChainMapParentsObjectValueType(val, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
+			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+		}
 		// deepcopy({"k": ba.get()})["k"] / copy({"k": ba.get()})["k"] —
 		// bare copy/deepcopy of object-dict (Class peels via iterable star-copy).
 		if et := pythonCopyCallMappingValueType(val, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
@@ -2693,6 +2698,11 @@ func pythonCollectionAccessElemType(call *grammar.Node, content []byte, elemOf, 
 			}
 			// ChainMap({"k": ba.get()}).maps[0].get("k") — maps index object scalar.
 			if et := pythonChainMapMapsIndexObjectValueType(obj, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
+				return et
+			}
+			// ChainMap({"k": ba.get()}, {"j": ba.get()}).parents.get("k") —
+			// parents object scalar under foreign same-leaf.
+			if et := pythonChainMapParentsObjectValueType(obj, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
 				return et
 			}
 			// deepcopy({"k": ba.get()}).get("k") / copy({"k": ba.get()}).get("k") —
@@ -5382,6 +5392,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// ma = ChainMap({"k": ba.get()}).maps[0] — maps index object
 						// scalar under foreign same-leaf (Class peels via iterable).
 						// Foreign too for shadowing.
+						elemOf[lname] = et
+					} else if et := pythonChainMapParentsObjectValueType(right, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
+						// pa = ChainMap({"k": ba.get()}, {"j": ba.get()}).parents —
+						// parents object scalar under foreign same-leaf (Class peels
+						// via iterable parents attr). Foreign too for shadowing.
 						elemOf[lname] = et
 					} else if et := pythonCopyCallMappingValueType(right, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
 						// da = deepcopy({"k": ba.get()}) / copy({"k": ba.get()}) —
@@ -12453,7 +12468,10 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 			return elemOf[ingest.NodeText(obj, content)]
 		case "parents":
 			// ChainMap.parents is itself a ChainMap of remaining maps.
-			return pythonChainMapExprScalarValueType(obj, content, elemOf)
+			// Object peels (method-return) fall through when funcReturns is
+			// nil here; pythonChainMapParentsObjectValueType covers them on
+			// rename/assign/collection-access paths under foreign same-leaf.
+			return pythonChainMapParentsObjectValueType(right, content, elemOf, nil, nil, nil)
 		}
 		return ""
 	}
@@ -14334,6 +14352,11 @@ func pythonObjectSubscriptElemType(sub *grammar.Node, content []byte, funcReturn
 	if et := pythonChainMapMapsIndexObjectValueType(val, content, nil, funcReturns, typeOf, fieldOf); et != "" {
 		return et
 	}
+	// ChainMap({"k": ba.get()}, {"j": ba.get()}).parents["k"] — parents object
+	// scalar assign under foreign same-leaf.
+	if et := pythonChainMapParentsObjectValueType(val, content, nil, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
 	// deepcopy({"k": ba.get()})["k"] / copy({"k": ba.get()})["k"] — bare
 	// copy/deepcopy of object-dict under foreign same-leaf.
 	return pythonCopyCallMappingValueType(val, content, nil, funcReturns, typeOf, fieldOf)
@@ -14985,6 +15008,11 @@ peeled:
 	}
 	// ChainMap({"k": ba.get()}).maps[0].values() — maps index object scalar.
 	if et := pythonChainMapMapsIndexObjectValueType(obj, content, nil, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
+	// ChainMap({"k": ba.get()}, {"j": ba.get()}).parents.values() — parents
+	// object scalar under foreign same-leaf.
+	if et := pythonChainMapParentsObjectValueType(obj, content, nil, funcReturns, typeOf, fieldOf); et != "" {
 		return et
 	}
 	// deepcopy({"k": ba.get()}).values() / copy({"k": ba.get()}).values().
@@ -16108,6 +16136,38 @@ func pythonObjectDictMergeArmNestedValueType(n *grammar.Node, content []byte, fu
 // same-leaf. Nested list-value maps / non-.maps receivers / slices fail closed.
 func pythonChainMapMapsIndexValueType(sub *grammar.Node, content []byte, elemOf map[string]string) string {
 	return pythonChainMapMapsIndexObjectValueType(sub, content, elemOf, nil, nil, nil)
+}
+
+// pythonChainMapParentsObjectValueType recovers T from
+// ChainMap({"k": ba.get()}, {"j": ba.get()}).parents /
+// collections.ChainMap(...).parents / ChainMap(OrderedDict(k=ba.get()), ...).parents /
+// ca.parents when the ChainMap expression has scalar object mapping value leaf T
+// (method-return / Class() / typed local). ChainMap.parents is itself a ChainMap
+// of remaining maps with the same value leaf, so parents["k"].run() /
+// parents.get("k").run() / pa = parents; pa["k"].run() peel under foreign
+// same-leaf. Mirrors Class pythonIterableElemType parents attr. Nested
+// list-value parents / non-.parents receivers fail closed.
+func pythonChainMapParentsObjectValueType(n *grammar.Node, content []byte, elemOf, funcReturns, typeOf, fieldOf map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		n = pythonParenInner(n)
+	}
+	if n == nil || n.Type() != "attribute" {
+		return ""
+	}
+	attr := ingest.ChildByField(n, "attribute")
+	if attr == nil || ingest.NodeText(attr, content) != "parents" {
+		return ""
+	}
+	obj := ingest.ChildByField(n, "object")
+	// Object peels first (method-return ChainMap / new_child); Class scalar
+	// falls through via pythonChainMapExprObjectScalarValueType helpers.
+	if et := pythonChainMapExprObjectScalarValueType(obj, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
+	return pythonChainMapExprScalarValueType(obj, content, elemOf)
 }
 
 // pythonChainMapMapsIndexObjectValueType recovers T from
