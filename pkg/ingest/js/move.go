@@ -1806,9 +1806,19 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// IteratorResult whose .value is pair of value T.
 						// Bind foreign too so dual-class B rebinds fail closed.
 						entryNextLocals[ingest.NodeText(nameN, content)] = t
+					} else if t := jsMapValueType(valN, content, out, factories, entryArrayLocals); t != "" {
+						// const ma = new Map([[k, new A()]]) / new Map(pa) —
+						// Map of value T. Bind BEFORE jsObjectEntriesArraySourceType:
+						// entries-array peels now accept bare Map / new Map (default
+						// iterator is entries) for [...ma][i][1] / Array.from(ma)[i][1],
+						// which would otherwise steal into entryArrayLocals and leave
+						// mapLocals empty so ma.get(k) under-renames.
+						// Bind foreign too so dual-class B rebinds fail closed.
+						mapLocals[ingest.NodeText(nameN, content)] = t
 					} else if t := jsObjectEntriesArraySourceType(valN, content, out, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals); t != "" {
 						// const es = Object.entries({k: new A()}) /
-						// const es = [...Object.entries({k: new A()})] —
+						// const es = [...Object.entries({k: new A()})] /
+						// const es = [...ma] after map local —
 						// array of [key, value] pairs of value T; es[i][1] peels.
 						// Bind foreign too so dual-class B rebinds fail closed.
 						entryArrayLocals[ingest.NodeText(nameN, content)] = t
@@ -1825,10 +1835,6 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// pairs of [T, T]; ie.next().value[1] peels.
 						// Bind foreign too so dual-class B rebinds fail closed.
 						entryArrayLocals[ingest.NodeText(nameN, content)] = t
-					} else if t := jsMapValueType(valN, content, out, factories, entryArrayLocals); t != "" {
-						// const ma = new Map([[k, new A()]]) / new Map(pa) —
-						// Map of value T. Bind foreign too so dual-class B rebinds fail closed.
-						mapLocals[ingest.NodeText(nameN, content)] = t
 					} else if t := jsPairArrayValueType(valN, content, out, factories); t != "" {
 						// const pa = [["k", new A()]] — pair-array local of value T;
 						// new Map(pa).get(k) peels via entryArrayLocals.
@@ -5265,8 +5271,12 @@ func jsObjectEntriesPairSubscriptType(n *grammar.Node, content []byte, typedLoca
 // / entries-iterator local (const es = Object.entries(...) /
 // const ia = arr.entries()), a single-spread copy
 // [...Object.entries(...)] / [...es] / [...arr.entries()] / [...map.entries()] /
-// [...set.entries()], arr.entries(), map.entries(), or set.entries().
+// [...set.entries()] / [...ma] (bare Map default iterator is entries) /
+// Array.from(ma) / Array.from(map.entries()), arr.entries(), map.entries(),
+// set.entries(), or a bare Map source (new Map([[k, new T()]]) / map local).
 // Used for es[i] / [...entries][i] peels.
+// Bare Map is intentionally NOT an array-element source of T (pairs, not values);
+// only entries peels ([…ma][i][1] / Array.from(ma)[i][1]) use this path.
 func jsObjectEntriesArraySourceType(n *grammar.Node, content []byte, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals map[string]string) string {
 	if n == nil {
 		return ""
@@ -5307,8 +5317,22 @@ func jsObjectEntriesArraySourceType(n *grammar.Node, content []byte, typedLocals
 			return t
 		}
 	}
-	// [...Object.entries({…})] / [...es] / [...arr.entries()] / [...map.entries()] —
-	// single spread of entries pair source.
+	// Bare Map / new Map([[k, new T()]]) — default iterator yields [k, v] pairs.
+	// Enables [...ma][0][1].run() / Array.from(ma)[0][1].run() after ma.set /
+	// new Map([[k, new A()]]) under foreign same-leaf (map.entries() already
+	// worked; bare spread was UNDER).
+	if t := jsMapSourceValueType(n, content, typedLocals, factories, mapLocals, entryArrayLocals); t != "" {
+		return t
+	}
+	// Array.from(entriesIterable) — materializes [k,v][] of value T. 1-arg or
+	// identity mapfn only. First arg peels as entries source (bare Map, .entries(),
+	// Object.entries, pair array, …). Non-entries first args fail closed here
+	// (array-element Array.from stays on jsArrayFromElemType).
+	if t := jsArrayFromEntriesSourceType(n, content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals); t != "" {
+		return t
+	}
+	// [...Object.entries({…})] / [...es] / [...arr.entries()] / [...map.entries()] /
+	// [...ma] — single spread of entries pair source (bare Map via mapSource above).
 	if n.Type() == "array" {
 		var spreadArg *grammar.Node
 		count := 0
@@ -5342,6 +5366,60 @@ func jsObjectEntriesArraySourceType(n *grammar.Node, content []byte, typedLocals
 		return jsObjectEntriesArraySourceType(spreadArg, content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals)
 	}
 	return ""
+}
+
+// jsArrayFromEntriesSourceType recovers T from Array.from(entriesIterable)
+// when the first arg peels as an entries pair source of value T (bare Map,
+// map.entries(), Object.entries, pair array, …). 1-arg or identity mapfn only.
+// Enables Array.from(ma)[0][1].run() under foreign same-leaf. Non-entries
+// first args fail closed (element Array.from stays on jsArrayFromElemType).
+func jsArrayFromEntriesSourceType(n *grammar.Node, content []byte, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals map[string]string) string {
+	if n == nil || n.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	args := ingest.ChildByField(n, "arguments")
+	if fn == nil || args == nil {
+		return ""
+	}
+	if fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain" {
+		return ""
+	}
+	obj := ingest.ChildByField(fn, "object")
+	prop := ingest.ChildByField(fn, "property")
+	if obj == nil || prop == nil ||
+		obj.Type() != "identifier" || ingest.NodeText(obj, content) != "Array" ||
+		ingest.NodeText(prop, content) != "from" {
+		return ""
+	}
+	var first, second *grammar.Node
+	count := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		count++
+		if first == nil {
+			first = ch
+		} else if second == nil {
+			second = ch
+		}
+	}
+	if first == nil {
+		return ""
+	}
+	switch count {
+	case 1:
+		// Array.from(entries) — no mapfn.
+	case 2:
+		if second == nil || !jsIsIdentityCallback(second, content) {
+			return ""
+		}
+	default:
+		return ""
+	}
+	return jsObjectEntriesArraySourceType(first, content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals)
 }
 
 // jsEntriesIterableValueType recovers T from an iterable of [key, value] pairs
