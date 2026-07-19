@@ -2139,15 +2139,18 @@ func functionTypeSingleCollectionResult(typeN *grammar.Node, content []byte) (ra
 //	type FA func() []*A
 //	type FMA = func() map[K]*A
 //	type FPA = func() ([]*A)
+//	type FA = FA0          // chained alias of a named func type
+//	type FA FA0            // defined type whose base is a named func type
 //
 // Multi-result function types fail closed (same as inline function_type peels).
-// Only direct function_type RHS is peeled — chained aliases (type FA = FB) are
-// left unresolved.
+// Chained aliases / defined-of-named resolve via fixed-point over type_identifier
+// RHS edges; cycles and unresolved targets stay absent (fail closed).
 func sameFileNamedFuncCollectionResults(root *grammar.Node, content []byte) map[string]rangeSourceInfo {
 	out := map[string]rangeSourceInfo{}
 	if root == nil {
 		return out
 	}
+	edges := map[string]string{}
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
 		if n == nil {
@@ -2166,6 +2169,9 @@ func sameFileNamedFuncCollectionResults(root *grammar.Node, content []byte) map[
 			}
 			if info, ok := functionTypeSingleCollectionResult(typeN, content); ok && info.elemType != "" {
 				out[name] = info
+			} else if tgt := typeIdentifierName(typeN, content); tgt != "" && tgt != name {
+				// type FA = FA0 / type FA FA0 — resolve after direct peels.
+				edges[name] = tgt
 			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -2173,6 +2179,7 @@ func sameFileNamedFuncCollectionResults(root *grammar.Node, content []byte) map[
 		}
 	}
 	walk(root)
+	resolveNamedTypeAliasEdges(out, edges)
 	return out
 }
 
@@ -2184,15 +2191,24 @@ func sameFileNamedFuncCollectionResults(root *grammar.Node, content []byte) map[
 //	type CA chan *A
 //	type AA [1]*A
 //	type PAS *[]*A
+//	type AS = AS0          // chained alias of a named collection type
+//	type AS AS0            // defined type whose base is a named collection
+//	type PAS *AS0          // pointer-to-named collection (param (*pas)[0])
 //
-// Only direct collection RHS is peeled — chained aliases (type AS = BS) left unresolved.
+// Chained aliases / defined-of-named resolve via fixed-point over type_identifier
+// RHS edges; pointer-to-named (*AS0) peels after the base is known. Cycles and
+// unresolved targets stay absent (fail closed).
 // isArray is set only when the declared type is (paren of) array_type, not when
 // reached only via pointer peel (type PAS *[n]T) so new(AA) peels but new(PAS) does not.
+// Chained aliases of an array-named type inherit isArray from the resolved base;
+// pointer-to-named always clears isArray (new(PAS) is not indexable).
 func sameFileNamedCollectionResults(root *grammar.Node, content []byte) map[string]rangeSourceInfo {
 	out := map[string]rangeSourceInfo{}
 	if root == nil {
 		return out
 	}
+	edges := map[string]string{}
+	ptrEdges := map[string]string{} // name → target for type PAS *AS0
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
 		if n == nil {
@@ -2215,6 +2231,12 @@ func sameFileNamedCollectionResults(root *grammar.Node, content []byte) map[stri
 				// indexable via (*pas) but not via new(PAS).
 				info.isArray = typeNodeIsDirectArray(typeN)
 				out[name] = info
+			} else if tgt := typeIdentifierName(typeN, content); tgt != "" && tgt != name {
+				// type AS = AS0 / type AS AS0 — resolve after direct peels.
+				edges[name] = tgt
+			} else if tgt := pointerToTypeIdentifierName(typeN, content); tgt != "" && tgt != name {
+				// type PAS *AS0 — resolve after AS0 (or chained AS) is known.
+				ptrEdges[name] = tgt
 			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -2222,7 +2244,119 @@ func sameFileNamedCollectionResults(root *grammar.Node, content []byte) map[stri
 		}
 	}
 	walk(root)
+	// Alias edges first (AS = AS0), then pointer-to-named (PAS *AS0 / PAS *AS),
+	// then alias edges again so type PAS2 = PAS resolves after PAS.
+	resolveNamedTypeAliasEdges(out, edges)
+	resolveNamedPointerToCollectionEdges(out, ptrEdges)
+	resolveNamedTypeAliasEdges(out, edges)
 	return out
+}
+
+// typeIdentifierName returns the text of a type_identifier node (after peeling
+// parenthesized_type wrappers), or "" when n is not a bare type name.
+func typeIdentifierName(n *grammar.Node, content []byte) string {
+	for n != nil && n.Type() == "parenthesized_type" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "(" || c.Type() == ")" {
+				continue
+			}
+			inner = c
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "type_identifier" {
+		return ""
+	}
+	return ingest.NodeText(n, content)
+}
+
+// pointerToTypeIdentifierName returns T for *T / (*T) when T is a type_identifier,
+// or "" when n is not a single-level pointer to a named type.
+func pointerToTypeIdentifierName(n *grammar.Node, content []byte) string {
+	for n != nil && n.Type() == "parenthesized_type" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "(" || c.Type() == ")" {
+				continue
+			}
+			inner = c
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "pointer_type" {
+		return ""
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		c := n.Child(i)
+		if c == nil || c.Type() == "*" {
+			continue
+		}
+		return typeIdentifierName(c, content)
+	}
+	return ""
+}
+
+// resolveNamedTypeAliasEdges follows type-identifier RHS chains into out using
+// fixed-point iteration (type AS = AS0 where AS0 already peels; multi-hop
+// type AS2 = AS). Cycles and unresolved targets stay absent (fail closed).
+func resolveNamedTypeAliasEdges(out map[string]rangeSourceInfo, edges map[string]string) {
+	if len(edges) == 0 {
+		return
+	}
+	for {
+		progress := false
+		for name, target := range edges {
+			if name == "" || target == "" || name == target {
+				continue
+			}
+			if _, ok := out[name]; ok {
+				continue
+			}
+			info, ok := out[target]
+			if !ok || info.elemType == "" {
+				continue
+			}
+			out[name] = info
+			progress = true
+		}
+		if !progress {
+			return
+		}
+	}
+}
+
+// resolveNamedPointerToCollectionEdges peels type PAS *AS0 once AS0 (or a chain
+// to a collection) is in out. isArray is cleared so new(PAS) stays fail-closed.
+func resolveNamedPointerToCollectionEdges(out map[string]rangeSourceInfo, ptrEdges map[string]string) {
+	if len(ptrEdges) == 0 {
+		return
+	}
+	for {
+		progress := false
+		for name, target := range ptrEdges {
+			if name == "" || target == "" || name == target {
+				continue
+			}
+			if _, ok := out[name]; ok {
+				continue
+			}
+			info, ok := out[target]
+			if !ok || info.elemType == "" {
+				continue
+			}
+			info.isArray = false
+			out[name] = info
+			progress = true
+		}
+		if !progress {
+			return
+		}
+	}
 }
 
 // typeNodeIsDirectArray reports whether n is (or is parenthesized) an array_type.
