@@ -2115,12 +2115,14 @@ func javaOptionalOfCollectionFactoryElemType(opt *grammar.Node, content []byte) 
 	}
 }
 
-// javaOptionalOrElseFallbackType recovers T from Optional.orElse(new T(...)) /
-// Optional.orElseGet(() -> new T(...)) when the Optional receiver is untyped
+// javaOptionalOrElseFallbackType recovers T from Optional.orElse(new T(...)/ba.get()) /
+// Optional.orElseGet(() -> new T(...)/ba.get()) when the Optional receiver is untyped
 // (Optional.empty() / unknown) but the default/supplier peels to concrete T.
-// Enables Optional.<A>empty().orElseGet(() -> new A()).run() under foreign
-// same-leaf. orElseThrow has no value default — fail closed here.
-func javaOptionalOrElseFallbackType(call *grammar.Node, content []byte) string {
+// Enables Optional.<A>empty().orElseGet(() -> new A()).run() and
+// Optional.empty().orElseGet(() -> ba.get()).run() under foreign same-leaf.
+// orElseThrow has no value default — fail closed here.
+// Class()-only peels work with nil typeMembers; method-return peels need typeMembers.
+func javaOptionalOrElseFallbackType(call *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
 	if call == nil || call.Type() != "method_invocation" {
 		return ""
 	}
@@ -2138,18 +2140,19 @@ func javaOptionalOrElseFallbackType(call *grammar.Node, content []byte) string {
 	}
 	arg := args[0]
 	if name == "orElse" {
-		// orElse(new A()) — default is object creation of T.
-		if arg.Type() != "object_creation_expression" {
-			return ""
-		}
-		typeN := ingest.ChildByField(arg, "type")
-		if typeN == nil {
-			return ""
-		}
-		return javaTypeName(typeN, content)
+		// orElse(new A()) / orElse(ba.get()) — default peels to T.
+		return javaObjectArgType(arg, content, compOf, typeMembers)
 	}
-	// orElseGet(() -> new A()) — zero-arg expression-bodied supplier.
-	if arg.Type() != "lambda_expression" {
+	// orElseGet(() -> new A() / ba.get()) — zero-arg expression-bodied supplier.
+	return javaZeroArgSupplierObjectElem(arg, content, compOf, typeMembers)
+}
+
+// javaZeroArgSupplierObjectElem recovers T from a zero-arg expression-bodied
+// Supplier lambda whose body peels via javaObjectArgType (new T(...) / ba.get()).
+// Used by Optional.orElseGet and Stream.generate under foreign same-leaf.
+// Blocks, method refs, and non-zero-arg lambdas fail closed.
+func javaZeroArgSupplierObjectElem(arg *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
+	if arg == nil || arg.Type() != "lambda_expression" {
 		return ""
 	}
 	if n := javaInferredLambdaParamNames(arg, content); len(n) != 0 {
@@ -2170,14 +2173,7 @@ func javaOptionalOrElseFallbackType(call *grammar.Node, content []byte) string {
 		}
 		body = inner
 	}
-	if body == nil || body.Type() != "object_creation_expression" {
-		return ""
-	}
-	typeN := ingest.ChildByField(body, "type")
-	if typeN == nil {
-		return ""
-	}
-	return javaTypeName(typeN, content)
+	return javaObjectArgType(body, content, compOf, typeMembers)
 }
 
 // javaNestedCollectionIdentElemType recovers T from a bare identifier that is a
@@ -3710,6 +3706,86 @@ func javaIsGatherersReceiver(n *grammar.Node, content []byte) bool {
 	default:
 		return false
 	}
+}
+
+// javaMapMultiObjectResultElemType recovers R after Stream.mapMulti(mapper) when
+// the stream source / accept arg peels via method-return object factories under
+// foreign same-leaf:
+//
+//	Stream.of(ba.get()).mapMulti((a, c) -> c.accept(a)) → A   // identity
+//	s.mapMulti((a, c) -> c.accept(ba.get())) → A              // accept method-return
+//	s.mapMulti((a, c) -> c.accept(new A())) → A               // accept construction
+//
+// Class pipeline peels live in javaMapMultiResultElemType. Non-accept / block
+// mappers fail closed.
+func javaMapMultiObjectResultElemType(call *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	var args *grammar.Node
+	for i := uint32(0); i < call.ChildCount(); i++ {
+		if call.Child(i).Type() == "argument_list" {
+			args = call.Child(i)
+			break
+		}
+	}
+	if args == nil {
+		return ""
+	}
+	var first *grammar.Node
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch.Type() == "lambda_expression" {
+			first = ch
+			break
+		}
+	}
+	if first == nil {
+		return ""
+	}
+	params := javaInferredLambdaParamNames(first, content)
+	if len(params) != 2 {
+		return ""
+	}
+	body := ingest.ChildByField(first, "body")
+	for body != nil && !body.IsNull() && body.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(body, "expression")
+		if inner == nil {
+			for i := uint32(0); i < body.ChildCount(); i++ {
+				ch := body.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		body = inner
+	}
+	if body == nil || body.IsNull() || body.Type() != "method_invocation" {
+		return ""
+	}
+	nameN := ingest.ChildByField(body, "name")
+	if nameN == nil || ingest.NodeText(nameN, content) != "accept" {
+		return ""
+	}
+	// Sink must be the Consumer param (second).
+	sink := ingest.ChildByField(body, "object")
+	if sink == nil || sink.Type() != "identifier" || ingest.NodeText(sink, content) != params[1] {
+		return ""
+	}
+	callArgs := javaCallArgs(body)
+	if len(callArgs) != 1 {
+		return ""
+	}
+	arg := callArgs[0]
+	recv := ingest.ChildByField(call, "object")
+	// c.accept(a) — identity preserves receiver method-return element type.
+	if arg.Type() == "identifier" && ingest.NodeText(arg, content) == params[0] {
+		return javaStaticCollectionOfObjectElemType(recv, content, compOf, typeMembers)
+	}
+	// c.accept(ba.get()) / c.accept(new A()) — peel accept arg.
+	return javaObjectArgType(arg, content, compOf, typeMembers)
 }
 
 // javaMapMultiResultElemType recovers R after Stream.mapMulti(mapper) when the
@@ -7272,6 +7348,62 @@ func javaStaticCollectionOfObjectElemType(obj *grammar.Node, content []byte, com
 			// Stream.concat(Stream.of(ba.get()), Stream.of(ba.get())) — both args
 			// share method-return element type under foreign same-leaf.
 			return javaStreamConcatObjectElemType(obj, content, compOf, typeMembers)
+		case "generate":
+			// Stream.generate(() -> ba.get()) / generate(() -> new A()) —
+			// supplier body peels via javaObjectArgType under foreign same-leaf
+			// (Class-only peels also live in javaStreamGenerateElemType).
+			if javaStaticFactoryReceiverName(recv, content) != "Stream" {
+				return ""
+			}
+			args := javaCallArgs(obj)
+			if len(args) != 1 {
+				return ""
+			}
+			return javaZeroArgSupplierObjectElem(args[0], content, compOf, typeMembers)
+		case "supplyAsync":
+			// CompletableFuture.supplyAsync(() -> ba.get()) /
+			// supplyAsync(() -> ba.get(), executor) — supplier method-return under
+			// foreign same-leaf (Class peels live in javaCompletableFutureSupplyAsyncElemType).
+			if javaStaticFactoryReceiverName(recv, content) != "CompletableFuture" {
+				return ""
+			}
+			args := javaCallArgs(obj)
+			if len(args) < 1 || len(args) > 2 {
+				return ""
+			}
+			return javaZeroArgSupplierObjectElem(args[0], content, compOf, typeMembers)
+		case "withInitial":
+			// ThreadLocal.withInitial(() -> ba.get()) — supplier method-return under
+			// foreign same-leaf (Class peels live in javaThreadLocalWithInitialElemType).
+			if javaStaticFactoryReceiverName(recv, content) != "ThreadLocal" {
+				return ""
+			}
+			args := javaCallArgs(obj)
+			if len(args) != 1 {
+				return ""
+			}
+			return javaZeroArgSupplierObjectElem(args[0], content, compOf, typeMembers)
+		case "iterate":
+			// Stream.iterate(ba.get(), x -> x) / iterate(ba.get(), pred, x -> x) —
+			// seed peels via javaObjectArgType under foreign same-leaf
+			// (Class-only peels also live in javaStreamIterateElemType).
+			// Operator/predicate args are not inspected (same as Class path).
+			if javaStaticFactoryReceiverName(recv, content) != "Stream" {
+				return ""
+			}
+			args := javaCallArgs(obj)
+			if len(args) < 2 || len(args) > 3 {
+				return ""
+			}
+			return javaObjectArgType(args[0], content, compOf, typeMembers)
+		case "mapMulti":
+			// Stream.of(ba.get()).mapMulti((a,c)->c.accept(a)) — identity accept
+			// preserves method-return element; accept(ba.get()/new A()) peels the
+			// accept arg. Non-accept / block mappers fail closed.
+			if t := javaMapMultiObjectResultElemType(obj, content, compOf, typeMembers); t != "" {
+				return t
+			}
+			return ""
 		case "unmodifiableList", "synchronizedList", "checkedList",
 			"unmodifiableSet", "synchronizedSet", "checkedSet",
 			"unmodifiableSortedSet", "synchronizedSortedSet", "checkedSortedSet",
@@ -7804,7 +7936,7 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		if t := javaStaticCollectionOfObjectElemType(obj, content, compOf, typeMembers); t != "" {
 			return t
 		}
-		return javaOptionalOrElseFallbackType(val, content)
+		return javaOptionalOrElseFallbackType(val, content, compOf, typeMembers)
 	case "min", "max":
 		// Collections.min(coll) / Collections.max(coll[, cmp]) return the element type.
 		// Stream.min/max return Optional — bind via orElse/ifPresent on the pipeline,
