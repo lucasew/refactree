@@ -2373,6 +2373,35 @@ peeled:
 		if et := pythonSubscriptElemType(obj, content, elemOf, nil, typeOf, pairSlots, nil, fieldOf); et != "" {
 			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 		}
+		// [ba.get()][0].run() / (ba.get(),)[0].run() — list/tuple of method-return
+		// or typed-local elements under foreign same-leaf (assigned
+		// xs = [ba.get()]; xs[0].run peels via elemOf after bind).
+		// Slices fail closed (same as pythonSubscriptElemType).
+		hasSlice := false
+		for i := uint32(0); i < obj.ChildCount(); i++ {
+			if obj.Child(i).Type() == "slice" {
+				hasSlice = true
+				break
+			}
+		}
+		if !hasSlice {
+			val := ingest.ChildByField(obj, "value")
+			for val != nil && !val.IsNull() {
+				switch val.Type() {
+				case "parenthesized_expression":
+					val = pythonParenInner(val)
+				case "named_expression":
+					// (xs := [ba.get()])[0].run() — walrus value is the collection.
+					val = ingest.ChildByField(val, "value")
+				default:
+					goto valPeeled
+				}
+			}
+		valPeeled:
+			if et := pythonHomogeneousObjectElem(val, content, funcReturns, typeOf, fieldOf); et != "" {
+				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+			}
+		}
 		return len(foreignReceivers) == 0
 	}
 	// (a if c else x).run() — both arms agree on Class leaf (typed local / Class()).
@@ -2401,9 +2430,20 @@ peeled:
 		}
 		return len(foreignReceivers) == 0
 	}
+	// (ba.get() or ba.get()).run() / (a and a).run() — both arms rename as ours
+	// under foreign same-leaf (nested or/and recurse). Mixed / None fail closed.
+	if obj.Type() == "boolean_operator" {
+		left := ingest.ChildByField(obj, "left")
+		rightN := ingest.ChildByField(obj, "right")
+		if left != nil && rightN != nil &&
+			pythonShouldRenameAttr(left, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf, funcReturns) &&
+			pythonShouldRenameAttr(rightN, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf, funcReturns) {
+			return true
+		}
+		return false
+	}
 	// Complex receivers without static type: unique-leaf only.
-	switch obj.Type() {
-	case "binary_operator", "boolean_operator":
+	if obj.Type() == "binary_operator" {
 		return len(foreignReceivers) == 0
 	}
 	return false
@@ -4810,6 +4850,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						elemOf[lname] = et
 					} else if et := pythonHomogeneousCtorElem(right, content); et != "" {
 						elemOf[lname] = et
+					} else if et := pythonHomogeneousObjectElem(right, content, funcReturns, typeOf, fieldOf); et != "" {
+						// xs = [ba.get()] / xs = (ba.get(),) / xs = [a] — method-return
+						// or typed-local elements under foreign same-leaf.
+						elemOf[lname] = et
 					} else if et := pythonListConcatElemType(right, content, elemOf, egElems, typeOf, lname); et != "" {
 						// xs = xs + [A()] / zs = xs + [A()] / xs = [] + [A()] —
 						// self-target untyped arms are wildcards (assign-concat).
@@ -5060,6 +5104,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				op != nil && ingest.NodeText(op, content) == "+=" {
 				lname := ingest.NodeText(left, content)
 				if et := pythonHomogeneousCtorElem(right, content); et != "" {
+					elemOf[lname] = et
+				} else if et := pythonHomogeneousObjectElem(right, content, funcReturns, typeOf, fieldOf); et != "" {
+					// xs += [ba.get()] — method-return elements under foreign same-leaf.
 					elemOf[lname] = et
 				} else if et := pythonListConcatElemType(right, content, elemOf, egElems, typeOf, lname); et != "" {
 					elemOf[lname] = et
@@ -5427,6 +5474,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// Scalar Class() / next / etc. already handled above (out/typeOf).
 			if et := pythonHomogeneousCtorElem(valueN, content); et != "" {
 				elemOf[lname] = et
+			} else if et := pythonHomogeneousObjectElem(valueN, content, funcReturns, typeOf, fieldOf); et != "" {
+				// xs := [ba.get()] / xs := (ba.get(),) — method-return elements.
+				elemOf[lname] = et
 			} else if et := pythonListConcatElemType(valueN, content, elemOf, egElems, typeOf, lname); et != "" {
 				elemOf[lname] = et
 			} else if et := pythonListRepeatElemType(valueN, content, elemOf, egElems, typeOf); et != "" {
@@ -5539,6 +5589,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					break
 				}
 				if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
+					out[ingest.NodeText(left, content)] = true
+				} else if et := pythonHomogeneousObjectElem(right, content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
+					// for x in [ba.get()] / for x in (ba.get(),) — method-return
+					// elements under foreign same-leaf (same leaf as xs=[ba.get()]; for x in xs).
 					out[ingest.NodeText(left, content)] = true
 				} else if et := pythonDictViewValuesHomogeneousType(right, content, fieldOf); ourReceivers[et] {
 					// for x in asdict(box).values() / vars / __dict__ / d.values()
@@ -12612,6 +12666,95 @@ func pythonHomogeneousCtorElem(collection *grammar.Node, content []byte) string 
 		return ""
 	}
 	return elem
+}
+
+// pythonHomogeneousObjectElem recovers T from [ba.get()] / (ba.get(),) / [a]
+// when every element peels to the same Class leaf via Class() ctor, method/
+// factory return, typed local, or parenthesized/walrus/ternary forms. Enables
+// [ba.get()][0].run() / xs = [ba.get()]; xs[0].run() under foreign same-leaf
+// (pythonHomogeneousCtorElem only peels Class() identifiers). Mixed leaves /
+// empty / non-object elements fail closed.
+func pythonHomogeneousObjectElem(collection *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if collection == nil {
+		return ""
+	}
+	switch collection.Type() {
+	case "list", "tuple", "set":
+		// ok
+	default:
+		return ""
+	}
+	var elem string
+	saw := false
+	for i := uint32(0); i < collection.ChildCount(); i++ {
+		ch := collection.Child(i)
+		if ch == nil {
+			continue
+		}
+		switch ch.Type() {
+		case "[", "]", "(", ")", "{", "}", ",", "comment":
+			continue
+		default:
+			t := pythonObjectLeafType(ch, content, funcReturns, typeOf, fieldOf)
+			if t == "" {
+				return ""
+			}
+			if !saw {
+				elem = t
+				saw = true
+				continue
+			}
+			if t != elem {
+				return ""
+			}
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return elem
+}
+
+// pythonObjectLeafType recovers the Class leaf of a value expression used as a
+// list/tuple element or similar object peel: typed local identifier, Class()
+// ctor, method/factory return (ba.get() → A), parenthesized / walrus wrappers,
+// or conditional when both arms agree. Other shapes fail closed.
+func pythonObjectLeafType(n *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	for n != nil && !n.IsNull() {
+		switch n.Type() {
+		case "parenthesized_expression":
+			n = pythonParenInner(n)
+		case "named_expression":
+			n = ingest.ChildByField(n, "value")
+		default:
+			goto peeled
+		}
+	}
+peeled:
+	if n == nil || n.IsNull() {
+		return ""
+	}
+	switch n.Type() {
+	case "identifier":
+		if typeOf == nil {
+			return ""
+		}
+		return typeOf[ingest.NodeText(n, content)]
+	case "call":
+		if ct := pythonClassCtorName(n, content); ct != "" {
+			return ct
+		}
+		return pythonCallFuncReturnType(n, content, funcReturns, typeOf, fieldOf)
+	case "conditional_expression":
+		body, alt := pythonConditionalArms(n)
+		t1 := pythonObjectLeafType(body, content, funcReturns, typeOf, fieldOf)
+		t2 := pythonObjectLeafType(alt, content, funcReturns, typeOf, fieldOf)
+		if t1 != "" && t1 == t2 {
+			return t1
+		}
+		return ""
+	}
+	return ""
 }
 
 // pythonNestedHomogeneousCtorElem recovers T from one-level nested list/tuple
