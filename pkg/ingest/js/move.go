@@ -4876,10 +4876,13 @@ func jsNestedArrayFlatElemType(n *grammar.Node, content []byte, arrayLocals, typ
 	return found
 }
 
-// jsArrayFromElemType recovers T from Array.from(arrLike) when the first arg
-// peels to uniform element type T and either no mapfn is present (single-arg)
-// or mapfn is an identity callback (x => x / (x) => { return x }).
-// Non-identity mapfn / thisArg-only / unknown first arg fail closed.
+// jsArrayFromElemType recovers T from Array.from(arrLike) when:
+//   - 1-arg: first arg peels to uniform element type T, or
+//   - 2-arg identity mapfn (x => x): same as 1-arg (type-preserving), or
+//   - 2-arg non-identity mapfn whose sole return peels to concrete T
+//     (Array.from({length: n}, () => new A()) / (_v, i) => a0) — mapfn return
+//     is the element type under foreign same-leaf.
+// thisArg (3rd arg) / unknown mapfn returns / untyped first arg fail closed.
 func jsArrayFromElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals) string {
 	if n == nil || n.Type() != "call_expression" {
 		return ""
@@ -4905,7 +4908,7 @@ func jsArrayFromElemType(n *grammar.Node, content []byte, arrayLocals, typedLoca
 	default:
 		return ""
 	}
-	// 1-arg: Array.from(arr). 2-arg: Array.from(arr, x => x) identity mapfn only.
+	// 1-arg: Array.from(arr). 2-arg: Array.from(arr, mapfn).
 	var first, second *grammar.Node
 	count := 0
 	for i := uint32(0); i < args.ChildCount(); i++ {
@@ -4925,16 +4928,35 @@ func jsArrayFromElemType(n *grammar.Node, content []byte, arrayLocals, typedLoca
 	}
 	switch count {
 	case 1:
-		// Array.from(arr) — no mapfn.
+		// Array.from(arr) — no mapfn; element type of first arg.
+		return jsArraySourceElemType(first, content, arrayLocals, typedLocals, factories, extra)
 	case 2:
-		// Array.from(arr, mapfn) — identity mapfn only (type-preserving).
-		if second == nil || !jsIsIdentityCallback(second, content) {
+		if second == nil {
 			return ""
 		}
+		// Array.from(arr, x => x) — identity mapfn preserves first-arg elements.
+		if jsIsIdentityCallback(second, content) {
+			return jsArraySourceElemType(first, content, arrayLocals, typedLocals, factories, extra)
+		}
+		// Array.from({length: n}, () => new A()) / (_v, i) => a0 — non-identity
+		// mapfn: sole return peels to concrete element T (array-like length
+		// objects have no element source; mapfn creates each slot).
+		return jsArrayFromMapfnReturnType(second, content, typedLocals, factories)
 	default:
 		return ""
 	}
-	return jsArraySourceElemType(first, content, arrayLocals, typedLocals, factories, extra)
+}
+
+// jsArrayFromMapfnReturnType recovers T from an Array.from mapfn whose sole
+// return expression peels to a concrete class leaf (new T() / typed local /
+// factory / ternary). Enables Array.from({length: n}, () => new A())[0].run()
+// under foreign same-leaf. Multi-statement / untyped returns fail closed.
+func jsArrayFromMapfnReturnType(cb *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	ret := jsCallbackSoleReturnExpr(cb, content)
+	if ret == nil {
+		return ""
+	}
+	return jsExprConcreteType(ret, content, typedLocals, factories)
 }
 
 // jsArrayOfElemType recovers T from Array.of(x, …) when every positional arg

@@ -6392,10 +6392,12 @@ func pythonItemgetterFieldType(call *grammar.Node, content []byte, fieldOf map[s
 // operator.name("field")(box) for name in {attrgetter, itemgetter} via fieldOf.
 // Object peels (same field leaf as the bare local):
 //
-//	attrgetter — box / replace(box) / dataclasses.replace(box)
+//	attrgetter — box / replace(box) / dataclasses.replace(box) /
+//	  SimpleNamespace(k=A()) / types.SimpleNamespace(k=A()) inline kwargs
+//	  (same leaf as getattr(SimpleNamespace(...), "k"))
 //	itemgetter — box / asdict(box) / vars(box) / box.__dict__
 func pythonOperatorGetterFieldType(call *grammar.Node, content []byte, fieldOf map[string]string, name string) string {
-	if call == nil || call.Type() != "call" || fieldOf == nil || name == "" {
+	if call == nil || call.Type() != "call" || name == "" {
 		return ""
 	}
 	// Outer call: getter(obj) — function must itself be name(...).
@@ -6440,10 +6442,36 @@ func pythonOperatorGetterFieldType(call *grammar.Node, content []byte, fieldOf m
 		return ""
 	}
 	objLocal := pythonOperatorGetterObjectLocal(objArgs[0], content, name)
-	if objLocal == "" {
+	if objLocal != "" && fieldOf != nil {
+		if t := fieldOf[objLocal+"."+field]; t != "" {
+			return t
+		}
+	}
+	// attrgetter("k")(SimpleNamespace(k=A())) / types.SimpleNamespace — inline SNS.
+	if name == "attrgetter" {
+		return pythonInlineSimpleNamespaceFieldType(objArgs[0], content, field)
+	}
+	return ""
+}
+
+// pythonInlineSimpleNamespaceFieldType recovers T from SimpleNamespace(k=A()) /
+// types.SimpleNamespace(k=A()) field k under foreign same-leaf. Keyword Class()
+// fields only; parenthesized forms peel. Mixed / non-SNS fail closed.
+func pythonInlineSimpleNamespaceFieldType(n *grammar.Node, content []byte, field string) string {
+	if n == nil || field == "" {
 		return ""
 	}
-	return fieldOf[objLocal+"."+field]
+	if n.Type() == "parenthesized_expression" {
+		return pythonInlineSimpleNamespaceFieldType(pythonParenInner(n), content, field)
+	}
+	if n.Type() != "call" {
+		return ""
+	}
+	fields, _ := pythonSimpleNamespaceFieldTypes(n, content)
+	if fields == nil {
+		return ""
+	}
+	return fields[field]
 }
 
 // pythonOperatorGetterObjectLocal recovers the identifier local whose fields are
@@ -6561,10 +6589,13 @@ func pythonStoredOperatorGetterType(call *grammar.Node, content []byte, getterOf
 			return ""
 		}
 		objLocal := pythonOperatorGetterObjectLocal(args[0], content, "attrgetter")
-		if objLocal == "" || fieldOf == nil {
-			return ""
+		if objLocal != "" && fieldOf != nil {
+			if t := fieldOf[objLocal+"."+field]; t != "" {
+				return t
+			}
 		}
-		return fieldOf[objLocal+"."+field]
+		// ga(SimpleNamespace(k=A())) after ga = attrgetter("k") — inline SNS.
+		return pythonInlineSimpleNamespaceFieldType(args[0], content, field)
 	case "itemgetter":
 		if field == "#" {
 			return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
@@ -6584,9 +6615,12 @@ func pythonStoredOperatorGetterType(call *grammar.Node, content []byte, getterOf
 // pythonCopyCallObjectType recovers T from copy.copy(x) / copy.deepcopy(x) /
 // bare copy(x) / deepcopy(x) (from copy import copy, deepcopy) when x is a typed
 // object local or Class() ctor (typeOf / ctor name), a field access box.a /
-// replace(box).a (fieldOf; same leaf as box.a), or a dict-view field key
+// replace(box).a (fieldOf; same leaf as box.a), a dict-view field key
 // access asdict(box)["a"] / vars(box)["a"] / box.__dict__["a"] / .get("a")
-// (fieldOf; same leaf as xa = asdict(box)["a"]). Collection copies use
+// (fieldOf; same leaf as xa = asdict(box)["a"]), next(iter(vars(...).values())) /
+// next(asdict(...).values()) first dict-view field, or
+// list/tuple(vars(...).values())[i] declaration-order index (same leaf as
+// next(...values()).run() / list(...values())[i].run()). Collection copies use
 // pythonIterableElemType instead. Wrong arity / other modules fail closed.
 func pythonCopyCallObjectType(call *grammar.Node, content []byte, typeOf map[string]string, fieldOf map[string]string) string {
 	if call == nil || call.Type() != "call" {
@@ -6624,8 +6658,34 @@ func pythonCopyCallObjectType(call *grammar.Node, content []byte, typeOf map[str
 	if !ok || len(args) != 1 {
 		return ""
 	}
-	if tn := pythonObjectExprType(args[0], content, typeOf); tn != "" {
-		return tn
+	// Prefer structured peels before Class() ctor / typed-local peels:
+	// pythonObjectExprType treats any identifier call as a Class ctor, so
+	// next(...)/getattr(...) would otherwise bind the bogus leaf "next"/"getattr"
+	// and fail closed under foreign same-leaf methods.
+	// copy.copy(next(iter(vars(SimpleNamespace(k=A())).values()))) /
+	// copy.copy(next(asdict(box).values())) — first declaration-order field
+	// (same leaf as next(...values()).run()). Only peel when arg is next(...).
+	if args[0].Type() == "call" {
+		if fn0 := ingest.ChildByField(args[0], "function"); fn0 != nil &&
+			fn0.Type() == "identifier" {
+			switch ingest.NodeText(fn0, content) {
+			case "next":
+				if et := pythonAstupleNextFirstField(args[0], content, fieldOf); et != "" {
+					return et
+				}
+			case "getattr":
+				// copy.copy(getattr(box, "a")) / getattr(SimpleNamespace(k=A()), "k")
+				// — same leaf as getattr(...).run() / attrgetter peels.
+				if ft := pythonGetattrFieldType(args[0], content, fieldOf); ft != "" {
+					return ft
+				}
+			}
+		}
+	}
+	// copy.copy(list(vars(SimpleNamespace(k=A())).values())[0]) /
+	// copy.copy(list(asdict(box).values())[i]) — declaration-order index peel.
+	if et := pythonAstupleIndexAccessType(args[0], content, fieldOf); et != "" {
+		return et
 	}
 	// copy.copy(box.a) / copy.copy(replace(box).a) — field type of the arg
 	// (same leaf as box.a.run() / xa = box.a; xa.run()).
@@ -6640,6 +6700,10 @@ func pythonCopyCallObjectType(call *grammar.Node, content []byte, typeOf map[str
 	// the dict-view key (same leaf as xa = asdict(box)["a"]; xa.run()).
 	if ft := pythonDictViewKeyAccessType(args[0], content, fieldOf); ft != "" {
 		return ft
+	}
+	// Typed local / Class() ctor last (after next/getattr/subscript peels above).
+	if tn := pythonObjectExprType(args[0], content, typeOf); tn != "" {
+		return tn
 	}
 	return ""
 }
@@ -10323,6 +10387,11 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 						}
 						if et := pythonHomogeneousDictValueCtorElem(objN, content); et != "" &&
 							pythonSimpleCalleeName(ingest.ChildByField(objN, "function"), content) == "ChainMap" {
+							return et
+						}
+						// dict.fromkeys(keys, A()).values() / dict.fromkeys(keys, value=A()).values()
+						// — value leaf is A (same as d = dict.fromkeys(...); d.values()).
+						if et := pythonDictFromkeysValueType(objN, content); et != "" {
 							return et
 						}
 					}
