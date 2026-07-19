@@ -2641,9 +2641,20 @@ func pythonCollectionAccessElemType(call *grammar.Node, content []byte, elemOf, 
 		// dict(k=A()).get("k") / ({"k": ba.get()} | {}).get("k") —
 		// inline mapping value peels when the receiver is not a typed local
 		// (assigned forms peel via elemOf after bind).
+		// Nested: ChainMap({"k": [ba.get()]}).get("k") / {"k": [ba.get()]}.get("k") /
+		// ({"k": [ba.get()]} | {}).get("k") — nested leaf so .get("k")[0].run() peels
+		// (Class nested peels via pythonIterableElemType / @nested).
 		// popleft/__next__ on non-dict shapes fail closed here.
 		switch ingest.NodeText(attr, content) {
 		case "get", "setdefault", "pop", "__getitem__":
+			// Nested object mapping first so {"k": [ba.get()]}.get("k") is list-of-A
+			// (elem A) rather than failing closed on scalar object-dict peel.
+			if nest := pythonNestedDictHomogeneousObjectListElem(obj, content, funcReturns, typeOf, fieldOf); nest != "" {
+				return nest
+			}
+			if nest := pythonObjectDictMergeNestedValueType(obj, content, funcReturns, typeOf, fieldOf); nest != "" {
+				return nest
+			}
 			if et := pythonHomogeneousObjectDictValue(obj, content, funcReturns, typeOf, fieldOf); et != "" {
 				return et
 			}
@@ -14760,7 +14771,8 @@ peeled:
 		return et
 	}
 	// [[ba.get()]][0] / ((ba.get(),),)[0] / [{"k": ba.get()}][0] /
-	// {"k": [ba.get()]}["k"] / {"outer": {"k": ba.get()}}["outer"] —
+	// {"k": [ba.get()]}["k"] / {"outer": {"k": ba.get()}}["outer"] /
+	// ChainMap({"k": [ba.get()]})["k"] / ({"k": [ba.get()]} | {})["k"] —
 	// one-level nested object collection / mapping row under foreign same-leaf
 	// (Class peels via pythonNestedMappingSubscriptElemType). Enables further
 	// [0] / ["k"] access as the nested leaf (same model as @nested locals).
@@ -14781,6 +14793,10 @@ peeled:
 				return nest
 			}
 			if nest := pythonNestedDictHomogeneousObjectListElem(val, content, funcReturns, typeOf, fieldOf); nest != "" {
+				return nest
+			}
+			// ({"k": [ba.get()]} | {"m": [ba.get()]})["k"] — nested object dict merge.
+			if nest := pythonObjectDictMergeNestedValueType(val, content, funcReturns, typeOf, fieldOf); nest != "" {
 				return nest
 			}
 		}
@@ -14939,6 +14955,24 @@ peeled:
 					}
 					objN := ingest.ChildByField(fn, "object")
 					return pythonObjectIterableElemType(objN, content, funcReturns, typeOf, fieldOf)
+				case "get", "setdefault", "pop":
+					// ChainMap({"k": [ba.get()]}).get("k") / {"k": [ba.get()]}.get("k") /
+					// ({"k": [ba.get()]} | {}).get("k") — nested object mapping value is
+					// list/tuple/set of T; element type T so .get("k")[0].run() peels
+					// under foreign same-leaf (Class peels via pythonIterableElemType).
+					// Scalar object-dict .get stays on pythonCollectionAccessElemType
+					// (value is T, not iterable of T).
+					objN := ingest.ChildByField(fn, "object")
+					for objN != nil && objN.Type() == "parenthesized_expression" {
+						objN = pythonParenInner(objN)
+					}
+					if nest := pythonNestedDictHomogeneousObjectListElem(objN, content, funcReturns, typeOf, fieldOf); nest != "" {
+						return nest
+					}
+					if nest := pythonObjectDictMergeNestedValueType(objN, content, funcReturns, typeOf, fieldOf); nest != "" {
+						return nest
+					}
+					return ""
 				}
 			}
 		}
@@ -15737,6 +15771,71 @@ func pythonDictMergeArmNestedValueType(n *grammar.Node, content []byte, elemOf m
 	return ""
 }
 
+// pythonObjectDictMergeNestedValueType recovers T from a dict | merge whose arms
+// are nested object collections (list/tuple/set of method-return / typed-local
+// objects, or dict-of-object), under foreign same-leaf:
+//
+//	({"k": [ba.get()]} | {"m": [ba.get()]})["k"][0].run()
+//	({"k": [ba.get()]} | {})["k"][0].run()
+//
+// Class()-only nested merge peels live in pythonDictMergeNestedValueType.
+// Empty dict is a wildcard; mixed leaves / non-nested arms fail closed.
+func pythonObjectDictMergeNestedValueType(n *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		n = pythonParenInner(n)
+	}
+	if n == nil || n.Type() != "binary_operator" {
+		return ""
+	}
+	op := ingest.ChildByField(n, "operator")
+	if op == nil || ingest.NodeText(op, content) != "|" {
+		return ""
+	}
+	left := ingest.ChildByField(n, "left")
+	right := ingest.ChildByField(n, "right")
+	if left == nil || right == nil {
+		return ""
+	}
+	etL := pythonObjectDictMergeArmNestedValueType(left, content, funcReturns, typeOf, fieldOf)
+	etR := pythonObjectDictMergeArmNestedValueType(right, content, funcReturns, typeOf, fieldOf)
+	wildL := pythonDictMergeArmWildcard(left, content)
+	wildR := pythonDictMergeArmWildcard(right, content)
+	if etL != "" && etR != "" {
+		if etL == etR {
+			return etL
+		}
+		return ""
+	}
+	if etL != "" && wildR {
+		return etL
+	}
+	if etR != "" && wildL {
+		return etR
+	}
+	return ""
+}
+
+// pythonObjectDictMergeArmNestedValueType types one | arm as a nested object
+// mapping leaf (dict/OrderedDict/UserDict/ChainMap of object collections).
+func pythonObjectDictMergeArmNestedValueType(n *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		n = pythonParenInner(n)
+	}
+	if n == nil {
+		return ""
+	}
+	if n.Type() == "binary_operator" {
+		return pythonObjectDictMergeNestedValueType(n, content, funcReturns, typeOf, fieldOf)
+	}
+	return pythonNestedDictHomogeneousObjectListElem(n, content, funcReturns, typeOf, fieldOf)
+}
+
 // pythonChainMapMapsIndexValueType recovers T from ChainMap(da).maps[i] /
 // ca.maps[i] / ChainMap({"k": A()}).maps[0] when the ChainMap expression has
 // scalar mapping value leaf T. ChainMap.maps is list[Mapping]; indexing yields
@@ -16439,12 +16538,14 @@ func pythonNestedDictLiteralHomogeneousObjectListElem(collection *grammar.Node, 
 	return nest
 }
 
-// pythonNestedDictCallHomogeneousObjectListElem recovers T from dict/OrderedDict
-// forms with nested object collections (mirrors Class nested call peels):
+// pythonNestedDictCallHomogeneousObjectListElem recovers T from dict/OrderedDict/
+// UserDict/ChainMap forms with nested object collections (mirrors Class nested
+// call peels in pythonNestedDictCallHomogeneousListCtorElem):
 //
 //	dict(k=[ba.get()]) / OrderedDict(k=[ba.get()]) — all-keyword
 //	dict([("k", [ba.get()])]) / OrderedDict((("k", [ba.get()]),)) — pairs
 //	dict({"k": [ba.get()]}) — single dictionary arg
+//	ChainMap({"k": [ba.get()]}) / ChainMap(OrderedDict(k=[ba.get()])) — one+ maps
 //
 // Mixed positional+kwargs, splat, empty, and non-collection values fail closed.
 func pythonNestedDictCallHomogeneousObjectListElem(call *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
@@ -16454,7 +16555,9 @@ func pythonNestedDictCallHomogeneousObjectListElem(call *grammar.Node, content [
 	name := pythonSimpleCalleeName(ingest.ChildByField(call, "function"), content)
 	switch name {
 	case "dict", "OrderedDict", "UserDict":
-		// ok
+		// ok — kwargs / pairs / single dict
+	case "ChainMap":
+		return pythonNestedChainMapHomogeneousObjectListElem(call, content, funcReturns, typeOf, fieldOf)
 	default:
 		return ""
 	}
@@ -16515,6 +16618,64 @@ func pythonNestedDictCallHomogeneousObjectListElem(call *grammar.Node, content [
 	default:
 		return ""
 	}
+}
+
+// pythonNestedChainMapHomogeneousObjectListElem recovers T from
+// ChainMap({"k": [ba.get()]}) / ChainMap(OrderedDict(k=[ba.get()])) /
+// ChainMap({"k": [ba.get()]}, {"m": deque([ba.get()])}) when every positional
+// map has nested object collections (or dict-of-object) of T. Mirrors Class
+// pythonNestedChainMapHomogeneousListCtorElem under foreign same-leaf.
+// Dict literals and dict/OrderedDict/UserDict calls accepted; kwargs/splat fail.
+func pythonNestedChainMapHomogeneousObjectListElem(call *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	argList := ingest.ChildByField(call, "arguments")
+	if argList == nil {
+		return ""
+	}
+	var nest string
+	saw := false
+	for i := uint32(0); i < argList.ChildCount(); i++ {
+		ch := argList.Child(i)
+		switch ch.Type() {
+		case "(", ")", ",", "comment":
+			continue
+		case "keyword_argument", "list_splat", "dictionary_splat", "parenthesized_list_splat":
+			return ""
+		case "dictionary":
+			et := pythonNestedDictLiteralHomogeneousObjectListElem(ch, content, funcReturns, typeOf, fieldOf)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				nest = et
+				saw = true
+				continue
+			}
+			if et != nest {
+				return ""
+			}
+		case "call":
+			// ChainMap(OrderedDict(k=[ba.get()])) / ChainMap(dict(k=[ba.get()])) /
+			// ChainMap(UserDict({"k": [ba.get()]})) / collections.OrderedDict(...).
+			et := pythonNestedDictHomogeneousObjectListElem(ch, content, funcReturns, typeOf, fieldOf)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				nest = et
+				saw = true
+				continue
+			}
+			if et != nest {
+				return ""
+			}
+		default:
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return nest
 }
 
 // pythonNestedDictPairsHomogeneousObjectListElem recovers T from a list/tuple of
