@@ -1396,9 +1396,32 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// var xa = switch (c) { case 0 -> a; default -> x; } when a/x are
 					// typed locals of our receiver (dual-class under-rename).
 					out[name] = true
+				} else if et := javaSwitchExprObjectType(valN, content, compOf, typeMembers); et != "" {
+					// var xa = switch (c) { case true -> ba.get(); default -> ba.get(); }
+					// — method-return arms under foreign same-leaf (Class peels via
+					// javaInferExprType / new T(); inline switch already renames).
+					if ourReceivers[et] {
+						out[name] = true
+					}
+					if recordIndex[et] != nil || fieldIndex[et] != nil || methodIndex[et] != nil {
+						javaBindRecordLocalComps(name, et, recordIndex, compOf)
+						javaBindRecordLocalComps(name, et, fieldIndex, compOf)
+						javaBindRecordLocalComps(name, et, methodIndex, compOf)
+					}
 				} else if valN != nil && valN.Type() == "ternary_expression" && javaTernaryTypedLocalType(valN, content, out) {
 					// var xa = c ? a : x — both arms typed locals of our receiver.
 					out[name] = true
+				} else if et := javaTernaryObjectType(valN, content, compOf, typeMembers); et != "" {
+					// var xa = c ? ba.get() : ba.get() — method-return arms under foreign
+					// same-leaf (Class peels via javaInferExprType; inline already renames).
+					if ourReceivers[et] {
+						out[name] = true
+					}
+					if recordIndex[et] != nil || fieldIndex[et] != nil || methodIndex[et] != nil {
+						javaBindRecordLocalComps(name, et, recordIndex, compOf)
+						javaBindRecordLocalComps(name, et, fieldIndex, compOf)
+						javaBindRecordLocalComps(name, et, methodIndex, compOf)
+					}
 				} else if recordIndex[inferred] != nil || fieldIndex[inferred] != nil || methodIndex[inferred] != nil {
 					// var ba = new BoxA(...) / var box = new Box() — track members when
 					// the outer type itself is not our receiver (incl. zero-arg methods).
@@ -10141,6 +10164,81 @@ func javaTernaryTypedLocalType(n *grammar.Node, content []byte, typedLocals map[
 	cons := ingest.ChildByField(n, "consequence")
 	alt := ingest.ChildByField(n, "alternative")
 	return javaIdentInTypedLocals(cons, content, typedLocals) && javaIdentInTypedLocals(alt, content, typedLocals)
+}
+
+// javaTernaryObjectType recovers T when both ternary arms peel to the same Class
+// leaf via javaObjectArgType (new T(...) / ba.get()). Enables
+// var xa = c ? ba.get() : ba.get() under foreign same-leaf (Class peels via
+// javaInferExprType; inline (c ? ba.get() : ba.get()).run() already renames).
+// Mixed / uninferable arms fail closed.
+func javaTernaryObjectType(n *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
+	if n == nil || n.Type() != "ternary_expression" {
+		return ""
+	}
+	cons := ingest.ChildByField(n, "consequence")
+	alt := ingest.ChildByField(n, "alternative")
+	t1 := javaObjectArgType(cons, content, compOf, typeMembers)
+	t2 := javaObjectArgType(alt, content, compOf, typeMembers)
+	if t1 != "" && t1 == t2 {
+		return t1
+	}
+	return ""
+}
+
+// javaSwitchExprObjectType recovers T when every switch arm peels to the same
+// Class leaf via javaObjectArgType (new T(...) / ba.get()). Enables
+// var xa = switch (c) { case true -> ba.get(); default -> ba.get(); } under
+// foreign same-leaf (Class peels via javaInferSwitchExprType; inline switch
+// already renames via javaSwitchExprAllArmsRename). Mixed / empty fail closed.
+func javaSwitchExprObjectType(sw *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
+	if sw == nil || sw.Type() != "switch_expression" {
+		return ""
+	}
+	body := ingest.ChildByField(sw, "body")
+	if body == nil {
+		for i := uint32(0); i < sw.ChildCount(); i++ {
+			if sw.Child(i).Type() == "switch_block" {
+				body = sw.Child(i)
+				break
+			}
+		}
+	}
+	if body == nil {
+		return ""
+	}
+	var elem string
+	saw := false
+	for i := uint32(0); i < body.ChildCount(); i++ {
+		ch := body.Child(i)
+		var armExpr *grammar.Node
+		switch ch.Type() {
+		case "switch_rule":
+			armExpr = javaSwitchRuleResult(ch)
+		case "switch_block_statement_group":
+			armExpr = javaSwitchGroupYieldExpr(ch)
+		default:
+			continue
+		}
+		if armExpr == nil {
+			return ""
+		}
+		tn := javaObjectArgType(armExpr, content, compOf, typeMembers)
+		if tn == "" {
+			return ""
+		}
+		if !saw {
+			elem = tn
+			saw = true
+			continue
+		}
+		if tn != elem {
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return elem
 }
 
 // javaIdentInTypedLocals reports whether n (after paren unwrap) is an identifier

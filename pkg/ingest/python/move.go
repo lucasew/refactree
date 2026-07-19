@@ -4822,6 +4822,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								} else if et := pythonHomogeneousObjectDictValue(obj, content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
 									// a = {"k": ba.get()}.get("k") / dict(k=ba.get()).get("k")
 									out[lname] = true
+								} else if et := pythonObjectDictMergeValueType(obj, content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
+									// a = ({"k": ba.get()} | {}).get("k") / ({} | {"k": ba.get()}).get("k")
+									// — object-dict merge value under foreign same-leaf (inline
+									// already peels; Class merge peels via pythonIterableElemType).
+									out[lname] = true
 								} else if et := pythonHomogeneousDictValueCtorElem(obj, content); ourReceivers[et] {
 									// a = {"k": A()}.get("k") / dict(k=A()).get("k")
 									out[lname] = true
@@ -13940,7 +13945,13 @@ func pythonObjectSubscriptElemType(sub *grammar.Node, content []byte, funcReturn
 		return et
 	}
 	// {"k": ba.get()}["k"] / dict(k=ba.get())["k"] — object-dict value peel.
-	return pythonHomogeneousObjectDictValue(val, content, funcReturns, typeOf, fieldOf)
+	if et := pythonHomogeneousObjectDictValue(val, content, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
+	// ({"k": ba.get()} | {})["k"] / ({} | {"k": ba.get()})["k"] — object-dict
+	// merge value (inline already peels via pythonShouldRenameAttr; assigned
+	// form needs typeOf bind under foreign same-leaf).
+	return pythonObjectDictMergeValueType(val, content, funcReturns, typeOf, fieldOf)
 }
 
 // pythonObjectCollectionElem recovers element type T from list/tuple/set
