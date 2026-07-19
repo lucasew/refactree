@@ -1787,6 +1787,9 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 	// a, b := makeAB() with makeAB() (*A, *B) binds a→A, b→B so foreign same-leaf
 	// methods on b are not fail-open rewritten.
 	funcResults := sameFileFuncResultTypes(pf.Root, content)
+	// Same-file collection results for as := getA() / as, err := getA() rangeSrc
+	// so a := as[0] peels under foreign same-leaf (as[0].Run already works).
+	funcColl := sameFileFuncCollectionResults(pf.Root, content)
 	genericPeels := sameFileGenericPeelFuncs(pf.Root, content)
 	// Named collection types: type AS []*A / type AM = map[K]*A — param peels.
 	namedColl := sameFileNamedCollectionResults(pf.Root, content)
@@ -1815,7 +1818,7 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 			// Named results: func (r *T) M() (a *A, b *B) — a/b used in body.
 			collectResultParameterBindings(n, content, &bindings, rangeSrc, namedColl)
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl, structFields, methodNamed)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl, structFields, methodNamed, funcColl)
 			}
 		case "function_declaration":
 			rangeSrc := map[string]rangeSourceInfo{}
@@ -1826,7 +1829,7 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 			// Without this, same-leaf foreign methods are fail-open rewritten.
 			collectResultParameterBindings(n, content, &bindings, rangeSrc, namedColl)
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl, structFields, methodNamed)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl, structFields, methodNamed, funcColl)
 			}
 		case "func_literal":
 			// Nested / package-level func literals: func(a *A, b *B) { a.Run(); b.Run() }.
@@ -1837,7 +1840,7 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 			}
 			collectResultParameterBindings(n, content, &bindings, rangeSrc, namedColl)
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl, structFields, methodNamed)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl, structFields, methodNamed, funcColl)
 			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -3643,7 +3646,10 @@ func methodDeclReceiverType(method *grammar.Node, content []byte) string {
 // funcResults maps same-file function names to positional concrete result types
 // for multi-return call binding (a, b := makeAB()).
 // namedColl maps same-file type AS []*A / AM map[K]*A (may be nil).
-func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo, funcResults map[string][]string, genericPeels map[string]string, namedColl map[string]rangeSourceInfo, structFields map[string]map[string]rangeSourceInfo, methodNamed map[string]map[string]string) {
+// funcColl maps same-file function names to positional collection result
+// element info (may be nil) so as := getA() / as, err := getA() register
+// rangeSrc for later a := as[0] peels.
+func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo, funcResults map[string][]string, genericPeels map[string]string, namedColl map[string]rangeSourceInfo, structFields map[string]map[string]rangeSourceInfo, methodNamed map[string]map[string]string, funcColl map[string][]rangeSourceInfo) {
 	if node == nil {
 		return
 	}
@@ -3764,8 +3770,9 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 			}
 			// Register collection short-vars into rangeSrc so later sa := sas[0]
 			// and range clauses peel under foreign same-leaf (sas := make([]SA,n)
-			// / sas := []SA{…} / sas := append(...)).
-			registerCollectionNames(names, right, content, rangeSrc, namedColl)
+			// / sas := []SA{…} / sas := append(...) / as := getA() /
+			// as, err := getA()).
+			registerCollectionNames(names, right, content, rangeSrc, namedColl, funcColl)
 		case "var_spec":
 			// var a, b T / var a, b = … — name is a repeated field; ChildByField
 			// only returns the first, so collect every name field (like params).
@@ -3800,7 +3807,7 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 								*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, types[i]})
 							}
 						}
-						registerCollectionNames(names, valueN, content, rangeSrc, namedColl)
+						registerCollectionNames(names, valueN, content, rangeSrc, namedColl, funcColl)
 						break
 					}
 					typ = typeNameFromRHS(valueN, content)
@@ -3839,8 +3846,9 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 					}
 				}
 			} else {
-				// var sas = make([]SA, n) / var sas = []SA{…} — collection value.
-				registerCollectionNames(names, valueN, content, rangeSrc, namedColl)
+				// var sas = make([]SA, n) / var sas = []SA{…} / var as = getA() —
+				// collection value.
+				registerCollectionNames(names, valueN, content, rangeSrc, namedColl, funcColl)
 			}
 		case "type_switch_statement":
 			// switch v := x.(type) { case *T: v.M() } — bind v to T only
@@ -4192,12 +4200,27 @@ func elemTypeFromIndexExpr(n *grammar.Node, content []byte, rangeSrc map[string]
 }
 
 // registerCollectionNames records rangeSrc entries for names bound to
-// collection constructors (make / composite / append / slice expr). Positional
-// for multi-value RHS. Enables sa := sas[0] after sas := make([]SA, n) and
-// range over short-var collections under foreign same-leaf. Fail closed when
+// collection constructors (make / composite / append / slice expr) and
+// same-file collection-returning helpers (as := getA() / as, err := getA()).
+// Positional for multi-value RHS. Enables sa := sas[0] after sas := make([]SA, n)
+// and a := as[0] after as, err := getA() under foreign same-leaf. Fail closed when
 // the RHS is not a known collection expr.
-func registerCollectionNames(names []string, right *grammar.Node, content []byte, rangeSrc map[string]rangeSourceInfo, namedColl map[string]rangeSourceInfo) {
+func registerCollectionNames(names []string, right *grammar.Node, content []byte, rangeSrc map[string]rangeSourceInfo, namedColl map[string]rangeSourceInfo, funcColl map[string][]rangeSourceInfo) {
 	if rangeSrc == nil || len(names) == 0 || right == nil {
+		return
+	}
+	// Multi-return same-file collection helpers: as, err := getA() with
+	// getA() ([]*A, error). Bind each collection slot so later a := as[0]
+	// peels (as[0].Run already peels via indexElemType).
+	if infos := collectionInfosFromCallResults(right, content, funcColl); len(infos) >= 2 {
+		for i, name := range names {
+			if name == "" || name == "_" || i >= len(infos) {
+				continue
+			}
+			if infos[i].elemType != "" {
+				rangeSrc[name] = infos[i]
+			}
+		}
 		return
 	}
 	var exprs []*grammar.Node
@@ -4216,7 +4239,7 @@ func registerCollectionNames(names []string, right *grammar.Node, content []byte
 		if name == "" || name == "_" || i >= len(exprs) {
 			continue
 		}
-		if info, ok := rangeSourceFromCollectionExprIdent(exprs[i], content, nil, 0, nil, namedColl, nil, nil, nil, nil, nil, nil, nil); ok && info.elemType != "" {
+		if info, ok := rangeSourceFromCollectionExprIdent(exprs[i], content, nil, 0, funcColl, namedColl, nil, nil, nil, nil, nil, nil, nil); ok && info.elemType != "" {
 			rangeSrc[name] = info
 		}
 	}
@@ -5759,6 +5782,7 @@ func goIdentTypeAtFunc(root *grammar.Node, content []byte, funcResults map[strin
 	namedColl := sameFileNamedCollectionResults(root, content)
 	structFields := sameFileStructNamedFuncFields(root, content)
 	methodNamed := sameFileMethodNamedResults(root, content)
+	funcColl := sameFileFuncCollectionResults(root, content)
 	var bindings []identTypeBinding
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
@@ -5778,7 +5802,7 @@ func goIdentTypeAtFunc(root *grammar.Node, content []byte, funcResults map[strin
 			}
 			collectResultParameterBindings(n, content, &bindings, rangeSrc, namedColl)
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl, structFields, methodNamed)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl, structFields, methodNamed, funcColl)
 			}
 		case "function_declaration", "func_literal":
 			rangeSrc := map[string]rangeSourceInfo{}
@@ -5787,7 +5811,7 @@ func goIdentTypeAtFunc(root *grammar.Node, content []byte, funcResults map[strin
 			}
 			collectResultParameterBindings(n, content, &bindings, rangeSrc, namedColl)
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl, structFields, methodNamed)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl, structFields, methodNamed, funcColl)
 			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
