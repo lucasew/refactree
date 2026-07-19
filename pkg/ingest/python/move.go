@@ -6302,11 +6302,24 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			// captures via fieldOf (box: Box with a: A; not homogeneous elemOf).
 			// match a: case x as xa: / case _ as xa: — bind captures from subject
 			// typeOf (a: A typed local / a = A()) under foreign same-leaf.
+			// match [ba.get()]: / match (ba.get(),): / match {"k": ba.get()}: —
+			// method-return collection / object-dict subjects under foreign
+			// same-leaf (Class() peels via pythonIterableElemType; assigned
+			// xs = [ba.get()]; match xs already peels via elemOf).
 			// Without this, a.m() is skipped under foreign same-leaf; *rest loops
 			// also stay untyped. as_pattern cases still handled above when walked.
 			subject := ingest.ChildByField(n, "subject")
 			if subject != nil {
 				et := pythonIterableElemType(subject, content, elemOf, egElems, typeOf)
+				if et == "" {
+					// match [ba.get()]: / match (ba.get(),): / match {ba.get()}:
+					// method-return sequence subject (Class() already peels).
+					et = pythonObjectCollectionElem(subject, content, funcReturns, typeOf, fieldOf)
+				}
+				if et == "" {
+					// match {"k": ba.get()}: case {"k": x}: — object-dict value.
+					et = pythonHomogeneousObjectDictValue(subject, content, funcReturns, typeOf, fieldOf)
+				}
 				subjLocal := ""
 				subjType := ""
 				nest := ""
