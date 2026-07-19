@@ -789,6 +789,8 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 	}
 
 	typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf := javaTypedLocals(pf.Root, content, ourSimple)
+	// Same-file record/class members for new BoxA(...).a() peels (dual-class).
+	typeMembers := javaMergeTypeMembers(javaRecordComponentIndex(pf.Root, content), javaClassFieldIndex(pf.Root, content))
 
 	var edits []ingest.Edit
 	var walk func(n *grammar.Node, enclosingClass string, switchMatchesOur bool)
@@ -811,7 +813,7 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			obj := ingest.ChildByField(n, "object")
 			name := ingest.ChildByField(n, "name")
 			if name != nil && ingest.NodeText(name, content) == oldLeaf {
-				if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, implementsEdges) {
+				if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, typeMembers, implementsEdges) {
 					edits = append(edits, ingest.Edit{
 						File:      fileRel,
 						StartByte: name.StartByte(),
@@ -827,7 +829,7 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 				field = ingest.ChildByType(n, "identifier")
 			}
 			if field != nil && ingest.NodeText(field, content) == oldLeaf {
-				if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, implementsEdges) {
+				if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, typeMembers, implementsEdges) {
 					edits = append(edits, ingest.Edit{
 						File:      fileRel,
 						StartByte: field.StartByte(),
@@ -851,7 +853,7 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			if len(parts) >= 2 {
 				obj, name := parts[0], parts[len(parts)-1]
 				if name.Type() == "identifier" && ingest.NodeText(name, content) == oldLeaf {
-					if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, implementsEdges) {
+					if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, typeMembers, implementsEdges) {
 						edits = append(edits, ingest.Edit{
 							File:      fileRel,
 							StartByte: name.StartByte(),
@@ -959,7 +961,7 @@ func javaRenameByTypeMaps(name string, ourReceivers, foreignReceivers, typedLoca
 // compOf maps "local.member" → type leaf for record component accessors and
 // class/record field access (ba.a().m() / box.a.m() / var xa = ba.a() / var xa = box.a
 // under foreign same-leaf methods).
-func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf map[string]string, implementsEdges map[string]map[string]bool) bool {
+func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf map[string]string, typeMembers map[string]map[string]string, implementsEdges map[string]map[string]bool) bool {
 	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
 		var inner *grammar.Node
 		for i := uint32(0); i < obj.ChildCount(); i++ {
@@ -1028,7 +1030,7 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 		if arr == nil {
 			return len(foreignReceivers) == 0
 		}
-		return javaShouldRenameMemberAccess(arr, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, implementsEdges)
+		return javaShouldRenameMemberAccess(arr, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, typeMembers, implementsEdges)
 	}
 	if obj.Type() == "identifier" || obj.Type() == "type_identifier" {
 		return javaRenameByTypeMaps(ingest.NodeText(obj, content), ourReceivers, foreignReceivers, typedLocals)
@@ -1055,7 +1057,7 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 	//   s.findFirst().get().get(0).m() after var s = gather(window*) — window list
 	//   oa.get().get(0).m() after var oa = s.findFirst() — Optional intermediate
 	if obj.Type() == "method_invocation" {
-		if et := javaCollectionAccessElemType(obj, content, elemOf, valOf, entryValOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf); et != "" {
+		if et := javaCollectionAccessElemType(obj, content, elemOf, valOf, entryValOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, typeMembers); et != "" {
 			return javaRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 		}
 		// Objects.requireNonNull(a) / requireNonNullElse(a, d) /
@@ -1085,8 +1087,8 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 		alt := ingest.ChildByField(obj, "alternative")
 		// Typed-local arms: both must rename as ours (disagree / foreign fail closed).
 		if cons != nil && alt != nil &&
-			javaShouldRenameMemberAccess(cons, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, implementsEdges) &&
-			javaShouldRenameMemberAccess(alt, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, implementsEdges) {
+			javaShouldRenameMemberAccess(cons, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, typeMembers, implementsEdges) &&
+			javaShouldRenameMemberAccess(alt, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, typeMembers, implementsEdges) {
 			return true
 		}
 		return false
@@ -1099,7 +1101,7 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 		}
 		// Typed-local-only arms: every arm must rename as ours (disagree / foreign
 		// fail closed). Mirrors ternary dual-class peels under foreign same-leaf.
-		if javaSwitchExprAllArmsRename(obj, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, implementsEdges) {
+		if javaSwitchExprAllArmsRename(obj, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, typeMembers, implementsEdges) {
 			return true
 		}
 		return false
@@ -1300,6 +1302,7 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 	}
 	recordIndex := javaRecordComponentIndex(root, content)
 	fieldIndex := javaClassFieldIndex(root, content)
+	typeMembers := javaMergeTypeMembers(recordIndex, fieldIndex)
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
 		if n == nil || n.IsNull() {
@@ -1400,7 +1403,7 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// var ga = ma.get(k) when ma: Map<K, List<A>> —
 					// List of T (not scalar T); track for ga.get(0).m().
 					elemOf[name] = et
-				} else if et := javaCollectionAccessElemType(valN, content, elemOf, valOf, entryValOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf); ourReceivers[et] {
+				} else if et := javaCollectionAccessElemType(valN, content, elemOf, valOf, entryValOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, typeMembers); ourReceivers[et] {
 					// var xa = as.get(0) / am.get("k") / as.iterator().next() / ia.next()
 					// / qa.poll() / qa.peek() / qa.take() / da.takeFirst()/takeLast()
 					// / as.remove(0) / as.getFirst()
@@ -1568,6 +1571,29 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 	}
 	walk(root)
 	return out, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf
+}
+
+
+// javaMergeTypeMembers merges record component and class field indexes into a
+// single type → member → leaf map for new T(...).m() peels under foreign same-leaf.
+func javaMergeTypeMembers(parts ...map[string]map[string]string) map[string]map[string]string {
+	out := map[string]map[string]string{}
+	for _, part := range parts {
+		if part == nil {
+			continue
+		}
+		for tn, members := range part {
+			if out[tn] == nil {
+				out[tn] = map[string]string{}
+			}
+			for m, t := range members {
+				if t != "" {
+					out[tn][m] = t
+				}
+			}
+		}
+	}
+	return out
 }
 
 // javaRecordComponentIndex maps record type name → component name → component type leaf
@@ -6875,7 +6901,7 @@ func javaInferredLambdaParamNames(lambda *grammar.Node, content []byte) []string
 // Fail closed on other methods / unknown receivers.
 // One-arg stream.reduce(BinaryOperator) returns Optional — use orElse/ifPresent
 // (pipeline typing), not bare var of the element type.
-func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, valOf, entryValOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf map[string]string) string {
+func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, valOf, entryValOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf map[string]string, typeMembers map[string]map[string]string) string {
 	for val != nil && !val.IsNull() && val.Type() == "parenthesized_expression" {
 		inner := ingest.ChildByField(val, "expression")
 		if inner == nil {
@@ -6911,7 +6937,7 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 	method := ingest.NodeText(nameN, content)
 	// Record component accessors before collection method names: ba.a() when
 	// ba is a known record local (zero-arg; component type from header).
-	if t := javaRecordComponentAccessType(val, obj, method, content, compOf); t != "" {
+	if t := javaRecordComponentAccessType(val, obj, method, content, compOf, typeMembers); t != "" {
 		return t
 	}
 	switch method {
@@ -7435,7 +7461,7 @@ func javaObjectsRequireNonNullElemType(call, obj *grammar.Node, content []byte, 
 	// Prefer collection/field accessors before javaInferExprType: the latter treats
 	// any ident.method() as type ident (A.make factory convention), which would
 	// mis-type as.get(0) as "as" instead of elemOf[as].
-	if t := javaCollectionAccessElemType(first, content, elemOf, valOf, entryValOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf); t != "" {
+	if t := javaCollectionAccessElemType(first, content, elemOf, valOf, entryValOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, nil); t != "" {
 		return t
 	}
 	if t := javaFieldAccessMemberType(first, content, compOf); t != "" {
@@ -7560,7 +7586,7 @@ func javaFunctionIdentityApplyType(call *grammar.Node, content []byte, elemOf, v
 		return ""
 	}
 	// Apply arg: new A() / typed local / collection access / pipeline.
-	if t := javaCollectionAccessElemType(firstArg, content, elemOf, valOf, nil, nil, nil, nil, nil, nil); t != "" {
+	if t := javaCollectionAccessElemType(firstArg, content, elemOf, valOf, nil, nil, nil, nil, nil, nil, nil); t != "" {
 		return t
 	}
 	if t := javaInferExprType(firstArg, content); t != "" {
@@ -7630,17 +7656,43 @@ func javaFunctionIdentityApplyArgIdent(call *grammar.Node, content []byte) strin
 
 // javaRecordComponentAccessType recovers T from ba.a() when ba is a record local
 // with component a of type T (zero-arg accessor only; fail closed on args).
-func javaRecordComponentAccessType(call, obj *grammar.Node, method string, content []byte, compOf map[string]string) string {
-	if call == nil || method == "" || compOf == nil || obj == nil {
+func javaRecordComponentAccessType(call, obj *grammar.Node, method string, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
+	if call == nil || method == "" || obj == nil {
 		return ""
 	}
 	if javaMethodCallArgCount(call) != 0 {
 		return ""
 	}
-	if obj.Type() != "identifier" {
-		return ""
+	// ba.a() when ba is a known record/class local.
+	if obj.Type() == "identifier" && compOf != nil {
+		if t := compOf[ingest.NodeText(obj, content)+"."+method]; t != "" {
+			return t
+		}
 	}
-	return compOf[ingest.NodeText(obj, content)+"."+method]
+	// new BoxA(new A()).a() — component type from same-file record/class header.
+	// Under foreign same-leaf methods (assigned ba.a() already peels via compOf).
+	if obj.Type() == "object_creation_expression" && typeMembers != nil {
+		if typeN := ingest.ChildByField(obj, "type"); typeN != nil {
+			tn := javaTypeName(typeN, content)
+			if tn != "" {
+				if comps := typeMembers[tn]; comps != nil {
+					return comps[method]
+				}
+			}
+		}
+	}
+	// ((BoxA) x).a() — cast to known record/class type.
+	if obj.Type() == "cast_expression" && typeMembers != nil {
+		if typeN := ingest.ChildByField(obj, "type"); typeN != nil {
+			tn := javaTypeName(typeN, content)
+			if tn != "" {
+				if comps := typeMembers[tn]; comps != nil {
+					return comps[method]
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // javaStreamReduceIdentityElemType recovers T from stream.reduce(identity, op[, comb]).
@@ -8214,7 +8266,7 @@ func javaInferSwitchExprType(sw *grammar.Node, content []byte) string {
 // rename as ours under foreign same-leaf methods (typed-local / construction
 // arms that javaShouldRenameMemberAccess accepts). Empty / uninferable arms
 // fail closed.
-func javaSwitchExprAllArmsRename(sw *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf map[string]string, implementsEdges map[string]map[string]bool) bool {
+func javaSwitchExprAllArmsRename(sw *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers, typedLocals map[string]bool, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf map[string]string, typeMembers map[string]map[string]string, implementsEdges map[string]map[string]bool) bool {
 	if sw == nil || sw.Type() != "switch_expression" {
 		return false
 	}
@@ -8245,7 +8297,7 @@ func javaSwitchExprAllArmsRename(sw *grammar.Node, content []byte, enclosingClas
 		if armExpr == nil {
 			return false
 		}
-		if !javaShouldRenameMemberAccess(armExpr, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, implementsEdges) {
+		if !javaShouldRenameMemberAccess(armExpr, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, typeMembers, implementsEdges) {
 			return false
 		}
 		saw = true

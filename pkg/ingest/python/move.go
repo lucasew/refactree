@@ -4004,6 +4004,15 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 	pythonMergeNamedtupleFields(root, content, fieldIndex)
 	// typing.NamedTuple("Box", [("a", A), ...]) / NamedTuple("Box", a=A, b=B).
 	pythonMergeFunctionalNamedTupleFields(root, content, fieldIndex)
+	// Type-level Class.field → T so BoxA(A()).a / BoxA(A()).item peels without
+	// a typed local (dual-class under foreign same-leaf).
+	for tn, fields := range fieldIndex {
+		for f, t := range fields {
+			if tn != "" && f != "" && t != "" {
+				fieldOf[tn+"."+f] = t
+			}
+		}
+	}
 	// bindFields: annotated/named fields + ordered namedtuple index aliases.
 	// Also synthetic `@astuple.local.#i` slots for direct astuple(local)[i]
 	// (fieldOrder; not local.#i so dataclasses stay non-indexable).
@@ -5840,6 +5849,64 @@ func pythonKeywordArgValue(call *grammar.Node, content []byte, key string) *gram
 	return nil
 }
 
+// pythonPropertyReturnType recovers (name, type) from a decorated_definition
+// that is a @property method with a concrete return annotation:
+//
+//	@property
+//	def item(self) -> A: ...
+//
+// Other decorators / missing return type / non-function body fail closed.
+func pythonPropertyReturnType(decorated *grammar.Node, content []byte) (string, string) {
+	if decorated == nil || decorated.Type() != "decorated_definition" {
+		return "", ""
+	}
+	isProp := false
+	var fn *grammar.Node
+	for i := uint32(0); i < decorated.ChildCount(); i++ {
+		ch := decorated.Child(i)
+		if ch == nil {
+			continue
+		}
+		switch ch.Type() {
+		case "decorator":
+			// @property / @property()
+			for j := uint32(0); j < ch.ChildCount(); j++ {
+				c := ch.Child(j)
+				if c == nil {
+					continue
+				}
+				if c.Type() == "identifier" && ingest.NodeText(c, content) == "property" {
+					isProp = true
+				}
+				if c.Type() == "call" {
+					if f := ingest.ChildByField(c, "function"); f != nil && f.Type() == "identifier" && ingest.NodeText(f, content) == "property" {
+						isProp = true
+					}
+				}
+			}
+		case "function_definition", "async_function_definition":
+			fn = ch
+		}
+	}
+	if !isProp || fn == nil {
+		return "", ""
+	}
+	nameN := ingest.ChildByField(fn, "name")
+	retN := ingest.ChildByField(fn, "return_type")
+	if nameN == nil || retN == nil {
+		return "", ""
+	}
+	name := ingest.NodeText(nameN, content)
+	if name == "" || name == "_" {
+		return "", ""
+	}
+	tn := pythonTypeName(retN, content)
+	if tn == "" {
+		return "", ""
+	}
+	return name, tn
+}
+
 // pythonClassFieldIndex maps class type name → field name → field type leaf
 // from same-file class_definition annotated assignments (Box with a: A →
 // "Box" → {"a":"A"}). Covers dataclass fields and plain annotated class attrs.
@@ -5862,16 +5929,23 @@ func pythonClassFieldIndex(root *grammar.Node, content []byte) map[string]map[st
 				for i := uint32(0); i < body.ChildCount(); i++ {
 					ch := body.Child(i)
 					// a: A / a: A = ... — annotated assignment in class body.
-					if ch.Type() != "assignment" {
+					if ch.Type() == "assignment" {
+						left := ingest.ChildByField(ch, "left")
+						typeN := ingest.ChildByField(ch, "type")
+						if left == nil || typeN == nil || left.Type() != "identifier" {
+							continue
+						}
+						if tn := pythonTypeName(typeN, content); tn != "" {
+							fields[ingest.NodeText(left, content)] = tn
+						}
 						continue
 					}
-					left := ingest.ChildByField(ch, "left")
-					typeN := ingest.ChildByField(ch, "type")
-					if left == nil || typeN == nil || left.Type() != "identifier" {
-						continue
-					}
-					if tn := pythonTypeName(typeN, content); tn != "" {
-						fields[ingest.NodeText(left, content)] = tn
+					// @property def item(self) -> A — property return type leaf so
+					// ba.item.run() peels under foreign same-leaf (same path as ba.a).
+					if ch.Type() == "decorated_definition" {
+						if pname, ptyp := pythonPropertyReturnType(ch, content); pname != "" && ptyp != "" {
+							fields[pname] = ptyp
+						}
 					}
 				}
 				if len(fields) > 0 {
@@ -6344,10 +6418,25 @@ func pythonFieldAccessType(attr *grammar.Node, content []byte, fieldOf map[strin
 	}
 	obj := ingest.ChildByField(attr, "object")
 	field := ingest.ChildByField(attr, "attribute")
-	if obj == nil || field == nil || obj.Type() != "identifier" {
+	if obj == nil || field == nil {
 		return ""
 	}
-	return fieldOf[ingest.NodeText(obj, content)+"."+ingest.NodeText(field, content)]
+	fname := ingest.NodeText(field, content)
+	if fname == "" {
+		return ""
+	}
+	// ba.a / ba.item — typed local with field/property leaf.
+	if obj.Type() == "identifier" {
+		return fieldOf[ingest.NodeText(obj, content)+"."+fname]
+	}
+	// BoxA(A()).a / BoxA(A()).item — constructor peel via type-level fieldOf
+	// entries ("BoxA.a") under foreign same-leaf methods.
+	if obj.Type() == "call" {
+		if tn := pythonExprClassType(obj, content); tn != "" {
+			return fieldOf[tn+"."+fname]
+		}
+	}
+	return ""
 }
 
 // pythonAttrgetterFieldType recovers T from attrgetter("a")(box) /

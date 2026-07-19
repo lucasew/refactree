@@ -1246,6 +1246,7 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 	factories := jsSameFileFactoryReturns(pf.Root, content)
 	generators := jsSameFileGeneratorYields(pf.Root, content)
 	typedLocals, settledOf, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals := jsTypedLocals(pf.Root, content, ourReceivers, factories, generators)
+	classFields := jsClassFieldIndex(pf.Root, content)
 	// Unique method leaf: ExtraRename already rewrites every simple obj.oldLeaf.
 	// Apply the same aggressiveness to object-pattern property keys.
 	uniqueLeaf := len(foreignReceivers) == 0
@@ -1287,7 +1288,7 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 			obj := ingest.ChildByField(n, "object")
 			prop := ingest.ChildByField(n, "property")
 			if obj != nil && prop != nil && ingest.NodeText(prop, content) == oldLeaf {
-				if jsShouldRenameMember(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, settledOf, factories, generators, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals) {
+				if jsShouldRenameMember(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, settledOf, factories, generators, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals, classFields) {
 					addEdit(prop.StartByte(), prop.EndByte(), newLeaf)
 				}
 			}
@@ -1304,7 +1305,7 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 			nameN := ingest.ChildByField(n, "name")
 			valN := ingest.ChildByField(n, "value")
 			if nameN != nil && nameN.Type() == "object_pattern" && valN != nil {
-				if uniqueLeaf || jsShouldRenameMember(valN, content, classHere, ourReceivers, foreignReceivers, typedLocals, settledOf, factories, generators, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals) {
+				if uniqueLeaf || jsShouldRenameMember(valN, content, classHere, ourReceivers, foreignReceivers, typedLocals, settledOf, factories, generators, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals, classFields) {
 					jsCollectObjectPatternMethodEdits(nameN, content, oldLeaf, newLeaf, addEdit)
 					// Shorthand `{ helper }` also renames the local binding — rewrite
 					// bare oldLeaf identifiers later in the same statement_block.
@@ -1503,7 +1504,7 @@ func jsRenameByTypeMaps(name string, ourReceivers, foreignReceivers map[string]b
 // (pair value is T[], not T — unlike scalar entryLocals).
 // groupEntryArrayLocals maps groupBy-entries array/iterator locals → element T
 // (const es = Object.entries(ga) → es:"A") so es[i][1][0].run() peels.
-func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers map[string]bool, typedLocals, settledOf, factories, generators, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals map[string]string) bool {
+func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers map[string]bool, typedLocals, settledOf, factories, generators, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals map[string]string, classFields map[string]map[string]string) bool {
 	if obj == nil {
 		return false
 	}
@@ -1704,6 +1705,13 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 		if t := jsIdentityObjectPropType(obj, content, typedLocals, factories, objValueLocals); t != "" {
+			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
+	}
+	// new BoxA().a.helper() / BoxA.sa.helper() / ba.a.helper() — class field
+	// peels from same-file field initializers (new T()) under foreign same-leaf.
+	if obj.Type() == "member_expression" || obj.Type() == "member_expression_optional" || obj.Type() == "optional_chain" {
+		if t := jsClassFieldAccessType(obj, content, typedLocals, classFields); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 	}
@@ -2261,6 +2269,131 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 	}
 	walk(root)
 	return out, settledOf, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals
+}
+
+// jsClassFieldIndex maps same-file class name → field name → value type leaf
+// from field initializers that are `new T(...)`:
+//
+//	class BoxA { a = new A(); static sa = new A(); #pa = new A(); }
+//
+// Enables new BoxA().a.helper() / BoxA.sa.helper() under foreign same-leaf.
+// Private fields use the private name text including '#'. Other initializers
+// fail closed.
+func jsClassFieldIndex(root *grammar.Node, content []byte) map[string]map[string]string {
+	out := map[string]map[string]string{}
+	if root == nil {
+		return out
+	}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		if n.Type() == "class_declaration" || n.Type() == "class" {
+			nameN := ingest.ChildByField(n, "name")
+			body := ingest.ChildByField(n, "body")
+			if nameN == nil || body == nil {
+				// class expression may lack name; skip
+			} else {
+				typeName := ingest.NodeText(nameN, content)
+				fields := map[string]string{}
+				for i := uint32(0); i < body.ChildCount(); i++ {
+					ch := body.Child(i)
+					if ch == nil {
+						continue
+					}
+					// field_definition: [static] name = value
+					if ch.Type() != "field_definition" && ch.Type() != "public_field_definition" {
+						continue
+					}
+					var prop *grammar.Node
+					var val *grammar.Node
+					for j := uint32(0); j < ch.ChildCount(); j++ {
+						c := ch.Child(j)
+						if c == nil {
+							continue
+						}
+						switch c.Type() {
+						case "property_identifier", "private_property_identifier", "identifier":
+							if prop == nil {
+								prop = c
+							}
+						case "new_expression":
+							val = c
+						}
+					}
+					// Prefer field-named children when present.
+					if p := ingest.ChildByField(ch, "property"); p != nil {
+						prop = p
+					}
+					if v := ingest.ChildByField(ch, "value"); v != nil {
+						val = v
+					}
+					if prop == nil || val == nil {
+						continue
+					}
+					fname := ingest.NodeText(prop, content)
+					if fname == "" {
+						continue
+					}
+					if tn := jsNewExpressionType(val, content); tn != "" {
+						fields[fname] = tn
+					}
+				}
+				if len(fields) > 0 {
+					out[typeName] = fields
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	return out
+}
+
+// jsClassFieldAccessType recovers T from new BoxA().a / BoxA.sa / ba.a when
+// the field is indexed from same-file class field initializers (new T()).
+// typedLocals may supply ba → BoxA for instance field peels.
+func jsClassFieldAccessType(obj *grammar.Node, content []byte, typedLocals map[string]string, classFields map[string]map[string]string) string {
+	if obj == nil || classFields == nil {
+		return ""
+	}
+	if obj.Type() != "member_expression" && obj.Type() != "member_expression_optional" && obj.Type() != "optional_chain" {
+		return ""
+	}
+	base := ingest.ChildByField(obj, "object")
+	prop := ingest.ChildByField(obj, "property")
+	if base == nil || prop == nil {
+		return ""
+	}
+	fname := ingest.NodeText(prop, content)
+	if fname == "" {
+		return ""
+	}
+	var typeName string
+	switch base.Type() {
+	case "new_expression":
+		typeName = jsNewExpressionType(base, content)
+	case "identifier":
+		// BoxA.sa (static on class name) or ba.a (typed local).
+		name := ingest.NodeText(base, content)
+		if _, isClass := classFields[name]; isClass {
+			typeName = name
+		} else if typedLocals != nil {
+			typeName = typedLocals[name]
+		}
+	default:
+		return ""
+	}
+	if typeName == "" {
+		return ""
+	}
+	if fields := classFields[typeName]; fields != nil {
+		return fields[fname]
+	}
+	return ""
 }
 
 // jsNewExpressionType returns the constructor identifier for `new Box(...)`.
