@@ -13795,6 +13795,12 @@ func pythonObjectSubscriptElemType(sub *grammar.Node, content []byte, funcReturn
 	if et := pythonObjectCollectionElem(val, content, funcReturns, typeOf, fieldOf); et != "" {
 		return et
 	}
+	// list(Counter([ba.get()]).elements())[0] / list(Counter([ba.get()]))[0] /
+	// list(filterfalse(..., [ba.get()]))[0] — method-return iterable wrappers
+	// under foreign same-leaf (Class peels via pythonIterableElemType).
+	if et := pythonObjectIterableElemType(val, content, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
 	// {"k": ba.get()}["k"] / dict(k=ba.get())["k"] — object-dict value peel.
 	return pythonHomogeneousObjectDictValue(val, content, funcReturns, typeOf, fieldOf)
 }
@@ -14464,7 +14470,9 @@ peeled:
 		fn := ingest.ChildByField(n, "function")
 		if fn != nil && fn.Type() == "identifier" {
 			switch ingest.NodeText(fn, content) {
-			case "list", "tuple", "set", "frozenset", "iter", "reversed", "sorted", "deque":
+			case "list", "tuple", "set", "frozenset", "iter", "reversed", "sorted", "deque", "Counter":
+				// Counter([ba.get()]) — keys are method-return elements (same as
+				// Class Counter peels under foreign same-leaf).
 				args, ok := pythonCallPositionalArgNodes(n)
 				if !ok || len(args) == 0 {
 					return ""
@@ -14566,6 +14574,27 @@ peeled:
 						return ""
 					}
 					return pythonObjectIterableElemType(args[1], content, funcReturns, typeOf, fieldOf)
+				case "Counter", "deque":
+					// collections.Counter([ba.get()]) / collections.deque([ba.get()]) —
+					// method-return elements under foreign same-leaf.
+					objN := ingest.ChildByField(fn, "object")
+					if objN == nil || objN.Type() != "identifier" || ingest.NodeText(objN, content) != "collections" {
+						return ""
+					}
+					args, ok := pythonCallPositionalArgNodes(n)
+					if !ok || len(args) == 0 {
+						return ""
+					}
+					return pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf)
+				case "elements":
+					// Counter([ba.get()]).elements() / collections.Counter(...).elements() —
+					// zero-arg; keys of Counter (same leaf as iterating Counter).
+					args, ok := pythonCallPositionalArgNodes(n)
+					if !ok || len(args) != 0 {
+						return ""
+					}
+					objN := ingest.ChildByField(fn, "object")
+					return pythonObjectIterableElemType(objN, content, funcReturns, typeOf, fieldOf)
 				}
 			}
 		}

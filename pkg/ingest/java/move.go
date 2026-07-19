@@ -1513,6 +1513,11 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// Map.of(k, new A()) / Map.ofEntries(Map.entry(k, new A())) / Map.copyOf(as) —
 					// Map of T values; track value T for values/forEach/get.
 					valOf[name] = et
+				} else if et := javaMapCopyCreationObjectValueType(valN, content, compOf, typeMembers); et != "" {
+					// var m = new HashMap<>(Map.of("k", ba.get())) — method-return map
+					// copy ctor under foreign same-leaf (Class peels via
+					// javaMapPipelineValueType above).
+					valOf[name] = et
 				} else if et := javaGroupingByCollectElemType(valN, content, elemOf, valOf); et != "" {
 					// var m = as.stream().collect(Collectors.groupingBy/partitioningBy(...)) —
 					// Map of List<T>; track group element T for values/forEach/get.
@@ -4689,6 +4694,7 @@ func javaExecutorSubmitCallableElemType(call *grammar.Node, content []byte) stri
 // Prefers declared single type arg; diamond peels the first constructor arg as a
 // stream/collection pipeline element (javaStreamPipelineElemType). Map/multi-arg
 // ctors and unknown types fail closed so new A() stays on the direct rename path.
+// Method-return sources (List.of(ba.get())) use javaCollectionCopyCreationObjectElemType.
 func javaCollectionCopyCreationElemType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	if call == nil || call.Type() != "object_creation_expression" {
 		return ""
@@ -4711,6 +4717,43 @@ func javaCollectionCopyCreationElemType(call *grammar.Node, content []byte, elem
 	// First arg is the source collection (capacity-int overloads fail closed when
 	// the arg is not a typed pipeline).
 	return javaStreamPipelineElemType(ctorArgs[0], content, elemOf, valOf)
+}
+
+// javaCollectionCopyCreationObjectElemType recovers E from Collection copy
+// constructors whose source peels via method-return object factories:
+//
+//	new ArrayList<>(List.of(ba.get())).get(0)
+//	new LinkedList<>(List.of(ba.get())).getFirst()
+//	new HashSet<>(List.of(ba.get())).iterator().next()
+//	new ArrayDeque<>(List.of(ba.get())).getFirst()
+//	new Vector<>(List.of(ba.get())).firstElement()
+//	new TreeSet<>(List.of(ba.get())).first()
+//
+// Class()-only peels live in javaCollectionCopyCreationElemType. Declared
+// single type arg is preferred (same as Class path). Capacity-int / unknown
+// first args fail closed.
+func javaCollectionCopyCreationObjectElemType(call *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
+	if call == nil || call.Type() != "object_creation_expression" {
+		return ""
+	}
+	typeN := ingest.ChildByField(call, "type")
+	if typeN == nil {
+		return ""
+	}
+	leaf := javaTypeName(typeN, content)
+	if !javaIsCollectionCopyCtorType(leaf) {
+		return ""
+	}
+	if args := javaTypeArgNames(typeN, content); len(args) == 1 && args[0] != "" {
+		return args[0]
+	}
+	ctorArgs := javaCallArgs(call)
+	if len(ctorArgs) < 1 {
+		return ""
+	}
+	// First arg is the source collection — peel method-return factories
+	// (List.of(ba.get()) / Arrays.asList(ba.get()) / Set.of / singletonList / …).
+	return javaStaticCollectionOfObjectElemType(ctorArgs[0], content, compOf, typeMembers)
 }
 
 // javaIsCollectionCopyCtorType reports concrete Collection types whose single-arg
@@ -4737,6 +4780,7 @@ func javaIsCollectionCopyCtorType(leaf string) bool {
 // Prefers declared second type arg; diamond peels the first constructor arg as a
 // map pipeline value (javaMapPipelineValueType). Non-map types / empty ctors fail
 // closed so collection copy ctors stay on the element path.
+// Method-return sources (Map.of(k, ba.get())) use javaMapCopyCreationObjectValueType.
 func javaMapCopyCreationValueType(call *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
 	if call == nil || call.Type() != "object_creation_expression" {
 		return ""
@@ -4759,6 +4803,38 @@ func javaMapCopyCreationValueType(call *grammar.Node, content []byte, elemOf, va
 	// First arg is the source map (capacity/load-factor overloads fail closed when
 	// the arg is not a typed map pipeline).
 	return javaMapPipelineValueType(ctorArgs[0], content, elemOf, valOf)
+}
+
+// javaMapCopyCreationObjectValueType recovers V from Map copy constructors whose
+// source peels via method-return map factories:
+//
+//	new HashMap<>(Map.of("k", ba.get())).get("k")
+//	new LinkedHashMap<>(Map.of("k", ba.get())).get("k")
+//	var m = new HashMap<>(Map.of("k", ba.get())); m.get("k")
+//
+// Class()-only peels live in javaMapCopyCreationValueType. Declared second type
+// arg is preferred. Capacity/load-factor / unknown first args fail closed.
+func javaMapCopyCreationObjectValueType(call *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
+	if call == nil || call.Type() != "object_creation_expression" {
+		return ""
+	}
+	typeN := ingest.ChildByField(call, "type")
+	if typeN == nil {
+		return ""
+	}
+	leaf := javaTypeName(typeN, content)
+	if !javaIsMapCopyCtorType(leaf) {
+		return ""
+	}
+	if args := javaTypeArgNames(typeN, content); len(args) >= 2 && args[1] != "" {
+		return args[1]
+	}
+	ctorArgs := javaCallArgs(call)
+	if len(ctorArgs) < 1 {
+		return ""
+	}
+	// First arg is the source map — peel method-return Map.of values.
+	return javaMapOfObjectValueType(ctorArgs[0], content, compOf, typeMembers)
 }
 
 // javaIsMapCopyCtorType reports concrete Map types whose Map-copy constructor
@@ -7318,6 +7394,8 @@ func javaHomogeneousObjectElem(args *grammar.Node, content []byte, compOf map[st
 //	Optional.of(ba.get()) / ofNullable(ba.get())
 //	CompletableFuture.completedFuture(ba.get())
 //	new CompletableFuture<>().completeAsync(() -> ba.get()) — diamond supplier peel
+//	new ArrayList<>(List.of(ba.get())) / new HashSet<>(List.of(ba.get())) —
+//	  Collection copy ctor with method-return source
 //
 // Class()-only peels live in javaStaticCollectionOfElemType. Mixed / unknown
 // methods / non-homogeneous args fail closed.
@@ -7337,7 +7415,17 @@ func javaStaticCollectionOfObjectElemType(obj *grammar.Node, content []byte, com
 			}
 			obj = inner
 		}
-		if obj == nil || obj.IsNull() || obj.Type() != "method_invocation" {
+		if obj == nil || obj.IsNull() {
+			return ""
+		}
+		// new ArrayList<>(List.of(ba.get())) / new LinkedList<>(…) / new HashSet<>(…)
+		// — Collection copy ctor with method-return source under foreign same-leaf.
+		// Enables .get(0).m() / .iterator().next().m() / var al = new ArrayList<>(…).
+		// Class() peels via javaStreamPipelineElemType / javaCollectionCopyCreationElemType.
+		if obj.Type() == "object_creation_expression" {
+			return javaCollectionCopyCreationObjectElemType(obj, content, compOf, typeMembers)
+		}
+		if obj.Type() != "method_invocation" {
 			return ""
 		}
 		name := javaMethodInvocationName(obj, content)
@@ -8031,9 +8119,13 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 			// Map.copyOf(m).get(k) / Collections.unmodifiableMap(m).get(k) /
 			// stream.collect(toMap(...)).get(k) — and remove(k) → V.
 			// Map.of(k, ba.get()).get(k) — method-return map value peels.
+			// new HashMap<>(Map.of(k, ba.get())).get(k) — map copy ctor method-return.
 			// getFirst/getLast/set/queue endpoints / CF join stay list/deque/CF-only.
 			if method == "get" || method == "remove" {
 				if vt := javaMapPipelineValueType(obj, content, elemOf, valOf); vt != "" {
+					return vt
+				}
+				if vt := javaMapCopyCreationObjectValueType(obj, content, compOf, typeMembers); vt != "" {
 					return vt
 				}
 				return javaMapOfObjectValueType(obj, content, compOf, typeMembers)
