@@ -1706,7 +1706,7 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 		}
 		// structuredClone({k: new A()}).k / structuredClone(oa).k — clone preserves
 		// uniform object value type (same leaf as oa.k / {...oa}.k).
-		if t := jsStructuredCloneObjectPropType(obj, content, typedLocals, factories, objValueLocals); t != "" {
+		if t := jsStructuredCloneObjectPropTypeEx(obj, content, typedLocals, factories, objValueLocals, classFields, methodReturns); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 		// new Proxy({k: new A()}, {}).k / Object.freeze({k: new A()}).k /
@@ -1719,7 +1719,7 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 	// structuredClone({k: new A()})["k"] / new Proxy({k: new A()}, {})["k"] /
 	// Object.create({k: ba.get()})["k"] — bracket form of object-prop peels.
 	if obj.Type() == "subscript_expression" {
-		if t := jsStructuredCloneObjectPropType(obj, content, typedLocals, factories, objValueLocals); t != "" {
+		if t := jsStructuredCloneObjectPropTypeEx(obj, content, typedLocals, factories, objValueLocals, classFields, methodReturns); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 		if t := jsIdentityObjectPropTypeEx(obj, content, typedLocals, factories, objValueLocals, classFields, methodReturns); t != "" {
@@ -1862,7 +1862,7 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// const a = {...{k: new A()}}.k / {...oa}.k / {...{k: ba.get()}}.k
 						// — uniform spread value T (method-return via Ex). Bind foreign too.
 						out[ingest.NodeText(nameN, content)] = t
-					} else if t := jsStructuredCloneObjectPropType(valN, content, out, factories, objValueLocals); t != "" {
+					} else if t := jsStructuredCloneObjectPropTypeEx(valN, content, out, factories, objValueLocals, classFields, methodReturns); t != "" {
 						// const a = structuredClone({k: new A()}).k / structuredClone(oa).k
 						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsIdentityObjectPropTypeEx(valN, content, out, factories, objValueLocals, classFields, methodReturns); t != "" {
@@ -9108,8 +9108,14 @@ func jsIteratorToArrayElemType(n *grammar.Node, content []byte, arrayLocals, typ
 // jsStructuredCloneObjectPropType recovers T from structuredClone({k: new T()}).k /
 // structuredClone(oa).k / structuredClone({k: new T()})["k"] when the clone arg
 // peels as a uniform-value object of T (literal / objValue local). Non-clone /
-// non-prop / mixed values fail closed.
+// non-prop / mixed values fail closed. Class()-only peels (nil methodReturns).
 func jsStructuredCloneObjectPropType(n *grammar.Node, content []byte, typedLocals, factories, objValueLocals map[string]string) string {
+	return jsStructuredCloneObjectPropTypeEx(n, content, typedLocals, factories, objValueLocals, nil, nil)
+}
+
+// jsStructuredCloneObjectPropTypeEx peels structuredClone({k: new BoxA().get()}).k
+// method-return props under foreign same-leaf (Class peels via non-Ex path).
+func jsStructuredCloneObjectPropTypeEx(n *grammar.Node, content []byte, typedLocals, factories, objValueLocals map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -9123,14 +9129,20 @@ func jsStructuredCloneObjectPropType(n *grammar.Node, content []byte, typedLocal
 	if obj == nil {
 		return ""
 	}
-	// structuredClone(x) — peel await/parens via jsStructuredCloneObjectValueType.
-	return jsStructuredCloneObjectValueType(obj, content, typedLocals, factories, objValueLocals)
+	// structuredClone(x) — peel await/parens via jsStructuredCloneObjectValueTypeEx.
+	return jsStructuredCloneObjectValueTypeEx(obj, content, typedLocals, factories, objValueLocals, classFields, methodReturns)
 }
 
 // jsStructuredCloneObjectValueType recovers uniform property value T from
 // structuredClone(objectLiteral | objValueLocal). Scalar clone peels stay on
-// jsIdentityCloneType. Non-object args fail closed.
+// jsIdentityCloneType. Non-object args fail closed. Class()-only peels.
 func jsStructuredCloneObjectValueType(n *grammar.Node, content []byte, typedLocals, factories, objValueLocals map[string]string) string {
+	return jsStructuredCloneObjectValueTypeEx(n, content, typedLocals, factories, objValueLocals, nil, nil)
+}
+
+// jsStructuredCloneObjectValueTypeEx peels structuredClone({k: new BoxA().get()})
+// method-return object literals under foreign same-leaf.
+func jsStructuredCloneObjectValueTypeEx(n *grammar.Node, content []byte, typedLocals, factories, objValueLocals map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -9145,7 +9157,7 @@ func jsStructuredCloneObjectValueType(n *grammar.Node, content []byte, typedLoca
 			arg = ch
 			break
 		}
-		return jsStructuredCloneObjectValueType(arg, content, typedLocals, factories, objValueLocals)
+		return jsStructuredCloneObjectValueTypeEx(arg, content, typedLocals, factories, objValueLocals, classFields, methodReturns)
 	}
 	for n != nil && n.Type() == "parenthesized_expression" {
 		var inner *grammar.Node
@@ -9198,7 +9210,10 @@ func jsStructuredCloneObjectValueType(n *grammar.Node, content []byte, typedLoca
 		return ""
 	}
 	if first.Type() == "object" {
-		return jsObjectLiteralValueType(first, content, typedLocals, factories)
+		return jsObjectLiteralValueTypeEx(first, content, typedLocals, factories, jsExtraLocals{
+			classFields:   classFields,
+			methodReturns: methodReturns,
+		})
 	}
 	if first.Type() == "identifier" && objValueLocals != nil {
 		return objValueLocals[ingest.NodeText(first, content)]

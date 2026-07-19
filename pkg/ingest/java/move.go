@@ -1514,23 +1514,11 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// Map.of(k, new A()) / Map.ofEntries(Map.entry(k, new A())) / Map.copyOf(as) —
 					// Map of T values; track value T for values/forEach/get.
 					valOf[name] = et
-				} else if et := javaMapCopyCreationObjectValueType(valN, content, compOf, typeMembers); et != "" {
-					// var m = new HashMap<>(Map.of("k", ba.get())) — method-return map
-					// copy ctor under foreign same-leaf (Class peels via
-					// javaMapPipelineValueType above).
-					valOf[name] = et
-				} else if et := javaMapOfEntriesObjectValueType(valN, content, compOf, typeMembers); et != "" {
-					// var m = Map.ofEntries(Map.entry("k", ba.get())) — method-return
-					// ofEntries under foreign same-leaf (Class peels via
-					// javaMapPipelineValueType above).
-					valOf[name] = et
-				} else if et := javaCollectionsSingletonMapObjectValueType(valN, content, compOf, typeMembers); et != "" {
-					// var m = Collections.singletonMap("k", ba.get()) — method-return
-					// singletonMap under foreign same-leaf.
-					valOf[name] = et
-				} else if et := javaMapOfObjectValueType(valN, content, compOf, typeMembers); et != "" {
-					// var m = Map.of("k", ba.get()) — method-return Map.of values
-					// under foreign same-leaf (Class peels via javaMapPipelineValueType).
+				} else if et := javaMapPipelineObjectValueType(valN, content, compOf, typeMembers); et != "" {
+					// var m = Map.copyOf(Map.of("k", ba.get())) /
+					// Collections.unmodifiableMap(Map.of("k", ba.get())) /
+					// new HashMap<>(Map.of(...)) / Map.of / ofEntries / singletonMap —
+					// method-return map value peels under foreign same-leaf.
 					valOf[name] = et
 				} else if et := javaGroupingByCollectElemType(valN, content, elemOf, valOf); et != "" {
 					// var m = as.stream().collect(Collectors.groupingBy/partitioningBy(...)) —
@@ -7536,6 +7524,9 @@ func javaStaticCollectionOfObjectElemType(obj *grammar.Node, content []byte, com
 			"stream", "parallelStream", "iterator", "listIterator",
 			"descendingIterator", "spliterator",
 			"reversed", "sequencedCollection",
+			// subList(from, to) — List view; bounds only (same E as Class path).
+			// Enables List.of(ba.get()).subList(0,1).get(0) under foreign same-leaf.
+			"subList",
 			"filter", // Optional.filter / Stream.filter — type-preserving when present
 			"or",     // Optional.or(Supplier) — always same T
 			"orElseThrow",
@@ -7755,6 +7746,83 @@ func javaCollectionsNCopiesObjectElemType(obj *grammar.Node, content []byte, com
 		return ""
 	}
 	return javaObjectArgType(args[1], content, compOf, typeMembers)
+}
+
+// javaMapPipelineObjectValueType recovers V from map expressions with
+// method-return / Class() value peels under foreign same-leaf:
+//
+//	Map.of(k, ba.get()) / Map.ofEntries(Map.entry(k, ba.get()))
+//	Collections.singletonMap(k, ba.get())
+//	Map.copyOf(Map.of(k, ba.get()))
+//	Collections.unmodifiableMap/synchronizedMap/checkedMap(Map.of(...))
+//	Collections.unmodifiableSortedMap(new TreeMap<>(Map.of(...)))
+//	new HashMap<>(Map.of(k, ba.get()))
+//
+// Class()-only peels live in javaMapPipelineValueType. Bare identifiers fail
+// closed here (need valOf; assigned forms bind via var peels).
+func javaMapPipelineObjectValueType(obj *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
+	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(obj, "expression")
+		if inner == nil {
+			for i := uint32(0); i < obj.ChildCount(); i++ {
+				ch := obj.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		obj = inner
+	}
+	if obj == nil || obj.IsNull() {
+		return ""
+	}
+	switch obj.Type() {
+	case "object_creation_expression":
+		// new HashMap<>(Map.of(k, ba.get())) / new TreeMap<>(…) —
+		// map copy ctor method-return (also used by unmodifiableSortedMap(new TreeMap<>(…))).
+		return javaMapCopyCreationObjectValueType(obj, content, compOf, typeMembers)
+	case "method_invocation":
+		name := javaMethodInvocationName(obj, content)
+		switch name {
+		case "of":
+			return javaMapOfObjectValueType(obj, content, compOf, typeMembers)
+		case "ofEntries":
+			return javaMapOfEntriesObjectValueType(obj, content, compOf, typeMembers)
+		case "singletonMap":
+			return javaCollectionsSingletonMapObjectValueType(obj, content, compOf, typeMembers)
+		case "copyOf":
+			// Map.copyOf(m) — value type of first-arg map (method-return nested).
+			recvN := ingest.ChildByField(obj, "object")
+			if javaStaticFactoryReceiverName(recvN, content) != "Map" {
+				return ""
+			}
+			first := javaFirstCallArg(obj)
+			if first == nil {
+				return ""
+			}
+			return javaMapPipelineObjectValueType(first, content, compOf, typeMembers)
+		case "unmodifiableMap", "synchronizedMap", "checkedMap",
+			"unmodifiableSortedMap", "synchronizedSortedMap", "checkedSortedMap",
+			"unmodifiableNavigableMap", "synchronizedNavigableMap", "checkedNavigableMap",
+			"unmodifiableSequencedMap", "synchronizedSequencedMap":
+			// Collections.*Map wrappers — value of first-arg map (Class args ignored).
+			recvN := ingest.ChildByField(obj, "object")
+			if javaStaticFactoryReceiverName(recvN, content) != "Collections" {
+				return ""
+			}
+			first := javaFirstCallArg(obj)
+			if first == nil {
+				return ""
+			}
+			return javaMapPipelineObjectValueType(first, content, compOf, typeMembers)
+		default:
+			return ""
+		}
+	default:
+		return ""
+	}
 }
 
 // javaMapOfObjectValueType recovers T from Map.of(k, ba.get()) / Map.of(k, new A())
@@ -8191,16 +8259,12 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 				if vt := javaMapPipelineValueType(obj, content, elemOf, valOf); vt != "" {
 					return vt
 				}
-				if vt := javaMapCopyCreationObjectValueType(obj, content, compOf, typeMembers); vt != "" {
-					return vt
-				}
-				if vt := javaMapOfEntriesObjectValueType(obj, content, compOf, typeMembers); vt != "" {
-					return vt
-				}
-				if vt := javaCollectionsSingletonMapObjectValueType(obj, content, compOf, typeMembers); vt != "" {
-					return vt
-				}
-				return javaMapOfObjectValueType(obj, content, compOf, typeMembers)
+				// Map.copyOf(Map.of(k, ba.get())).get(k) /
+				// Collections.unmodifiableMap(Map.of(k, ba.get())).get(k) /
+				// Collections.synchronizedMap/checkedMap / unmodifiableSortedMap /
+				// Map.of / ofEntries / singletonMap / new HashMap<>(Map.of(...)) —
+				// method-return map value peels under foreign same-leaf.
+				return javaMapPipelineObjectValueType(obj, content, compOf, typeMembers)
 			}
 			return ""
 		}

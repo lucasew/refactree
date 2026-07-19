@@ -2310,7 +2310,7 @@ peeled:
 			if ft := pythonRecordKeyAccessType(obj, content, fieldOf); ft != "" {
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 			}
-			if ft := pythonDictViewKeyAccessType(obj, content, fieldOf); ft != "" {
+			if ft := pythonDictViewKeyAccessType(obj, content, fieldOf, funcReturns, typeOf); ft != "" {
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 			}
 			if ft := pythonAttrgetterFieldType(obj, content, fieldOf, funcReturns, typeOf); ft != "" {
@@ -2452,7 +2452,7 @@ peeled:
 		if ft := pythonRecordKeyAccessType(obj, content, fieldOf); ft != "" {
 			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 		}
-		if ft := pythonDictViewKeyAccessType(obj, content, fieldOf); ft != "" {
+		if ft := pythonDictViewKeyAccessType(obj, content, fieldOf, funcReturns, typeOf); ft != "" {
 			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 		}
 		if ft := pythonAstupleIndexAccessType(obj, content, fieldOf); ft != "" {
@@ -4759,7 +4759,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								}
 								// a = asdict(box).get("a") / vars(box).get("a") /
 								// box.__dict__.get("a") — dict-view field keys.
-								if ft := pythonDictViewKeyAccessType(right, content, fieldOf); ft != "" {
+								if ft := pythonDictViewKeyAccessType(right, content, fieldOf, funcReturns, typeOf); ft != "" {
 									typeOf[lname] = ft
 									bindFields(lname, ft)
 									if ourReceivers[ft] {
@@ -4969,7 +4969,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						if ourReceivers[ft] {
 							out[lname] = true
 						}
-					} else if ft := pythonDictViewKeyAccessType(right, content, fieldOf); ft != "" {
+					} else if ft := pythonDictViewKeyAccessType(right, content, fieldOf, funcReturns, typeOf); ft != "" {
 						typeOf[lname] = ft
 						bindFields(lname, ft)
 						if ourReceivers[ft] {
@@ -5605,7 +5605,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							}
 							// a := asdict(box).get("a") / vars(box).get("a") /
 							// box.__dict__.get("a") — dict-view field keys.
-							if ft := pythonDictViewKeyAccessType(valueN, content, fieldOf); ft != "" {
+							if ft := pythonDictViewKeyAccessType(valueN, content, fieldOf, funcReturns, typeOf); ft != "" {
 								typeOf[lname] = ft
 								bindFields(lname, ft)
 								if ourReceivers[ft] {
@@ -5772,7 +5772,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					if ourReceivers[ft] {
 						out[lname] = true
 					}
-				} else if ft := pythonDictViewKeyAccessType(valueN, content, fieldOf); ft != "" {
+				} else if ft := pythonDictViewKeyAccessType(valueN, content, fieldOf, funcReturns, typeOf); ft != "" {
 					typeOf[lname] = ft
 					bindFields(lname, ft)
 					if ourReceivers[ft] {
@@ -7218,7 +7218,7 @@ func pythonOperatorGetterFieldType(call *grammar.Node, content []byte, fieldOf, 
 	// itemgetter("k")(vars(SimpleNamespace(k=A()))) / itemgetter("k")(SNS(...).__dict__)
 	// — same leaf as vars(SNS(...))["k"] under foreign same-leaf.
 	if name == "itemgetter" {
-		return pythonInlineSimpleNamespaceDictViewFieldType(objArgs[0], content, field)
+		return pythonInlineSimpleNamespaceDictViewFieldType(objArgs[0], content, field, funcReturns, typeOf, fieldOf)
 	}
 	return ""
 }
@@ -7543,7 +7543,7 @@ func pythonCopyCallObjectType(call *grammar.Node, content []byte, typeOf, fieldO
 	// copy.copy(asdict(box)["a"]) / copy.copy(asdict(box).get("a")) /
 	// copy.copy(vars(box)["a"]) / copy.copy(box.__dict__["a"]) — field type of
 	// the dict-view key (same leaf as xa = asdict(box)["a"]; xa.run()).
-	if ft := pythonDictViewKeyAccessType(args[0], content, fieldOf); ft != "" {
+	if ft := pythonDictViewKeyAccessType(args[0], content, fieldOf, funcReturns, typeOf); ft != "" {
 		return ft
 	}
 	// Typed local / Class() ctor (after next/getattr/subscript peels above).
@@ -8929,7 +8929,7 @@ func pythonReplacePeeledObjectLocal(n *grammar.Node, content []byte) string {
 // inline SimpleNamespace(...), or ba._asdict(); non-string keys and other
 // callees fail closed. dataclasses.asdict accepted (leaf name asdict); vars is
 // bare builtin only.
-func pythonDictViewKeyAccessType(n *grammar.Node, content []byte, fieldOf map[string]string) string {
+func pythonDictViewKeyAccessType(n *grammar.Node, content []byte, fieldOf, funcReturns, typeOf map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -8947,7 +8947,7 @@ func pythonDictViewKeyAccessType(n *grammar.Node, content []byte, fieldOf map[st
 		if key == "" {
 			return ""
 		}
-		if t := pythonDictViewKeyFromSource(val, content, fieldOf, key); t != "" {
+		if t := pythonDictViewKeyFromSource(val, content, fieldOf, funcReturns, typeOf, key); t != "" {
 			return t
 		}
 	case "call":
@@ -8972,7 +8972,7 @@ func pythonDictViewKeyAccessType(n *grammar.Node, content []byte, fieldOf map[st
 			if key == "" {
 				return ""
 			}
-			if t := pythonDictViewKeyFromSource(obj, content, fieldOf, key); t != "" {
+			if t := pythonDictViewKeyFromSource(obj, content, fieldOf, funcReturns, typeOf, key); t != "" {
 				return t
 			}
 		}
@@ -8983,13 +8983,14 @@ func pythonDictViewKeyAccessType(n *grammar.Node, content []byte, fieldOf map[st
 // pythonDictViewKeyFromSource recovers field key type T from a dict-view source
 // expression (asdict(box) / vars(box) / box.__dict__ / ba._asdict() /
 // vars(SimpleNamespace(...)) / SimpleNamespace(...).__dict__).
-func pythonDictViewKeyFromSource(src *grammar.Node, content []byte, fieldOf map[string]string, key string) string {
+// funcReturns/typeOf peel method-return SNS kwargs under foreign same-leaf.
+func pythonDictViewKeyFromSource(src *grammar.Node, content []byte, fieldOf, funcReturns, typeOf map[string]string, key string) string {
 	if src == nil || key == "" {
 		return ""
 	}
-	// Inline vars(SimpleNamespace(k=A())) / SimpleNamespace(...).__dict__ —
+	// Inline vars(SimpleNamespace(k=A()/ba.get())) / SimpleNamespace(...).__dict__ —
 	// field types from kwargs (no local fieldOf needed).
-	if t := pythonInlineSimpleNamespaceDictViewFieldType(src, content, key); t != "" {
+	if t := pythonInlineSimpleNamespaceDictViewFieldType(src, content, key, funcReturns, typeOf, fieldOf); t != "" {
 		return t
 	}
 	if fieldOf == nil {
@@ -9040,9 +9041,9 @@ func pythonInlineSimpleNamespaceDictViewCall(src *grammar.Node, content []byte) 
 // pythonInlineSimpleNamespaceDictViewFieldType recovers T from
 // vars(SimpleNamespace(k=A())) / vars(types.SimpleNamespace(k=A())) /
 // SimpleNamespace(k=A()).__dict__ field key k under foreign same-leaf.
-// Keyword fields only; mixed / non-Class values fail closed via
-// pythonSimpleNamespaceFieldTypes.
-func pythonInlineSimpleNamespaceDictViewFieldType(src *grammar.Node, content []byte, key string) string {
+// Keyword fields only; Class() and method-return / typed-local values peel via
+// pythonSimpleNamespaceObjectFieldTypes. Mixed / non-object values fail closed.
+func pythonInlineSimpleNamespaceDictViewFieldType(src *grammar.Node, content []byte, key string, funcReturns, typeOf, fieldOf map[string]string) string {
 	if src == nil || key == "" {
 		return ""
 	}
@@ -9050,7 +9051,7 @@ func pythonInlineSimpleNamespaceDictViewFieldType(src *grammar.Node, content []b
 	if call == nil {
 		return ""
 	}
-	fields, _ := pythonSimpleNamespaceFieldTypes(call, content)
+	fields, _ := pythonSimpleNamespaceObjectFieldTypes(call, content, funcReturns, typeOf, fieldOf)
 	if fields == nil {
 		return ""
 	}
@@ -9060,13 +9061,19 @@ func pythonInlineSimpleNamespaceDictViewFieldType(src *grammar.Node, content []b
 // pythonInlineSimpleNamespaceDictViewHomogeneousType recovers the shared value
 // type of vars(SimpleNamespace(k=A())) / SimpleNamespace(...).__dict__ when all
 // declaration-order field types agree. Enables for x in vars(SNS(...)).values()
-// under foreign same-leaf. Mixed fields fail closed.
+// under foreign same-leaf. Mixed fields fail closed. Class()-only peels (nil maps).
 func pythonInlineSimpleNamespaceDictViewHomogeneousType(src *grammar.Node, content []byte) string {
+	return pythonInlineSimpleNamespaceDictViewHomogeneousTypeEx(src, content, nil, nil, nil)
+}
+
+// pythonInlineSimpleNamespaceDictViewHomogeneousTypeEx peels method-return SNS
+// kwargs under foreign same-leaf (vars(SimpleNamespace(k=ba.get())).values()).
+func pythonInlineSimpleNamespaceDictViewHomogeneousTypeEx(src *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
 	call := pythonInlineSimpleNamespaceDictViewCall(src, content)
 	if call == nil {
 		return ""
 	}
-	_, order := pythonSimpleNamespaceFieldTypes(call, content)
+	_, order := pythonSimpleNamespaceObjectFieldTypes(call, content, funcReturns, typeOf, fieldOf)
 	if len(order) == 0 {
 		return ""
 	}
@@ -10520,9 +10527,10 @@ func pythonGetitemElemType(call *grammar.Node, content []byte, elemOf, egElems, 
 		return ""
 	}
 	// getitem(vars(SimpleNamespace(k=A())), "k") — same leaf as vars(SNS)["k"].
+	// Class()-only peels here (nil maps); method-return SNS uses object getitem path.
 	if args[1].Type() == "string" {
 		if _, key := pythonStringContent(args[1], content); key != "" {
-			if t := pythonInlineSimpleNamespaceDictViewFieldType(args[0], content, key); t != "" {
+			if t := pythonInlineSimpleNamespaceDictViewFieldType(args[0], content, key, nil, typeOf, nil); t != "" {
 				return t
 			}
 		}
@@ -14595,6 +14603,20 @@ peeled:
 					// method-return elements under foreign same-leaf.
 					objN := ingest.ChildByField(fn, "object")
 					if objN == nil || objN.Type() != "identifier" || ingest.NodeText(objN, content) != "collections" {
+						return ""
+					}
+					args, ok := pythonCallPositionalArgNodes(n)
+					if !ok || len(args) == 0 {
+						return ""
+					}
+					return pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf)
+				case "fromkeys":
+					// dict.fromkeys([ba.get()]) / dict.fromkeys([ba.get()], v) —
+					// iteration yields keys (1st-arg elements); value arg ignored.
+					// Enables list(dict.fromkeys([ba.get()]))[0] under foreign same-leaf
+					// (Class peels via pythonIterableElemType fromkeys).
+					objN := ingest.ChildByField(fn, "object")
+					if objN == nil || objN.Type() != "identifier" || ingest.NodeText(objN, content) != "dict" {
 						return ""
 					}
 					args, ok := pythonCallPositionalArgNodes(n)
