@@ -11030,7 +11030,8 @@ func pythonObjectNextPairSlots(call *grammar.Node, content []byte, funcReturns, 
 
 // pythonObjectPairIterSlotsOf peels object enumerate/zip pair-iters and identity
 // list/tuple/iter/reversed/sorted/filter wrappers (same wrappers as
-// pythonPairIterSlotsOf Class path).
+// pythonPairIterSlotsOf Class path). Also combinations/permutations/batched
+// with literal r/n over object iterables under foreign same-leaf.
 func pythonObjectPairIterSlotsOf(right *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) []string {
 	if right == nil {
 		return nil
@@ -11042,6 +11043,11 @@ func pythonObjectPairIterSlotsOf(right *grammar.Node, content []byte, funcReturn
 		return nil
 	}
 	if types := pythonObjectEnumerateZipTargetTypes(right, content, funcReturns, typeOf, fieldOf); len(types) > 0 {
+		return types
+	}
+	// combinations/permutations/combinations_with_replacement/batched with
+	// literal r/n over object iterables → homogeneous pair slots.
+	if types := pythonObjectCombBatchedPairSlots(right, content, funcReturns, typeOf, fieldOf); len(types) > 0 {
 		return types
 	}
 	fn := ingest.ChildByField(right, "function")
@@ -11065,6 +11071,106 @@ func pythonObjectPairIterSlotsOf(right *grammar.Node, content []byte, funcReturn
 		return pythonObjectPairIterSlotsOf(args[1], content, funcReturns, typeOf, fieldOf)
 	}
 	return nil
+}
+
+// pythonObjectCombBatchedPairSlots is the object-iter form of
+// pythonCombBatchedPairSlots: combinations/permutations/batched over
+// [ba.get(), …] with literal r/n → [elem]*n. Enables
+// list(combinations([ba.get(), ba.get()], 2))[0][0].run() under foreign same-leaf.
+func pythonObjectCombBatchedPairSlots(right *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) []string {
+	et := pythonObjectCombPermElemType(right, content, funcReturns, typeOf, fieldOf)
+	if et == "" {
+		et = pythonObjectBatchedElemType(right, content, funcReturns, typeOf, fieldOf)
+	}
+	if et == "" {
+		return nil
+	}
+	n := pythonCallSecondPositionalInt(right, content)
+	if n <= 0 {
+		return nil
+	}
+	out := make([]string, n)
+	for i := range out {
+		out[i] = et
+	}
+	return out
+}
+
+// pythonObjectCombPermElemType recovers shared T from combinations/permutations/
+// combinations_with_replacement of an object iterable (1st arg).
+func pythonObjectCombPermElemType(right *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if right == nil || right.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(right, "function")
+	if fn == nil {
+		return ""
+	}
+	var fname string
+	switch fn.Type() {
+	case "identifier":
+		fname = ingest.NodeText(fn, content)
+	case "attribute":
+		objN := ingest.ChildByField(fn, "object")
+		attrN := ingest.ChildByField(fn, "attribute")
+		if objN == nil || attrN == nil || objN.Type() != "identifier" {
+			return ""
+		}
+		if ingest.NodeText(objN, content) != "itertools" {
+			return ""
+		}
+		fname = ingest.NodeText(attrN, content)
+	default:
+		return ""
+	}
+	switch fname {
+	case "combinations", "permutations", "combinations_with_replacement":
+		// ok
+	default:
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(right)
+	if !ok || len(args) == 0 {
+		return ""
+	}
+	return pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf)
+}
+
+// pythonObjectBatchedElemType recovers T from batched/itertools.batched of an
+// object iterable (1st arg; n/strict ignored for element typing).
+func pythonObjectBatchedElemType(right *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if right == nil || right.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(right, "function")
+	if fn == nil {
+		return ""
+	}
+	switch fn.Type() {
+	case "identifier":
+		if ingest.NodeText(fn, content) != "batched" {
+			return ""
+		}
+	case "attribute":
+		objN := ingest.ChildByField(fn, "object")
+		attrN := ingest.ChildByField(fn, "attribute")
+		if objN == nil || attrN == nil || objN.Type() != "identifier" {
+			return ""
+		}
+		if ingest.NodeText(objN, content) != "itertools" {
+			return ""
+		}
+		if ingest.NodeText(attrN, content) != "batched" {
+			return ""
+		}
+	default:
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(right)
+	if !ok || len(args) == 0 {
+		return ""
+	}
+	return pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf)
 }
 
 // pythonObjectPairSlotsOf recovers per-slot types for an object pair expression:
@@ -14442,6 +14548,18 @@ peeled:
 					return pythonObjectLeafType(args[0], content, funcReturns, typeOf, fieldOf)
 				case "chain", "merge":
 					return pythonObjectChainElemType(n, content, funcReturns, typeOf, fieldOf)
+				case "from_iterable":
+					// chain.from_iterable([[ba.get()]]) /
+					// itertools.chain.from_iterable([[ba.get()]]) — flatten one level.
+					objN := ingest.ChildByField(fn, "object")
+					if !pythonIsChainReceiver(objN, content) {
+						return ""
+					}
+					args, ok := pythonCallPositionalArgNodes(n)
+					if !ok || len(args) != 1 {
+						return ""
+					}
+					return pythonObjectChainFromIterableElemType(args[0], content, funcReturns, typeOf, fieldOf)
 				case "takewhile", "dropwhile", "filterfalse":
 					args, ok := pythonCallPositionalArgNodes(n)
 					if !ok || len(args) < 2 {
@@ -14453,6 +14571,54 @@ peeled:
 		}
 	}
 	return ""
+}
+
+// pythonObjectChainFromIterableElemType recovers T from
+// chain.from_iterable([[ba.get()]]) / chain.from_iterable([(ba.get(),)]) when
+// the sole arg is a list/tuple of object iterables that agree on element T.
+// Mirrors pythonChainFromIterableElemType for method-return dual-class peels.
+func pythonObjectChainFromIterableElemType(arg *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if arg == nil {
+		return ""
+	}
+	for arg != nil && arg.Type() == "parenthesized_expression" {
+		arg = pythonParenInner(arg)
+	}
+	if arg == nil {
+		return ""
+	}
+	switch arg.Type() {
+	case "list", "tuple":
+		// ok
+	default:
+		return ""
+	}
+	var et string
+	saw := false
+	for i := uint32(0); i < arg.ChildCount(); i++ {
+		ch := arg.Child(i)
+		switch ch.Type() {
+		case "[", "]", "(", ")", ",", "comment":
+			continue
+		default:
+			t := pythonObjectIterableElemType(ch, content, funcReturns, typeOf, fieldOf)
+			if t == "" {
+				return ""
+			}
+			if !saw {
+				et = t
+				saw = true
+				continue
+			}
+			if et != t {
+				return ""
+			}
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return et
 }
 
 // pythonObjectComprehensionElemType recovers T from identity genexp/list/set
