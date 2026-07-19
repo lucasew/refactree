@@ -2295,7 +2295,7 @@ peeled:
 			if et := pythonReduceElemType(obj, content, elemOf, nil, typeOf); et != "" {
 				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 			}
-			if et := pythonCollectionAccessElemType(obj, content, elemOf); et != "" {
+			if et := pythonCollectionAccessElemType(obj, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
 				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 			}
 		}
@@ -2374,10 +2374,12 @@ peeled:
 			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 		}
 		// [ba.get()][0].run() / (ba.get(),)[0].run() / {"k": ba.get()}["k"].run() /
-		// ([ba.get()] + [ba.get()])[0].run() / list([ba.get()])[0].run() /
-		// ([ba.get()] or [ba.get()])[0].run() — method-return / typed-local
-		// collection peels under foreign same-leaf (assigned forms peel via
-		// elemOf after bind). Slices fail closed (same as pythonSubscriptElemType).
+		// dict(k=ba.get())["k"].run() / ([ba.get()] + [ba.get()])[0].run() /
+		// ([ba.get()] * 2)[0].run() / [*[ba.get()]][0].run() /
+		// list([ba.get()])[0].run() / ([ba.get()] or [ba.get()])[0].run() —
+		// method-return / typed-local collection peels under foreign same-leaf
+		// (assigned forms peel via elemOf after bind). Slices fail closed
+		// (same as pythonSubscriptElemType).
 		hasSlice := false
 		for i := uint32(0); i < obj.ChildCount(); i++ {
 			if obj.Child(i).Type() == "slice" {
@@ -2466,10 +2468,12 @@ func pythonAwaitArg(n *grammar.Node) *grammar.Node {
 //	items.popleft().run() / items.pop().run() / items.pop(0).run()
 //	d.get(k).run() / d.setdefault(k).run() / q.get().run()
 //	it.__next__().run() / items.__getitem__(i).run() / list(items).pop().run()
+//	{"k": ba.get()}.get("k").run() / dict(k=ba.get()).get("k").run() —
+//	inline method-return / Class() dict value peels under foreign same-leaf
 //
 // Same methods as the assignment path in pythonTypedLocals. Other methods and
 // untyped receivers fail closed ("").
-func pythonCollectionAccessElemType(call *grammar.Node, content []byte, elemOf map[string]string) string {
+func pythonCollectionAccessElemType(call *grammar.Node, content []byte, elemOf, funcReturns, typeOf, fieldOf map[string]string) string {
 	if call == nil || call.Type() != "call" {
 		return ""
 	}
@@ -2486,7 +2490,25 @@ func pythonCollectionAccessElemType(call *grammar.Node, content []byte, elemOf m
 		// Element/value type of the receiver collection (default args ignored).
 		// __getitem__(i) is the same leaf as items[i] / d[k].
 		// get_nowait is asyncio.Queue / queue.Queue non-blocking get (same E as get).
-		return pythonIterableElemType(ingest.ChildByField(fn, "object"), content, elemOf, nil, nil)
+		obj := ingest.ChildByField(fn, "object")
+		if et := pythonIterableElemType(obj, content, elemOf, nil, typeOf); et != "" {
+			return et
+		}
+		// {"k": ba.get()}.get("k") / dict(k=ba.get()).get("k") /
+		// {"k": ba.get()}.__getitem__("k") / {"k": A()}.get("k") /
+		// dict(k=A()).get("k") — inline mapping value peels when the receiver
+		// is not a typed local (assigned forms peel via elemOf after bind).
+		// popleft/__next__ on non-dict shapes fail closed here.
+		switch ingest.NodeText(attr, content) {
+		case "get", "setdefault", "pop", "__getitem__":
+			if et := pythonHomogeneousObjectDictValue(obj, content, funcReturns, typeOf, fieldOf); et != "" {
+				return et
+			}
+			if et := pythonHomogeneousDictValueCtorElem(obj, content); et != "" {
+				return et
+			}
+		}
+		return ""
 	}
 	return ""
 }
@@ -4558,6 +4580,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								}
 								if et := pythonIterableElemType(obj, content, elemOf, egElems, typeOf); ourReceivers[et] {
 									out[lname] = true
+								} else if et := pythonHomogeneousObjectDictValue(obj, content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
+									// a = {"k": ba.get()}.get("k") / dict(k=ba.get()).get("k")
+									out[lname] = true
+								} else if et := pythonHomogeneousDictValueCtorElem(obj, content); ourReceivers[et] {
+									// a = {"k": A()}.get("k") / dict(k=A()).get("k")
+									out[lname] = true
 								} else if ingest.NodeText(attr, content) == "setdefault" {
 									// a = da.setdefault("k", A()) — unannotated dict: peel Class()
 									// default and bind elemOf so da["k"] peels under foreign same-leaf.
@@ -5284,6 +5312,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								break
 							}
 							if et := pythonIterableElemType(obj, content, elemOf, egElems, typeOf); ourReceivers[et] {
+								out[lname] = true
+							} else if et := pythonHomogeneousObjectDictValue(obj, content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
+								// a := {"k": ba.get()}.get("k") / dict(k=ba.get()).get("k")
+								out[lname] = true
+							} else if et := pythonHomogeneousDictValueCtorElem(obj, content); ourReceivers[et] {
+								// a := {"k": A()}.get("k") / dict(k=A()).get("k")
 								out[lname] = true
 							}
 						case "copy", "deepcopy":
@@ -12684,6 +12718,8 @@ func pythonHomogeneousCtorElem(collection *grammar.Node, content []byte) string 
 //
 //	[ba.get()] / (ba.get(),) / {ba.get()} / [a]
 //	[ba.get()] + [ba.get()] / [] + [ba.get()]  (empty list/tuple wildcard)
+//	[ba.get()] * n / n * [ba.get()]            (list/tuple repeat)
+//	[*[ba.get()]] / [ba.get(), *[ba.get()]]    (star-list of object leaves)
 //	[ba.get()] or [ba.get()] / [ba.get()] and [ba.get()]
 //	list([ba.get()]) / tuple(...) / set(...) / deque(...) / sorted(...)
 //	parenthesized / walrus / ternary when both arms agree
@@ -12693,7 +12729,8 @@ func pythonHomogeneousCtorElem(collection *grammar.Node, content []byte) string 
 // (pythonClassCtorName would otherwise treat frozenset as a scalar leaf).
 //
 // Enables ([ba.get()]+[ba.get()])[0].run() / list([ba.get()])[0].run() /
-// ([ba.get()] or [ba.get()])[0].run() and assigned forms. Mixed leaves /
+// ([ba.get()] or [ba.get()])[0].run() / ([ba.get()]*2)[0].run() /
+// [*[ba.get()]][0].run() and assigned forms. Mixed leaves /
 // empty non-wildcard / non-object shapes fail closed.
 func pythonObjectCollectionElem(n *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
 	for n != nil && !n.IsNull() {
@@ -12715,30 +12752,53 @@ peeled:
 	case "list", "tuple", "set":
 		return pythonHomogeneousObjectElem(n, content, funcReturns, typeOf, fieldOf)
 	case "binary_operator":
-		// [ba.get()] + [ba.get()] / [] + [ba.get()] — list concat only (+).
 		op := ingest.ChildByField(n, "operator")
-		if op == nil || ingest.NodeText(op, content) != "+" {
+		if op == nil {
 			return ""
 		}
-		left := ingest.ChildByField(n, "left")
-		right := ingest.ChildByField(n, "right")
-		etL := pythonObjectCollectionElem(left, content, funcReturns, typeOf, fieldOf)
-		etR := pythonObjectCollectionElem(right, content, funcReturns, typeOf, fieldOf)
-		wildL := pythonIsEmptyCollectionLiteral(left)
-		wildR := pythonIsEmptyCollectionLiteral(right)
-		if etL != "" && etR != "" {
-			if etL == etR {
+		switch ingest.NodeText(op, content) {
+		case "+":
+			// [ba.get()] + [ba.get()] / [] + [ba.get()] — list concat.
+			left := ingest.ChildByField(n, "left")
+			right := ingest.ChildByField(n, "right")
+			etL := pythonObjectCollectionElem(left, content, funcReturns, typeOf, fieldOf)
+			etR := pythonObjectCollectionElem(right, content, funcReturns, typeOf, fieldOf)
+			wildL := pythonIsEmptyCollectionLiteral(left)
+			wildR := pythonIsEmptyCollectionLiteral(right)
+			if etL != "" && etR != "" {
+				if etL == etR {
+					return etL
+				}
+				return ""
+			}
+			if etL != "" && wildR {
 				return etL
 			}
+			if etR != "" && wildL {
+				return etR
+			}
+			return ""
+		case "*":
+			// [ba.get()] * n / n * [ba.get()] / (ba.get(),) * n — list/tuple
+			// repeat preserves element type (integer arm ignored).
+			left := ingest.ChildByField(n, "left")
+			right := ingest.ChildByField(n, "right")
+			if left == nil || right == nil {
+				return ""
+			}
+			leftInt := pythonIsIntegerLiteral(left, content)
+			rightInt := pythonIsIntegerLiteral(right, content)
+			if leftInt == rightInt {
+				return ""
+			}
+			coll := right
+			if rightInt {
+				coll = left
+			}
+			return pythonObjectCollectionElem(coll, content, funcReturns, typeOf, fieldOf)
+		default:
 			return ""
 		}
-		if etL != "" && wildR {
-			return etL
-		}
-		if etR != "" && wildL {
-			return etR
-		}
-		return ""
 	case "boolean_operator":
 		// [ba.get()] or [ba.get()] / [ba.get()] and [ba.get()] — both arms
 		// agree (empty collection is a wildcard). Mixed fail closed.
@@ -12790,12 +12850,14 @@ peeled:
 	return ""
 }
 
-// pythonHomogeneousObjectElem recovers T from [ba.get()] / (ba.get(),) / [a]
-// when every element peels to the same Class leaf via Class() ctor, method/
-// factory return, typed local, or parenthesized/walrus/ternary forms. Enables
-// [ba.get()][0].run() / xs = [ba.get()]; xs[0].run() under foreign same-leaf
-// (pythonHomogeneousCtorElem only peels Class() identifiers). Mixed leaves /
-// empty / non-object elements fail closed.
+// pythonHomogeneousObjectElem recovers T from [ba.get()] / (ba.get(),) / [a] /
+// [*[ba.get()]] / [ba.get(), *[ba.get()]] when every element peels to the same
+// Class leaf via Class() ctor, method/factory return, typed local, parenthesized/
+// walrus/ternary forms, or list_splat of an object collection of the same T.
+// Enables [ba.get()][0].run() / [*[ba.get()]][0].run() / xs = [ba.get()];
+// xs[0].run() under foreign same-leaf (pythonHomogeneousCtorElem only peels
+// Class() identifiers; pythonHomogeneousSplatListCtorElem only peels Class()
+// and typed-local splats). Mixed leaves / empty / non-object elements fail closed.
 func pythonHomogeneousObjectElem(collection *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
 	if collection == nil {
 		return ""
@@ -12816,6 +12878,36 @@ func pythonHomogeneousObjectElem(collection *grammar.Node, content []byte, funcR
 		switch ch.Type() {
 		case "[", "]", "(", ")", "{", "}", ",", "comment":
 			continue
+		case "list_splat":
+			// *[ba.get()] / *([ba.get()] + [ba.get()]) — peel collection elem of splat arg.
+			var val *grammar.Node
+			for j := uint32(0); j < ch.ChildCount(); j++ {
+				c := ch.Child(j)
+				if c.Type() == "*" {
+					continue
+				}
+				val = c
+				break
+			}
+			if val == nil {
+				return ""
+			}
+			if pythonIsEmptyCollectionLiteral(val) {
+				// *[] is a wildcard (no type introduced).
+				continue
+			}
+			t := pythonObjectCollectionElem(val, content, funcReturns, typeOf, fieldOf)
+			if t == "" {
+				return ""
+			}
+			if !saw {
+				elem = t
+				saw = true
+				continue
+			}
+			if t != elem {
+				return ""
+			}
 		default:
 			t := pythonObjectLeafType(ch, content, funcReturns, typeOf, fieldOf)
 			if t == "" {
@@ -12837,14 +12929,19 @@ func pythonHomogeneousObjectElem(collection *grammar.Node, content []byte, funcR
 	return elem
 }
 
-// pythonHomogeneousObjectDictValue recovers T from {"k": ba.get()} /
-// {"k": ba.get(), "j": a} when every pair value peels to the same Class leaf
-// via pythonObjectLeafType. Enables {"k": ba.get()}["k"].run() /
-// da = {"k": ba.get()}; da["k"].run() under foreign same-leaf
-// (pythonHomogeneousDictLiteralValueCtorElem only peels Class() identifiers).
+// pythonHomogeneousObjectDictValue recovers T from mapping constructors whose
+// values peel to the same Class leaf via pythonObjectLeafType:
+//
+//	{"k": ba.get()} / {"k": ba.get(), "j": a}
+//	dict(k=ba.get()) / OrderedDict(k=ba.get()) / UserDict(k=ba.get())
+//	dict({"k": ba.get()}) / dict([("k", ba.get())])
+//
+// Enables {"k": ba.get()}["k"].run() / {"k": ba.get()}.get("k").run() /
+// dict(k=ba.get())["k"].run() / da = dict(k=ba.get()); da["k"].run() under
+// foreign same-leaf (Class()-only peels live in pythonHomogeneousDictValueCtorElem).
 // Parenthesized / walrus wrappers accepted. Empty / mixed / splat / non-pair
 // fail closed. Call after nested dict peels on assign so {"k": frozenset([A()])}
-// is not bound as scalar "frozenset".
+// / dict(k=frozenset([A()])) is not bound as scalar "frozenset".
 func pythonHomogeneousObjectDictValue(collection *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
 	for collection != nil && !collection.IsNull() {
 		switch collection.Type() {
@@ -12857,7 +12954,23 @@ func pythonHomogeneousObjectDictValue(collection *grammar.Node, content []byte, 
 		}
 	}
 peeled:
-	if collection == nil || collection.IsNull() || collection.Type() != "dictionary" {
+	if collection == nil || collection.IsNull() {
+		return ""
+	}
+	switch collection.Type() {
+	case "dictionary":
+		return pythonHomogeneousObjectDictLiteralValue(collection, content, funcReturns, typeOf, fieldOf)
+	case "call":
+		return pythonHomogeneousObjectDictCallValue(collection, content, funcReturns, typeOf, fieldOf)
+	default:
+		return ""
+	}
+}
+
+// pythonHomogeneousObjectDictLiteralValue recovers T from {"k": ba.get()} when
+// every pair value peels to the same Class leaf.
+func pythonHomogeneousObjectDictLiteralValue(collection *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if collection == nil || collection.Type() != "dictionary" {
 		return ""
 	}
 	var elem string
@@ -12889,6 +13002,135 @@ peeled:
 			}
 		default:
 			// Splat / comprehension / unknown — fail closed.
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return elem
+}
+
+// pythonHomogeneousObjectDictCallValue recovers T from dict(k=ba.get()) /
+// OrderedDict(k=ba.get()) / UserDict(k=ba.get()) / dict({"k": ba.get()}) /
+// dict([("k", ba.get())]) when every value peels to the same Class leaf.
+func pythonHomogeneousObjectDictCallValue(call *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	name := pythonSimpleCalleeName(ingest.ChildByField(call, "function"), content)
+	switch name {
+	case "dict", "OrderedDict", "UserDict":
+		// ok
+	default:
+		return ""
+	}
+	argList := ingest.ChildByField(call, "arguments")
+	if argList == nil {
+		return ""
+	}
+	var positionals []*grammar.Node
+	var keywords []*grammar.Node
+	for i := uint32(0); i < argList.ChildCount(); i++ {
+		ch := argList.Child(i)
+		switch ch.Type() {
+		case "(", ")", ",", "comment":
+			continue
+		case "keyword_argument":
+			keywords = append(keywords, ch)
+		case "list_splat", "dictionary_splat", "parenthesized_list_splat":
+			return ""
+		default:
+			positionals = append(positionals, ch)
+		}
+	}
+	// All-keyword form: dict(k=ba.get()) / OrderedDict(k=ba.get(), m=a)
+	if len(positionals) == 0 {
+		if len(keywords) == 0 {
+			return ""
+		}
+		var elem string
+		saw := false
+		for _, kw := range keywords {
+			et := pythonObjectLeafType(ingest.ChildByField(kw, "value"), content, funcReturns, typeOf, fieldOf)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				elem = et
+				saw = true
+				continue
+			}
+			if et != elem {
+				return ""
+			}
+		}
+		if !saw {
+			return ""
+		}
+		return elem
+	}
+	// Single positional only (no kwargs): dict({"k": ba.get()}) / dict([("k", ba.get())])
+	if len(positionals) != 1 || len(keywords) != 0 {
+		return ""
+	}
+	arg := positionals[0]
+	switch arg.Type() {
+	case "dictionary":
+		return pythonHomogeneousObjectDictLiteralValue(arg, content, funcReturns, typeOf, fieldOf)
+	case "list", "tuple":
+		return pythonHomogeneousObjectDictPairsValue(arg, content, funcReturns, typeOf, fieldOf)
+	default:
+		return ""
+	}
+}
+
+// pythonHomogeneousObjectDictPairsValue recovers T from [("k", ba.get())] /
+// (("k", ba.get()),) when every pair value peels to the same Class leaf.
+func pythonHomogeneousObjectDictPairsValue(pairs *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if pairs == nil {
+		return ""
+	}
+	switch pairs.Type() {
+	case "list", "tuple":
+		// ok
+	default:
+		return ""
+	}
+	var elem string
+	saw := false
+	for i := uint32(0); i < pairs.ChildCount(); i++ {
+		ch := pairs.Child(i)
+		switch ch.Type() {
+		case "[", "]", "(", ")", ",", "comment":
+			continue
+		case "list", "tuple":
+			var elems []*grammar.Node
+			for j := uint32(0); j < ch.ChildCount(); j++ {
+				el := ch.Child(j)
+				switch el.Type() {
+				case "[", "]", "(", ")", ",", "comment":
+					continue
+				default:
+					elems = append(elems, el)
+				}
+			}
+			if len(elems) != 2 {
+				return ""
+			}
+			et := pythonObjectLeafType(elems[1], content, funcReturns, typeOf, fieldOf)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				elem = et
+				saw = true
+				continue
+			}
+			if et != elem {
+				return ""
+			}
+		default:
 			return ""
 		}
 	}
