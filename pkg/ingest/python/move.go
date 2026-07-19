@@ -2535,6 +2535,18 @@ peeled:
 		if et := pythonObjectDictMergeValueType(val, content, funcReturns, typeOf, fieldOf); et != "" {
 			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 		}
+		// ChainMap({"k": ba.get()}).new_child()["k"] /
+		// ChainMap({"k": ba.get()}).new_child({"j": ba.get()})["j"] —
+		// scalar object new_child under foreign same-leaf (Class peels via
+		// pythonIterableElemType / pythonChainMapNewChildValueType).
+		if et := pythonChainMapNewChildObjectValueType(val, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
+			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+		}
+		// ChainMap({"k": [ba.get()]}).new_child()["k"][0] intermediate —
+		// nested object new_child row (same @nested model as Class path).
+		if nest := pythonChainMapNewChildObjectNestedValueType(val, content, elemOf, funcReturns, typeOf, fieldOf); nest != "" {
+			return pythonRenameByTypeMaps(nest, ourReceivers, foreignReceivers, nil)
+		}
 		return len(foreignReceivers) == 0
 	}
 	// (a if c else x).run() — both arms agree on Class leaf (typed local / Class()).
@@ -2662,6 +2674,11 @@ func pythonCollectionAccessElemType(call *grammar.Node, content []byte, elemOf, 
 				return et
 			}
 			if et := pythonMappingProxyObjectValueType(obj, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
+				return et
+			}
+			// ChainMap({"k": ba.get()}).new_child().get("k") — scalar object new_child
+			// (Class solid via pythonIterableElemType; nested .get stays Class-also-UNDER).
+			if et := pythonChainMapNewChildObjectValueType(obj, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
 				return et
 			}
 			if et := pythonHomogeneousDictValueCtorElem(obj, content); et != "" {
@@ -5303,6 +5320,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// ca = ChainMap(da).new_child({"j": [A()]}) / ca.new_child() nested —
 						// preserve @nested leaf. Foreign too for shadowing.
 						elemOf["@nested."+lname] = nest
+					} else if nest := pythonChainMapNewChildObjectNestedValueType(right, content, elemOf, funcReturns, typeOf, fieldOf); nest != "" {
+						// ca = ChainMap({"k": [ba.get()]}).new_child() /
+						// ca = ChainMap({"k": [ba.get()]}).new_child({"m": [ba.get()]}) —
+						// method-return nested new_child under foreign same-leaf
+						// (Class peels above). Foreign too for shadowing.
+						elemOf["@nested."+lname] = nest
 					} else if et := pythonHomogeneousObjectDictValue(right, content, funcReturns, typeOf, fieldOf); et != "" {
 						// da = {"k": ba.get()} / da = {"k": a} — method-return /
 						// typed-local scalar dict values under foreign same-leaf.
@@ -5329,6 +5352,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					} else if et := pythonChainMapNewChildValueType(right, content, elemOf); et != "" {
 						// ca = ChainMap(da).new_child({"j": A()}) / ca.new_child() scalar.
 						// Foreign too for shadowing.
+						elemOf[lname] = et
+					} else if et := pythonChainMapNewChildObjectValueType(right, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
+						// ca = ChainMap({"k": ba.get()}).new_child() /
+						// ca = ChainMap({"k": ba.get()}).new_child({"j": ba.get()}) —
+						// method-return scalar new_child under foreign same-leaf
+						// (Class peels above). Foreign too for shadowing.
 						elemOf[lname] = et
 					} else if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); et != "" {
 						elemOf[lname] = et
@@ -12927,6 +12956,182 @@ func pythonChainMapChildNestedValueType(n *grammar.Node, content []byte, elemOf 
 	return pythonNestedDictHomogeneousListCtorElem(n, content)
 }
 
+// pythonChainMapNewChildObjectValueType recovers T from
+// ChainMap({"k": ba.get()}).new_child() /
+// ChainMap({"k": ba.get()}).new_child({"j": ba.get()}) /
+// collections.ChainMap(...).new_child() when parent and optional child agree on
+// scalar object mapping value leaf T. Zero-arg new_child preserves parent.
+// Mirrors Class pythonChainMapNewChildValueType under foreign same-leaf.
+// Nested list values use pythonChainMapNewChildObjectNestedValueType.
+// Mixed / kwargs / splat fail closed.
+func pythonChainMapNewChildObjectValueType(call *grammar.Node, content []byte, elemOf, funcReturns, typeOf, fieldOf map[string]string) string {
+	parent, child, ok := pythonChainMapNewChildParts(call, content)
+	if !ok {
+		return ""
+	}
+	pt := pythonChainMapExprObjectScalarValueType(parent, content, elemOf, funcReturns, typeOf, fieldOf)
+	if pt == "" {
+		return ""
+	}
+	if child == nil {
+		return pt
+	}
+	ct := pythonChainMapChildObjectScalarValueType(child, content, elemOf, funcReturns, typeOf, fieldOf)
+	if ct == "" || ct != pt {
+		return ""
+	}
+	return pt
+}
+
+// pythonChainMapNewChildObjectNestedValueType recovers T from
+// ChainMap({"k": [ba.get()]}).new_child() /
+// ChainMap({"k": [ba.get()]}).new_child({"m": [ba.get()]}) /
+// ChainMap(OrderedDict(k=[ba.get()])).new_child() when parent and optional
+// child agree on nested mapping-of-list/set object leaf T. Mirrors Class
+// pythonChainMapNewChildNestedValueType under foreign same-leaf.
+func pythonChainMapNewChildObjectNestedValueType(call *grammar.Node, content []byte, elemOf, funcReturns, typeOf, fieldOf map[string]string) string {
+	parent, child, ok := pythonChainMapNewChildParts(call, content)
+	if !ok {
+		return ""
+	}
+	pt := pythonChainMapExprObjectNestedValueType(parent, content, elemOf, funcReturns, typeOf, fieldOf)
+	if pt == "" {
+		return ""
+	}
+	if child == nil {
+		return pt
+	}
+	ct := pythonChainMapChildObjectNestedValueType(child, content, elemOf, funcReturns, typeOf, fieldOf)
+	if ct == "" || ct != pt {
+		return ""
+	}
+	return pt
+}
+
+// pythonChainMapExprObjectScalarValueType recovers scalar object mapping value
+// leaf T from a ChainMap expression (literal / local / new_child chain).
+func pythonChainMapExprObjectScalarValueType(n *grammar.Node, content []byte, elemOf, funcReturns, typeOf, fieldOf map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		n = pythonParenInner(n)
+	}
+	if n == nil {
+		return ""
+	}
+	// Assigned scalar ChainMap / dict locals (elemOf leaf).
+	if et := pythonChainMapLocalValueType(n, content, elemOf); et != "" {
+		return et
+	}
+	// Recursive object new_child.
+	if et := pythonChainMapNewChildObjectValueType(n, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
+	// Class new_child scalar (parent may be Class-typed local).
+	if et := pythonChainMapNewChildValueType(n, content, elemOf); et != "" {
+		return et
+	}
+	if n.Type() == "call" {
+		// ChainMap({"k": ba.get()}) / ChainMap(OrderedDict(k=ba.get())).
+		if et := pythonHomogeneousObjectDictValue(n, content, funcReturns, typeOf, fieldOf); et != "" &&
+			pythonSimpleCalleeName(ingest.ChildByField(n, "function"), content) == "ChainMap" {
+			return et
+		}
+		// Class literal ChainMap({"k": A()}) — allows mixed parent Class + child
+		// object only when leaves agree (child path peels object separately).
+		if et := pythonHomogeneousDictValueCtorElem(n, content); et != "" &&
+			pythonSimpleCalleeName(ingest.ChildByField(n, "function"), content) == "ChainMap" {
+			return et
+		}
+	}
+	if n.Type() == "identifier" && elemOf != nil {
+		if elemOf["@nested."+ingest.NodeText(n, content)] != "" {
+			return ""
+		}
+		return elemOf[ingest.NodeText(n, content)]
+	}
+	return ""
+}
+
+// pythonChainMapExprObjectNestedValueType recovers nested object mapping-of-list
+// leaf T from a ChainMap expression (literal / local / new_child chain).
+func pythonChainMapExprObjectNestedValueType(n *grammar.Node, content []byte, elemOf, funcReturns, typeOf, fieldOf map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		n = pythonParenInner(n)
+	}
+	if n == nil {
+		return ""
+	}
+	if et := pythonChainMapLocalNestedValueType(n, content, elemOf); et != "" {
+		return et
+	}
+	if et := pythonChainMapNewChildObjectNestedValueType(n, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
+	if et := pythonChainMapNewChildNestedValueType(n, content, elemOf); et != "" {
+		return et
+	}
+	if n.Type() == "call" {
+		if et := pythonNestedDictHomogeneousObjectListElem(n, content, funcReturns, typeOf, fieldOf); et != "" &&
+			pythonSimpleCalleeName(ingest.ChildByField(n, "function"), content) == "ChainMap" {
+			return et
+		}
+		if et := pythonNestedDictHomogeneousListCtorElem(n, content); et != "" &&
+			pythonSimpleCalleeName(ingest.ChildByField(n, "function"), content) == "ChainMap" {
+			return et
+		}
+	}
+	if n.Type() == "identifier" && elemOf != nil {
+		return elemOf["@nested."+ingest.NodeText(n, content)]
+	}
+	return ""
+}
+
+func pythonChainMapChildObjectScalarValueType(n *grammar.Node, content []byte, elemOf, funcReturns, typeOf, fieldOf map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		n = pythonParenInner(n)
+	}
+	if n == nil {
+		return ""
+	}
+	if n.Type() == "identifier" && elemOf != nil {
+		if elemOf["@nested."+ingest.NodeText(n, content)] != "" {
+			return ""
+		}
+		return elemOf[ingest.NodeText(n, content)]
+	}
+	if et := pythonHomogeneousObjectDictValue(n, content, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
+	return pythonHomogeneousDictValueCtorElem(n, content)
+}
+
+func pythonChainMapChildObjectNestedValueType(n *grammar.Node, content []byte, elemOf, funcReturns, typeOf, fieldOf map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		n = pythonParenInner(n)
+	}
+	if n == nil {
+		return ""
+	}
+	if n.Type() == "identifier" && elemOf != nil {
+		return elemOf["@nested."+ingest.NodeText(n, content)]
+	}
+	if et := pythonNestedDictHomogeneousObjectListElem(n, content, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
+	return pythonNestedDictHomogeneousListCtorElem(n, content)
+}
+
 // pythonHomogeneousSplatListCtorElem recovers T from star-lists of Class() and
 // typed splats:
 //
@@ -14085,7 +14290,15 @@ func pythonObjectSubscriptElemType(sub *grammar.Node, content []byte, funcReturn
 	// ({"k": ba.get()} | {})["k"] / ({} | {"k": ba.get()})["k"] — object-dict
 	// merge value (inline already peels via pythonShouldRenameAttr; assigned
 	// form needs typeOf bind under foreign same-leaf).
-	return pythonObjectDictMergeValueType(val, content, funcReturns, typeOf, fieldOf)
+	if et := pythonObjectDictMergeValueType(val, content, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
+	// ChainMap({"k": ba.get()}).new_child()["k"] — scalar object new_child assign.
+	if et := pythonChainMapNewChildObjectValueType(val, content, nil, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
+	// ChainMap({"k": [ba.get()]}).new_child()["k"] — nested object new_child row.
+	return pythonChainMapNewChildObjectNestedValueType(val, content, nil, funcReturns, typeOf, fieldOf)
 }
 
 // pythonObjectCollectionElem recovers element type T from list/tuple/set
@@ -14797,6 +15010,11 @@ peeled:
 			}
 			// ({"k": [ba.get()]} | {"m": [ba.get()]})["k"] — nested object dict merge.
 			if nest := pythonObjectDictMergeNestedValueType(val, content, funcReturns, typeOf, fieldOf); nest != "" {
+				return nest
+			}
+			// ChainMap({"k": [ba.get()]}).new_child()["k"] — nested object new_child
+			// (Class peels via pythonNestedMappingSubscriptElemType).
+			if nest := pythonChainMapNewChildObjectNestedValueType(val, content, nil, funcReturns, typeOf, fieldOf); nest != "" {
 				return nest
 			}
 		}
