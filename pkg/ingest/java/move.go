@@ -1006,12 +1006,13 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 	// Nested type / enum-constant: Outer.Nested.m(), Color.RED.m()
 	// Also box.a.run() / ba.a.run() when box/ba is a typed local with field or
 	// record component a of type T (compOf; under foreign same-leaf methods).
+	// oa.h.box.run() — nested field peel via typeMembers under foreign same-leaf.
 	if obj.Type() == "field_access" {
 		text := ingest.NodeText(obj, content)
 		if ourReceivers[text] || foreignReceivers[text] {
 			return ourReceivers[text]
 		}
-		if ft := javaFieldAccessMemberType(obj, content, compOf); ft != "" {
+		if ft := javaFieldAccessMemberType(obj, content, compOf, typeMembers); ft != "" {
 			return javaRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 		}
 		return javaRenameByTypeMaps(javaFieldAccessRoot(obj, content), ourReceivers, foreignReceivers, nil)
@@ -1085,13 +1086,18 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 		return len(foreignReceivers) == 0
 	}
 	// (c ? a : x).run() / (c ? new A() : A.make()).run() — both arms agree on T.
+	// (c ? ba.get() : ba.get()).run() — method-return arms (javaInferExprType
+	// treats ident.method as type ident, so only positive our-type infers early;
+	// otherwise both arms must rename as ours under foreign same-leaf).
 	if obj.Type() == "ternary_expression" {
-		if t := javaInferExprType(obj, content); t != "" {
-			return javaRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		if t := javaInferExprType(obj, content); t != "" &&
+			javaRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil) {
+			return true
 		}
 		cons := ingest.ChildByField(obj, "consequence")
 		alt := ingest.ChildByField(obj, "alternative")
-		// Typed-local arms: both must rename as ours (disagree / foreign fail closed).
+		// Typed-local / method-return arms: both must rename as ours
+		// (disagree / foreign fail closed).
 		if cons != nil && alt != nil &&
 			javaShouldRenameMemberAccess(cons, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, typeMembers, implementsEdges) &&
 			javaShouldRenameMemberAccess(alt, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, typeMembers, implementsEdges) {
@@ -1101,12 +1107,14 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 	}
 	// switch (n) { default -> a; } / default -> new A() — construction arms via
 	// javaInferSwitchExprType; typed-local arms agree like dual-class ternary.
+	// Method-return arms: only positive our-type infers early (same as ternary).
 	if obj.Type() == "switch_expression" {
-		if t := javaInferSwitchExprType(obj, content); t != "" {
-			return javaRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		if t := javaInferSwitchExprType(obj, content); t != "" &&
+			javaRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil) {
+			return true
 		}
-		// Typed-local-only arms: every arm must rename as ours (disagree / foreign
-		// fail closed). Mirrors ternary dual-class peels under foreign same-leaf.
+		// Typed-local / method-return arms: every arm must rename as ours
+		// (disagree / foreign fail closed). Mirrors ternary dual-class peels.
 		if javaSwitchExprAllArmsRename(obj, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, typeMembers, implementsEdges) {
 			return true
 		}
@@ -1397,11 +1405,12 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					javaBindRecordLocalComps(name, inferred, recordIndex, compOf)
 					javaBindRecordLocalComps(name, inferred, fieldIndex, compOf)
 					javaBindRecordLocalComps(name, inferred, methodIndex, compOf)
-				} else if et := javaFieldAccessMemberType(valN, content, compOf); et != "" {
+				} else if et := javaFieldAccessMemberType(valN, content, compOf, typeMembers); et != "" {
 					// var xa = box.a / var xa = ba.a — class/record field access when
 					// box/ba is a typed local with member type A.
 					// var ha = oa.h — outer field of non-our type HolderA so ha.get()
 					// peels under foreign same-leaf (bind members, not only ourReceivers).
+					// var ba = oa.h.box — nested field peel (typeMembers).
 					if ourReceivers[et] {
 						out[name] = true
 					}
@@ -1422,7 +1431,7 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// var ga = ma.get(k) when ma: Map<K, List<A>> —
 					// List of T (not scalar T); track for ga.get(0).m().
 					elemOf[name] = et
-				} else if et := javaCollectionAccessElemType(valN, content, elemOf, valOf, entryValOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, typeMembers); ourReceivers[et] {
+				} else if et := javaCollectionAccessElemType(valN, content, elemOf, valOf, entryValOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, typeMembers); et != "" {
 					// var xa = as.get(0) / am.get("k") / as.iterator().next() / ia.next()
 					// / qa.poll() / qa.peek() / qa.take() / da.takeFirst()/takeLast()
 					// / as.remove(0) / as.getFirst()
@@ -1439,7 +1448,16 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					// / as[0] / (as)[0] when as is A[] (array element via elemOf)
 					// / stream.gather(windowFixed).findFirst().get().get(0) — window list elem
 					// / s.findFirst().get().get(0) after var s = gather(window*)
-					out[name] = true
+					// var xa = ba.self() — intermediate BoxA method return so xa.get().run()
+					// peels under foreign same-leaf (bind members, not only ourReceivers).
+					if ourReceivers[et] {
+						out[name] = true
+					}
+					if recordIndex[et] != nil || fieldIndex[et] != nil || methodIndex[et] != nil {
+						javaBindRecordLocalComps(name, et, recordIndex, compOf)
+						javaBindRecordLocalComps(name, et, fieldIndex, compOf)
+						javaBindRecordLocalComps(name, et, methodIndex, compOf)
+					}
 				} else if id := javaObjectsRequireNonNullArgIdent(valN, content); id != "" && out[id] {
 					// var xa = Objects.requireNonNull(a) / requireNonNullElse(a, d) /
 					// requireNonNullElseGet(a, s) when a is already a typed local
@@ -1753,8 +1771,10 @@ func javaBindRecordLocalComps(local, typeName string, index map[string]map[strin
 }
 
 // javaFieldAccessMemberType recovers T from box.a / ba.a when box/ba is a typed
-// local with field or record component a of type T (identifier object only).
-func javaFieldAccessMemberType(obj *grammar.Node, content []byte, compOf map[string]string) string {
+// local with field or record component a of type T (identifier object).
+// Nested oa.h.box peels when typeMembers is non-nil: resolve oa.h → HolderA then
+// typeMembers[HolderA][box] → BoxA (dual-class under foreign same-leaf).
+func javaFieldAccessMemberType(obj *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
 	if obj == nil || obj.Type() != "field_access" || compOf == nil {
 		return ""
 	}
@@ -1763,10 +1783,25 @@ func javaFieldAccessMemberType(obj *grammar.Node, content []byte, compOf map[str
 	if field == nil {
 		field = ingest.ChildByType(obj, "identifier")
 	}
-	if base == nil || field == nil || base.Type() != "identifier" {
+	if base == nil || field == nil {
 		return ""
 	}
-	return compOf[ingest.NodeText(base, content)+"."+ingest.NodeText(field, content)]
+	fname := ingest.NodeText(field, content)
+	if fname == "" {
+		return ""
+	}
+	if base.Type() == "identifier" {
+		return compOf[ingest.NodeText(base, content)+"."+fname]
+	}
+	// Nested field: oa.h.box — peel outer field type then type-level member.
+	if base.Type() == "field_access" && typeMembers != nil {
+		if bt := javaFieldAccessMemberType(base, content, compOf, typeMembers); bt != "" {
+			if comps := typeMembers[bt]; comps != nil {
+				return comps[fname]
+			}
+		}
+	}
+	return ""
 }
 
 // javaRecordCollectionElem records name → element/value types for arrays and generics
@@ -7487,7 +7522,7 @@ func javaObjectsRequireNonNullElemType(call, obj *grammar.Node, content []byte, 
 	if t := javaCollectionAccessElemType(first, content, elemOf, valOf, entryValOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, nil); t != "" {
 		return t
 	}
-	if t := javaFieldAccessMemberType(first, content, compOf); t != "" {
+	if t := javaFieldAccessMemberType(first, content, compOf, nil); t != "" {
 		return t
 	}
 	// new A() / A.make() / (A) x / ternary/switch of those.
@@ -7730,10 +7765,11 @@ func javaRecordComponentAccessType(call, obj *grammar.Node, method string, conte
 			}
 		}
 	}
-	// oa.h.get() — field access peel then zero-arg method return (dual-class).
+	// oa.h.get() / oa.h.box.get() — field access peel then zero-arg method return
+	// (dual-class; nested fields via typeMembers).
 	// oa is a typed local with field h of type HolderA; typeMembers[HolderA][get]=A.
 	if obj.Type() == "field_access" && typeMembers != nil {
-		if ft := javaFieldAccessMemberType(obj, content, compOf); ft != "" {
+		if ft := javaFieldAccessMemberType(obj, content, compOf, typeMembers); ft != "" {
 			if comps := typeMembers[ft]; comps != nil {
 				if t := comps[method]; t != "" {
 					return t

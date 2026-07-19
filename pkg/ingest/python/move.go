@@ -6531,6 +6531,14 @@ func pythonFieldAccessType(attr *grammar.Node, content []byte, fieldOf, funcRetu
 	if obj.Type() == "identifier" {
 		return fieldOf[ingest.NodeText(obj, content)+"."+fname]
 	}
+	// Nested field: oa.h.h — peel outer attribute type then type-level field leaf
+	// (fieldOf["HolderA.h"]=BoxA). Enables oa.h.h.get().run() under foreign
+	// same-leaf when assigned ha = oa.h; ha.h.get() already peels.
+	if obj.Type() == "attribute" {
+		if bt := pythonFieldAccessType(obj, content, fieldOf, funcReturns, typeOf); bt != "" {
+			return fieldOf[bt+"."+fname]
+		}
+	}
 	// BoxA(A()).a / BoxA(A()).item — constructor peel via type-level fieldOf
 	// entries ("BoxA.a") under foreign same-leaf methods.
 	// ba.self().item — method-return peel (funcReturns["BoxA.self"]=BoxA).

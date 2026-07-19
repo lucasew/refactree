@@ -1677,9 +1677,18 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 		}
 	}
 	// (c ? new A() : new A()).run() / (c ? a : x).run() — both arms agree on T.
+	// (c ? new BoxA().get() : new BoxA().get()).helper() — method-return arms
+	// under foreign same-leaf (jsTernaryExprType only peels new/local/factory).
 	if obj.Type() == "ternary_expression" {
 		if t := jsTernaryExprType(obj, content, typedLocals, factories); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
+		cons := ingest.ChildByField(obj, "consequence")
+		alt := ingest.ChildByField(obj, "alternative")
+		if cons != nil && alt != nil &&
+			jsShouldRenameMember(cons, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, settledOf, factories, generators, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals, classFields, methodReturns) &&
+			jsShouldRenameMember(alt, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, settledOf, factories, generators, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals, classFields, methodReturns) {
+			return true
 		}
 	}
 	// {...{k: new A()}}.k.run() / {...oa}.k.run() — object spread property peels
