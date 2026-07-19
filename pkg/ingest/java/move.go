@@ -7817,6 +7817,9 @@ func javaCollectionsNCopiesObjectElemType(obj *grammar.Node, content []byte, com
 //	Collections.unmodifiableMap/synchronizedMap/checkedMap(Map.of(...))
 //	Collections.unmodifiableSortedMap(new TreeMap<>(Map.of(...)))
 //	new HashMap<>(Map.of(k, ba.get()))
+//	Stream.of(ba.get()).collect(Collectors.toMap(k, a -> a[, …])) —
+//	  identity value-mapper toMap/toConcurrentMap/toUnmodifiableMap
+//	  (stream element via javaStaticCollectionOfObjectElemType)
 //
 // Class()-only peels live in javaMapPipelineValueType. Bare identifiers fail
 // closed here (need valOf; assigned forms bind via var peels).
@@ -7846,6 +7849,17 @@ func javaMapPipelineObjectValueType(obj *grammar.Node, content []byte, compOf ma
 	case "method_invocation":
 		name := javaMethodInvocationName(obj, content)
 		switch name {
+		case "collect":
+			// Stream.of(ba.get()).collect(Collectors.toMap(k, a -> a[, …])) /
+			// collect(toConcurrentMap|toUnmodifiableMap(...)) /
+			// collectingAndThen(toMap(...), finisher) — Map of stream element T
+			// when the value mapper is identity. Method-return stream factories
+			// (Stream.of(ba.get())) peel via javaStaticCollectionOfObjectElemType
+			// under foreign same-leaf (Class peels via javaToMapCollectValueType).
+			if !javaIsToMapIdentityValueCollector(obj, content) {
+				return ""
+			}
+			return javaStaticCollectionOfObjectElemType(ingest.ChildByField(obj, "object"), content, compOf, typeMembers)
 		case "of":
 			return javaMapOfObjectValueType(obj, content, compOf, typeMembers)
 		case "ofEntries":

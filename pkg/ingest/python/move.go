@@ -6128,7 +6128,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				}
 			}
 			// with nullcontext(a) as xa / closing(A()) as xa — identity CM peels.
-			if name, typ := pythonAsPatternIdentityCMBinding(n, content, typeOf); name != "" {
+			// with nullcontext(ba.get()) as xa — method-return under foreign same-leaf.
+			if name, typ := pythonAsPatternIdentityCMBinding(n, content, typeOf, funcReturns, fieldOf); name != "" {
 				typeOf[name] = typ
 				bindFields(name, typ)
 				if ourReceivers[typ] {
@@ -17424,10 +17425,11 @@ func pythonCastCallType(call *grammar.Node, content []byte) string {
 
 // pythonAsPatternIdentityCMBinding recovers (alias, T) from
 // `with nullcontext(x) as a` / `with closing(x) as a` /
-// `with contextlib.nullcontext(x) as a` when x peels to T (typed local / Class()).
+// `with contextlib.nullcontext(x) as a` when x peels to T (typed local / Class() /
+// method-return ba.get() under foreign same-leaf).
 // Same-file @contextmanager factories stay on pythonAsPatternCMYieldBinding.
 // Other CM names / arity fail closed.
-func pythonAsPatternIdentityCMBinding(n *grammar.Node, content []byte, typeOf map[string]string) (name, typ string) {
+func pythonAsPatternIdentityCMBinding(n *grammar.Node, content []byte, typeOf, funcReturns, fieldOf map[string]string) (name, typ string) {
 	if n == nil || n.Type() != "as_pattern" {
 		return "", ""
 	}
@@ -17488,6 +17490,11 @@ func pythonAsPatternIdentityCMBinding(n *grammar.Node, content []byte, typeOf ma
 	tn := pythonObjectExprType(args[0], content, typeOf)
 	if tn == "" {
 		tn = pythonClassCtorName(args[0], content)
+	}
+	// nullcontext(ba.get()) / closing(ba.get()) — method-return peels under
+	// foreign same-leaf (Class / typed-local peels above).
+	if tn == "" {
+		tn = pythonObjectLeafType(args[0], content, funcReturns, typeOf, fieldOf)
 	}
 	if tn == "" {
 		return "", ""
