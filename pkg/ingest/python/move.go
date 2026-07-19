@@ -2562,6 +2562,17 @@ peeled:
 		if et := pythonCopyCallMappingValueType(val, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
 			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 		}
+		// {"k": ba.get()}.copy()["k"] / ChainMap({"k": ba.get()}).copy()["k"] —
+		// zero-arg mapping method copy under foreign same-leaf (Class peels via
+		// pythonIterableElemType zero-arg copy).
+		if et := pythonMappingMethodCopyObjectValueType(val, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
+			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+		}
+		// {"k": [ba.get()]}.copy()["k"] intermediate — nested object mapping
+		// method copy (Class peels via pythonNestedMappingCopyCallType).
+		if nest := pythonMappingMethodCopyObjectNestedValueType(val, content, elemOf, funcReturns, typeOf, fieldOf); nest != "" {
+			return pythonRenameByTypeMaps(nest, ourReceivers, foreignReceivers, nil)
+		}
 		return len(foreignReceivers) == 0
 	}
 	// (a if c else x).run() — both arms agree on Class leaf (typed local / Class()).
@@ -2708,6 +2719,11 @@ func pythonCollectionAccessElemType(call *grammar.Node, content []byte, elemOf, 
 			// deepcopy({"k": ba.get()}).get("k") / copy({"k": ba.get()}).get("k") —
 			// bare copy/deepcopy of object-dict under foreign same-leaf.
 			if et := pythonCopyCallMappingValueType(obj, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
+				return et
+			}
+			// {"k": ba.get()}.copy().get("k") / ChainMap(...).copy().get("k") —
+			// zero-arg mapping method copy under foreign same-leaf.
+			if et := pythonMappingMethodCopyObjectValueType(obj, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
 				return et
 			}
 			if et := pythonHomogeneousDictValueCtorElem(obj, content); et != "" {
@@ -5355,6 +5371,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// method-return nested new_child under foreign same-leaf
 						// (Class peels above). Foreign too for shadowing.
 						elemOf["@nested."+lname] = nest
+					} else if nest := pythonMappingMethodCopyObjectNestedValueType(right, content, elemOf, funcReturns, typeOf, fieldOf); nest != "" {
+						// da = {"k": [ba.get()]}.copy() — nested object mapping method
+						// copy under foreign same-leaf (Class peels via
+						// pythonNestedMappingCopyCallType). Foreign too for shadowing.
+						elemOf["@nested."+lname] = nest
 					} else if et := pythonHomogeneousObjectDictValue(right, content, funcReturns, typeOf, fieldOf); et != "" {
 						// da = {"k": ba.get()} / da = {"k": a} — method-return /
 						// typed-local scalar dict values under foreign same-leaf.
@@ -5402,6 +5423,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// da = deepcopy({"k": ba.get()}) / copy({"k": ba.get()}) —
 						// bare copy/deepcopy of object-dict under foreign same-leaf
 						// (Class peels via iterable star-copy). Foreign too for shadowing.
+						elemOf[lname] = et
+					} else if et := pythonMappingMethodCopyObjectValueType(right, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
+						// da = {"k": ba.get()}.copy() / ca = ChainMap({"k": ba.get()}).copy() —
+						// zero-arg mapping method copy under foreign same-leaf
+						// (Class peels via iterable zero-arg copy). Foreign too for shadowing.
 						elemOf[lname] = et
 					} else if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); et != "" {
 						elemOf[lname] = et
@@ -14359,7 +14385,16 @@ func pythonObjectSubscriptElemType(sub *grammar.Node, content []byte, funcReturn
 	}
 	// deepcopy({"k": ba.get()})["k"] / copy({"k": ba.get()})["k"] — bare
 	// copy/deepcopy of object-dict under foreign same-leaf.
-	return pythonCopyCallMappingValueType(val, content, nil, funcReturns, typeOf, fieldOf)
+	if et := pythonCopyCallMappingValueType(val, content, nil, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
+	// {"k": ba.get()}.copy()["k"] / ChainMap({"k": ba.get()}).copy()["k"] —
+	// zero-arg mapping method copy under foreign same-leaf.
+	if et := pythonMappingMethodCopyObjectValueType(val, content, nil, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
+	// {"k": [ba.get()]}.copy()["k"] — nested object mapping method copy row.
+	return pythonMappingMethodCopyObjectNestedValueType(val, content, nil, funcReturns, typeOf, fieldOf)
 }
 
 // pythonObjectCollectionElem recovers element type T from list/tuple/set
@@ -15089,6 +15124,11 @@ peeled:
 			// ChainMap({"k": [ba.get()]}).new_child()["k"] — nested object new_child
 			// (Class peels via pythonNestedMappingSubscriptElemType).
 			if nest := pythonChainMapNewChildObjectNestedValueType(val, content, nil, funcReturns, typeOf, fieldOf); nest != "" {
+				return nest
+			}
+			// {"k": [ba.get()]}.copy()["k"] — nested object mapping method copy row
+			// (Class peels via pythonNestedMappingCopyCallType).
+			if nest := pythonMappingMethodCopyObjectNestedValueType(val, content, nil, funcReturns, typeOf, fieldOf); nest != "" {
 				return nest
 			}
 		}
@@ -16253,6 +16293,104 @@ func pythonCopyCallMappingValueType(call *grammar.Node, content []byte, elemOf, 
 	}
 	if et := pythonObjectDictMergeValueType(arg, content, funcReturns, typeOf, fieldOf); et != "" {
 		return et
+	}
+	return ""
+}
+
+// pythonZeroArgMappingCopyReceiver returns the receiver of a zero-arg
+// mapping.copy() / .deepcopy() attribute call. Module-qualified copy.copy(x)
+// (object is identifier "copy") and non-zero arity fail closed.
+func pythonZeroArgMappingCopyReceiver(call *grammar.Node, content []byte) *grammar.Node {
+	if call == nil || call.Type() != "call" {
+		return nil
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "attribute" {
+		return nil
+	}
+	attr := ingest.ChildByField(fn, "attribute")
+	obj := ingest.ChildByField(fn, "object")
+	if attr == nil || obj == nil {
+		return nil
+	}
+	method := ingest.NodeText(attr, content)
+	if method != "copy" && method != "deepcopy" {
+		return nil
+	}
+	// copy.copy(x) / copy.deepcopy(x) — not mapping method copy.
+	if obj.Type() == "identifier" && ingest.NodeText(obj, content) == "copy" {
+		return nil
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) != 0 {
+		return nil
+	}
+	for obj != nil && obj.Type() == "parenthesized_expression" {
+		obj = pythonParenInner(obj)
+	}
+	return obj
+}
+
+// pythonMappingMethodCopyObjectValueType recovers T from mapping.copy() when
+// the receiver peels as scalar mapping value leaf T under foreign same-leaf:
+//
+//	{"k": ba.get()}.copy()["k"] / {"k": ba.get()}.copy().get("k")
+//	ChainMap({"k": ba.get()}).copy()["k"] / collections.ChainMap(...).copy()
+//	ca = ChainMap({"k": ba.get()}).copy(); ca["k"].run()
+//	da = {"k": ba.get()}.copy(); da["k"].run()
+//
+// Class peels via pythonIterableElemType zero-arg copy of Class() dict/ChainMap.
+// Only dict literals and ChainMap receivers are extended (product-solid Class
+// forms). OrderedDict(k=...).copy / dict(k=...).copy / UserDict.copy stay
+// Class-also-UNDER and fail closed here. Nested list values use
+// pythonMappingMethodCopyObjectNestedValueType.
+func pythonMappingMethodCopyObjectValueType(call *grammar.Node, content []byte, elemOf, funcReturns, typeOf, fieldOf map[string]string) string {
+	obj := pythonZeroArgMappingCopyReceiver(call, content)
+	if obj == nil {
+		return ""
+	}
+	// {"k": ba.get()} / {"k": A()} dict literal.
+	if obj.Type() == "dictionary" {
+		return pythonHomogeneousObjectDictLiteralValue(obj, content, funcReturns, typeOf, fieldOf)
+	}
+	// ChainMap({"k": ba.get()}) / collections.ChainMap / multi-map / OD-in-CM.
+	if et := pythonChainMapExprObjectScalarValueType(obj, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
+	// da.copy() when da is a typed scalar mapping local.
+	if obj.Type() == "identifier" && elemOf != nil {
+		if elemOf["@nested."+ingest.NodeText(obj, content)] != "" {
+			return ""
+		}
+		return elemOf[ingest.NodeText(obj, content)]
+	}
+	return ""
+}
+
+// pythonMappingMethodCopyObjectNestedValueType recovers T from mapping.copy()
+// when the receiver is a nested mapping of list/set of T:
+//
+//	{"k": [ba.get()]}.copy()["k"][0] / da = {"k": [ba.get()]}.copy(); da["k"][0]
+//
+// Class peels via pythonNestedMappingCopyCallType (star-copy nested of Class
+// list values). ChainMap nested .copy remains Class-also-UNDER — fail closed.
+// Only dict-literal receivers are extended here.
+func pythonMappingMethodCopyObjectNestedValueType(call *grammar.Node, content []byte, elemOf, funcReturns, typeOf, fieldOf map[string]string) string {
+	obj := pythonZeroArgMappingCopyReceiver(call, content)
+	if obj == nil {
+		return ""
+	}
+	if obj.Type() == "dictionary" {
+		// Method-return nested list values first.
+		if nest := pythonNestedDictLiteralHomogeneousObjectListElem(obj, content, funcReturns, typeOf, fieldOf); nest != "" {
+			return nest
+		}
+		// Class() nested list values (assign / Class path may hit before object).
+		return pythonNestedDictLiteralHomogeneousListCtorElem(obj, content)
+	}
+	// da.copy() when da is a nested mapping local.
+	if obj.Type() == "identifier" && elemOf != nil {
+		return elemOf["@nested."+ingest.NodeText(obj, content)]
 	}
 	return ""
 }
