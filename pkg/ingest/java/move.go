@@ -1759,6 +1759,11 @@ func javaRecordCollectionElem(typeN *grammar.Node, name string, content []byte, 
 			if nest := javaOptionalOfCollectionElemType(typeN, content); nest != "" {
 				elemOf["@nested."+name] = nest
 			}
+			// Collection of Optional: List<Optional<A>> → nested A for
+			// as.stream().flatMap(Optional::stream) peels.
+			if nest := javaCollectionOfOptionalElemType(typeN, content); nest != "" {
+				elemOf["@nested."+name] = nest
+			}
 		}
 		// Map<K,V> / HashMap<K,V> — second type arg is the value type.
 		// Function<T,R> — second type arg is the apply result R.
@@ -3791,6 +3796,11 @@ func javaFlatMapResultElemType(call *grammar.Node, content []byte, elemOf, valOf
 		if javaIsCollectionStreamMethodRef(first, content) {
 			return javaFlatMapCollectionStreamElemType(recv, content, elemOf)
 		}
+		// Stream.of(oa).flatMap(Optional::stream) / List<Optional<A>>.stream()
+		// .flatMap(Optional::stream) — peel Optional to element T.
+		if javaIsOptionalStreamMethodRef(first, content) {
+			return javaFlatMapOptionalStreamElemType(recv, content, elemOf, valOf)
+		}
 		return ""
 	case "lambda_expression":
 		body := ingest.ChildByField(first, "body")
@@ -3848,6 +3858,187 @@ func javaFlatMapCollectionStreamElemType(recv *grammar.Node, content []byte, ele
 		return ""
 	}
 	return elemOf["@nested."+src]
+}
+
+// javaIsOptionalStreamMethodRef reports Optional::stream (Java 9+ Optional.stream()).
+func javaIsOptionalStreamMethodRef(ref *grammar.Node, content []byte) bool {
+	if ref == nil || ref.Type() != "method_reference" {
+		return false
+	}
+	var parts []*grammar.Node
+	for i := uint32(0); i < ref.ChildCount(); i++ {
+		ch := ref.Child(i)
+		if ch.Type() == "::" {
+			continue
+		}
+		parts = append(parts, ch)
+	}
+	if len(parts) < 2 {
+		return false
+	}
+	obj, name := parts[0], parts[len(parts)-1]
+	if (obj.Type() != "identifier" && obj.Type() != "type_identifier") || name.Type() != "identifier" {
+		return false
+	}
+	return ingest.NodeText(obj, content) == "Optional" && ingest.NodeText(name, content) == "stream"
+}
+
+// javaFlatMapOptionalStreamElemType recovers T after stream.flatMap(Optional::stream)
+// / flatMap(o -> o.stream()) when the stream carries Optional of T:
+//
+//	Stream.of(oa).flatMap(Optional::stream) with Optional<A> oa → A
+//	Stream.of(Optional.of(new A())).flatMap(Optional::stream) → A
+//	as.stream().flatMap(Optional::stream) with List<Optional<A>> as → A
+//
+// Unknown / non-Optional stream sources fail closed.
+func javaFlatMapOptionalStreamElemType(recv *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	if recv == nil {
+		return ""
+	}
+	// Peel type-preserving stream stages (filter/sorted/…) to the root source.
+	for recv != nil && !recv.IsNull() && recv.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(recv, "expression")
+		if inner == nil {
+			for i := uint32(0); i < recv.ChildCount(); i++ {
+				ch := recv.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		recv = inner
+	}
+	if recv == nil || recv.IsNull() {
+		return ""
+	}
+	if recv.Type() == "method_invocation" {
+		nameN := ingest.ChildByField(recv, "name")
+		if nameN == nil {
+			return ""
+		}
+		name := ingest.NodeText(nameN, content)
+		switch name {
+		case "filter", "peek", "sorted", "distinct", "limit", "skip",
+			"unordered", "sequential", "parallel", "onClose", "takeWhile", "dropWhile":
+			return javaFlatMapOptionalStreamElemType(ingest.ChildByField(recv, "object"), content, elemOf, valOf)
+		case "stream", "parallelStream":
+			// as.stream() with List<Optional<A>> as — nested A via @nested.
+			if elemOf != nil {
+				src := javaStreamSourceIdent(recv, content)
+				if src != "" {
+					if nest := elemOf["@nested."+src]; nest != "" {
+						return nest
+					}
+				}
+			}
+			return ""
+		case "of", "ofNullable":
+			// Stream.of(oa) / Stream.ofNullable(oa) / Stream.of(Optional.of(...)).
+			obj := ingest.ChildByField(recv, "object")
+			if javaStaticFactoryReceiverName(obj, content) != "Stream" {
+				return ""
+			}
+			arg := javaFirstCallArg(recv)
+			if arg == nil {
+				return ""
+			}
+			return javaOptionalStreamArgElemType(arg, content, elemOf, valOf)
+		default:
+			return ""
+		}
+	}
+	// Bare stream local: only when nested Optional elem was recorded (rare).
+	if recv.Type() == "identifier" && elemOf != nil {
+		if nest := elemOf["@nested."+ingest.NodeText(recv, content)]; nest != "" {
+			return nest
+		}
+	}
+	return ""
+}
+
+// javaOptionalStreamArgElemType recovers T from an Optional-of-T expression used
+// as a Stream.of / ofNullable argument (or similar Optional carrier).
+func javaOptionalStreamArgElemType(arg *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+	if arg == nil {
+		return ""
+	}
+	for arg != nil && !arg.IsNull() && arg.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(arg, "expression")
+		if inner == nil {
+			for i := uint32(0); i < arg.ChildCount(); i++ {
+				ch := arg.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		arg = inner
+	}
+	if arg == nil || arg.IsNull() {
+		return ""
+	}
+	switch arg.Type() {
+	case "identifier":
+		// Optional<A> oa tracked as elemOf[oa] = "A".
+		if elemOf == nil {
+			return ""
+		}
+		return elemOf[ingest.NodeText(arg, content)]
+	case "method_invocation":
+		nameN := ingest.ChildByField(arg, "name")
+		if nameN == nil {
+			return ""
+		}
+		name := ingest.NodeText(nameN, content)
+		switch name {
+		case "of", "ofNullable":
+			obj := ingest.ChildByField(arg, "object")
+			if javaStaticFactoryReceiverName(obj, content) != "Optional" {
+				return ""
+			}
+			// Optional.of(new A()) / ofNullable(new A()).
+			if et := javaStaticCollectionOfElemType(arg, content, name); et != "" {
+				return et
+			}
+			// Optional.of(a) / ofNullable(a) when a is a typed local.
+			if inner := javaFirstCallArg(arg); inner != nil && inner.Type() == "identifier" && elemOf != nil {
+				return elemOf[ingest.NodeText(inner, content)]
+			}
+			return ""
+		default:
+			return ""
+		}
+	default:
+		return ""
+	}
+}
+
+// javaCollectionOfOptionalElemType recovers T from List/Collection/Set of Optional of T
+// (one nesting level). List<Optional<A>> → "A"; List<A> / Optional / multi-arg fail closed.
+func javaCollectionOfOptionalElemType(typeN *grammar.Node, content []byte) string {
+	if typeN == nil || typeN.Type() != "generic_type" {
+		return ""
+	}
+	outer := javaTypeName(typeN, content)
+	if !javaIsCollectionTypeName(outer) {
+		return ""
+	}
+	inner := javaFirstTypeArgNode(typeN)
+	if inner == nil || inner.Type() != "generic_type" {
+		return ""
+	}
+	if javaTypeName(inner, content) != "Optional" {
+		return ""
+	}
+	args := javaTypeArgNames(inner, content)
+	if len(args) != 1 || args[0] == "" {
+		return ""
+	}
+	return args[0]
 }
 
 // javaStreamSourceIdent peels a type-preserving stream pipeline down to the
@@ -4017,6 +4208,8 @@ func javaFlatMapMapperBodyElemType(body *grammar.Node, param string, recv *gramm
 		case "stream":
 			// xs -> xs.stream() — collection-of-collection flatMap peel
 			// (nestedA.stream().flatMap(xs -> xs.stream()) → nested A).
+			// Also Optional stream peel: Stream.of(oa).flatMap(o -> o.stream()) /
+			// List<Optional<A>>.stream().flatMap(o -> o.stream()) → A.
 			// Zero-arg only; receiver must be the lambda param.
 			obj := ingest.ChildByField(body, "object")
 			if obj == nil || obj.Type() != "identifier" || param == "" {
@@ -4028,7 +4221,10 @@ func javaFlatMapMapperBodyElemType(body *grammar.Node, param string, recv *gramm
 			if !javaCallIsZeroArg(body) {
 				return ""
 			}
-			return javaFlatMapCollectionStreamElemType(recv, content, elemOf)
+			if et := javaFlatMapCollectionStreamElemType(recv, content, elemOf); et != "" {
+				return et
+			}
+			return javaFlatMapOptionalStreamElemType(recv, content, elemOf, valOf)
 		default:
 			return ""
 		}

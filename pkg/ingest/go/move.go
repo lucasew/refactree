@@ -3892,11 +3892,14 @@ func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identEl
 	// (*pas) / (*pam) — pointer-to-collection param/local (pas *[]*A / *map[K]*A).
 	// indexElemType peels *[]T / *map to element T; enable (*pas)[1:][0] and
 	// range over *pas under foreign same-leaf (same leaf as (*pas)[0]).
+	// (*&as)[0] / (*&aa)[0] — address-of then deref of a collection local/param:
+	// peel unary & so the subsequent * (or pointer-to-array index) reaches the
+	// identifier (dual-class under foreign same-leaf).
 	if n.Type() == "unary_expression" {
-		star := false
+		opText := ""
 		var inner *grammar.Node
-		if opField := ingest.ChildByField(n, "operator"); opField != nil && ingest.NodeText(opField, content) == "*" {
-			star = true
+		if opField := ingest.ChildByField(n, "operator"); opField != nil {
+			opText = ingest.NodeText(opField, content)
 		}
 		if opField := ingest.ChildByField(n, "operand"); opField != nil {
 			inner = opField
@@ -3906,9 +3909,20 @@ func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identEl
 			if ch == nil {
 				continue
 			}
-			if ch.Type() == "*" || (ch.Type() == "unary_operator" && ingest.NodeText(ch, content) == "*") {
-				star = true
+			if ch.Type() == "*" || ch.Type() == "&" {
+				if opText == "" {
+					opText = ch.Type()
+				}
 				continue
+			}
+			if ch.Type() == "unary_operator" {
+				t := ingest.NodeText(ch, content)
+				if t == "*" || t == "&" {
+					if opText == "" {
+						opText = t
+					}
+					continue
+				}
 			}
 			if ch.Type() == "(" || ch.Type() == ")" {
 				continue
@@ -3917,7 +3931,7 @@ func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identEl
 				inner = ch
 			}
 		}
-		if star && inner != nil {
+		if (opText == "*" || opText == "&") && inner != nil {
 			for inner != nil && inner.Type() == "parenthesized_expression" {
 				var in2 *grammar.Node
 				for i := uint32(0); i < inner.ChildCount(); i++ {
