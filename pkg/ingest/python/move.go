@@ -9071,6 +9071,7 @@ func pythonSharedSlotType(types []string) string {
 // Counter / collections.Counter (keys = iterable elements; .elements() same),
 // dict.fromkeys(iterable[, value]) (keys = 1st-arg elements; value ignored here),
 // items.copy() (zero-arg; same element type as receiver),
+// {**da} / {**da, "k": A()} (dictionary star-copy of typed mapping values),
 // items or [] / items or [A()] (boolean or/and when both sides agree; empty
 // list/tuple/set is a wildcard), parenthesized forms, d.values() when d's dict
 // value type is in elemOf, or e.exceptions when e was bound by except* Type as e
@@ -9094,6 +9095,10 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 			return pythonHomogeneousSplatListCtorElem(right, content, elemOf, egElems, typeOf, "")
 		}
 		return ""
+	case "dictionary":
+		// {**da} / {**da, **db} / {**da, "k": A()} — star-copy of typed mapping
+		// values (same leaf as da.copy() / da["k"]). Enables {**da}["k"].run().
+		return pythonDictStarCopyValueType(right, content, elemOf)
 	case "binary_operator":
 		// xs + [A()] / [A()] + xs / xs + ys — list concat element type when sides
 		// agree; empty list/tuple is a wildcard. Self-target untyped arms only in
@@ -9300,8 +9305,8 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 					}
 					// la[0].values() when la: list[dict[str, A]] — la[0] peels as a
 					// mapping/container of A via @nested; values yield A under foreign
-					// same-leaf. Non-subscript receivers fail closed (no list.values).
-					if objN.Type() == "subscript" {
+					// same-leaf. {**da}.values() star-copy peels via dictionary case.
+					if objN.Type() == "subscript" || objN.Type() == "dictionary" {
 						return pythonIterableElemType(objN, content, elemOf, egElems, typeOf)
 					}
 					return ""
@@ -10699,6 +10704,81 @@ func pythonHomogeneousDictValueCtorElem(collection *grammar.Node, content []byte
 	default:
 		return ""
 	}
+}
+
+// pythonDictStarCopyValueType recovers T from a dictionary star-copy expression
+// whose every arm peels to the same mapping value type T:
+//
+//	{**da} / {**da, **db} when da/db are typed mapping locals (elemOf)
+//	{**da, "k": A()} / {**da, "k": A(), **db} when Class() values agree with stars
+//
+// Enables {**da}["k"].run() / db = {**da}; db["k"].run() under foreign same-leaf
+// (same leaf as da.copy()["k"] / da["k"]). Nested-only mappings (@nested without
+// scalar elemOf), empty dicts, mixed leaves, and non-identifier splats fail closed.
+func pythonDictStarCopyValueType(n *grammar.Node, content []byte, elemOf map[string]string) string {
+	if n == nil || n.Type() != "dictionary" || elemOf == nil {
+		return ""
+	}
+	found := ""
+	saw := false
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		ch := n.Child(i)
+		if ch == nil {
+			continue
+		}
+		switch ch.Type() {
+		case "{", "}", ",", "comment":
+			continue
+		case "dictionary_splat":
+			var arg *grammar.Node
+			for j := uint32(0); j < ch.ChildCount(); j++ {
+				c := ch.Child(j)
+				if c == nil || c.Type() == "**" {
+					continue
+				}
+				arg = c
+				break
+			}
+			if arg == nil || arg.Type() != "identifier" {
+				return ""
+			}
+			name := ingest.NodeText(arg, content)
+			if name == "" {
+				return ""
+			}
+			// Scalar mapping values only. Nested list values use @nested and are
+			// not a scalar value leaf for {**da}["k"].run().
+			et := elemOf[name]
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				found = et
+				saw = true
+			} else if found != et {
+				return ""
+			}
+		case "pair":
+			val := ingest.ChildByField(ch, "value")
+			et := pythonClassCtorName(val, content)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				found = et
+				saw = true
+			} else if found != et {
+				return ""
+			}
+		default:
+			// Comprehension / unknown — fail closed.
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return found
 }
 
 // pythonHomogeneousDictLiteralValueCtorElem recovers T from a dictionary

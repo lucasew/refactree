@@ -1638,6 +1638,13 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 	}
+	// ma.get(k) ?? new A() / ma.get(k) || new A() — nullish/or default peels
+	// under foreign same-leaf when both arms agree on T (or one is null/undefined).
+	if obj.Type() == "binary_expression" {
+		if t := jsNullishOrDefaultType(obj, content, typedLocals, factories, mapLocals, entryArrayLocals); t != "" {
+			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
+	}
 	// Complex receivers: only when the method leaf is unique project-wide.
 	switch obj.Type() {
 	case "call_expression", "await_expression", "ternary_expression",
@@ -1796,6 +1803,11 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// so dual-class B rebinds overwrite a prior A under the same name
 						// (rename path fails closed via foreignReceivers).
 						entryLocals[ingest.NodeText(nameN, content)] = t
+					} else if t := jsObjectEntriesPairAtType(valN, content, out, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals); t != "" {
+						// const e = [...ma].at(0) / es.at(0) — pair local of value T
+						// (same leaf as es[0]); e[1].run() peels via entryLocals.
+						// Bind foreign too so dual-class B rebinds fail closed.
+						entryLocals[ingest.NodeText(nameN, content)] = t
 					} else if t := jsEntriesNextPairType(valN, content, out, factories, arrayLocals, entryArrayLocals, entryNextLocals, mapLocals, setLocals); t != "" {
 						// const e = [new A()].entries().next().value /
 						// const e = ia.next().value / ra.value — pair local of value T.
@@ -1829,6 +1841,11 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						entryArrayLocals[ingest.NodeText(nameN, content)] = t
 					} else if t := jsMapEntriesValueType(valN, content, out, factories, mapLocals, entryArrayLocals); t != "" {
 						// const ie = new Map([[k, new A()]]).entries() / ma.entries()
+						entryArrayLocals[ingest.NodeText(nameN, content)] = t
+					} else if t := jsMapSymbolIteratorEntriesType(valN, content, out, factories, mapLocals, entryArrayLocals); t != "" {
+						// const ia = ma[Symbol.iterator]() / new Map([[k, new A()]])[Symbol.iterator]()
+						// — Map default iterator yields entries pairs of value T.
+						// Bind foreign too so dual-class B rebinds fail closed.
 						entryArrayLocals[ingest.NodeText(nameN, content)] = t
 					} else if t := jsSetEntriesValueType(valN, content, arrayLocals, out, factories, setLocals); t != "" {
 						// const ie = new Set([new A()]).entries() / sa.entries()
@@ -1907,6 +1924,9 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsMapGetValueType(valN, content, out, factories, mapLocals, entryArrayLocals); ourReceivers[t] {
 						// const a = new Map([[k, new A()]]).get(k) / ma.get(k) / new Map(pa).get(k)
+						out[ingest.NodeText(nameN, content)] = t
+					} else if t := jsNullishOrDefaultType(valN, content, out, factories, mapLocals, entryArrayLocals); ourReceivers[t] {
+						// const a = ma.get(k) ?? new A() / ma.get(k) || new A()
 						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsArrayElemSubscriptType(valN, content, arrayLocals, out, factories, extra); ourReceivers[t] {
 						// const a = [new A()][0] / Array.from([new A()])[0] /
@@ -6037,6 +6057,202 @@ func jsMapGetValueType(n *grammar.Node, content []byte, typedLocals, factories, 
 	return jsMapSourceValueType(ingest.ChildByField(fn, "object"), content, typedLocals, factories, mapLocals, entryArrayLocals)
 }
 
+// jsMapSymbolIteratorEntriesType recovers T from ma[Symbol.iterator]() /
+// new Map([[k, new T()]])[Symbol.iterator]() when the receiver peels to a Map of
+// uniform value type T. Zero-arg only. Map's default iterator yields [k, v] pairs
+// (same as .entries()). Enables ma[Symbol.iterator]().next().value[1].run() under
+// foreign same-leaf. Array/Set Symbol.iterator stay on element peels.
+func jsMapSymbolIteratorEntriesType(n *grammar.Node, content []byte, typedLocals, factories, mapLocals, entryArrayLocals map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "call_expression" || !jsCallIsZeroArg(n) {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil || fn.Type() != "subscript_expression" {
+		return ""
+	}
+	if !jsIsSymbolIteratorIndex(ingest.ChildByField(fn, "index"), content) {
+		return ""
+	}
+	return jsMapSourceValueType(ingest.ChildByField(fn, "object"), content, typedLocals, factories, mapLocals, entryArrayLocals)
+}
+
+// jsObjectEntriesPairAtType recovers T from es.at(i) / [...ma].at(0) /
+// Array.from(ma).at(0) when the receiver peels as an entries-array source of
+// value T. Single numeric arg only (incl. -1). The expression itself is a pair
+// of value T (not T) — use for entryLocals and pair-value peels via [1].
+// Enables [...ma].at(0)[1].run() under foreign same-leaf (es[0][1] already worked).
+func jsObjectEntriesPairAtType(n *grammar.Node, content []byte, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	args := ingest.ChildByField(n, "arguments")
+	if fn == nil || args == nil {
+		return ""
+	}
+	if fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain" {
+		return ""
+	}
+	prop := ingest.ChildByField(fn, "property")
+	if prop == nil || ingest.NodeText(prop, content) != "at" {
+		return ""
+	}
+	var first *grammar.Node
+	count := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		count++
+		if first == nil {
+			first = ch
+		}
+	}
+	if count != 1 || first == nil || !jsIsNumericIndexArg(first, content) {
+		return ""
+	}
+	return jsObjectEntriesArraySourceType(ingest.ChildByField(fn, "object"), content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals)
+}
+
+// jsNullishOrDefaultType recovers T from left ?? right / left || right when both
+// arms peel to the same concrete type T, or one arm peels to T and the other is
+// null/undefined. Arms peel via map.get value type or concrete new/local/factory.
+// Enables (ma.get(k) ?? new A()).run() / const a = ma.get(k) || new A() under
+// foreign same-leaf. Mismatched arms (get A ?? new B()) fail closed.
+func jsNullishOrDefaultType(n *grammar.Node, content []byte, typedLocals, factories, mapLocals, entryArrayLocals map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "binary_expression" {
+		return ""
+	}
+	op := ingest.ChildByField(n, "operator")
+	if op == nil {
+		return ""
+	}
+	switch ingest.NodeText(op, content) {
+	case "??", "||":
+		// ok
+	default:
+		return ""
+	}
+	left := ingest.ChildByField(n, "left")
+	right := ingest.ChildByField(n, "right")
+	lt := jsNullishArmType(left, content, typedLocals, factories, mapLocals, entryArrayLocals)
+	rt := jsNullishArmType(right, content, typedLocals, factories, mapLocals, entryArrayLocals)
+	if lt != "" && rt != "" {
+		if lt == rt {
+			return lt
+		}
+		return ""
+	}
+	if lt != "" && jsIsNullUndefinedLiteral(right, content) {
+		return lt
+	}
+	if rt != "" && jsIsNullUndefinedLiteral(left, content) {
+		return rt
+	}
+	return ""
+}
+
+// jsNullishArmType recovers T from one arm of ?? / ||: map.get value, new T(),
+// typed local, or factory call. Empty / mixed fail closed at the binary level.
+func jsNullishArmType(n *grammar.Node, content []byte, typedLocals, factories, mapLocals, entryArrayLocals map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if t := jsMapGetValueType(n, content, typedLocals, factories, mapLocals, entryArrayLocals); t != "" {
+		return t
+	}
+	return jsExprConcreteType(n, content, typedLocals, factories)
+}
+
+// jsIsNullUndefinedLiteral reports null / undefined (identifier or keyword form).
+func jsIsNullUndefinedLiteral(n *grammar.Node, content []byte) bool {
+	if n == nil {
+		return false
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil {
+		return false
+	}
+	switch n.Type() {
+	case "null":
+		return true
+	case "undefined":
+		return true
+	case "identifier":
+		return ingest.NodeText(n, content) == "undefined"
+	}
+	return false
+}
+
 // jsEntriesIteratorSourceType recovers T from an entries-iterator expression
 // that yields [key, value] pairs of value T: arr.entries(), map.entries(), or
 // an entries-iterator / pair-array local (entryArrayLocals).
@@ -6063,6 +6279,12 @@ func jsEntriesIteratorSourceType(n *grammar.Node, content []byte, typedLocals, f
 		return t
 	}
 	if t := jsMapEntriesValueType(n, content, typedLocals, factories, mapLocals, entryArrayLocals); t != "" {
+		return t
+	}
+	// ma[Symbol.iterator]() — Map default iterator yields [k,v] pairs of value T
+	// (same leaf as ma.entries()). Enables ma[Symbol.iterator]().next().value[1].run()
+	// under foreign same-leaf. Bare Map is already entries via mapSource elsewhere.
+	if t := jsMapSymbolIteratorEntriesType(n, content, typedLocals, factories, mapLocals, entryArrayLocals); t != "" {
 		return t
 	}
 	if t := jsSetEntriesValueType(n, content, arrayLocals, typedLocals, factories, setLocals); t != "" {
@@ -6183,6 +6405,10 @@ func jsObjectEntriesPairValueType(n *grammar.Node, content []byte, typedLocals, 
 	}
 	// arr.entries().next().value[1] / ra.value[1] after entries next result.
 	if t := jsEntriesNextPairType(obj, content, typedLocals, factories, arrayLocals, entryArrayLocals, entryNextLocals, mapLocals, setLocals); t != "" {
+		return t
+	}
+	// [...ma].at(0)[1] / es.at(i)[1] — pair from entries-array .at (same leaf as es[i][1]).
+	if t := jsObjectEntriesPairAtType(obj, content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals); t != "" {
 		return t
 	}
 	return jsObjectEntriesPairSubscriptType(obj, content, typedLocals, factories, entryArrayLocals, arrayLocals, mapLocals, setLocals, objValueLocals)
