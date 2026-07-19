@@ -2158,7 +2158,7 @@ peeled:
 	if obj.Type() == "call" {
 		if fn := ingest.ChildByField(obj, "function"); fn != nil {
 			// getattr(box, "a") before bare-ident ctor path (function is identifier).
-			if ft := pythonGetattrFieldType(obj, content, fieldOf); ft != "" {
+			if ft := pythonGetattrFieldType(obj, content, fieldOf, funcReturns, typeOf); ft != "" {
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 			}
 			// copy.copy(item).run() / copy.copy(box.a).run() /
@@ -2311,10 +2311,10 @@ peeled:
 			if ft := pythonDictViewKeyAccessType(obj, content, fieldOf); ft != "" {
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 			}
-			if ft := pythonAttrgetterFieldType(obj, content, fieldOf); ft != "" {
+			if ft := pythonAttrgetterFieldType(obj, content, fieldOf, funcReturns, typeOf); ft != "" {
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 			}
-			if ft := pythonItemgetterFieldType(obj, content, fieldOf); ft != "" {
+			if ft := pythonItemgetterFieldType(obj, content, fieldOf, funcReturns, typeOf); ft != "" {
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 			}
 			// itemgetter(0)(items).run() / operator.itemgetter(0)(list(items)).run() —
@@ -4839,7 +4839,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					// shared elemOf), not an element; use pair[i] / unpack / nested for.
 					// xa = itemgetter("a")(box) / itemgetter("a")(asdict(box)) —
 					// TypedDict/record or dict-view string-key (fieldOf).
-					if ft := pythonItemgetterFieldType(right, content, fieldOf); ft != "" {
+					if ft := pythonItemgetterFieldType(right, content, fieldOf, funcReturns, typeOf); ft != "" {
 						typeOf[lname] = ft
 						bindFields(lname, ft)
 						if ourReceivers[ft] {
@@ -4865,7 +4865,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					// operator.attrgetter("a")(box) — single-field getter on a typed
 					// local (or replace of it) yields the field type (same as box.a).
 					// Multi-field attrgetter fails closed.
-					if ft := pythonAttrgetterFieldType(right, content, fieldOf); ft != "" {
+					if ft := pythonAttrgetterFieldType(right, content, fieldOf, funcReturns, typeOf); ft != "" {
 						typeOf[lname] = ft
 						bindFields(lname, ft)
 						if ourReceivers[ft] {
@@ -4873,7 +4873,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						}
 					}
 					// xa = getattr(box, "a") — builtin field access (same leaf as box.a).
-					if ft := pythonGetattrFieldType(right, content, fieldOf); ft != "" {
+					if ft := pythonGetattrFieldType(right, content, fieldOf, funcReturns, typeOf); ft != "" {
 						typeOf[lname] = ft
 						bindFields(lname, ft)
 						if ourReceivers[ft] {
@@ -4974,6 +4974,16 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						}
 					} else if et := pythonSubscriptElemType(right, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots, fieldOf); ourReceivers[et] {
 						out[lname] = true
+					} else if et := pythonObjectSubscriptElemType(right, content, funcReturns, typeOf, fieldOf); et != "" {
+						// xa = sorted([ba.get()])[0] / [ba.get()][0] / list([ba.get()])[0]
+						// — method-return collection element under foreign same-leaf
+						// (direct sorted([ba.get()])[0].run() already peels; assigned
+						// form needs typeOf bind). Foreign too for shadowing.
+						typeOf[lname] = et
+						bindFields(lname, et)
+						if ourReceivers[et] {
+							out[lname] = true
+						}
 					}
 				}
 				// xa = box.a — dataclass/class field access when box is a typed local
@@ -5612,7 +5622,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// a := itemgetter(0)(items) / operator.itemgetter(0)(items) /
 				// pair := itemgetter(0)(pairs) when pairs is a pair-iter.
 				// xa := itemgetter("a")(box) / itemgetter("a")(asdict(box)).
-				if ft := pythonItemgetterFieldType(valueN, content, fieldOf); ft != "" {
+				if ft := pythonItemgetterFieldType(valueN, content, fieldOf, funcReturns, typeOf); ft != "" {
 					typeOf[lname] = ft
 					bindFields(lname, ft)
 					if ourReceivers[ft] {
@@ -5635,7 +5645,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				}
 				// xa := attrgetter("a")(box) / attrgetter("a")(replace(box)) /
 				// operator.attrgetter("a")(box).
-				if ft := pythonAttrgetterFieldType(valueN, content, fieldOf); ft != "" {
+				if ft := pythonAttrgetterFieldType(valueN, content, fieldOf, funcReturns, typeOf); ft != "" {
 					typeOf[lname] = ft
 					bindFields(lname, ft)
 					if ourReceivers[ft] {
@@ -5643,7 +5653,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					}
 				}
 				// xa := getattr(box, "a") — builtin field access (same leaf as box.a).
-				if ft := pythonGetattrFieldType(valueN, content, fieldOf); ft != "" {
+				if ft := pythonGetattrFieldType(valueN, content, fieldOf, funcReturns, typeOf); ft != "" {
 					typeOf[lname] = ft
 					bindFields(lname, ft)
 					if ourReceivers[ft] {
@@ -6978,23 +6988,25 @@ func pythonFieldAccessType(attr *grammar.Node, content []byte, fieldOf, funcRetu
 // pythonAttrgetterFieldType recovers T from attrgetter("a")(box) /
 // operator.attrgetter("a")(box) / attrgetter("a")(replace(box)) when box is a
 // typed local with annotated field a of type T (fieldOf; same leaf as box.a /
-// replace(box).a). Single string field only — multi-field attrgetter("a","b")
-// returns a tuple and fails closed. Stored getters (g = attrgetter("a"); g(box))
-// use pythonStoredOperatorGetterType via getterOf.
-func pythonAttrgetterFieldType(call *grammar.Node, content []byte, fieldOf map[string]string) string {
-	return pythonOperatorGetterFieldType(call, content, fieldOf, "attrgetter")
+// replace(box).a). Also attrgetter("a")(w.get()) / attrgetter("a")(Box(A())) via
+// type-level fieldOf["Box.a"] under foreign same-leaf. Single string field only —
+// multi-field attrgetter("a","b") returns a tuple and fails closed. Stored
+// getters (g = attrgetter("a"); g(box)) use pythonStoredOperatorGetterType.
+func pythonAttrgetterFieldType(call *grammar.Node, content []byte, fieldOf, funcReturns, typeOf map[string]string) string {
+	return pythonOperatorGetterFieldType(call, content, fieldOf, funcReturns, typeOf, "attrgetter")
 }
 
 // pythonGetattrFieldType recovers T from getattr(box, "a") when box is a typed
 // local with annotated field a of type T (fieldOf; same leaf as box.a /
-// attrgetter("a")(box)). Also getattr(SimpleNamespace(k=A()), "k") /
-// getattr(types.SimpleNamespace(k=A()), "k") — inline SNS kwargs (same leaf as
+// attrgetter("a")(box)). Also getattr(w.get(), "a") / getattr(Box(A()), "a") via
+// type-level fieldOf under foreign same-leaf, and getattr(SimpleNamespace(k=A()), "k")
+// / types.SimpleNamespace(k=A()) — inline SNS kwargs (same leaf as
 // vars(SimpleNamespace(...))["k"] / SimpleNamespace(...).k). Exactly two
 // positional args: object + string field name. Three-arg getattr(obj, name,
 // default), non-string attr names, and other objects fail closed. Bare builtin
 // name only — getattr from other modules / getattr stored in a variable are
 // not tracked.
-func pythonGetattrFieldType(call *grammar.Node, content []byte, fieldOf map[string]string) string {
+func pythonGetattrFieldType(call *grammar.Node, content []byte, fieldOf, funcReturns, typeOf map[string]string) string {
 	if call == nil || call.Type() != "call" {
 		return ""
 	}
@@ -7013,14 +7025,26 @@ func pythonGetattrFieldType(call *grammar.Node, content []byte, fieldOf map[stri
 	if field == "" {
 		return ""
 	}
+	if fieldOf == nil {
+		return ""
+	}
 	if args[0].Type() == "identifier" {
-		if fieldOf == nil {
-			return ""
-		}
 		return fieldOf[ingest.NodeText(args[0], content)+"."+field]
 	}
-	// getattr(SimpleNamespace(k=A()), "k") / types.SimpleNamespace — inline SNS.
+	// getattr(w.get(), "a") / getattr(Box(A()), "a") — method-return / Class()
+	// object peels via type-level fieldOf (same leaf as w.get().a / Box(A()).a).
 	if args[0].Type() == "call" {
+		if tn := pythonCallFuncReturnType(args[0], content, funcReturns, typeOf, fieldOf); tn != "" {
+			if t := fieldOf[tn+"."+field]; t != "" {
+				return t
+			}
+		}
+		if tn := pythonExprClassType(args[0], content); tn != "" {
+			if t := fieldOf[tn+"."+field]; t != "" {
+				return t
+			}
+		}
+		// getattr(SimpleNamespace(k=A()), "k") / types.SimpleNamespace — inline SNS.
 		fields, _ := pythonSimpleNamespaceFieldTypes(args[0], content)
 		if fields != nil {
 			return fields[field]
@@ -7032,12 +7056,13 @@ func pythonGetattrFieldType(call *grammar.Node, content []byte, fieldOf map[stri
 // pythonItemgetterFieldType recovers T from itemgetter("a")(box) /
 // operator.itemgetter("a")(box) / itemgetter("a")(asdict(box)) when box is a
 // typed local with annotated field a of type T (fieldOf; same leaf as box["a"] /
-// asdict(box)["a"]). Single string key only — multi-key itemgetter("a","b")
+// asdict(box)["a"]). Also itemgetter("a")(w.get()) via type-level fieldOf under
+// foreign same-leaf. Single string key only — multi-key itemgetter("a","b")
 // returns a tuple and fails closed. Numeric itemgetter(i)(collection) uses
 // pythonItemgetterElemType instead. Stored getters (g = itemgetter("a"); g(box))
 // use pythonStoredOperatorGetterType via getterOf.
-func pythonItemgetterFieldType(call *grammar.Node, content []byte, fieldOf map[string]string) string {
-	return pythonOperatorGetterFieldType(call, content, fieldOf, "itemgetter")
+func pythonItemgetterFieldType(call *grammar.Node, content []byte, fieldOf, funcReturns, typeOf map[string]string) string {
+	return pythonOperatorGetterFieldType(call, content, fieldOf, funcReturns, typeOf, "itemgetter")
 }
 
 // pythonOperatorGetterFieldType recovers T from name("field")(box) /
@@ -7045,10 +7070,12 @@ func pythonItemgetterFieldType(call *grammar.Node, content []byte, fieldOf map[s
 // Object peels (same field leaf as the bare local):
 //
 //	attrgetter — box / replace(box) / dataclasses.replace(box) /
+//	  w.get() / Box(A()) method-return / Class() via type-level fieldOf /
 //	  SimpleNamespace(k=A()) / types.SimpleNamespace(k=A()) inline kwargs
 //	  (same leaf as getattr(SimpleNamespace(...), "k"))
-//	itemgetter — box / asdict(box) / vars(box) / box.__dict__
-func pythonOperatorGetterFieldType(call *grammar.Node, content []byte, fieldOf map[string]string, name string) string {
+//	itemgetter — box / asdict(box) / vars(box) / box.__dict__ /
+//	  w.get() / Box(A()) method-return / Class() via type-level fieldOf
+func pythonOperatorGetterFieldType(call *grammar.Node, content []byte, fieldOf, funcReturns, typeOf map[string]string, name string) string {
 	if call == nil || call.Type() != "call" || name == "" {
 		return ""
 	}
@@ -7097,6 +7124,20 @@ func pythonOperatorGetterFieldType(call *grammar.Node, content []byte, fieldOf m
 	if objLocal != "" && fieldOf != nil {
 		if t := fieldOf[objLocal+"."+field]; t != "" {
 			return t
+		}
+	}
+	// attrgetter("a")(w.get()) / itemgetter("a")(w.get()) / Class() object —
+	// type-level fieldOf (same leaf as w.get().a / Box(A()).a under foreign same-leaf).
+	if fieldOf != nil && objArgs[0].Type() == "call" {
+		if tn := pythonCallFuncReturnType(objArgs[0], content, funcReturns, typeOf, fieldOf); tn != "" {
+			if t := fieldOf[tn+"."+field]; t != "" {
+				return t
+			}
+		}
+		if tn := pythonExprClassType(objArgs[0], content); tn != "" {
+			if t := fieldOf[tn+"."+field]; t != "" {
+				return t
+			}
 		}
 	}
 	// attrgetter("k")(SimpleNamespace(k=A())) / types.SimpleNamespace — inline SNS.
@@ -7354,7 +7395,7 @@ func pythonCopyCallObjectType(call *grammar.Node, content []byte, typeOf, fieldO
 				case "getattr":
 					// copy.copy(getattr(box, "a")) / getattr(SimpleNamespace(k=A()), "k")
 					// — same leaf as getattr(...).run() / attrgetter peels.
-					if ft := pythonGetattrFieldType(args[0], content, fieldOf); ft != "" {
+					if ft := pythonGetattrFieldType(args[0], content, fieldOf, funcReturns, typeOf); ft != "" {
 						return ft
 					}
 				}
@@ -7362,10 +7403,10 @@ func pythonCopyCallObjectType(call *grammar.Node, content []byte, typeOf, fieldO
 				// copy.copy(attrgetter("k")(SimpleNamespace(...))) /
 				// copy.copy(itemgetter("k")(vars(SNS(...)))) — structured getter peels
 				// before Class() ctor path (attrgetter/itemgetter would be bogus leaves).
-				if ft := pythonAttrgetterFieldType(args[0], content, fieldOf); ft != "" {
+				if ft := pythonAttrgetterFieldType(args[0], content, fieldOf, funcReturns, typeOf); ft != "" {
 					return ft
 				}
-				if ft := pythonItemgetterFieldType(args[0], content, fieldOf); ft != "" {
+				if ft := pythonItemgetterFieldType(args[0], content, fieldOf, funcReturns, typeOf); ft != "" {
 					return ft
 				}
 			}
@@ -13268,6 +13309,33 @@ func pythonHomogeneousCtorElem(collection *grammar.Node, content []byte) string 
 		return ""
 	}
 	return elem
+}
+
+// pythonObjectSubscriptElemType recovers T from coll[i] when coll peels as an
+// object collection of T (not a slice). Enables
+// xa = sorted([ba.get()])[0] / xa = [ba.get()][0] / xa = list([ba.get()])[0]
+// under foreign same-leaf (direct coll[i].run() already peels via
+// pythonShouldRenameAttr). Slices fail closed (sequence, not element).
+func pythonObjectSubscriptElemType(sub *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if sub == nil || sub.Type() != "subscript" {
+		return ""
+	}
+	// Slice subscript (items[1:3] / items[:]) fails closed — not an element.
+	for i := uint32(0); i < sub.ChildCount(); i++ {
+		ch := sub.Child(i)
+		if ch != nil && ch.Type() == "slice" {
+			return ""
+		}
+	}
+	val := ingest.ChildByField(sub, "value")
+	if val == nil {
+		return ""
+	}
+	if et := pythonObjectCollectionElem(val, content, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
+	// {"k": ba.get()}["k"] / dict(k=ba.get())["k"] — object-dict value peel.
+	return pythonHomogeneousObjectDictValue(val, content, funcReturns, typeOf, fieldOf)
 }
 
 // pythonObjectCollectionElem recovers element type T from list/tuple/set

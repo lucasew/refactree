@@ -5104,6 +5104,42 @@ func javaIsIdentityLambda(n *grammar.Node, content []byte) bool {
 	return javaLambdaBodyIsIdent(n, content, params[0])
 }
 
+// javaIsIdentityMapCall reports stream.map(a -> a) / optional.map(a -> a) with a
+// sole unary identity lambda. Used by method-return object peels so
+// Stream.of(ba.get()).map(x -> x).findFirst().get() preserves T under foreign
+// same-leaf (non-identity mappers fail closed).
+func javaIsIdentityMapCall(call *grammar.Node, content []byte) bool {
+	if call == nil || call.Type() != "method_invocation" {
+		return false
+	}
+	if name := javaMethodInvocationName(call, content); name != "map" {
+		return false
+	}
+	var args *grammar.Node
+	for i := uint32(0); i < call.ChildCount(); i++ {
+		if call.Child(i).Type() == "argument_list" {
+			args = call.Child(i)
+			break
+		}
+	}
+	if args == nil {
+		return false
+	}
+	var first *grammar.Node
+	count := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," || ch.Type() == "comment" {
+			continue
+		}
+		count++
+		if first == nil {
+			first = ch
+		}
+	}
+	return count == 1 && javaIsIdentityLambda(first, content)
+}
+
 // javaIsValueIdentityBiLambda reports expression-bodied bi-lambdas that return
 // their second (value) parameter: (k, v) -> v. Used to recover U=V from
 // ConcurrentHashMap.search identity BiFunctions. Blocks / other bodies fail closed.
@@ -7021,6 +7057,16 @@ func javaStaticCollectionOfObjectElemType(obj *grammar.Node, content []byte, com
 			// Stream intermediate type-preserving stages.
 			obj = recv
 			continue
+		case "map":
+			// Stream.of(ba.get()).map(x -> x).findFirst().get() — identity mapper
+			// preserves method-return element under foreign same-leaf (filter/peek
+			// already type-preserve; non-identity mappers fail closed here so
+			// type-changing map stays unbound on the Class pipeline path).
+			if javaIsIdentityMapCall(obj, content) {
+				obj = recv
+				continue
+			}
+			return ""
 		case "collect":
 			// Stream.of(ba.get()).collect(Collectors.toList()/toSet()/…) —
 			// type-preserving collector under foreign same-leaf (Class peels via

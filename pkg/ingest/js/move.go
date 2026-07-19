@@ -1621,8 +1621,9 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 			// wa.deref() after const wa = new WeakRef(...) — referent peel under foreign same-leaf.
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
-		if t := jsReflectGetType(obj, content, typedLocals, factories, objValueLocals); t != "" {
-			// Reflect.get({k: new A()}, "k") / Reflect.get(oa, "k") — property value peel.
+		if t := jsReflectGetTypeEx(obj, content, typedLocals, factories, objValueLocals, classFields, methodReturns); t != "" {
+			// Reflect.get({k: new A()}, "k") / Reflect.get({k: new BoxA().get()}, "k") /
+			// Reflect.get(oa, "k") — property value peel under foreign same-leaf.
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 		if t := jsReflectConstructType(obj, content); t != "" {
@@ -2111,7 +2112,7 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// const a = new WeakRef(new A()).deref() / wa.deref() after
 						// const wa = new WeakRef(...)
 						out[ingest.NodeText(nameN, content)] = t
-					} else if t := jsReflectGetType(valN, content, out, factories, objValueLocals); ourReceivers[t] {
+					} else if t := jsReflectGetTypeEx(valN, content, out, factories, objValueLocals, classFields, methodReturns); ourReceivers[t] {
 						// const a = Reflect.get({k: new A()}, "k") / Reflect.get(oa, "k")
 						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsReflectConstructType(valN, content); ourReceivers[t] {
@@ -7681,6 +7682,9 @@ func jsArrayConcatElemType(obj, args *grammar.Node, content []byte, arrayLocals,
 		}
 	}
 	// Each arg must be element T or array-source of T (zero args = identity of recv).
+	// Empty array literal args are no-ops (same as zero args) so
+	// [new A()].concat([])[0].run() / [new BoxA().get()].concat([]) peels.
+	// Element peels: Class/typed-local via concrete; method-return via leaf type.
 	argT := ""
 	sawArg := false
 	if args != nil {
@@ -7689,8 +7693,13 @@ func jsArrayConcatElemType(obj, args *grammar.Node, content []byte, arrayLocals,
 			if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
 				continue
 			}
+			// [].concat([]) / [new A()].concat([]) — empty array is a no-op insert.
+			if jsIsEmptyArrayLiteral(ch) {
+				continue
+			}
 			var t string
-			if ct := jsExprConcreteType(ch, content, typedLocals, factories); ct != "" {
+			// Class/typed-local; method-return when extra.methodReturns set.
+			if ct := jsExprLeafType(ch, content, typedLocals, factories, extra.classFields, extra.methodReturns); ct != "" {
 				t = ct
 			} else if at := jsArraySourceElemType(ch, content, arrayLocals, typedLocals, factories, extra); at != "" {
 				t = at
@@ -9472,7 +9481,14 @@ func jsWeakRefDerefTypeEx(n *grammar.Node, content []byte, typedLocals, factorie
 // Object.assign/fromEntries sources with uniform values. Key ignored (all values
 // agree). Enables Reflect.get({k: new A()}, "k").run() / Reflect.get(oa, "k").run()
 // under foreign same-leaf. Mixed property values / non-Reflect callees fail closed.
+// Method-return object values use jsReflectGetTypeEx.
 func jsReflectGetType(n *grammar.Node, content []byte, typedLocals, factories, objValueLocals map[string]string) string {
+	return jsReflectGetTypeEx(n, content, typedLocals, factories, objValueLocals, nil, nil)
+}
+
+// jsReflectGetTypeEx peels Reflect.get({k: new BoxA().get()}, "k") under foreign
+// same-leaf (method-return property values via jsObjectLiteralValueTypeEx).
+func jsReflectGetTypeEx(n *grammar.Node, content []byte, typedLocals, factories, objValueLocals map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -9537,17 +9553,19 @@ func jsReflectGetType(n *grammar.Node, content []byte, typedLocals, factories, o
 	if first == nil {
 		return ""
 	}
+	extra := jsExtraLocals{classFields: classFields, methodReturns: methodReturns}
 	if first.Type() == "object" {
-		return jsObjectLiteralValueType(first, content, typedLocals, factories)
+		// Class peels via concrete path; method-return when methodReturns set.
+		return jsObjectLiteralValueTypeEx(first, content, typedLocals, factories, extra)
 	}
 	if first.Type() == "identifier" && objValueLocals != nil {
 		return objValueLocals[ingest.NodeText(first, content)]
 	}
 	// Object.assign / Object.fromEntries sources with uniform values.
-	if t := jsObjectAssignValueType(first, content, typedLocals, factories, objValueLocals); t != "" {
+	if t := jsObjectAssignValueTypeEx(first, content, typedLocals, factories, objValueLocals, classFields, methodReturns); t != "" {
 		return t
 	}
-	if t := jsObjectFromEntriesValueType(first, content, typedLocals, factories, nil, nil); t != "" {
+	if t := jsObjectFromEntriesValueTypeEx(first, content, typedLocals, factories, nil, nil, classFields, methodReturns); t != "" {
 		return t
 	}
 	return ""
