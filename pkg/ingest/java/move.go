@@ -3046,15 +3046,16 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			// element type (range views; bounds/inclusivity args do not change E).
 			// CompletableFuture.whenComplete / whenCompleteAsync / copy /
 			// toCompletableFuture / orTimeout / completeOnTimeout /
-			// exceptionally / exceptionallyAsync / exceptionallyCompose /
-			// exceptionallyComposeAsync / minimalCompletionStage — always return
-			// the same result T by API signature (side-effect / timeout / recovery /
-			// Executor args do not change T). completeAsync is handled below
-			// (typed CF peels receiver; diamond/raw falls back to supplier body).
+			// exceptionallyCompose / exceptionallyComposeAsync /
+			// minimalCompletionStage — always return the same result T by API
+			// signature (side-effect / timeout / recovery / Executor args do not
+			// change T). exceptionally / exceptionallyAsync are special-cased
+			// below (typed CF peels receiver; untyped failedFuture falls back to
+			// Function body). completeAsync is handled below (typed CF peels
+			// receiver; diamond/raw falls back to supplier body).
 			// Enables whenComplete(...).join() / whenCompleteAsync(...).join() /
-			// exceptionallyAsync(...).join() / copy().join() under foreign
-			// same-leaf methods. Type-changing stages (thenApply/handle/…) stay
-			// on their own identity/rewrap peels.
+			// copy().join() under foreign same-leaf methods. Type-changing stages
+			// (thenApply/handle/…) stay on their own identity/rewrap peels.
 			// Optional.or(Supplier) always returns Optional of the same T by API
 			// signature (alternative Optional supplier does not change T).
 			// Enables or(...).ifPresent / or(...).orElse / var o2 = or(...);
@@ -3063,7 +3064,6 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 			"descendingSet", "headSet", "tailSet", "subSet",
 			"whenComplete", "whenCompleteAsync", "copy", "toCompletableFuture",
 			"orTimeout", "completeOnTimeout",
-			"exceptionally", "exceptionallyAsync",
 			"exceptionallyCompose", "exceptionallyComposeAsync",
 			"minimalCompletionStage",
 			"or":
@@ -3087,6 +3087,18 @@ func javaStreamPipelineElemType(obj *grammar.Node, content []byte, elemOf, valOf
 				return ""
 			}
 			return javaStreamPipelineElemType(recv, content, elemOf, valOf)
+		case "exceptionally", "exceptionallyAsync":
+			// CompletableFuture.exceptionally / exceptionallyAsync(Function[, Executor]):
+			// typed CF peels receiver T by signature (recovery Function must yield T).
+			// Untyped failedFuture(...).exceptionally(t -> new A() / A.make()) recovers
+			// T from the Function body (same shapes as thenApply identity/new).
+			// Enables failedFuture(...).exceptionally(t -> A.make()).join().m() under
+			// foreign same-leaf methods. Method-return bodies peel via object path.
+			recv := ingest.ChildByField(obj, "object")
+			if et := javaStreamPipelineElemType(recv, content, elemOf, valOf); et != "" {
+				return et
+			}
+			return javaMapResultElemType(obj, content, elemOf, valOf)
 		case "completeAsync":
 			// CompletableFuture.completeAsync(() -> new A()) /
 			// completeAsync(() -> new A(), executor) — returns this CF.
@@ -4548,6 +4560,20 @@ func javaIsOptionalOfMethodRef(ref *grammar.Node, content []byte) bool {
 	default:
 		return false
 	}
+}
+
+// javaIsFailedFutureCall reports CompletableFuture.failedFuture(...).
+// Used so exceptionally(t -> new A() / ba.get()) peels mapper body when the
+// receiver CF has no element type (failedFuture is untyped by construction).
+func javaIsFailedFutureCall(n *grammar.Node, content []byte) bool {
+	if n == nil || n.Type() != "method_invocation" {
+		return false
+	}
+	nameN := ingest.ChildByField(n, "name")
+	if nameN == nil || ingest.NodeText(nameN, content) != "failedFuture" {
+		return false
+	}
+	return javaStaticFactoryReceiverName(ingest.ChildByField(n, "object"), content) == "CompletableFuture"
 }
 
 // javaIsCompletedFutureMethodRef reports CompletableFuture::completedFuture.
@@ -7959,9 +7985,20 @@ func javaStaticCollectionOfObjectElemType(obj *grammar.Node, content []byte, com
 				continue
 			}
 			return javaFlatMapCallObjectMapperElemType(obj, content, compOf, typeMembers)
+		case "exceptionally", "exceptionallyAsync":
+			// Typed CF: exceptionally preserves T by signature (continue to recv).
+			// Untyped failedFuture(...).exceptionally(t -> ba.get() / new A()) —
+			// recover T from Function body under foreign same-leaf (Class peels
+			// via javaMapResultElemType in pipeline path).
+			if javaIsFailedFutureCall(recv, content) {
+				if et := javaMapCallObjectMapperElemType(obj, content, compOf, typeMembers); et != "" {
+					return et
+				}
+			}
+			obj = recv
+			continue
 		case "whenComplete", "whenCompleteAsync", "copy", "toCompletableFuture",
 			"orTimeout", "completeOnTimeout",
-			"exceptionally", "exceptionallyAsync",
 			"exceptionallyCompose", "exceptionallyComposeAsync",
 			"minimalCompletionStage":
 			// CF type-preserving stages by API signature (side-effect / timeout /
