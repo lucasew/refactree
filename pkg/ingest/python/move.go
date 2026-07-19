@@ -2381,6 +2381,11 @@ peeled:
 		if ft := pythonNamedtupleMakeFieldAccessType(obj, content); ft != "" {
 			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 		}
+		// SimpleNamespace(k=ba.get()).k / types.SimpleNamespace(k=A()).k —
+		// inline SNS kwargs (Class() or method-return) under foreign same-leaf.
+		if ft := pythonInlineSimpleNamespaceObjectFieldType(obj, content, funcReturns, typeOf, fieldOf); ft != "" {
+			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
+		}
 		return len(foreignReceivers) == 0
 	}
 	// box["a"].run() — TypedDict/record string-key value (fieldOf).
@@ -2465,6 +2470,10 @@ peeled:
 		// pythonObjectCollectionElem so assign of {"k": frozenset([A()])}
 		// still hits nested peels before scalar dict binding).
 		if et := pythonHomogeneousObjectDictValue(val, content, funcReturns, typeOf, fieldOf); et != "" {
+			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+		}
+		// dict.fromkeys(keys, ba.get())["k"] — fromkeys value leaf.
+		if et := pythonDictFromkeysObjectValueType(val, content, funcReturns, typeOf, fieldOf); et != "" {
 			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 		}
 		// ({"k": ba.get()} | {"j": ba.get()})["j"] — object-dict merge value.
@@ -2696,6 +2705,12 @@ func pythonFutureResultCallType(call *grammar.Node, content []byte, futureOf map
 // order is declaration-order Class leaves for @astuple.local.#i slots so
 // vars(da).values() / d = vars(da); d.values() peels when values are uniform.
 func pythonSimpleNamespaceFieldTypes(call *grammar.Node, content []byte) (map[string]string, []string) {
+	return pythonSimpleNamespaceObjectFieldTypes(call, content, nil, nil, nil)
+}
+
+// pythonSimpleNamespaceObjectFieldTypes peels SNS kwargs as Class() or
+// method-return / typed-local leaves (k=ba.get() → A) under foreign same-leaf.
+func pythonSimpleNamespaceObjectFieldTypes(call *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) (map[string]string, []string) {
 	if call == nil || call.Type() != "call" {
 		return nil, nil
 	}
@@ -2731,7 +2746,7 @@ func pythonSimpleNamespaceFieldTypes(call *grammar.Node, content []byte) (map[st
 			if nameN == nil || nameN.Type() != "identifier" {
 				return nil, nil
 			}
-			et := pythonClassCtorName(valN, content)
+			et := pythonObjectLeafType(valN, content, funcReturns, typeOf, fieldOf)
 			if et == "" {
 				return nil, nil
 			}
@@ -2778,11 +2793,11 @@ func pythonCopyLocalFieldOf(src, dst string, fieldOf map[string]string) {
 
 // pythonBindSimpleNamespaceLocal records fieldOf["local.f"] and declaration-order
 // @astuple.local.#i slots from SimpleNamespace(...) / types.SimpleNamespace(...).
-func pythonBindSimpleNamespaceLocal(local string, call *grammar.Node, content []byte, fieldOf map[string]string) {
+func pythonBindSimpleNamespaceLocal(local string, call *grammar.Node, content []byte, fieldOf, funcReturns, typeOf map[string]string) {
 	if local == "" || fieldOf == nil {
 		return
 	}
-	fields, order := pythonSimpleNamespaceFieldTypes(call, content)
+	fields, order := pythonSimpleNamespaceObjectFieldTypes(call, content, funcReturns, typeOf, fieldOf)
 	if len(fields) == 0 {
 		return
 	}
@@ -4438,7 +4453,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					// same-leaf. Dedicated path (not namedtuple fieldIndex): kwargs
 					// are attributes, not invented ctor fields.
 					// Foreign fields too for shadowing (db = SimpleNamespace(k=B())).
-					pythonBindSimpleNamespaceLocal(lname, right, content, fieldOf)
+					pythonBindSimpleNamespaceLocal(lname, right, content, fieldOf, funcReturns, typeOf)
 					// a = A.make() / a = A.create() — @staticmethod / @classmethod
 					// factory (attribute callee; "Class.method" keys in funcReturns).
 					// Bare make_a() is handled in the identifier branch below too.
@@ -4978,7 +4993,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// Bind into elemOf so next(ga) / for a in ga type.
 						// Foreign too for shadowing.
 						elemOf[lname] = et
-					} else if et := pythonDictFromkeysValueType(right, content); et != "" {
+					} else if et := pythonDictFromkeysObjectValueType(right, content, funcReturns, typeOf, fieldOf); et != "" {
 						elemOf[lname] = et
 					} else if et := pythonHomogeneousCtorElem(right, content); et != "" {
 						elemOf[lname] = et
@@ -5563,7 +5578,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				}
 				if valueN.Type() == "call" {
 					// da := SimpleNamespace(k=A()) — same fieldOf bind as plain assignment.
-					pythonBindSimpleNamespaceLocal(lname, valueN, content, fieldOf)
+					pythonBindSimpleNamespaceLocal(lname, valueN, content, fieldOf, funcReturns, typeOf)
 					pythonBindNamedtupleReplaceLocal(lname, valueN, content, typeOf, fieldOf, fieldNames, fieldIndex, ourReceivers, out)
 					pythonBindNamedtupleMakeLocal(lname, valueN, content, typeOf, fieldOf, fieldNames, fieldIndex, ourReceivers, out)
 				}
@@ -6983,16 +6998,34 @@ func pythonOperatorGetterFieldType(call *grammar.Node, content []byte, fieldOf m
 // types.SimpleNamespace(k=A()) field k under foreign same-leaf. Keyword Class()
 // fields only; parenthesized forms peel. Mixed / non-SNS fail closed.
 func pythonInlineSimpleNamespaceFieldType(n *grammar.Node, content []byte, field string) string {
+	return pythonInlineSimpleNamespaceObjectFieldTypeOn(n, content, field, nil, nil, nil)
+}
+
+// pythonInlineSimpleNamespaceObjectFieldType recovers T from
+// SimpleNamespace(k=ba.get()).k attribute access under foreign same-leaf.
+func pythonInlineSimpleNamespaceObjectFieldType(attr *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if attr == nil || attr.Type() != "attribute" {
+		return ""
+	}
+	fieldN := ingest.ChildByField(attr, "attribute")
+	obj := ingest.ChildByField(attr, "object")
+	if fieldN == nil || obj == nil {
+		return ""
+	}
+	return pythonInlineSimpleNamespaceObjectFieldTypeOn(obj, content, ingest.NodeText(fieldN, content), funcReturns, typeOf, fieldOf)
+}
+
+func pythonInlineSimpleNamespaceObjectFieldTypeOn(n *grammar.Node, content []byte, field string, funcReturns, typeOf, fieldOf map[string]string) string {
 	if n == nil || field == "" {
 		return ""
 	}
 	if n.Type() == "parenthesized_expression" {
-		return pythonInlineSimpleNamespaceFieldType(pythonParenInner(n), content, field)
+		return pythonInlineSimpleNamespaceObjectFieldTypeOn(pythonParenInner(n), content, field, funcReturns, typeOf, fieldOf)
 	}
 	if n.Type() != "call" {
 		return ""
 	}
-	fields, _ := pythonSimpleNamespaceFieldTypes(n, content)
+	fields, _ := pythonSimpleNamespaceObjectFieldTypes(n, content, funcReturns, typeOf, fieldOf)
 	if fields == nil {
 		return ""
 	}
@@ -11073,7 +11106,8 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 						}
 						// dict.fromkeys(keys, A()).values() / dict.fromkeys(keys, value=A()).values()
 						// — value leaf is A (same as d = dict.fromkeys(...); d.values()).
-						if et := pythonDictFromkeysValueType(objN, content); et != "" {
+						if et := pythonDictFromkeysObjectValueType(objN, content, nil, nil, nil); et != "" {
+
 							return et
 						}
 					}
@@ -12404,6 +12438,12 @@ func pythonExpandSingleListTupleSplat(call *grammar.Node) []*grammar.Node {
 // dict.fromkeys(keys, value=A()). Used to seed elemOf for later .values/.get.
 // Missing/non-Class value fails closed ("").
 func pythonDictFromkeysValueType(right *grammar.Node, content []byte) string {
+	return pythonDictFromkeysObjectValueType(right, content, nil, nil, nil)
+}
+
+// pythonDictFromkeysObjectValueType peels dict.fromkeys value as Class() or
+// method-return / typed-local leaf (ba.get() → A) under foreign same-leaf.
+func pythonDictFromkeysObjectValueType(right *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
 	if right == nil || right.Type() != "call" {
 		return ""
 	}
@@ -12419,13 +12459,13 @@ func pythonDictFromkeysValueType(right *grammar.Node, content []byte) string {
 	if ingest.NodeText(objN, content) != "dict" || ingest.NodeText(attrN, content) != "fromkeys" {
 		return ""
 	}
-	// 2nd positional Class() — dict.fromkeys(keys, A())
+	// 2nd positional — dict.fromkeys(keys, A()) / dict.fromkeys(keys, ba.get())
 	if args, ok := pythonCallPositionalArgNodes(right); ok && len(args) >= 2 {
-		if name := pythonClassCtorName(args[1], content); name != "" {
+		if name := pythonObjectLeafType(args[1], content, funcReturns, typeOf, fieldOf); name != "" {
 			return name
 		}
 	}
-	// keyword value=Class() — dict.fromkeys(keys, value=A())
+	// keyword value= — dict.fromkeys(keys, value=A()) / value=ba.get()
 	argList := ingest.ChildByField(right, "arguments")
 	if argList == nil {
 		return ""
@@ -12443,7 +12483,7 @@ func pythonDictFromkeysValueType(right *grammar.Node, content []byte) string {
 		if ingest.NodeText(nameN, content) != "value" {
 			continue
 		}
-		return pythonClassCtorName(valN, content)
+		return pythonObjectLeafType(valN, content, funcReturns, typeOf, fieldOf)
 	}
 	return ""
 }
@@ -13432,7 +13472,11 @@ peeled:
 		return ""
 	}
 	obj := ingest.ChildByField(fn, "object")
-	return pythonHomogeneousObjectDictValue(obj, content, funcReturns, typeOf, fieldOf)
+	if et := pythonHomogeneousObjectDictValue(obj, content, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
+	// dict.fromkeys(keys, ba.get()).values() — value leaf under foreign same-leaf.
+	return pythonDictFromkeysObjectValueType(obj, content, funcReturns, typeOf, fieldOf)
 }
 
 // pythonObjectIterableElemType recovers T from object-collection / object-dict
@@ -13481,6 +13525,45 @@ peeled:
 					return ""
 				}
 				return pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf)
+			case "filter":
+				// filter(pred, [ba.get()]) — iterable is 2nd arg.
+				args, ok := pythonCallPositionalArgNodes(n)
+				if !ok || len(args) < 2 {
+					return ""
+				}
+				return pythonObjectIterableElemType(args[1], content, funcReturns, typeOf, fieldOf)
+			case "map":
+				// map(lambda x: x, [ba.get()]) / map(A, …) identity/class handled
+				// in Class() path; object peels identity map iterable.
+				args, ok := pythonCallPositionalArgNodes(n)
+				if !ok || len(args) < 2 {
+					return ""
+				}
+				if pythonIsIdentityLambda(args[0], content) {
+					return pythonObjectIterableElemType(args[1], content, funcReturns, typeOf, fieldOf)
+				}
+				return ""
+			case "nlargest", "nsmallest":
+				// nlargest(n, [ba.get()], key=…) — element of 2nd arg.
+				args, ok := pythonCallPositionalArgNodes(n)
+				if !ok || len(args) < 2 {
+					return ""
+				}
+				return pythonObjectIterableElemType(args[1], content, funcReturns, typeOf, fieldOf)
+			}
+		}
+		// heapq.nlargest / heapq.nsmallest
+		if fn != nil && fn.Type() == "attribute" {
+			attr := ingest.ChildByField(fn, "attribute")
+			if attr != nil {
+				switch ingest.NodeText(attr, content) {
+				case "nlargest", "nsmallest":
+					args, ok := pythonCallPositionalArgNodes(n)
+					if !ok || len(args) < 2 {
+						return ""
+					}
+					return pythonObjectIterableElemType(args[1], content, funcReturns, typeOf, fieldOf)
+				}
 			}
 		}
 	}

@@ -6120,6 +6120,10 @@ func javaMapOfEntriesValueType(call *grammar.Node, content []byte) string {
 // call sites under foreign same-leaf methods.
 // Unknown shapes fail closed.
 func javaEntryExprValueType(obj *grammar.Node, content []byte, elemOf, valOf, entryValOf map[string]string) string {
+	return javaEntryExprValueTypeEx(obj, content, elemOf, valOf, entryValOf, nil, nil)
+}
+
+func javaEntryExprValueTypeEx(obj *grammar.Node, content []byte, elemOf, valOf, entryValOf, compOf map[string]string, typeMembers map[string]map[string]string) string {
 	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
 		inner := ingest.ChildByField(obj, "expression")
 		if inner == nil {
@@ -6152,7 +6156,7 @@ func javaEntryExprValueType(obj *grammar.Node, content []byte, elemOf, valOf, en
 			}
 		}
 		if val := ingest.ChildByField(obj, "value"); val != nil {
-			return javaEntryExprValueType(val, content, elemOf, valOf, entryValOf)
+			return javaEntryExprValueTypeEx(val, content, elemOf, valOf, entryValOf, compOf, typeMembers)
 		}
 		return ""
 	case "object_creation_expression":
@@ -6167,8 +6171,8 @@ func javaEntryExprValueType(obj *grammar.Node, content []byte, elemOf, valOf, en
 		}
 		switch name := ingest.NodeText(nameN, content); name {
 		case "entry":
-			// Map.entry(k, new T(...)) — value type from second arg creation.
-			return javaMapEntryCreationValueType(obj, content)
+			// Map.entry(k, new T(...)) / Map.entry(k, ba.get()) — value type.
+			return javaMapEntryObjectValueType(obj, content, compOf, typeMembers)
 		case "firstEntry", "lastEntry",
 			// NavigableMap poll/search entry accessors also return Map.Entry<K,V>;
 			// V from map value type (same path as firstEntry/lastEntry).
@@ -6263,6 +6267,13 @@ func javaOptionalEntryValueType(opt *grammar.Node, content []byte, elemOf, valOf
 // Key is ignored; only the second arg's creation type matters. Non-Map receivers,
 // wrong arity, or non-creation values fail closed.
 func javaMapEntryCreationValueType(call *grammar.Node, content []byte) string {
+	return javaMapEntryObjectValueType(call, content, nil, nil)
+}
+
+// javaMapEntryObjectValueType peels Map.entry(k, new T(...)) / Map.entry(k, ba.get())
+// value arg under foreign same-leaf. Class()-only peels live in
+// javaMapEntryCreationValueType.
+func javaMapEntryObjectValueType(call *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
 	if call == nil || call.Type() != "method_invocation" {
 		return ""
 	}
@@ -6280,6 +6291,12 @@ func javaMapEntryCreationValueType(call *grammar.Node, content []byte) string {
 	args := javaCallArgs(call)
 	if len(args) != 2 {
 		return ""
+	}
+	// Prefer method-return / Class() object peels when typeMembers available.
+	if typeMembers != nil {
+		if t := javaObjectArgType(args[1], content, compOf, typeMembers); t != "" {
+			return t
+		}
 	}
 	arg := args[1]
 	if arg.Type() != "object_creation_expression" {
@@ -6960,6 +6977,7 @@ func javaStaticCollectionOfObjectElemType(obj *grammar.Node, content []byte, com
 			"descendingIterator", "spliterator",
 			"reversed", "sequencedCollection",
 			"filter", // Optional.filter — type-preserving when present
+			"or",     // Optional.or(Supplier) — always same T
 			"orElseThrow",
 			"join", "getNow", "resultNow",
 			"get": // zero-arg Optional/CF get on pipeline
@@ -7442,9 +7460,9 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 	case "getValue", "setValue":
 		// e.getValue() — Map.Entry local (entrySet for-var / forEach / var ea = …).
 		// e.setValue(v) — returns previous V (same value type leaf as getValue).
-		// Map.entry(k, new T(...)).getValue() / am.firstEntry().getValue() —
-		// am.firstEntry().setValue(v) / am.lastEntry().setValue(v) — same V.
-		return javaEntryExprValueType(obj, content, elemOf, valOf, entryValOf)
+		// Map.entry(k, new T(...)).getValue() / Map.entry(k, ba.get()).getValue() /
+		// am.firstEntry().getValue() / am.firstEntry().setValue(v) — same V.
+		return javaEntryExprValueTypeEx(obj, content, elemOf, valOf, entryValOf, compOf, typeMembers)
 	case "next", "previous", "nextElement":
 		// it.next() / as.iterator().next() — element of iterator or pipeline.
 		// lia.previous() / as.listIterator().previous() — same E (ListIterator).

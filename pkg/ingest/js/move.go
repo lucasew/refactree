@@ -1513,6 +1513,7 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 		objValue: objValueLocals, groupBy: groupByLocals, groupMap: groupMapLocals,
 		groupEntry: groupEntryLocals, groupEntryArray: groupEntryArrayLocals,
 		mapLocals: mapLocals, setLocals: setLocals, entryArrayLocals: entryArrayLocals,
+		classFields: classFields, methodReturns: methodReturns,
 	}
 	// Unwrap (new Box()) so parenthesized new expressions still match.
 	for obj != nil && obj.Type() == "parenthesized_expression" {
@@ -1561,9 +1562,9 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 		if t := jsIdentityCloneType(obj, content, typedLocals, factories); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
-		if t := jsMapGetValueType(obj, content, typedLocals, factories, mapLocals, entryArrayLocals); t != "" {
-			// new Map([[k, new A()]]).get(k) / ma.get(k) / new Map(pa).get(k) —
-			// uniform value type (pa is pair-array local).
+		if t := jsMapGetValueTypeEx(obj, content, typedLocals, factories, mapLocals, entryArrayLocals, classFields, methodReturns); t != "" {
+			// new Map([[k, new A()]]).get(k) / ma.get(k) / new Map(pa).get(k) /
+			// new Map([[k, ba.get()]]).get(k) — uniform value type (method-return too).
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 		if t := jsArrayAtElemType(obj, content, arrayLocals, typedLocals, factories, extra); t != "" {
@@ -1672,7 +1673,7 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 	// ma.get(k) ?? new A() / ma.get(k) || new A() — nullish/or default peels
 	// under foreign same-leaf when both arms agree on T (or one is null/undefined).
 	if obj.Type() == "binary_expression" {
-		if t := jsNullishOrDefaultType(obj, content, typedLocals, factories, mapLocals, entryArrayLocals); t != "" {
+		if t := jsNullishOrDefaultTypeEx(obj, content, typedLocals, factories, mapLocals, entryArrayLocals, classFields, methodReturns); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 	}
@@ -1794,6 +1795,7 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 		objValue: objValueLocals, groupBy: groupByLocals, groupMap: groupMapLocals,
 		groupEntry: groupEntryLocals, groupEntryArray: groupEntryArrayLocals,
 		mapLocals: mapLocals, setLocals: setLocals, entryArrayLocals: entryArrayLocals,
+		classFields: classFields, methodReturns: methodReturns,
 	}
 	if root == nil || len(ourReceivers) == 0 {
 		return out, settledOf, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals
@@ -3533,6 +3535,13 @@ func jsBindAllSettledValueObjectPattern(pattern *grammar.Node, content []byte, v
 
 // jsExprConcreteType peels new T() / typed local / factory call / ternary to a class leaf.
 func jsExprConcreteType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	return jsExprLeafType(n, content, typedLocals, factories, nil, nil)
+}
+
+// jsExprLeafType peels new T() / typed local / factory / ternary / zero-arg method
+// return (ba.get() → A) under foreign same-leaf. methodReturns/classFields may be
+// nil (Class()/local/factory only — same as historical jsExprConcreteType).
+func jsExprLeafType(n *grammar.Node, content []byte, typedLocals, factories map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -3542,7 +3551,7 @@ func jsExprConcreteType(n *grammar.Node, content []byte, typedLocals, factories 
 			if ch.Type() == "(" || ch.Type() == ")" {
 				continue
 			}
-			return jsExprConcreteType(ch, content, typedLocals, factories)
+			return jsExprLeafType(ch, content, typedLocals, factories, classFields, methodReturns)
 		}
 		return ""
 	}
@@ -3555,10 +3564,35 @@ func jsExprConcreteType(n *grammar.Node, content []byte, typedLocals, factories 
 		}
 	}
 	if n.Type() == "call_expression" {
-		return jsFactoryCallReturnType(n, content, factories)
+		if t := jsFactoryCallReturnType(n, content, factories); t != "" {
+			return t
+		}
+		// ba.get() / new BoxA().get() — zero-arg product method return.
+		return jsMethodCallReturnType(n, content, typedLocals, classFields, methodReturns, "")
 	}
 	if n.Type() == "ternary_expression" {
-		return jsTernaryExprType(n, content, typedLocals, factories)
+		return jsTernaryExprLeafType(n, content, typedLocals, factories, classFields, methodReturns)
+	}
+	return ""
+}
+
+// jsTernaryExprLeafType is jsTernaryExprType with method-return arms.
+func jsTernaryExprLeafType(n *grammar.Node, content []byte, typedLocals, factories map[string]string, classFields, methodReturns map[string]map[string]string) string {
+	if n == nil || n.Type() != "ternary_expression" {
+		return ""
+	}
+	cons := ingest.ChildByField(n, "consequence")
+	alt := ingest.ChildByField(n, "alternative")
+	t1 := jsExprLeafType(cons, content, typedLocals, factories, classFields, methodReturns)
+	t2 := jsExprLeafType(alt, content, typedLocals, factories, classFields, methodReturns)
+	if t1 != "" && t1 == t2 {
+		return t1
+	}
+	if t1 != "" && jsIsNullUndefinedLiteral(alt, content) {
+		return t1
+	}
+	if t2 != "" && jsIsNullUndefinedLiteral(cons, content) {
+		return t2
 	}
 	return ""
 }
@@ -3919,9 +3953,15 @@ func jsGeneratorCallYieldType(n *grammar.Node, content []byte, generators, genLo
 	return generators[ingest.NodeText(fn, content)]
 }
 
-// jsUniformArrayElemType recovers T from [new T() / a / makeT(), …] when every
-// element peels to the same concrete type T. Empty / mixed arrays fail closed.
+// jsUniformArrayElemType recovers T from [new T() / a / makeT() / ba.get(), …]
+// when every element peels to the same concrete type T (Class()/local/factory/
+// zero-arg method return via extra.methodReturns). Empty / mixed arrays fail closed.
 func jsUniformArrayElemType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	return jsUniformArrayElemTypeEx(n, content, typedLocals, factories, jsExtraLocals{})
+}
+
+// jsUniformArrayElemTypeEx is jsUniformArrayElemType with method-return peels.
+func jsUniformArrayElemTypeEx(n *grammar.Node, content []byte, typedLocals, factories map[string]string, extra jsExtraLocals) string {
 	if n == nil {
 		return ""
 	}
@@ -3947,7 +3987,7 @@ func jsUniformArrayElemType(n *grammar.Node, content []byte, typedLocals, factor
 		if el == nil || el.Type() == "[" || el.Type() == "]" || el.Type() == "," {
 			continue
 		}
-		t := jsExprConcreteType(el, content, typedLocals, factories)
+		t := jsExprLeafType(el, content, typedLocals, factories, extra.classFields, extra.methodReturns)
 		if t == "" {
 			return ""
 		}
@@ -3980,6 +4020,10 @@ type jsExtraLocals struct {
 	mapLocals        map[string]string // Map local → value T (ma.set / new Map)
 	setLocals        map[string]string // Set local → element T (xs.add / new Set)
 	entryArrayLocals map[string]string // pair-array local for new Map(pa)
+	// classFields / methodReturns peel ba.get() / new BoxA().get() as array/object
+	// element leaves under foreign same-leaf (jsExprConcreteType alone is Class()-only).
+	classFields   map[string]map[string]string
+	methodReturns map[string]map[string]string
 }
 
 // jsArraySourceElemType recovers T from an array-like expression whose elements
@@ -4028,7 +4072,7 @@ func jsArraySourceElemType(n *grammar.Node, content []byte, arrayLocals, typedLo
 	if n == nil {
 		return ""
 	}
-	if t := jsUniformArrayElemType(n, content, typedLocals, factories); t != "" {
+	if t := jsUniformArrayElemTypeEx(n, content, typedLocals, factories, extra); t != "" {
 		return t
 	}
 	if t := jsArraySpreadElemType(n, content, arrayLocals, typedLocals, factories, extra); t != "" {
@@ -4097,7 +4141,7 @@ func jsArraySourceElemType(n *grammar.Node, content []byte, arrayLocals, typedLo
 	}
 	// new Set([new A()]) / set local — Array.from(xs) / [...xs] element source.
 	// Bare Map intentionally excluded (entries, not values).
-	if t := jsSetSourceValueType(n, content, arrayLocals, typedLocals, factories, extra.setLocals); t != "" {
+	if t := jsSetSourceValueTypeEx(n, content, arrayLocals, typedLocals, factories, extra.setLocals, extra); t != "" {
 		return t
 	}
 	// structuredClone(arr) / structuredClone([new A()]) — identity of array source.
@@ -5509,7 +5553,7 @@ func jsArrayOfElemType(n *grammar.Node, content []byte, typedLocals, factories m
 		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
 			continue
 		}
-		t := jsExprConcreteType(ch, content, typedLocals, factories)
+		t := jsExprLeafType(ch, content, typedLocals, factories, extra.classFields, extra.methodReturns)
 		if t == "" {
 			return ""
 		}
@@ -5533,7 +5577,7 @@ func jsArrayOfElemType(n *grammar.Node, content []byte, typedLocals, factories m
 // and Object.values(o) when o is an objValueLocal (fromEntries / assign).
 // Non-object-literal / mixed / empty / method / spread entries fail closed.
 func jsObjectValuesElemType(n *grammar.Node, content []byte, typedLocals, factories map[string]string, extra jsExtraLocals) string {
-	if t := jsObjectStaticValuesCallType(n, content, typedLocals, factories, "values"); t != "" {
+	if t := jsObjectStaticValuesCallTypeEx(n, content, typedLocals, factories, "values", extra); t != "" {
 		return t
 	}
 	// Object.values(Object.fromEntries(...)) — values are fromEntries pair values.
@@ -6051,6 +6095,11 @@ func jsObjectStaticCallSingleArg(n *grammar.Node, content []byte, method string)
 // jsObjectStaticValuesCallType recovers uniform property-value type T from
 // Object.values/Object.entries({…}) (single object-literal arg).
 func jsObjectStaticValuesCallType(n *grammar.Node, content []byte, typedLocals, factories map[string]string, method string) string {
+	return jsObjectStaticValuesCallTypeEx(n, content, typedLocals, factories, method, jsExtraLocals{})
+}
+
+// jsObjectStaticValuesCallTypeEx peels Object.values/keys with method-return property values.
+func jsObjectStaticValuesCallTypeEx(n *grammar.Node, content []byte, typedLocals, factories map[string]string, method string, extra jsExtraLocals) string {
 	if n == nil || n.Type() != "call_expression" || method == "" {
 		return ""
 	}
@@ -6128,7 +6177,7 @@ func jsObjectStaticValuesCallType(n *grammar.Node, content []byte, typedLocals, 
 				t = typedLocals[ingest.NodeText(val, content)]
 			}
 		} else {
-			t = jsExprConcreteType(val, content, typedLocals, factories)
+			t = jsExprLeafType(val, content, typedLocals, factories, extra.classFields, extra.methodReturns)
 		}
 		if t == "" {
 			return ""
@@ -6416,7 +6465,65 @@ func jsPairArrayValueType(n *grammar.Node, content []byte, typedLocals, factorie
 		if len(slots) != 2 {
 			return ""
 		}
-		t := jsExprConcreteType(slots[1], content, typedLocals, factories)
+		t := jsExprLeafType(slots[1], content, typedLocals, factories, nil, nil)
+		if t == "" {
+			return ""
+		}
+		if !saw {
+			found = t
+			saw = true
+		} else if found != t {
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return found
+}
+
+// jsPairArrayValueTypeEx peels pair values including zero-arg method returns.
+func jsPairArrayValueTypeEx(n *grammar.Node, content []byte, typedLocals, factories map[string]string, classFields, methodReturns map[string]map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "array" {
+		return ""
+	}
+	found := ""
+	saw := false
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		el := n.Child(i)
+		if el == nil || el.Type() == "[" || el.Type() == "]" || el.Type() == "," {
+			continue
+		}
+		if el.Type() != "array" {
+			return ""
+		}
+		var slots []*grammar.Node
+		for j := uint32(0); j < el.ChildCount(); j++ {
+			ch := el.Child(j)
+			if ch == nil || ch.Type() == "[" || ch.Type() == "]" || ch.Type() == "," {
+				continue
+			}
+			slots = append(slots, ch)
+		}
+		if len(slots) != 2 {
+			return ""
+		}
+		t := jsExprLeafType(slots[1], content, typedLocals, factories, classFields, methodReturns)
 		if t == "" {
 			return ""
 		}
@@ -6437,6 +6544,10 @@ func jsPairArrayValueType(n *grammar.Node, content []byte, typedLocals, factorie
 // pair-array literal [[k, v], …], pair-array local (entryArrayLocals), or
 // Object.entries({…}) when property values agree.
 func jsMapIterableValueType(n *grammar.Node, content []byte, typedLocals, factories, entryArrayLocals map[string]string) string {
+	return jsMapIterableValueTypeEx(n, content, typedLocals, factories, entryArrayLocals, nil, nil)
+}
+
+func jsMapIterableValueTypeEx(n *grammar.Node, content []byte, typedLocals, factories, entryArrayLocals map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -6455,7 +6566,7 @@ func jsMapIterableValueType(n *grammar.Node, content []byte, typedLocals, factor
 	if n == nil {
 		return ""
 	}
-	if t := jsPairArrayValueType(n, content, typedLocals, factories); t != "" {
+	if t := jsPairArrayValueTypeEx(n, content, typedLocals, factories, classFields, methodReturns); t != "" {
 		return t
 	}
 	if t := jsObjectEntriesValueType(n, content, typedLocals, factories, nil); t != "" {
@@ -6477,6 +6588,10 @@ func jsMapIterableValueType(n *grammar.Node, content []byte, typedLocals, factor
 // array literal, pair-array/entries local, or Object.entries({…}). Empty /
 // mixed / other ctors fail closed. WeakMap shares the same pair-value peel.
 func jsMapValueType(n *grammar.Node, content []byte, typedLocals, factories, entryArrayLocals map[string]string) string {
+	return jsMapValueTypeEx(n, content, typedLocals, factories, entryArrayLocals, nil, nil)
+}
+
+func jsMapValueTypeEx(n *grammar.Node, content []byte, typedLocals, factories, entryArrayLocals map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -6533,7 +6648,7 @@ func jsMapValueType(n *grammar.Node, content []byte, typedLocals, factories, ent
 	if count != 1 || first == nil {
 		return ""
 	}
-	return jsMapIterableValueType(first, content, typedLocals, factories, entryArrayLocals)
+	return jsMapIterableValueTypeEx(first, content, typedLocals, factories, entryArrayLocals, classFields, methodReturns)
 }
 
 // jsSetValueType recovers T from new Set(iterable) when the single iterable arg
@@ -6597,6 +6712,10 @@ func jsSetValueType(n *grammar.Node, content []byte, arrayLocals, typedLocals, f
 // jsSetSourceValueType recovers T from new Set([new T()]) / new Set(as) or a
 // set local bound to uniform element type T.
 func jsSetSourceValueType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories, setLocals map[string]string) string {
+	return jsSetSourceValueTypeEx(n, content, arrayLocals, typedLocals, factories, setLocals, jsExtraLocals{setLocals: setLocals})
+}
+
+func jsSetSourceValueTypeEx(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories, setLocals map[string]string, extra jsExtraLocals) string {
 	if n == nil {
 		return ""
 	}
@@ -6615,7 +6734,7 @@ func jsSetSourceValueType(n *grammar.Node, content []byte, arrayLocals, typedLoc
 	if n == nil {
 		return ""
 	}
-	if t := jsSetValueType(n, content, arrayLocals, typedLocals, factories, jsExtraLocals{}); t != "" {
+	if t := jsSetValueType(n, content, arrayLocals, typedLocals, factories, extra); t != "" {
 		return t
 	}
 	if n.Type() == "identifier" && setLocals != nil {
@@ -6776,6 +6895,10 @@ func jsArrayFindElemType(n *grammar.Node, content []byte, arrayLocals, typedLoca
 // jsMapSourceValueType recovers T from new Map([[k, new T()]]) / new Map(pa) or
 // a map local bound to uniform value type T.
 func jsMapSourceValueType(n *grammar.Node, content []byte, typedLocals, factories, mapLocals, entryArrayLocals map[string]string) string {
+	return jsMapSourceValueTypeEx(n, content, typedLocals, factories, mapLocals, entryArrayLocals, nil, nil)
+}
+
+func jsMapSourceValueTypeEx(n *grammar.Node, content []byte, typedLocals, factories, mapLocals, entryArrayLocals map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -6794,7 +6917,7 @@ func jsMapSourceValueType(n *grammar.Node, content []byte, typedLocals, factorie
 	if n == nil {
 		return ""
 	}
-	if t := jsMapValueType(n, content, typedLocals, factories, entryArrayLocals); t != "" {
+	if t := jsMapValueTypeEx(n, content, typedLocals, factories, entryArrayLocals, classFields, methodReturns); t != "" {
 		return t
 	}
 	if n.Type() == "identifier" && mapLocals != nil {
@@ -6888,6 +7011,10 @@ func jsMapValuesYieldType(n *grammar.Node, content []byte, typedLocals, factorie
 // jsMapGetValueType recovers T from map.get(key) when map peels to a Map of
 // uniform value type T. Requires exactly one positional arg (any key expression).
 func jsMapGetValueType(n *grammar.Node, content []byte, typedLocals, factories, mapLocals, entryArrayLocals map[string]string) string {
+	return jsMapGetValueTypeEx(n, content, typedLocals, factories, mapLocals, entryArrayLocals, nil, nil)
+}
+
+func jsMapGetValueTypeEx(n *grammar.Node, content []byte, typedLocals, factories, mapLocals, entryArrayLocals map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -6930,7 +7057,7 @@ func jsMapGetValueType(n *grammar.Node, content []byte, typedLocals, factories, 
 	if count != 1 {
 		return ""
 	}
-	return jsMapSourceValueType(ingest.ChildByField(fn, "object"), content, typedLocals, factories, mapLocals, entryArrayLocals)
+	return jsMapSourceValueTypeEx(ingest.ChildByField(fn, "object"), content, typedLocals, factories, mapLocals, entryArrayLocals, classFields, methodReturns)
 }
 
 // jsMapSymbolIteratorEntriesType recovers T from ma[Symbol.iterator]() /
@@ -7029,6 +7156,11 @@ func jsObjectEntriesPairAtType(n *grammar.Node, content []byte, typedLocals, fac
 // (true && new A()).run() / const a = true && new A() under foreign same-leaf.
 // Mismatched arms (get A ?? new B()) fail closed.
 func jsNullishOrDefaultType(n *grammar.Node, content []byte, typedLocals, factories, mapLocals, entryArrayLocals map[string]string) string {
+	return jsNullishOrDefaultTypeEx(n, content, typedLocals, factories, mapLocals, entryArrayLocals, nil, nil)
+}
+
+// jsNullishOrDefaultTypeEx peels nullish/or/and with method-return arms.
+func jsNullishOrDefaultTypeEx(n *grammar.Node, content []byte, typedLocals, factories, mapLocals, entryArrayLocals map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -7060,8 +7192,8 @@ func jsNullishOrDefaultType(n *grammar.Node, content []byte, typedLocals, factor
 	}
 	left := ingest.ChildByField(n, "left")
 	right := ingest.ChildByField(n, "right")
-	lt := jsNullishArmType(left, content, typedLocals, factories, mapLocals, entryArrayLocals)
-	rt := jsNullishArmType(right, content, typedLocals, factories, mapLocals, entryArrayLocals)
+	lt := jsNullishArmTypeEx(left, content, typedLocals, factories, mapLocals, entryArrayLocals, classFields, methodReturns)
+	rt := jsNullishArmTypeEx(right, content, typedLocals, factories, mapLocals, entryArrayLocals, classFields, methodReturns)
 	if lt != "" && rt != "" {
 		if lt == rt {
 			return lt
@@ -7114,6 +7246,10 @@ func jsIsTrueLiteral(n *grammar.Node, content []byte) bool {
 // jsNullishArmType recovers T from one arm of ?? / ||: map.get value, new T(),
 // typed local, or factory call. Empty / mixed fail closed at the binary level.
 func jsNullishArmType(n *grammar.Node, content []byte, typedLocals, factories, mapLocals, entryArrayLocals map[string]string) string {
+	return jsNullishArmTypeEx(n, content, typedLocals, factories, mapLocals, entryArrayLocals, nil, nil)
+}
+
+func jsNullishArmTypeEx(n *grammar.Node, content []byte, typedLocals, factories, mapLocals, entryArrayLocals map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -7129,10 +7265,10 @@ func jsNullishArmType(n *grammar.Node, content []byte, typedLocals, factories, m
 		}
 		n = inner
 	}
-	if t := jsMapGetValueType(n, content, typedLocals, factories, mapLocals, entryArrayLocals); t != "" {
+	if t := jsMapGetValueTypeEx(n, content, typedLocals, factories, mapLocals, entryArrayLocals, classFields, methodReturns); t != "" {
 		return t
 	}
-	return jsExprConcreteType(n, content, typedLocals, factories)
+	return jsExprLeafType(n, content, typedLocals, factories, classFields, methodReturns)
 }
 
 // jsIsNullUndefinedLiteral reports null / undefined (identifier or keyword form).
