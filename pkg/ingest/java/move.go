@@ -3682,6 +3682,99 @@ func javaGatherObjectResultElemType(call *grammar.Node, content []byte, compOf m
 	return javaObjectArgType(body, content, compOf, typeMembers)
 }
 
+// javaMapCallObjectMapperElemType recovers U from Stream/Optional.map or
+// CF thenApply/handle mappers under foreign same-leaf when the expression-bodied
+// lambda yields a known object leaf:
+//
+//	Stream.of(0).map(x -> ba.get()) → A
+//	Optional.of(0).map(x -> ba.get()) → A
+//	completedFuture(0).thenApply(x -> ba.get()) → A
+//	completedFuture(0).thenApplyAsync(x -> ba.get()) → A
+//	completedFuture(0).handle((x, e) -> ba.get()) → A
+//
+// First lambda among args; body peels via javaObjectArgType (new T(...) / ba.get()).
+// Identity mappers are handled by callers before this (type-preserving peel).
+// Blocks / unknown bodies fail closed. Class peels live in javaMapResultElemType.
+func javaMapCallObjectMapperElemType(call *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	var mapper *grammar.Node
+	for _, a := range javaCallArgs(call) {
+		if a.Type() == "lambda_expression" {
+			mapper = a
+			break
+		}
+	}
+	if mapper == nil {
+		return ""
+	}
+	body := javaLambdaExprBody(mapper)
+	if body == nil || body.IsNull() {
+		return ""
+	}
+	return javaObjectArgType(body, content, compOf, typeMembers)
+}
+
+// javaFlatMapCallObjectMapperElemType recovers T from Stream/Optional.flatMap or
+// CF thenCompose mappers under foreign same-leaf when the mapper rewraps a known
+// object leaf:
+//
+//	Stream.of(0).flatMap(x -> Stream.of(ba.get())) → A
+//	Optional.of(0).flatMap(x -> Optional.of(ba.get())) → A
+//	completedFuture(0).thenCompose(x -> completedFuture(ba.get())) → A
+//
+// Expression-bodied lambdas only; of/ofNullable/completedFuture/completedStage
+// rewraps peel the sole arg via javaObjectArgType. Method refs and blocks fail
+// closed. Identity rewraps are handled by callers before this. Class peels live
+// in javaFlatMapResultElemType / javaStaticCollectionOfElemType.
+func javaFlatMapCallObjectMapperElemType(call *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	var first *grammar.Node
+	for _, a := range javaCallArgs(call) {
+		if a.Type() == "lambda_expression" {
+			first = a
+			break
+		}
+	}
+	if first == nil {
+		return ""
+	}
+	body := javaLambdaExprBody(first)
+	if body == nil || body.IsNull() || body.Type() != "method_invocation" {
+		return ""
+	}
+	nameN := ingest.ChildByField(body, "name")
+	if nameN == nil {
+		return ""
+	}
+	name := ingest.NodeText(nameN, content)
+	obj := ingest.ChildByField(body, "object")
+	if obj == nil || (obj.Type() != "identifier" && obj.Type() != "type_identifier") {
+		return ""
+	}
+	recvName := ingest.NodeText(obj, content)
+	switch name {
+	case "of", "ofNullable":
+		if recvName != "Optional" && recvName != "Stream" {
+			return ""
+		}
+	case "completedFuture", "completedStage":
+		if recvName != "CompletableFuture" {
+			return ""
+		}
+	default:
+		return ""
+	}
+	arg := javaFirstCallArg(body)
+	if arg == nil {
+		return ""
+	}
+	return javaObjectArgType(arg, content, compOf, typeMembers)
+}
+
 // javaGatherFoldScanElemType recovers R from Gatherers.fold/scan when the
 // initializer is expression-bodied `() -> new T()` and the integrator is
 // expression-bodied identity on the accumulator `(r, t) -> r`. Other shapes
@@ -5393,6 +5486,28 @@ func javaIsIdentityThenApplyCall(call *grammar.Node, content []byte) bool {
 	return false
 }
 
+// javaIsIdentityApplyToEitherCall reports CF applyToEither/applyToEitherAsync(
+// other, a -> a[, executor]) with a unary identity Function among args. Used by
+// method-return object peels so completedFuture(ba.get()).applyToEither(other, x -> x)
+// .join() preserves T under foreign same-leaf (Class peels via javaMapResultElemType).
+func javaIsIdentityApplyToEitherCall(call *grammar.Node, content []byte) bool {
+	if call == nil || call.Type() != "method_invocation" {
+		return false
+	}
+	switch javaMethodInvocationName(call, content) {
+	case "applyToEither", "applyToEitherAsync":
+	default:
+		return false
+	}
+	// First lambda among args (other stage is non-lambda first; optional Executor after).
+	for _, a := range javaCallArgs(call) {
+		if a.Type() == "lambda_expression" {
+			return javaIsIdentityLambda(a, content)
+		}
+	}
+	return false
+}
+
 // javaIsIdentityHandleCall reports CF handle/handleAsync((a, e) -> a[, executor])
 // with a bi-lambda that returns its first parameter. Used by method-return object
 // peels so completedFuture(ba.get()).handle((x,e)->x).join() preserves T under
@@ -5403,6 +5518,32 @@ func javaIsIdentityHandleCall(call *grammar.Node, content []byte) bool {
 	}
 	switch javaMethodInvocationName(call, content) {
 	case "handle", "handleAsync":
+	default:
+		return false
+	}
+	for _, a := range javaCallArgs(call) {
+		if a.Type() == "lambda_expression" {
+			params := javaInferredLambdaParamNames(a, content)
+			if len(params) != 2 {
+				return false
+			}
+			return javaLambdaBodyIsIdent(a, content, params[0])
+		}
+	}
+	return false
+}
+
+// javaIsIdentityThenCombineCall reports CF thenCombine/thenCombineAsync(
+// other, (a, b) -> a[, executor]) with a bi-lambda that returns its first
+// parameter. Used by method-return object peels so completedFuture(ba.get())
+// .thenCombine(other, (a,b)->a).join() preserves T under foreign same-leaf
+// (Class peels via javaMapResultElemType).
+func javaIsIdentityThenCombineCall(call *grammar.Node, content []byte) bool {
+	if call == nil || call.Type() != "method_invocation" {
+		return false
+	}
+	switch javaMethodInvocationName(call, content) {
+	case "thenCombine", "thenCombineAsync":
 	default:
 		return false
 	}
@@ -7655,40 +7796,67 @@ func javaStaticCollectionOfObjectElemType(obj *grammar.Node, content []byte, com
 		case "map":
 			// Stream.of(ba.get()).map(x -> x).findFirst().get() — identity mapper
 			// preserves method-return element under foreign same-leaf (filter/peek
-			// already type-preserve; non-identity mappers fail closed here so
-			// type-changing map stays unbound on the Class pipeline path).
+			// already type-preserve). Type-changing mappers peel via object arg:
+			// Stream.of(0).map(x -> ba.get()) / Optional.of(0).map(x -> ba.get())
+			// (Class peels via javaMapResultElemType new T(...) bodies).
 			if javaIsIdentityMapCall(obj, content) {
 				obj = recv
 				continue
 			}
-			return ""
+			return javaMapCallObjectMapperElemType(obj, content, compOf, typeMembers)
 		case "thenApply", "thenApplyAsync":
 			// CompletableFuture.completedFuture(ba.get()).thenApply(x -> x).join() —
 			// identity Function preserves method-return CF result under foreign
 			// same-leaf (Class peels via javaStreamPipelineElemType).
+			// Type-changing: completedFuture(0).thenApply(x -> ba.get()).join()
+			// peels mapper body via javaObjectArgType (Class: x -> new A()).
 			if javaIsIdentityThenApplyCall(obj, content) {
 				obj = recv
 				continue
 			}
-			return ""
+			return javaMapCallObjectMapperElemType(obj, content, compOf, typeMembers)
+		case "applyToEither", "applyToEitherAsync":
+			// Identity: completedFuture(ba.get()).applyToEither(other, x -> x).join()
+			// preserves method-return CF result T (Class peels via javaMapResultElemType).
+			// Type-changing: completedFuture(0).applyToEither(other, x -> ba.get())
+			// peels Function body via javaObjectArgType (Class: x -> new A()).
+			if javaIsIdentityApplyToEitherCall(obj, content) {
+				obj = recv
+				continue
+			}
+			return javaMapCallObjectMapperElemType(obj, content, compOf, typeMembers)
 		case "handle", "handleAsync":
 			// completedFuture(ba.get()).handle((x,e) -> x).join() — first-param
 			// BiFunction identity preserves method-return CF result under foreign
-			// same-leaf (Class peels via javaMapResultElemType). Type-changing fail closed.
+			// same-leaf (Class peels via javaMapResultElemType).
+			// Type-changing: completedFuture(0).handle((x,e) -> ba.get()).join()
+			// peels body via javaObjectArgType (Class: (x,e) -> new A()).
 			if javaIsIdentityHandleCall(obj, content) {
 				obj = recv
 				continue
 			}
-			return ""
+			return javaMapCallObjectMapperElemType(obj, content, compOf, typeMembers)
+		case "thenCombine", "thenCombineAsync":
+			// Identity: completedFuture(ba.get()).thenCombine(other, (a,b) -> a).join()
+			// preserves method-return CF result T (Class peels via javaMapResultElemType).
+			// Type-changing: completedFuture(0).thenCombine(other, (a,b) -> ba.get())
+			// peels BiFunction body via javaObjectArgType (Class: (a,b) -> new A()).
+			if javaIsIdentityThenCombineCall(obj, content) {
+				obj = recv
+				continue
+			}
+			return javaMapCallObjectMapperElemType(obj, content, compOf, typeMembers)
 		case "thenCompose", "thenComposeAsync":
 			// completedFuture(ba.get()).thenCompose(x -> completedFuture(x)).join() —
 			// identity CompletionStage rewrap preserves method-return CF result under
 			// foreign same-leaf (Class peels via javaFlatMapResultElemType).
+			// Type-changing: completedFuture(0).thenCompose(x -> completedFuture(ba.get()))
+			// peels rewrap arg via javaObjectArgType (Class: completedFuture(new A())).
 			if javaIsIdentityThenComposeCall(obj, content) {
 				obj = recv
 				continue
 			}
-			return ""
+			return javaFlatMapCallObjectMapperElemType(obj, content, compOf, typeMembers)
 		case "whenComplete", "whenCompleteAsync", "copy", "toCompletableFuture",
 			"orTimeout", "completeOnTimeout",
 			"exceptionally", "exceptionallyAsync",
@@ -7704,12 +7872,15 @@ func javaStaticCollectionOfObjectElemType(obj *grammar.Node, content []byte, com
 			// Stream.of(ba.get()).flatMap(x -> Stream.of(x)).findFirst().get() /
 			// Optional.of(ba.get()).flatMap(x -> Optional.of(x)).get() — identity
 			// rewrap preserves method-return element under foreign same-leaf
-			// (Class peels via javaStreamPipelineElemType; non-identity fail closed).
+			// (Class peels via javaStreamPipelineElemType).
+			// Type-changing: Stream.of(0).flatMap(x -> Stream.of(ba.get())) /
+			// Optional.of(0).flatMap(x -> Optional.of(ba.get())) peels rewrap arg
+			// via javaObjectArgType (Class: Stream.of(new A())).
 			if javaIsIdentityFlatMapRewrapCall(obj, content) {
 				obj = recv
 				continue
 			}
-			return ""
+			return javaFlatMapCallObjectMapperElemType(obj, content, compOf, typeMembers)
 		case "collect":
 			// Stream.of(ba.get()).collect(Collectors.toList()/toSet()/…) /
 			// collect(Collectors.reducing/maxBy/minBy(...)) — type-preserving
