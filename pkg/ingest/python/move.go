@@ -2471,6 +2471,12 @@ peeled:
 		if et := pythonSubscriptElemType(obj, content, elemOf, nil, typeOf, pairSlots, nil, fieldOf); et != "" {
 			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 		}
+		// list(enumerate([ba.get()]))[0][1].run() / list(zip([ba.get()], …))[0][0].run() /
+		// next(enumerate([ba.get()]))[1].run() — object pair-slot subscript under
+		// foreign same-leaf (Class peels via pythonSubscriptElemType / pairIterSlots).
+		if et := pythonObjectPairSlotSubscriptType(obj, content, funcReturns, typeOf, fieldOf); et != "" {
+			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+		}
 		// [ba.get()][0].run() / (ba.get(),)[0].run() / {"k": ba.get()}["k"].run() /
 		// dict(k=ba.get())["k"].run() / ([ba.get()] + [ba.get()])[0].run() /
 		// ([ba.get()] * 2)[0].run() / [*[ba.get()]][0].run() /
@@ -4942,6 +4948,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					if types := pythonPairSlotsOf(right, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots); len(types) > 0 {
 						// Foreign slots too — shadow prior same-name pair locals.
 						pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+					} else if types := pythonObjectPairSlotsOf(right, content, funcReturns, typeOf, fieldOf); len(types) > 0 {
+						// pair = list(enumerate([ba.get()]))[0] / list(zip([ba.get()], …))[0]
+						// — object pair-iter index under foreign same-leaf.
+						pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 					} else if ft := pythonRecordKeyAccessType(right, content, fieldOf); ft != "" {
 						typeOf[lname] = ft
 						bindFields(lname, ft)
@@ -4976,6 +4986,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						}
 					} else if et := pythonSubscriptElemType(right, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots, fieldOf); ourReceivers[et] {
 						out[lname] = true
+					} else if et := pythonObjectPairSlotSubscriptType(right, content, funcReturns, typeOf, fieldOf); et != "" {
+						// xa = list(enumerate([ba.get()]))[0][1] / list(zip(...))[0][0]
+						// — object pair-slot double subscript under foreign same-leaf.
+						typeOf[lname] = et
+						bindFields(lname, et)
+						if ourReceivers[et] {
+							out[lname] = true
+						}
 					} else if et := pythonObjectSubscriptElemType(right, content, funcReturns, typeOf, fieldOf); et != "" {
 						// xa = sorted([ba.get()])[0] / [ba.get()][0] / list([ba.get()])[0]
 						// — method-return collection element under foreign same-leaf
@@ -5051,6 +5069,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				if right != nil {
 					if types := pythonPairIterSlotsOf(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
 						// Foreign slots too — shadow prior same-name pair-iters.
+						pairIterSlots[lname] = types
+					} else if types := pythonObjectPairIterSlotsOf(right, content, funcReturns, typeOf, fieldOf); len(types) > 0 {
+						// pairs = list(enumerate([ba.get()])) / list(zip([ba.get()], …))
+						// — object pair-iter under foreign same-leaf (reuse pairIterSlots
+						// so pairs[0] / pairs[0][1] peels via Class subscript path).
 						pairIterSlots[lname] = types
 					} else if et := pythonGroupbyGroupElemType(right, content, elemOf, egElems, typeOf); et != "" {
 						// groups = groupby(items) / groups = itertools.groupby(...) /
@@ -5220,6 +5243,14 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// a, b = next(zip(...)) / next(pairs) / pair / pairs[0] /
 						// list(zip(...))[0] when pair/pair-iter slots known.
 						// Per-slot: ourReceivers only; untyped slots (enumerate index) skip.
+						for i, name := range targets {
+							if i < len(types) && ourReceivers[types[i]] {
+								out[name] = true
+							}
+						}
+					} else if types := pythonObjectPairSlotsOf(right, content, funcReturns, typeOf, fieldOf); len(types) > 0 {
+						// a, b = list(zip([ba.get()], …))[0] / list(enumerate([ba.get()]))[0]
+						// / next(zip([ba.get()], …)) — object pair under foreign same-leaf.
 						for i, name := range targets {
 							if i < len(types) && ourReceivers[types[i]] {
 								out[name] = true
@@ -5712,6 +5743,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			if valueN.Type() == "subscript" {
 				if types := pythonPairSlotsOf(valueN, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots); len(types) > 0 {
 					pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+				} else if types := pythonObjectPairSlotsOf(valueN, content, funcReturns, typeOf, fieldOf); len(types) > 0 {
+					// pair := list(enumerate([ba.get()]))[0] / list(zip(...))[0]
+					pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 				} else if ft := pythonRecordKeyAccessType(valueN, content, fieldOf); ft != "" {
 					typeOf[lname] = ft
 					bindFields(lname, ft)
@@ -5739,6 +5773,20 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					}
 				} else if et := pythonSubscriptElemType(valueN, content, elemOf, egElems, typeOf, pairSlots, pairIterSlots, fieldOf); ourReceivers[et] {
 					out[lname] = true
+				} else if et := pythonObjectPairSlotSubscriptType(valueN, content, funcReturns, typeOf, fieldOf); et != "" {
+					// xa := list(enumerate([ba.get()]))[0][1] / list(zip(...))[0][0]
+					typeOf[lname] = et
+					bindFields(lname, et)
+					if ourReceivers[et] {
+						out[lname] = true
+					}
+				} else if et := pythonObjectSubscriptElemType(valueN, content, funcReturns, typeOf, fieldOf); et != "" {
+					// xa := sorted([ba.get()])[0] / [ba.get()][0] — method-return collection.
+					typeOf[lname] = et
+					bindFields(lname, et)
+					if ourReceivers[et] {
+						out[lname] = true
+					}
 				}
 			}
 			// xa := box.a — dataclass/class field access (same as plain assignment).
@@ -10999,6 +11047,248 @@ func pythonObjectPairIterSlotsOf(right *grammar.Node, content []byte, funcReturn
 		return pythonObjectPairIterSlotsOf(args[1], content, funcReturns, typeOf, fieldOf)
 	}
 	return nil
+}
+
+// pythonObjectPairSlotsOf recovers per-slot types for an object pair expression:
+// next(enumerate([ba.get()])) / next(zip([ba.get()], …)),
+// min/max/choice/heappop/itemgetter/pop of list(zip([ba.get()], …)),
+// list(enumerate([ba.get()]))[0] / list(zip([ba.get()], …))[0]
+// (index into a pair-yielding sequence yields one pair with those slots).
+// Parenthesized forms accepted. Slices fail closed. Same shapes as
+// pythonPairSlotsOf Class path for solid object peels.
+func pythonObjectPairSlotsOf(n *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) []string {
+	if n == nil {
+		return nil
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		n = pythonParenInner(n)
+	}
+	if n == nil {
+		return nil
+	}
+	switch n.Type() {
+	case "call":
+		// next(enumerate([ba.get()])) / next(zip([ba.get()], …))
+		if types := pythonObjectNextPairSlots(n, content, funcReturns, typeOf, fieldOf); len(types) > 0 {
+			return types
+		}
+		// min/max(list(zip([ba.get()], …)))
+		if types := pythonObjectMinMaxPairSlots(n, content, funcReturns, typeOf, fieldOf); len(types) > 0 {
+			return types
+		}
+		// choice/random.choice(list(zip([ba.get()], …)))
+		if types := pythonObjectChoicePairSlots(n, content, funcReturns, typeOf, fieldOf); len(types) > 0 {
+			return types
+		}
+		// heappop/heapq.heappop(list(zip([ba.get()], …)))
+		if types := pythonObjectHeappopPairSlots(n, content, funcReturns, typeOf, fieldOf); len(types) > 0 {
+			return types
+		}
+		// itemgetter(0)(list(zip([ba.get()], …)))
+		if types := pythonObjectItemgetterPairSlots(n, content, funcReturns, typeOf, fieldOf); len(types) > 0 {
+			return types
+		}
+		// list(zip([ba.get()], …)).pop()
+		return pythonObjectPopPairSlots(n, content, funcReturns, typeOf, fieldOf)
+	case "subscript":
+		// list(enumerate([ba.get()]))[0] / list(zip([ba.get()], …))[0] /
+		// (list(enumerate([ba.get()])))[0] — one pair from a pair-yielding sequence.
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			if n.Child(i).Type() == "slice" {
+				return nil
+			}
+		}
+		val := ingest.ChildByField(n, "value")
+		return pythonObjectPairIterSlotsOf(val, content, funcReturns, typeOf, fieldOf)
+	default:
+		return nil
+	}
+}
+
+// pythonObjectMinMaxPairSlots is the object-iter form of pythonMinMaxPairSlots.
+func pythonObjectMinMaxPairSlots(call *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) []string {
+	if call == nil || call.Type() != "call" {
+		return nil
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "identifier" {
+		return nil
+	}
+	switch ingest.NodeText(fn, content) {
+	case "min", "max":
+		// ok
+	default:
+		return nil
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) != 1 {
+		return nil
+	}
+	return pythonObjectPairIterSlotsOf(args[0], content, funcReturns, typeOf, fieldOf)
+}
+
+// pythonObjectChoicePairSlots is the object-iter form of pythonChoicePairSlots.
+func pythonObjectChoicePairSlots(call *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) []string {
+	if call == nil || call.Type() != "call" {
+		return nil
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil {
+		return nil
+	}
+	switch fn.Type() {
+	case "identifier":
+		if ingest.NodeText(fn, content) != "choice" {
+			return nil
+		}
+	case "attribute":
+		attr := ingest.ChildByField(fn, "attribute")
+		obj := ingest.ChildByField(fn, "object")
+		if attr == nil || ingest.NodeText(attr, content) != "choice" {
+			return nil
+		}
+		if obj == nil || obj.Type() != "identifier" || ingest.NodeText(obj, content) != "random" {
+			return nil
+		}
+	default:
+		return nil
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) == 0 {
+		return nil
+	}
+	return pythonObjectPairIterSlotsOf(args[0], content, funcReturns, typeOf, fieldOf)
+}
+
+// pythonObjectHeappopPairSlots is the object-iter form of pythonHeappopPairSlots.
+func pythonObjectHeappopPairSlots(call *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) []string {
+	if call == nil || call.Type() != "call" {
+		return nil
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil {
+		return nil
+	}
+	switch fn.Type() {
+	case "identifier":
+		switch ingest.NodeText(fn, content) {
+		case "heappop", "heappushpop", "heapreplace":
+			// ok
+		default:
+			return nil
+		}
+	case "attribute":
+		attr := ingest.ChildByField(fn, "attribute")
+		obj := ingest.ChildByField(fn, "object")
+		if attr == nil {
+			return nil
+		}
+		switch ingest.NodeText(attr, content) {
+		case "heappop", "heappushpop", "heapreplace":
+			// ok
+		default:
+			return nil
+		}
+		if obj == nil || obj.Type() != "identifier" || ingest.NodeText(obj, content) != "heapq" {
+			return nil
+		}
+	default:
+		return nil
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) == 0 {
+		return nil
+	}
+	return pythonObjectPairIterSlotsOf(args[0], content, funcReturns, typeOf, fieldOf)
+}
+
+// pythonObjectItemgetterPairSlots is the object-iter form of pythonItemgetterPairSlots.
+func pythonObjectItemgetterPairSlots(call *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) []string {
+	if call == nil || call.Type() != "call" {
+		return nil
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "call" {
+		return nil
+	}
+	innerFn := ingest.ChildByField(fn, "function")
+	if innerFn == nil {
+		return nil
+	}
+	switch innerFn.Type() {
+	case "identifier":
+		if ingest.NodeText(innerFn, content) != "itemgetter" {
+			return nil
+		}
+	case "attribute":
+		attr := ingest.ChildByField(innerFn, "attribute")
+		obj := ingest.ChildByField(innerFn, "object")
+		if attr == nil || ingest.NodeText(attr, content) != "itemgetter" {
+			return nil
+		}
+		if obj == nil || obj.Type() != "identifier" || ingest.NodeText(obj, content) != "operator" {
+			return nil
+		}
+	default:
+		return nil
+	}
+	idxArgs, ok := pythonCallPositionalArgNodes(fn)
+	if !ok || len(idxArgs) != 1 {
+		return nil
+	}
+	collArgs, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(collArgs) != 1 {
+		return nil
+	}
+	return pythonObjectPairIterSlotsOf(collArgs[0], content, funcReturns, typeOf, fieldOf)
+}
+
+// pythonObjectPopPairSlots is the object-iter form of pythonPopPairSlots.
+func pythonObjectPopPairSlots(call *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) []string {
+	if call == nil || call.Type() != "call" {
+		return nil
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "attribute" {
+		return nil
+	}
+	attr := ingest.ChildByField(fn, "attribute")
+	if attr == nil || ingest.NodeText(attr, content) != "pop" {
+		return nil
+	}
+	obj := ingest.ChildByField(fn, "object")
+	return pythonObjectPairIterSlotsOf(obj, content, funcReturns, typeOf, fieldOf)
+}
+
+// pythonObjectPairSlotSubscriptType returns the slot type for
+// list(enumerate([ba.get()]))[0][1] / list(zip([ba.get()], …))[0][0] /
+// next(enumerate([ba.get()]))[1] when i is a non-negative integer literal and
+// the pair peels via object pair-iters. Untyped slots (enumerate index), OOB
+// indices, and non-literal indices fail closed.
+func pythonObjectPairSlotSubscriptType(sub *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if sub == nil || sub.Type() != "subscript" {
+		return ""
+	}
+	idxN := ingest.ChildByField(sub, "subscript")
+	if idxN == nil || idxN.Type() != "integer" {
+		return ""
+	}
+	idxText := ingest.NodeText(idxN, content)
+	if idxText == "" {
+		return ""
+	}
+	idx := 0
+	for _, c := range idxText {
+		if c < '0' || c > '9' {
+			return ""
+		}
+		idx = idx*10 + int(c-'0')
+	}
+	slots := pythonObjectPairSlotsOf(ingest.ChildByField(sub, "value"), content, funcReturns, typeOf, fieldOf)
+	if idx < 0 || idx >= len(slots) {
+		return ""
+	}
+	return slots[idx]
 }
 
 // pythonMinMaxPairSlots recovers pair slot types for min(pair_iter) / max(pair_iter)
