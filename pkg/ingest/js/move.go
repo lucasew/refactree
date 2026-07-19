@@ -1601,20 +1601,23 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 			// Iterator.from([new A()]).reduce((a,x) => x) / method-return yield peel.
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
-		if t := jsPromiseThenIdentityType(obj, content, typedLocals, factories); t != "" {
-			// Promise.resolve(new A()).then(x => x) / await …then(x => x) —
-			// identity then peels to resolved value T under foreign same-leaf.
+		if t := jsPromiseThenIdentityType(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
+			// Promise.resolve(new A() / new BoxA().get()).then(x => x) /
+			// await …then(x => x) — identity then peels to resolved value T
+			// under foreign same-leaf (method-return via methodReturns).
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
-		if t := jsPromiseFinallyType(obj, content, typedLocals, factories); t != "" {
-			// Promise.resolve(new A()).finally(() => {}) / await …finally —
-			// finally is identity for the resolved value under foreign same-leaf.
+		if t := jsPromiseFinallyType(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
+			// Promise.resolve(new A() / new BoxA().get()).finally(() => {}) /
+			// await …finally — finally is identity for the resolved value
+			// under foreign same-leaf (method-return via methodReturns).
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
-		if t := jsPromiseCatchType(obj, content, typedLocals, factories); t != "" {
-			// Promise.resolve(new A()).catch(() => null) / await …catch —
-			// catch is identity for the fulfilled value under foreign same-leaf
-			// (rejection handler ignored for typing; same leaf as finally).
+		if t := jsPromiseCatchType(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
+			// Promise.resolve(new A() / new BoxA().get()).catch(() => null) /
+			// await …catch — catch is identity for the fulfilled value under
+			// foreign same-leaf (rejection handler ignored; method-return via
+			// methodReturns; same leaf as finally).
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 		if t := jsPromiseTryTypeEx(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
@@ -2118,14 +2121,14 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// const a = Iterator.from([new A()]).reduce((a,x) => x) /
 						// Iterator.from([new BoxA().get()]).reduce(...)
 						out[ingest.NodeText(nameN, content)] = t
-					} else if t := jsPromiseThenIdentityType(valN, content, out, factories); ourReceivers[t] {
-						// const a = await Promise.resolve(new A()).then(x => x)
+					} else if t := jsPromiseThenIdentityType(valN, content, out, factories, classFields, methodReturns); ourReceivers[t] {
+						// const a = await Promise.resolve(new A() / new BoxA().get()).then(x => x)
 						out[ingest.NodeText(nameN, content)] = t
-					} else if t := jsPromiseFinallyType(valN, content, out, factories); ourReceivers[t] {
-						// const a = await Promise.resolve(new A()).finally(() => {})
+					} else if t := jsPromiseFinallyType(valN, content, out, factories, classFields, methodReturns); ourReceivers[t] {
+						// const a = await Promise.resolve(new A() / new BoxA().get()).finally(() => {})
 						out[ingest.NodeText(nameN, content)] = t
-					} else if t := jsPromiseCatchType(valN, content, out, factories); ourReceivers[t] {
-						// const a = await Promise.resolve(new A()).catch(() => null)
+					} else if t := jsPromiseCatchType(valN, content, out, factories, classFields, methodReturns); ourReceivers[t] {
+						// const a = await Promise.resolve(new A() / new BoxA().get()).catch(() => null)
 						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsPromiseTryTypeEx(valN, content, out, factories, classFields, methodReturns); ourReceivers[t] {
 						// const a = await Promise.try(() => new A() / new BoxA().get())
@@ -3231,16 +3234,18 @@ func jsBindPromiseThenParams(call *grammar.Node, content []byte, ourReceivers ma
 	if resolveT == "" {
 		resolveT = jsPromiseTryTypeEx(obj, content, out, factories, classFields, methodReturns)
 	}
-	// Promise.resolve(...).then(x => x) identity chain → scalar value type.
+	// Promise.resolve(...).then(x => x) identity chain → scalar value type
+	// (method-return via methodReturns under foreign same-leaf).
 	if resolveT == "" {
-		resolveT = jsPromiseThenIdentityType(obj, content, out, factories)
+		resolveT = jsPromiseThenIdentityType(obj, content, out, factories, classFields, methodReturns)
 	}
-	// Promise.resolve(...).finally(fn) / .catch(fn) identity stages → scalar value.
+	// Promise.resolve(...).finally(fn) / .catch(fn) identity stages → scalar value
+	// (method-return via methodReturns under foreign same-leaf).
 	if resolveT == "" {
-		resolveT = jsPromiseFinallyType(obj, content, out, factories)
+		resolveT = jsPromiseFinallyType(obj, content, out, factories, classFields, methodReturns)
 	}
 	if resolveT == "" {
-		resolveT = jsPromiseCatchType(obj, content, out, factories)
+		resolveT = jsPromiseCatchType(obj, content, out, factories, classFields, methodReturns)
 	}
 	// Promise.race/any([new T() / ba.get(), …]) → scalar value type when elems agree.
 	raceT := jsPromiseRaceValueTypeEx(obj, content, out, factories, classFields, methodReturns)
@@ -10549,8 +10554,9 @@ func jsArrayReduceElemType(n *grammar.Node, content []byte, arrayLocals, typedLo
 // jsPromiseFinallyType recovers T from p.finally(fn) / await p.finally(fn) when
 // p peels to a Promise of value T. finally is identity for the resolved value
 // (callback ignored). Enables (await Promise.resolve(new A()).finally(()=>{})).run()
-// under foreign same-leaf methods. Unknown receivers fail closed.
-func jsPromiseFinallyType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+// and (await Promise.resolve(new BoxA().get()).finally(()=>{})).run() under foreign
+// same-leaf methods (method-return via methodReturns). Unknown receivers fail closed.
+func jsPromiseFinallyType(n *grammar.Node, content []byte, typedLocals, factories map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -10564,7 +10570,7 @@ func jsPromiseFinallyType(n *grammar.Node, content []byte, typedLocals, factorie
 			arg = ch
 			break
 		}
-		return jsPromiseFinallyType(arg, content, typedLocals, factories)
+		return jsPromiseFinallyType(arg, content, typedLocals, factories, classFields, methodReturns)
 	}
 	for n != nil && n.Type() == "parenthesized_expression" {
 		var inner *grammar.Node
@@ -10608,19 +10614,20 @@ func jsPromiseFinallyType(n *grammar.Node, content []byte, typedLocals, factorie
 		return ""
 	}
 	obj := ingest.ChildByField(fn, "object")
-	if t := jsPromiseResolveArgType(obj, content, typedLocals, factories); t != "" {
+	// Class peels via resolve/race; method-return via Ex (methodReturns).
+	if t := jsPromiseResolveArgTypeEx(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
 		return t
 	}
-	if t := jsPromiseRaceValueType(obj, content, typedLocals, factories); t != "" {
+	if t := jsPromiseRaceValueTypeEx(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
 		return t
 	}
-	if t := jsPromiseThenIdentityType(obj, content, typedLocals, factories); t != "" {
+	if t := jsPromiseThenIdentityType(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
 		return t
 	}
-	if t := jsPromiseCatchType(obj, content, typedLocals, factories); t != "" {
+	if t := jsPromiseCatchType(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
 		return t
 	}
-	if t := jsPromiseFinallyType(obj, content, typedLocals, factories); t != "" {
+	if t := jsPromiseFinallyType(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
 		return t
 	}
 	return ""
@@ -10629,10 +10636,11 @@ func jsPromiseFinallyType(n *grammar.Node, content []byte, typedLocals, factorie
 // jsPromiseCatchType recovers T from p.catch(fn) / await p.catch(fn) when
 // p peels to a Promise of value T. catch is identity for the fulfilled value
 // (rejection handler ignored for typing). Enables
-// (await Promise.resolve(new A()).catch(() => null)).run() and
+// (await Promise.resolve(new A()).catch(() => null)).run() /
+// (await Promise.resolve(new BoxA().get()).catch(() => null)).run() and
 // Promise.resolve(new A()).catch(() => null).then(a => a.run()) under foreign
-// same-leaf methods. Unknown receivers fail closed.
-func jsPromiseCatchType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+// same-leaf methods (method-return via methodReturns). Unknown receivers fail closed.
+func jsPromiseCatchType(n *grammar.Node, content []byte, typedLocals, factories map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -10646,7 +10654,7 @@ func jsPromiseCatchType(n *grammar.Node, content []byte, typedLocals, factories 
 			arg = ch
 			break
 		}
-		return jsPromiseCatchType(arg, content, typedLocals, factories)
+		return jsPromiseCatchType(arg, content, typedLocals, factories, classFields, methodReturns)
 	}
 	for n != nil && n.Type() == "parenthesized_expression" {
 		var inner *grammar.Node
@@ -10690,19 +10698,20 @@ func jsPromiseCatchType(n *grammar.Node, content []byte, typedLocals, factories 
 		return ""
 	}
 	obj := ingest.ChildByField(fn, "object")
-	if t := jsPromiseResolveArgType(obj, content, typedLocals, factories); t != "" {
+	// Class peels via resolve/race; method-return via Ex (methodReturns).
+	if t := jsPromiseResolveArgTypeEx(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
 		return t
 	}
-	if t := jsPromiseRaceValueType(obj, content, typedLocals, factories); t != "" {
+	if t := jsPromiseRaceValueTypeEx(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
 		return t
 	}
-	if t := jsPromiseThenIdentityType(obj, content, typedLocals, factories); t != "" {
+	if t := jsPromiseThenIdentityType(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
 		return t
 	}
-	if t := jsPromiseFinallyType(obj, content, typedLocals, factories); t != "" {
+	if t := jsPromiseFinallyType(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
 		return t
 	}
-	if t := jsPromiseCatchType(obj, content, typedLocals, factories); t != "" {
+	if t := jsPromiseCatchType(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
 		return t
 	}
 	return ""
@@ -10711,10 +10720,12 @@ func jsPromiseCatchType(n *grammar.Node, content []byte, typedLocals, factories 
 // jsPromiseThenIdentityType recovers T from p.then(x => x) / await p.then(x => x)
 // when p peels to a Promise of value T via Promise.resolve / race / any or a
 // further identity then chain. Enables
-// Promise.resolve(new A()).then(x => x).then(a => a.run()) and
-// (await Promise.resolve(new A()).then(x => x)).run() under foreign same-leaf.
-// Non-identity then callbacks / unknown receivers fail closed.
-func jsPromiseThenIdentityType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+// Promise.resolve(new A()).then(x => x).then(a => a.run()) /
+// (await Promise.resolve(new A()).then(x => x)).run() and the method-return
+// forms Promise.resolve(new BoxA().get()).then(x => x) under foreign same-leaf
+// (method-return via methodReturns). Non-identity then callbacks / unknown
+// receivers fail closed.
+func jsPromiseThenIdentityType(n *grammar.Node, content []byte, typedLocals, factories map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -10729,7 +10740,7 @@ func jsPromiseThenIdentityType(n *grammar.Node, content []byte, typedLocals, fac
 			arg = ch
 			break
 		}
-		return jsPromiseThenIdentityType(arg, content, typedLocals, factories)
+		return jsPromiseThenIdentityType(arg, content, typedLocals, factories, classFields, methodReturns)
 	}
 	for n != nil && n.Type() == "parenthesized_expression" {
 		var inner *grammar.Node
@@ -10777,19 +10788,20 @@ func jsPromiseThenIdentityType(n *grammar.Node, content []byte, typedLocals, fac
 	}
 	obj := ingest.ChildByField(fn, "object")
 	// Peel Promise.resolve / race / any / further identity then / finally / catch.
-	if t := jsPromiseResolveArgType(obj, content, typedLocals, factories); t != "" {
+	// Class peels via resolve/race; method-return via Ex (methodReturns).
+	if t := jsPromiseResolveArgTypeEx(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
 		return t
 	}
-	if t := jsPromiseRaceValueType(obj, content, typedLocals, factories); t != "" {
+	if t := jsPromiseRaceValueTypeEx(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
 		return t
 	}
-	if t := jsPromiseFinallyType(obj, content, typedLocals, factories); t != "" {
+	if t := jsPromiseFinallyType(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
 		return t
 	}
-	if t := jsPromiseCatchType(obj, content, typedLocals, factories); t != "" {
+	if t := jsPromiseCatchType(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
 		return t
 	}
-	if t := jsPromiseThenIdentityType(obj, content, typedLocals, factories); t != "" {
+	if t := jsPromiseThenIdentityType(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
 		return t
 	}
 	return ""
