@@ -2528,15 +2528,17 @@ func pythonSimpleNamespaceFieldTypes(call *grammar.Node, content []byte) map[str
 }
 
 // pythonCollectionMutationElemType recovers (local, T, nested) from list/deque/
-// mapping-bucket mutations that insert a Class() instance:
+// set/mapping-bucket mutations that insert a Class() instance:
 //
 //	xs.append(A()) / xs.extend([A()]) / xs.insert(0, A()) → (xs, A, false)
+//	xs.add(A()) / deque.extendleft([A()]) → (xs, A, false)
 //	da["k"].append(A()) / da.get("k").extend([A()]) / da["k"].insert(0, A())
 //	  → (da, A, true)  // @nested leaf for mapping-of-list
 //
-// Enables bare list/deque mutation peels (xs=[]; xs.append(A()); xs[0].run()) and
-// defaultdict(list) extend/insert peels under foreign same-leaf. Non-Class args,
-// heterogeneous extend collections, and non-ident/non-mapping receivers fail closed.
+// Enables bare list/deque/set mutation peels (xs=[]; xs.append(A()); xs[0].run()
+// / xs=set(); xs.add(A()); next(iter(xs)).run()) and defaultdict(list)
+// extend/insert peels under foreign same-leaf. Non-Class args, heterogeneous
+// extend collections, and non-ident/non-mapping receivers fail closed.
 func pythonCollectionMutationElemType(call *grammar.Node, content []byte) (local, classType string, nested bool) {
 	if call == nil || call.Type() != "call" {
 		return "", "", false
@@ -2556,14 +2558,15 @@ func pythonCollectionMutationElemType(call *grammar.Node, content []byte) (local
 	}
 	var et string
 	switch method {
-	case "append", "appendleft":
-		// xs.append(A()) / deque.appendleft(A()) — single Class() positional.
+	case "append", "appendleft", "add":
+		// xs.append(A()) / deque.appendleft(A()) / set.add(A()) — single Class().
 		if len(args) != 1 {
 			return "", "", false
 		}
 		et = pythonClassCtorName(args[0], content)
-	case "extend", "update":
-		// xs.extend([A()]) / xs.extend((A(),)) — homogeneous Class() collection.
+	case "extend", "extendleft", "update":
+		// xs.extend([A()]) / xs.extend((A(),)) / deque.extendleft([A()]) —
+		// homogeneous Class() collection.
 		// ca.update([A()]) / s.update({A()}) — Counter/set keys from Class() elems
 		// (product dual-class Counter peels under foreign same-leaf).
 		if len(args) != 1 {
@@ -4904,9 +4907,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 			if fut, et := pythonFutureSetResultType(n, content); fut != "" && et != "" {
 				futureOf[fut] = et
 			}
-			// xs.append(A()) / xs.extend([A()]) / xs.insert(0, A()) — bare list/
-			// deque mutation. da["k"].append/extend/insert — mapping-of-list
-			// bucket (defaultdict(list)). Bind elemOf / @nested so xs[0].run() /
+			// xs.append(A()) / xs.extend([A()]) / xs.insert(0, A()) /
+			// xs.add(A()) / deque.extendleft([A()]) — bare list/deque/set mutation.
+			// da["k"].append/extend/insert — mapping-of-list bucket (defaultdict(list)).
+			// Bind elemOf / @nested so xs[0].run() / next(iter(xs)).run() /
 			// da["k"][0].run() peel under foreign same-leaf. Foreign too for shadowing.
 			if local, et, nest := pythonCollectionMutationElemType(n, content); local != "" && et != "" {
 				if nest {

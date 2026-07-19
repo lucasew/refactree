@@ -2048,7 +2048,8 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 				arrayLocals[local] = et
 			}
 		case "assignment_expression":
-			// xs = [...xs, new A()] / xs = xs.concat([new A()]) / xs = [new A()] —
+			// xs = [...xs, new A()] / xs = xs.concat([new A()]) /
+			// xs = xs.toSpliced(0,0,new A()) / xs = [new A()] —
 			// rebind arrayLocals from RHS (self-target untyped arms are wildcards).
 			// Foreign too for shadowing (ys after xs).
 			left := ingest.ChildByField(n, "left")
@@ -2058,6 +2059,12 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 				if t := jsArrayAssignSourceElemType(right, content, arrayLocals, out, factories, extra, name); t != "" {
 					arrayLocals[name] = t
 				}
+			}
+			// xs[0] = new A() — index assign binds arrayLocals so xs[0].run() /
+			// for (const a of xs) peel under foreign same-leaf. Numeric index only;
+			// non-ident receivers / non-concrete RHS fail closed. Foreign too.
+			if local, et := jsArrayIndexAssignElemType(n, content, out, factories); local != "" && et != "" {
+				arrayLocals[local] = et
 			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -4273,58 +4280,16 @@ func jsArrayIdentityElemType(n *grammar.Node, content []byte, arrayLocals, typed
 		// empty-array receiver is a wildcard (type from args). Mixed inserts fail closed.
 		return jsArrayConcatElemType(obj, args, content, arrayLocals, typedLocals, factories, extra, "")
 	case "toSpliced":
-		t := jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories, extra)
-		if t == "" {
-			return ""
-		}
-		// toSpliced(start, deleteCount, ...items) — items (after first two
-		// positional args) must each peel to T; zero items is identity.
-		if args != nil {
-			pos := 0
-			for i := uint32(0); i < args.ChildCount(); i++ {
-				ch := args.Child(i)
-				if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
-					continue
-				}
-				pos++
-				if pos <= 2 {
-					continue
-				}
-				if jsExprConcreteType(ch, content, typedLocals, factories) != t {
-					return ""
-				}
-			}
-		}
-		return t
+		// toSpliced(start, deleteCount, ...items) — typed receiver + items of T;
+		// empty-array receiver is a wildcard (type from inserts). Zero items is
+		// identity of a typed receiver. Self-target assign uses
+		// jsArrayAssignSourceElemType → jsArrayToSplicedElemType(selfTarget).
+		return jsArrayToSplicedElemType(obj, args, content, arrayLocals, typedLocals, factories, extra, "")
 	case "with":
-		// arr.with(i, val) — receiver elems T and val peels to T.
-		t := jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories, extra)
-		if t == "" {
-			return ""
-		}
-		var idx, val *grammar.Node
-		pos := 0
-		if args != nil {
-			for i := uint32(0); i < args.ChildCount(); i++ {
-				ch := args.Child(i)
-				if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
-					continue
-				}
-				pos++
-				if pos == 1 {
-					idx = ch
-				} else if pos == 2 {
-					val = ch
-				}
-			}
-		}
-		if pos != 2 || idx == nil || val == nil || !jsIsNumericIndexArg(idx, content) {
-			return ""
-		}
-		if jsExprConcreteType(val, content, typedLocals, factories) != t {
-			return ""
-		}
-		return t
+		// arr.with(i, val) — typed receiver + val of T; empty-array receiver is
+		// a wildcard (type from val). Self-target assign uses
+		// jsArrayAssignSourceElemType → jsArrayWithElemType(selfTarget).
+		return jsArrayWithElemType(obj, args, content, arrayLocals, typedLocals, factories, extra, "")
 	}
 	return ""
 }
@@ -6370,8 +6335,9 @@ func jsArrayMutationElemType(call *grammar.Node, content []byte, arrayLocals, ty
 
 // jsArrayAssignSourceElemType recovers T from an assignment RHS used to rebind
 // an array local: [new A()] / [...xs, new A()] / xs.concat([new A()]) /
-// [].concat(new A()) with selfTarget wildcards for untyped self arms.
-// Foreign leaves returned too so dual-class B rebinds shadow A.
+// [].concat(new A()) / xs.toSpliced(0,0,new A()) / [].toSpliced(0,0,new A()) /
+// xs.with(0, new A()) / [].with(0, new A()) with selfTarget wildcards for
+// untyped self arms. Foreign leaves returned too so dual-class B rebinds shadow A.
 func jsArrayAssignSourceElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals, selfTarget string) string {
 	if n == nil {
 		return ""
@@ -6384,16 +6350,165 @@ func jsArrayAssignSourceElemType(n *grammar.Node, content []byte, arrayLocals, t
 	if t := jsArraySpreadElemTypeSelf(n, content, arrayLocals, typedLocals, factories, extra, selfTarget); t != "" {
 		return t
 	}
-	// Concat with self-target / empty receiver (xs = xs.concat([new A()])).
+	// Concat / toSpliced / with with self-target / empty receiver
+	// (xs = xs.concat([new A()]) / xs = xs.toSpliced(0,0,new A()) /
+	//  xs = xs.with(0, new A())).
 	if n.Type() == "call_expression" {
 		fn := ingest.ChildByField(n, "function")
 		if fn != nil && (fn.Type() == "member_expression" || fn.Type() == "member_expression_optional" || fn.Type() == "optional_chain") {
-			if prop := ingest.ChildByField(fn, "property"); prop != nil && ingest.NodeText(prop, content) == "concat" {
-				return jsArrayConcatElemType(ingest.ChildByField(fn, "object"), ingest.ChildByField(n, "arguments"), content, arrayLocals, typedLocals, factories, extra, selfTarget)
+			if prop := ingest.ChildByField(fn, "property"); prop != nil {
+				switch ingest.NodeText(prop, content) {
+				case "concat":
+					return jsArrayConcatElemType(ingest.ChildByField(fn, "object"), ingest.ChildByField(n, "arguments"), content, arrayLocals, typedLocals, factories, extra, selfTarget)
+				case "toSpliced":
+					return jsArrayToSplicedElemType(ingest.ChildByField(fn, "object"), ingest.ChildByField(n, "arguments"), content, arrayLocals, typedLocals, factories, extra, selfTarget)
+				case "with":
+					return jsArrayWithElemType(ingest.ChildByField(fn, "object"), ingest.ChildByField(n, "arguments"), content, arrayLocals, typedLocals, factories, extra, selfTarget)
+				}
 			}
 		}
 	}
 	return ""
+}
+
+// jsArrayToSplicedElemType recovers T from arr.toSpliced(start, deleteCount, ...items)
+// when the receiver and each insert peel to uniform element type T. Empty-array
+// receiver is a wildcard (type from inserts). When selfTarget is set (assignment
+// `xs = xs.toSpliced(…)`), an untyped identifier receiver equal to selfTarget is
+// also a wildcard. Zero-item toSpliced is identity of a typed receiver only.
+// Mixed inserts fail closed.
+func jsArrayToSplicedElemType(obj, args *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals, selfTarget string) string {
+	recvT := jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories, extra)
+	wildRecv := false
+	if recvT == "" {
+		if jsIsEmptyArrayLiteral(obj) {
+			wildRecv = true
+		} else if selfTarget != "" && obj != nil && obj.Type() == "identifier" {
+			name := ingest.NodeText(obj, content)
+			if name == selfTarget && (arrayLocals == nil || arrayLocals[name] == "") {
+				wildRecv = true
+			}
+		}
+		if !wildRecv {
+			return ""
+		}
+	}
+	// toSpliced(start, deleteCount, ...items) — items after first two positionals.
+	itemT := ""
+	sawItem := false
+	if args != nil {
+		pos := 0
+		for i := uint32(0); i < args.ChildCount(); i++ {
+			ch := args.Child(i)
+			if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+				continue
+			}
+			pos++
+			if pos <= 2 {
+				continue
+			}
+			t := jsExprConcreteType(ch, content, typedLocals, factories)
+			if t == "" {
+				return ""
+			}
+			if !sawItem {
+				itemT = t
+				sawItem = true
+			} else if itemT != t {
+				return ""
+			}
+		}
+	}
+	if recvT != "" {
+		if sawItem && itemT != recvT {
+			return ""
+		}
+		return recvT
+	}
+	// Wildcard receiver — need at least one typed insert.
+	if !sawItem {
+		return ""
+	}
+	return itemT
+}
+
+// jsArrayWithElemType recovers T from arr.with(i, val) when the receiver and
+// val peel to uniform element type T. Empty-array receiver is a wildcard (type
+// from val). When selfTarget is set (assignment `xs = xs.with(…)`), an untyped
+// identifier receiver equal to selfTarget is also a wildcard. Numeric index
+// required; non-concrete val / mixed types fail closed.
+func jsArrayWithElemType(obj, args *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals, selfTarget string) string {
+	recvT := jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories, extra)
+	wildRecv := false
+	if recvT == "" {
+		if jsIsEmptyArrayLiteral(obj) {
+			wildRecv = true
+		} else if selfTarget != "" && obj != nil && obj.Type() == "identifier" {
+			name := ingest.NodeText(obj, content)
+			if name == selfTarget && (arrayLocals == nil || arrayLocals[name] == "") {
+				wildRecv = true
+			}
+		}
+		if !wildRecv {
+			return ""
+		}
+	}
+	var idx, val *grammar.Node
+	pos := 0
+	if args != nil {
+		for i := uint32(0); i < args.ChildCount(); i++ {
+			ch := args.Child(i)
+			if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+				continue
+			}
+			pos++
+			if pos == 1 {
+				idx = ch
+			} else if pos == 2 {
+				val = ch
+			}
+		}
+	}
+	if pos != 2 || idx == nil || val == nil || !jsIsNumericIndexArg(idx, content) {
+		return ""
+	}
+	valT := jsExprConcreteType(val, content, typedLocals, factories)
+	if valT == "" {
+		return ""
+	}
+	if recvT != "" {
+		if valT != recvT {
+			return ""
+		}
+		return recvT
+	}
+	return valT
+}
+
+// jsArrayIndexAssignElemType recovers (local, T) from xs[i] = new T() when the
+// left is a numeric-index subscript of an identifier and the RHS peels to a
+// concrete class leaf. Enables xs[0].run() / for (const a of xs) under foreign
+// same-leaf after index assign. Non-numeric index / non-ident receiver /
+// non-concrete RHS fail closed.
+func jsArrayIndexAssignElemType(assign *grammar.Node, content []byte, typedLocals, factories map[string]string) (local, classType string) {
+	if assign == nil || assign.Type() != "assignment_expression" {
+		return "", ""
+	}
+	left := ingest.ChildByField(assign, "left")
+	right := ingest.ChildByField(assign, "right")
+	if left == nil || right == nil || left.Type() != "subscript_expression" {
+		return "", ""
+	}
+	obj := ingest.ChildByField(left, "object")
+	idx := ingest.ChildByField(left, "index")
+	if obj == nil || obj.Type() != "identifier" || !jsIsNumericIndexArg(idx, content) {
+		return "", ""
+	}
+	t := jsExprConcreteType(right, content, typedLocals, factories)
+	if t == "" {
+		return "", ""
+	}
+	return ingest.NodeText(obj, content), t
 }
 
 // jsArrayPopShiftElemType recovers T from arr.pop() / arr.shift() when the
