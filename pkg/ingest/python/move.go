@@ -2276,6 +2276,12 @@ peeled:
 					if et := pythonGetitemElemType(obj, content, elemOf, nil, typeOf); et != "" {
 						return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 					}
+					// getitem([ba.get()], 0) — method-return collection under foreign same-leaf.
+					if args, ok := pythonCallPositionalArgNodes(obj); ok && len(args) >= 1 {
+						if et := pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf); et != "" {
+							return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+						}
+					}
 				}
 				// make_a().run() after def make_a() -> A / def make_a(): return A() /
 				// @lru_cache def make_a() -> A / make_a = lambda: A() — same-file
@@ -2315,6 +2321,26 @@ peeled:
 			// same element leaf as items[i] / a = getitem(items, i); a.run().
 			if et := pythonGetitemElemType(obj, content, elemOf, nil, typeOf); et != "" {
 				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+			}
+			// operator.getitem([ba.get()], 0) — method-return collection under foreign same-leaf.
+			if fn := ingest.ChildByField(obj, "function"); fn != nil {
+				isGetitem := false
+				if fn.Type() == "identifier" && ingest.NodeText(fn, content) == "getitem" {
+					isGetitem = true
+				} else if fn.Type() == "attribute" {
+					if attr := ingest.ChildByField(fn, "attribute"); attr != nil && ingest.NodeText(attr, content) == "getitem" {
+						if o := ingest.ChildByField(fn, "object"); o != nil && o.Type() == "identifier" && ingest.NodeText(o, content) == "operator" {
+							isGetitem = true
+						}
+					}
+				}
+				if isGetitem {
+					if args, ok := pythonCallPositionalArgNodes(obj); ok && len(args) >= 1 {
+						if et := pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf); et != "" {
+							return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+						}
+					}
+				}
 			}
 			// random.choice(seq).run() — module-qualified form (function is attribute).
 			if et := pythonRandomChoiceElemType(obj, content, elemOf, nil, typeOf); et != "" {
@@ -2476,6 +2502,10 @@ peeled:
 		if et := pythonDictFromkeysObjectValueType(val, content, funcReturns, typeOf, fieldOf); et != "" {
 			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 		}
+		// MappingProxyType({"k": ba.get()})["k"] — proxy of object-dict value.
+		if et := pythonMappingProxyObjectValueType(val, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
+			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+		}
 		// ({"k": ba.get()} | {"j": ba.get()})["j"] — object-dict merge value.
 		if et := pythonObjectDictMergeValueType(val, content, funcReturns, typeOf, fieldOf); et != "" {
 			return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
@@ -2589,6 +2619,9 @@ func pythonCollectionAccessElemType(call *grammar.Node, content []byte, elemOf, 
 		switch ingest.NodeText(attr, content) {
 		case "get", "setdefault", "pop", "__getitem__":
 			if et := pythonHomogeneousObjectDictValue(obj, content, funcReturns, typeOf, fieldOf); et != "" {
+				return et
+			}
+			if et := pythonMappingProxyObjectValueType(obj, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
 				return et
 			}
 			if et := pythonHomogeneousDictValueCtorElem(obj, content); et != "" {
@@ -4542,6 +4575,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						if fname == "next" {
 							if types := pythonNextPairSlots(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
 								pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
+							} else if types := pythonObjectNextPairSlots(right, content, funcReturns, typeOf, fieldOf); len(types) > 0 {
+								// pair = next(enumerate([ba.get()])) / next(zip([ba.get()], …))
+								pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 							} else if types := pythonItemsCallPairSlots(right, content, elemOf, fieldOf); len(types) > 0 {
 								// p = next(asdict(pair).items()) / next(d.items()) —
 								// pair local (key untyped, value leaf); use p[1] / unpack.
@@ -4551,7 +4587,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							} else if et := pythonAstupleNextFirstField(right, content, fieldOf); ourReceivers[et] {
 								out[lname] = true
 							} else if args, ok := pythonCallPositionalArgNodes(right); ok && len(args) > 0 {
-								// a = next(iter([ba.get()])) / next(dict(k=ba.get()).values())
+								// a = next(iter([ba.get()])) / next(dict(k=ba.get()).values()) /
+								// a = next(x for x in [ba.get()])
 								if et := pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
 									out[lname] = true
 								}
@@ -4772,6 +4809,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								obj := ingest.ChildByField(fn, "object")
 								if et := pythonIterableElemType(obj, content, elemOf, egElems, typeOf); ourReceivers[et] {
 									out[lname] = true
+								} else if et := pythonObjectIterableElemType(obj, content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
+									// a = [ba.get()].__getitem__(0) — method-return collection.
+									out[lname] = true
 								}
 							}
 						}
@@ -4797,6 +4837,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					// a = getitem(items, i) / operator.getitem(items, i) /
 					// getitem(d, k) — same element/value leaf as items[i] / d[k].
 					if et := pythonGetitemElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
+						out[lname] = true
+					} else if et := pythonGetitemObjectElemType(right, content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
+						// a = getitem([ba.get()], 0) / operator.getitem([ba.get()], 0)
 						out[lname] = true
 					}
 					// xa = attrgetter("a")(box) / attrgetter("a")(replace(box)) /
@@ -4995,6 +5038,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						elemOf[lname] = et
 					} else if et := pythonDictFromkeysObjectValueType(right, content, funcReturns, typeOf, fieldOf); et != "" {
 						elemOf[lname] = et
+					} else if et := pythonMappingProxyObjectValueType(right, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
+						// pa = MappingProxyType({"k": ba.get()}) — proxy value leaf.
+						elemOf[lname] = et
 					} else if et := pythonHomogeneousCtorElem(right, content); et != "" {
 						elemOf[lname] = et
 					} else if et := pythonObjectCollectionElem(right, content, funcReturns, typeOf, fieldOf); et != "" {
@@ -5137,6 +5183,21 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// a, b = next(zip(...)) / next(pairs) / pair / pairs[0] /
 						// list(zip(...))[0] when pair/pair-iter slots known.
 						// Per-slot: ourReceivers only; untyped slots (enumerate index) skip.
+						for i, name := range targets {
+							if i < len(types) && ourReceivers[types[i]] {
+								out[name] = true
+							}
+						}
+					} else if types := pythonObjectNextPairSlots(right, content, funcReturns, typeOf, fieldOf); len(types) > 0 {
+						// a, b = next(zip([ba.get()], …)) / next(enumerate([ba.get()]))
+						// object pair-iter under foreign same-leaf.
+						for i, name := range targets {
+							if i < len(types) && ourReceivers[types[i]] {
+								out[name] = true
+							}
+						}
+					} else if types := pythonObjectEnumerateZipTargetTypes(right, content, funcReturns, typeOf, fieldOf); len(types) > 0 {
+						// a, b = zip([ba.get()], …) unlikely; covers direct pair-iter forms.
 						for i, name := range targets {
 							if i < len(types) && ourReceivers[types[i]] {
 								out[name] = true
@@ -5513,6 +5574,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							obj := ingest.ChildByField(fn, "object")
 							if et := pythonIterableElemType(obj, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
+							} else if et := pythonObjectIterableElemType(obj, content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
+								out[lname] = true
 							}
 						}
 					}
@@ -5534,6 +5597,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// a := getitem(items, i) / operator.getitem(items, i) —
 				// same element/value leaf as items[i] / d[k].
 				if et := pythonGetitemElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
+					out[lname] = true
+				} else if et := pythonGetitemObjectElemType(valueN, content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
 					out[lname] = true
 				}
 				// xa := attrgetter("a")(box) / attrgetter("a")(replace(box)) /
@@ -5761,6 +5826,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					pythonBindPairLoopTarget(ingest.NodeText(left, content), types, pairSlots, elemOf)
 					break
 				}
+				// for item in enumerate([ba.get()]) / for pair in zip([ba.get()], …) —
+				// object pair-iter under foreign same-leaf (Class peels above).
+				if types := pythonObjectEnumerateZipTargetTypes(right, content, funcReturns, typeOf, fieldOf); len(types) > 0 {
+					pythonBindPairLoopTarget(ingest.NodeText(left, content), types, pairSlots, elemOf)
+					break
+				}
 				// for item in d.items() / asdict(...).items() / list(d.items()) —
 				// pair local (key untyped, value leaf); use item[1] / k, a = item.
 				// Same slots as p = next(...items()). Mixed asdict fields fail closed.
@@ -5834,6 +5905,16 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// for a, b in list/tuple/iter/reversed/sorted/filter(...zip...) —
 				// identity wrappers preserve pair slots (see pythonPairIterSlotsOf).
 				if types := pythonPairIterSlotsOf(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
+					for i, name := range targets {
+						if i < len(types) && ourReceivers[types[i]] {
+							out[name] = true
+						}
+					}
+					break
+				}
+				// for i, a in enumerate([ba.get()]) / for a, _ in zip([ba.get()], …) —
+				// object pair-iter under foreign same-leaf.
+				if types := pythonObjectEnumerateZipTargetTypes(right, content, funcReturns, typeOf, fieldOf); len(types) > 0 {
 					for i, name := range targets {
 						if i < len(types) && ourReceivers[types[i]] {
 							out[name] = true
@@ -10237,6 +10318,41 @@ func pythonGetitemElemType(call *grammar.Node, content []byte, elemOf, egElems, 
 	return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
 }
 
+// pythonGetitemObjectElemType recovers T from getitem([ba.get()], i) /
+// operator.getitem([ba.get()], i) when the collection peels as an object
+// iterable under foreign same-leaf (Class()-only peels via pythonGetitemElemType).
+func pythonGetitemObjectElemType(call *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil {
+		return ""
+	}
+	switch fn.Type() {
+	case "identifier":
+		if ingest.NodeText(fn, content) != "getitem" {
+			return ""
+		}
+	case "attribute":
+		attr := ingest.ChildByField(fn, "attribute")
+		obj := ingest.ChildByField(fn, "object")
+		if attr == nil || ingest.NodeText(attr, content) != "getitem" {
+			return ""
+		}
+		if obj == nil || obj.Type() != "identifier" || ingest.NodeText(obj, content) != "operator" {
+			return ""
+		}
+	default:
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) < 1 {
+		return ""
+	}
+	return pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf)
+}
+
 // pythonItemgetterElemType recovers the element type of
 // itemgetter(i)(collection) / operator.itemgetter(i)(collection).
 // Single-index itemgetter applied to a known collection yields one element
@@ -10548,6 +10664,62 @@ func pythonNextPairSlots(call *grammar.Node, content []byte, elemOf, egElems, ty
 		return nil
 	}
 	return pythonPairIterSlotsOf(args[0], content, elemOf, egElems, typeOf, pairIterSlots)
+}
+
+// pythonObjectNextPairSlots recovers pair slots for next(enumerate([ba.get()])) /
+// next(zip([ba.get()], …)) under foreign same-leaf (object pair-iters).
+func pythonObjectNextPairSlots(call *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) []string {
+	if call == nil || call.Type() != "call" {
+		return nil
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "identifier" || ingest.NodeText(fn, content) != "next" {
+		return nil
+	}
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) == 0 {
+		return nil
+	}
+	return pythonObjectPairIterSlotsOf(args[0], content, funcReturns, typeOf, fieldOf)
+}
+
+// pythonObjectPairIterSlotsOf peels object enumerate/zip pair-iters and identity
+// list/tuple/iter/reversed/sorted/filter wrappers (same wrappers as
+// pythonPairIterSlotsOf Class path).
+func pythonObjectPairIterSlotsOf(right *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) []string {
+	if right == nil {
+		return nil
+	}
+	for right != nil && right.Type() == "parenthesized_expression" {
+		right = pythonParenInner(right)
+	}
+	if right == nil || right.Type() != "call" {
+		return nil
+	}
+	if types := pythonObjectEnumerateZipTargetTypes(right, content, funcReturns, typeOf, fieldOf); len(types) > 0 {
+		return types
+	}
+	fn := ingest.ChildByField(right, "function")
+	if fn == nil || fn.Type() != "identifier" {
+		return nil
+	}
+	args, ok := pythonCallPositionalArgNodes(right)
+	if !ok {
+		return nil
+	}
+	switch ingest.NodeText(fn, content) {
+	case "list", "tuple", "iter", "reversed", "sorted":
+		if len(args) == 0 {
+			return nil
+		}
+		return pythonObjectPairIterSlotsOf(args[0], content, funcReturns, typeOf, fieldOf)
+	case "filter":
+		if len(args) < 2 {
+			return nil
+		}
+		return pythonObjectPairIterSlotsOf(args[1], content, funcReturns, typeOf, fieldOf)
+	}
+	return nil
 }
 
 // pythonMinMaxPairSlots recovers pair slot types for min(pair_iter) / max(pair_iter)
@@ -13476,7 +13648,11 @@ peeled:
 		return et
 	}
 	// dict.fromkeys(keys, ba.get()).values() — value leaf under foreign same-leaf.
-	return pythonDictFromkeysObjectValueType(obj, content, funcReturns, typeOf, fieldOf)
+	if et := pythonDictFromkeysObjectValueType(obj, content, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
+	// MappingProxyType({"k": ba.get()}).values() — proxy value leaf.
+	return pythonMappingProxyObjectValueType(obj, content, nil, funcReturns, typeOf, fieldOf)
 }
 
 // pythonObjectIterableElemType recovers T from object-collection / object-dict
@@ -13489,7 +13665,9 @@ peeled:
 //	list(dict(k=ba.get()).values()) / iter(...values())
 //
 // Enables next(iter([ba.get()])).run() / min([ba.get()], key=...).run() /
-// for x in dict(k=ba.get()).values(): x.run() under foreign same-leaf.
+// for x in dict(k=ba.get()).values(): x.run() /
+// for x in cycle([ba.get()]): x.run() / next(x for x in [ba.get()]).run()
+// under foreign same-leaf.
 func pythonObjectIterableElemType(n *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
 	for n != nil && !n.IsNull() {
 		switch n.Type() {
@@ -13511,6 +13689,11 @@ peeled:
 	}
 	// dict(k=ba.get()).values() / {"k": ba.get()}.values() / ChainMap(...).values()
 	if et := pythonObjectDictValuesElemType(n, content, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
+	// next(x for x in [ba.get()]) / for a in [x for x in [ba.get()]] —
+	// identity comprehension of object iterable.
+	if et := pythonObjectComprehensionElemType(n, content, funcReturns, typeOf, fieldOf); et != "" {
 		return et
 	}
 	// list/iter/reversed/... of an object-dict values view (objectCollection
@@ -13550,9 +13733,26 @@ peeled:
 					return ""
 				}
 				return pythonObjectIterableElemType(args[1], content, funcReturns, typeOf, fieldOf)
+			case "cycle", "islice", "accumulate", "compress":
+				// cycle([ba.get()]) / islice([ba.get()], n) — 1st arg element.
+				args, ok := pythonCallPositionalArgNodes(n)
+				if !ok || len(args) == 0 {
+					return ""
+				}
+				return pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf)
+			case "chain", "merge":
+				// chain([ba.get()], [ba.get()]) — shared object element when all agree.
+				return pythonObjectChainElemType(n, content, funcReturns, typeOf, fieldOf)
+			case "takewhile", "dropwhile", "filterfalse":
+				// takewhile(pred, [ba.get()]) — 2nd arg element.
+				args, ok := pythonCallPositionalArgNodes(n)
+				if !ok || len(args) < 2 {
+					return ""
+				}
+				return pythonObjectIterableElemType(args[1], content, funcReturns, typeOf, fieldOf)
 			}
 		}
-		// heapq.nlargest / heapq.nsmallest
+		// heapq.nlargest / itertools.cycle / itertools.chain / ...
 		if fn != nil && fn.Type() == "attribute" {
 			attr := ingest.ChildByField(fn, "attribute")
 			if attr != nil {
@@ -13563,11 +13763,173 @@ peeled:
 						return ""
 					}
 					return pythonObjectIterableElemType(args[1], content, funcReturns, typeOf, fieldOf)
+				case "cycle", "islice", "accumulate", "compress":
+					args, ok := pythonCallPositionalArgNodes(n)
+					if !ok || len(args) == 0 {
+						return ""
+					}
+					return pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf)
+				case "chain", "merge":
+					return pythonObjectChainElemType(n, content, funcReturns, typeOf, fieldOf)
+				case "takewhile", "dropwhile", "filterfalse":
+					args, ok := pythonCallPositionalArgNodes(n)
+					if !ok || len(args) < 2 {
+						return ""
+					}
+					return pythonObjectIterableElemType(args[1], content, funcReturns, typeOf, fieldOf)
 				}
 			}
 		}
 	}
 	return ""
+}
+
+// pythonObjectComprehensionElemType recovers T from identity genexp/list/set
+// comps over object iterables: x for x in [ba.get()] / [x for x in [ba.get()]].
+// Same identity rules as pythonComprehensionElemType; body must match for-target.
+func pythonObjectComprehensionElemType(comp *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if comp == nil {
+		return ""
+	}
+	switch comp.Type() {
+	case "generator_expression", "list_comprehension", "set_comprehension":
+		// ok
+	default:
+		return ""
+	}
+	body := ingest.ChildByField(comp, "body")
+	if body == nil || body.Type() != "identifier" {
+		return ""
+	}
+	var forClause *grammar.Node
+	forCount := 0
+	for i := uint32(0); i < comp.ChildCount(); i++ {
+		if ch := comp.Child(i); ch.Type() == "for_in_clause" {
+			forCount++
+			if forClause == nil {
+				forClause = ch
+			}
+		}
+	}
+	if forCount != 1 || forClause == nil {
+		return ""
+	}
+	left := ingest.ChildByField(forClause, "left")
+	right := ingest.ChildByField(forClause, "right")
+	if left == nil || right == nil || left.Type() != "identifier" {
+		return ""
+	}
+	if ingest.NodeText(body, content) != ingest.NodeText(left, content) {
+		return ""
+	}
+	return pythonObjectIterableElemType(right, content, funcReturns, typeOf, fieldOf)
+}
+
+// pythonObjectChainElemType recovers shared T from chain/merge of object
+// iterables: chain([ba.get()], [ba.get()]) — all args agree; any untyped fails.
+func pythonObjectChainElemType(call *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	args, ok := pythonCallPositionalArgNodes(call)
+	if !ok || len(args) == 0 {
+		return ""
+	}
+	found := ""
+	for _, a := range args {
+		et := pythonObjectIterableElemType(a, content, funcReturns, typeOf, fieldOf)
+		if et == "" {
+			return ""
+		}
+		if found == "" {
+			found = et
+		} else if found != et {
+			return ""
+		}
+	}
+	return found
+}
+
+// pythonObjectEnumerateZipTargetTypes recovers per-slot types for
+// enumerate([ba.get()]) → ["", "A"] and zip([ba.get()], …) when args peel as
+// object iterables under foreign same-leaf (Class() peels via
+// pythonEnumerateZipTargetTypes).
+func pythonObjectEnumerateZipTargetTypes(right *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) []string {
+	if right == nil || right.Type() != "call" {
+		return nil
+	}
+	fn := ingest.ChildByField(right, "function")
+	if fn == nil {
+		return nil
+	}
+	var fname string
+	switch fn.Type() {
+	case "identifier":
+		fname = ingest.NodeText(fn, content)
+	case "attribute":
+		objN := ingest.ChildByField(fn, "object")
+		attrN := ingest.ChildByField(fn, "attribute")
+		if objN == nil || attrN == nil || objN.Type() != "identifier" {
+			return nil
+		}
+		if ingest.NodeText(objN, content) != "itertools" {
+			return nil
+		}
+		switch ingest.NodeText(attrN, content) {
+		case "zip_longest", "pairwise", "product":
+			fname = ingest.NodeText(attrN, content)
+		default:
+			return nil
+		}
+	default:
+		return nil
+	}
+	args, ok := pythonCallPositionalArgNodes(right)
+	if !ok {
+		if fname != "zip" && fname != "zip_longest" {
+			return nil
+		}
+		args = pythonExpandSingleListTupleSplat(right)
+		if len(args) == 0 {
+			return nil
+		}
+	}
+	switch fname {
+	case "enumerate":
+		if len(args) == 0 {
+			return nil
+		}
+		et := pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf)
+		if et == "" {
+			return nil
+		}
+		return []string{"", et}
+	case "zip", "zip_longest", "product":
+		if len(args) == 0 {
+			return nil
+		}
+		out := make([]string, len(args))
+		any := false
+		for i, a := range args {
+			et := pythonObjectIterableElemType(a, content, funcReturns, typeOf, fieldOf)
+			out[i] = et
+			if et != "" {
+				any = true
+			}
+		}
+		if !any {
+			return nil
+		}
+		return out
+	case "pairwise":
+		if len(args) == 0 {
+			return nil
+		}
+		et := pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf)
+		if et == "" {
+			return nil
+		}
+		return []string{et, et}
+	default:
+		return nil
+	}
 }
 
 // pythonHomogeneousObjectDictPairsValue recovers T from [("k", ba.get())] /
@@ -14192,6 +14554,14 @@ func pythonChainMapLocalValueType(call *grammar.Node, content []byte, elemOf map
 // MappingProxyType(vars(SimpleNamespace(k=A())))["k"].run() under foreign same-leaf.
 // Nested list values / multi-arg / kwargs / splat fail closed.
 func pythonMappingProxyValueType(call *grammar.Node, content []byte, elemOf map[string]string) string {
+	return pythonMappingProxyObjectValueType(call, content, elemOf, nil, nil, nil)
+}
+
+// pythonMappingProxyObjectValueType peels MappingProxyType arg as Class() or
+// method-return / typed-local object-dict value leaf (ba.get() → A) under
+// foreign same-leaf. Same shapes as pythonMappingProxyValueType plus
+// MappingProxyType({"k": ba.get()}) / MappingProxyType(dict(k=ba.get())).
+func pythonMappingProxyObjectValueType(call *grammar.Node, content []byte, elemOf, funcReturns, typeOf, fieldOf map[string]string) string {
 	if call == nil || call.Type() != "call" {
 		return ""
 	}
@@ -14226,7 +14596,11 @@ func pythonMappingProxyValueType(call *grammar.Node, content []byte, elemOf map[
 	if t := pythonInlineSimpleNamespaceDictViewHomogeneousType(arg, content); t != "" {
 		return t
 	}
-	// MappingProxyType({"k": A()}) — homogeneous Class() values.
+	// MappingProxyType({"k": ba.get()}) / MappingProxyType({"k": A()}) —
+	// homogeneous object-dict / Class() values under foreign same-leaf.
+	if et := pythonHomogeneousObjectDictValue(arg, content, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
 	return pythonHomogeneousDictValueCtorElem(arg, content)
 }
 

@@ -2153,7 +2153,10 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 					// const {k: a} = {k: new A()} / const {k: a} = oa after
 					// objValue local of uniform property value T.
 					// Bind foreign too so dual-class B rebinds fail closed.
-					if t := jsObjectLiteralValueType(valN, content, out, factories); t != "" {
+					// const {k: a} = {k: new BoxA().get()} — method-return values.
+					if t := jsObjectLiteralValueTypeEx(valN, content, out, factories, extra); t != "" {
+						jsBindObjectPatternUniformValues(nameN, content, t, out)
+					} else if t := jsObjectLiteralValueType(valN, content, out, factories); t != "" {
 						jsBindObjectPatternUniformValues(nameN, content, t, out)
 					} else if t := jsObjectSpreadValueType(valN, content, out, factories, objValueLocals); t != "" {
 						// const {k: a} = {...{k: new A()}} / {...oa}
@@ -7854,6 +7857,13 @@ func jsMapSetMutationElemType(call *grammar.Node, content []byte, typedLocals, f
 // jsObjectLiteralNestedArrayElemType). Enables const oa = {k: new A()};
 // Object.values(oa)[0].run() / oa.k.run() under foreign same-leaf.
 func jsObjectLiteralValueType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	return jsObjectLiteralValueTypeEx(n, content, typedLocals, factories, jsExtraLocals{})
+}
+
+// jsObjectLiteralValueTypeEx is jsObjectLiteralValueType with method-return peels
+// (new BoxA().get() → A) via jsExprLeafType when extra.methodReturns is set.
+// Enables const {k: a} = {k: new BoxA().get()} under foreign same-leaf.
+func jsObjectLiteralValueTypeEx(n *grammar.Node, content []byte, typedLocals, factories map[string]string, extra jsExtraLocals) string {
 	if n == nil {
 		return ""
 	}
@@ -7897,6 +7907,8 @@ func jsObjectLiteralValueType(n *grammar.Node, content []byte, typedLocals, fact
 			if typedLocals != nil {
 				t = typedLocals[ingest.NodeText(val, content)]
 			}
+		} else if extra.methodReturns != nil || extra.classFields != nil {
+			t = jsExprLeafType(val, content, typedLocals, factories, extra.classFields, extra.methodReturns)
 		} else {
 			t = jsExprConcreteType(val, content, typedLocals, factories)
 		}
