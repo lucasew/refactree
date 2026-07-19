@@ -1030,7 +1030,7 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 	// pipeline; otherwise peel into the array root (handles (xs)[0] / matrix[i][j]
 	// and A[] params collapsed into typedLocals).
 	if obj.Type() == "array_access" {
-		if et := javaArrayAccessElemType(obj, content, elemOf, valOf); et != "" {
+		if et := javaArrayAccessElemType(obj, content, elemOf, valOf, compOf, typeMembers); et != "" {
 			return javaRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 		}
 		arr := ingest.ChildByField(obj, "array")
@@ -7595,6 +7595,12 @@ func javaStaticCollectionOfObjectElemType(obj *grammar.Node, content []byte, com
 			// subList(from, to) — List view; bounds only (same E as Class path).
 			// Enables List.of(ba.get()).subList(0,1).get(0) under foreign same-leaf.
 			"subList",
+			// toArray() / toArray(generator) / toArray(new T[0]) — T[] of stream/
+			// collection element; enables Stream.of(ba.get()).toArray(A[]::new)[0] /
+			// List.of(ba.get()).toArray(A[]::new)[0] under foreign same-leaf
+			// (Class peels via javaStreamPipelineElemType type-preserving toArray).
+			// clone() — T[] of same element (array clone; same leaf as Class path).
+			"toArray", "clone",
 			"filter", // Optional.filter / Stream.filter — type-preserving when present
 			"or",     // Optional.or(Supplier) — always same T
 			"orElseThrow",
@@ -8112,8 +8118,9 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 	// Direct as[0].m() already renames via typedLocals (javaTypeName collapses
 	// A[] → A on the array param); var xa = as[0] needs this elemOf path.
 	// as.stream().toArray()[i] / as.toArray(new A[0])[i] — pipeline element type.
+	// Stream.of(ba.get()).toArray(A[]::new)[i] — method-return factory peels.
 	if val.Type() == "array_access" {
-		return javaArrayAccessElemType(val, content, elemOf, valOf)
+		return javaArrayAccessElemType(val, content, elemOf, valOf, compOf, typeMembers)
 	}
 	if val.Type() != "method_invocation" {
 		return ""
@@ -8630,7 +8637,16 @@ func javaCHMReduceReturnType(call, obj *grammar.Node, content []byte, elemOf, va
 // via the creation type, or from Stream/Collection.toArray()[i] via the pipeline
 // element type. Index expressions do not change the element type leaf.
 // Nested array_access peels to the root; unknown roots fail closed.
-func javaArrayAccessElemType(val *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+//
+// Method-return factories under foreign same-leaf:
+//
+//	Stream.of(ba.get()).toArray(A[]::new)[i]
+//	List.of(ba.get()).toArray(A[]::new)[i]
+//	Stream.of(ba.get()).collect(Collectors.toList()).toArray(A[]::new)[i]
+//
+// Class() peels via javaStreamPipelineElemType; method-return peels via
+// javaStaticCollectionOfObjectElemType (toArray is type-preserving there).
+func javaArrayAccessElemType(val *grammar.Node, content []byte, elemOf, valOf, compOf map[string]string, typeMembers map[string]map[string]string) string {
 	for val != nil && !val.IsNull() {
 		for val != nil && !val.IsNull() && val.Type() == "parenthesized_expression" {
 			inner := ingest.ChildByField(val, "expression")
@@ -8679,7 +8695,11 @@ func javaArrayAccessElemType(val *grammar.Node, content []byte, elemOf, valOf ma
 		// pipeline (toArray is type-preserving).
 		// Arrays.copyOf(as, n)[i] / Arrays.copyOfRange(as, from, to)[i] —
 		// first-arg array element type (length/range only).
-		return javaStreamPipelineElemType(val, content, elemOf, valOf)
+		// Class() peels first; method-return factory peels under foreign same-leaf.
+		if et := javaStreamPipelineElemType(val, content, elemOf, valOf); et != "" {
+			return et
+		}
+		return javaStaticCollectionOfObjectElemType(val, content, compOf, typeMembers)
 	}
 	return ""
 }

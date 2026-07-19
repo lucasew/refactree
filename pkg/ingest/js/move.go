@@ -8142,6 +8142,12 @@ func jsArrayAssignSourceElemType(n *grammar.Node, content []byte, arrayLocals, t
 // (assignment `xs = xs.toSpliced(…)`), an untyped identifier receiver equal to
 // selfTarget is also a wildcard. Zero-item toSpliced is identity of a typed
 // receiver only. Mixed inserts fail closed.
+//
+// Insert peels via jsExprLeafType so method-return args work under foreign same-leaf:
+//
+//	[null].toSpliced(0, 1, new BoxA().get())[0].run()
+//
+// (Class peels via new A() already worked; with/fill use the same leaf path.)
 func jsArrayToSplicedElemType(obj, args *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals, selfTarget string) string {
 	recvT := jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories, extra)
 	wildRecv := false
@@ -8176,7 +8182,9 @@ func jsArrayToSplicedElemType(obj, args *grammar.Node, content []byte, arrayLoca
 			if pos <= 2 {
 				continue
 			}
-			t := jsExprConcreteType(ch, content, typedLocals, factories)
+			// Class/typed-local via concrete path; method-return when
+			// extra.methodReturns set (same leaf as arr.with / arr.fill).
+			t := jsExprLeafType(ch, content, typedLocals, factories, extra.classFields, extra.methodReturns)
 			if t == "" {
 				return ""
 			}
