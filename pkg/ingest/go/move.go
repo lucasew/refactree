@@ -2500,6 +2500,9 @@ func sameFileStructNamedFuncFields(root *grammar.Node, content []byte) map[strin
 		return out
 	}
 	namedFunc := sameFileNamedFuncCollectionResults(root, content)
+	namedColl := sameFileNamedCollectionResults(root, content)
+	// type WA struct { SA } — embedded named struct; promote collection/func fields.
+	embeds := map[string][]string{}
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
 		if n == nil {
@@ -2511,9 +2514,12 @@ func sameFileStructNamedFuncFields(root *grammar.Node, content []byte) map[strin
 			if nameN != nil && typeN != nil && typeN.Type() == "struct_type" {
 				structName := ingest.NodeText(nameN, content)
 				if structName != "" {
-					fields := collectStructNamedFuncFields(typeN, content, namedFunc)
+					fields, emb := collectStructCollectionAndFuncFields(typeN, content, namedFunc, namedColl)
 					if len(fields) > 0 {
 						out[structName] = fields
+					}
+					if len(emb) > 0 {
+						embeds[structName] = emb
 					}
 				}
 			}
@@ -2523,6 +2529,39 @@ func sameFileStructNamedFuncFields(root *grammar.Node, content []byte) map[strin
 		}
 	}
 	walk(root)
+	// Promote embedded struct fields fixed-point (WA embeds SA → wa.Items peels).
+	// Direct fields win over promoted; cycles / unresolved embeds fail closed.
+	for changed := true; changed; {
+		changed = false
+		for recv, embList := range embeds {
+			dst := out[recv]
+			if dst == nil {
+				dst = map[string]rangeSourceInfo{}
+			}
+			before := len(dst)
+			for _, emb := range embList {
+				src := out[emb]
+				if len(src) == 0 {
+					continue
+				}
+				for fname, info := range src {
+					if info.elemType == "" {
+						continue
+					}
+					if _, exists := dst[fname]; exists {
+						continue
+					}
+					dst[fname] = info
+				}
+			}
+			if len(dst) > before {
+				out[recv] = dst
+				changed = true
+			} else if len(dst) > 0 && out[recv] == nil {
+				out[recv] = dst
+			}
+		}
+	}
 	return out
 }
 
@@ -2558,9 +2597,13 @@ func callReturningFuncCollection(n *grammar.Node, content []byte, funcRetFunc ma
 	return info, true
 }
 
-// selectorNamedFuncField reports collection result element info when n is a
-// selector xa.Fa and xa has a known same-file struct type with function-typed
-// field Fa (type Box struct { Fa FA } with type FA func() []*A).
+// selectorNamedFuncField reports collection element info when n is a selector
+// xa.Fa / sa.Items and xa/sa has a known same-file struct type with:
+//   - function-typed field Fa (type Box struct { Fa FA } with FA func() []*A)
+//   - collection field Items (type SA struct { Items []*A } / Items AS / M map[K]*A)
+//
+// Used for xa.Fa() call peels, sa.Items[0] index peels, and short-var
+// items := sa.Items / fa := xa.Fa under foreign same-leaf methods.
 func selectorNamedFuncField(n *grammar.Node, content []byte, valueType func(string, uint32) (string, bool), structFields map[string]map[string]rangeSourceInfo, at uint32) (rangeSourceInfo, bool) {
 	if n == nil || valueType == nil || len(structFields) == 0 {
 		return rangeSourceInfo{}, false
@@ -2599,12 +2642,15 @@ func selectorNamedFuncField(n *grammar.Node, content []byte, valueType func(stri
 	return info, true
 }
 
-// collectStructNamedFuncFields walks a struct_type for named fields whose type
-// is a function type with a single collection result.
-func collectStructNamedFuncFields(structType *grammar.Node, content []byte, namedFunc map[string]rangeSourceInfo) map[string]rangeSourceInfo {
+// collectStructCollectionAndFuncFields walks a struct_type for named fields
+// whose type is either a function type with a single collection result or a
+// collection (slice/array/map/named/pointer-to). Also returns embedded named
+// struct type identifiers (type WA struct { SA }) for field promotion.
+func collectStructCollectionAndFuncFields(structType *grammar.Node, content []byte, namedFunc, namedColl map[string]rangeSourceInfo) (map[string]rangeSourceInfo, []string) {
 	fields := map[string]rangeSourceInfo{}
+	var embeds []string
 	if structType == nil {
-		return fields
+		return fields, embeds
 	}
 	var walk func(*grammar.Node)
 	walk = func(n *grammar.Node) {
@@ -2613,13 +2659,8 @@ func collectStructNamedFuncFields(structType *grammar.Node, content []byte, name
 		}
 		if n.Type() == "field_declaration" {
 			typeField := ingest.ChildByField(n, "type")
-			info, ok := functionTypeOrNamedCollectionResult(typeField, content, namedFunc)
-			if !ok || info.elemType == "" {
-				return
-			}
-			// Collect all field_identifier names (Fa FA / X, Y FA). Skip
-			// embedded fields (type only, no field_identifier).
-			anyName := false
+			// Collect named field identifiers (Items []*A / Fa FA / X, Y []*A).
+			var names []string
 			for i := uint32(0); i < n.ChildCount(); i++ {
 				ch := n.Child(i)
 				if ch == nil || ch.Type() != "field_identifier" {
@@ -2629,10 +2670,30 @@ func collectStructNamedFuncFields(structType *grammar.Node, content []byte, name
 				if fname == "" || fname == "_" {
 					continue
 				}
-				fields[fname] = info
-				anyName = true
+				names = append(names, fname)
 			}
-			_ = anyName
+			if len(names) == 0 {
+				// Embedded field: type SA / *SA only (no field_identifier).
+				// Record named struct types for promotion; skip *T embeds that
+				// are not same-file structs (fail closed).
+				embName := embeddedStructTypeName(typeField, content)
+				if embName != "" {
+					embeds = append(embeds, embName)
+				}
+				return
+			}
+			// Prefer function-type fields (Fa FA) over collection peels so
+			// func() []*A is not treated as a bare collection.
+			info, ok := functionTypeOrNamedCollectionResult(typeField, content, namedFunc)
+			if !ok || info.elemType == "" {
+				info, ok = collectionTypeOrNamedResult(typeField, content, namedColl)
+			}
+			if !ok || info.elemType == "" {
+				return
+			}
+			for _, fname := range names {
+				fields[fname] = info
+			}
 			return
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -2640,7 +2701,29 @@ func collectStructNamedFuncFields(structType *grammar.Node, content []byte, name
 		}
 	}
 	walk(structType)
-	return fields
+	return fields, embeds
+}
+
+// embeddedStructTypeName returns the type_identifier of an embedded field type
+// SA / *SA (pointer peel). Non-identifier embeds fail closed.
+func embeddedStructTypeName(typeN *grammar.Node, content []byte) string {
+	if typeN == nil {
+		return ""
+	}
+	if typeN.Type() == "pointer_type" {
+		for i := uint32(0); i < typeN.ChildCount(); i++ {
+			c := typeN.Child(i)
+			if c == nil || c.Type() == "*" {
+				continue
+			}
+			return embeddedStructTypeName(c, content)
+		}
+		return ""
+	}
+	if typeN.Type() == "type_identifier" {
+		return ingest.NodeText(typeN, content)
+	}
+	return ""
 }
 
 // sameFileIfaceMethodCollectionResults maps same-file receiver type → method
@@ -3585,6 +3668,35 @@ func typeCaseSingleType(typeCase *grammar.Node, content []byte) (string, bool) {
 		return "", false
 	}
 	return types[0], true
+}
+
+// typeCaseSingleCollection returns collection element info when a type_case
+// lists exactly one collection type ([]*A / map[K]*A / AS / *AS). Multi-type
+// arms and non-collection types fail closed.
+func typeCaseSingleCollection(typeCase *grammar.Node, content []byte, namedColl map[string]rangeSourceInfo) (rangeSourceInfo, bool) {
+	if typeCase == nil {
+		return rangeSourceInfo{}, false
+	}
+	var infos []rangeSourceInfo
+	for i := uint32(0); i < typeCase.ChildCount(); i++ {
+		if typeCase.FieldNameForChild(i) != "type" {
+			continue
+		}
+		c := typeCase.Child(i)
+		if c == nil || c.IsNull() || c.Type() == "," {
+			continue
+		}
+		if info, ok := collectionTypeOrNamedResult(c, content, namedColl); ok && info.elemType != "" {
+			infos = append(infos, info)
+		} else {
+			// Non-collection type in this arm — fail closed for multi-mixed too.
+			infos = append(infos, rangeSourceInfo{})
+		}
+	}
+	if len(infos) != 1 || infos[0].elemType == "" {
+		return rangeSourceInfo{}, false
+	}
+	return infos[0], true
 }
 
 func identListNames(n *grammar.Node, content []byte) []string {
@@ -5190,6 +5302,16 @@ func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identEl
 		}
 		return rangeSourceInfo{}, false
 	}
+	// sa.Items / sa.M — struct field of collection type (type SA struct {
+	// Items []*A } / Items AS / M map[K]*A). Also promoted embeds (type WA
+	// struct { SA } → wa.Items). Under foreign same-leaf for sa.Items[0].M
+	// and items := sa.Items short-var peels.
+	if n.Type() == "selector_expression" {
+		if info, ok := selectorNamedFuncField(n, content, valueType, structFields, at); ok && info.elemType != "" {
+			return info, true
+		}
+		return rangeSourceInfo{}, false
+	}
 	if n.Type() != "call_expression" {
 		return rangeSourceInfo{}, false
 	}
@@ -5471,6 +5593,26 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 			return
 		}
 		switch n.Type() {
+		case "type_switch_statement":
+			// switch as := x.(type) { case []*A: as[0].M() } / case AS: —
+			// bind alias to collection element type inside each single-type
+			// collection case (multi-type arms fail closed). Concrete *A
+			// cases stay on collectLocalTypeBindings value path.
+			aliasNames := identListNames(ingest.ChildByField(n, "alias"), content)
+			if len(aliasNames) == 1 {
+				alias := aliasNames[0]
+				if alias != "" && alias != "_" {
+					for i := uint32(0); i < n.ChildCount(); i++ {
+						c := n.Child(i)
+						if c == nil || c.Type() != "type_case" {
+							continue
+						}
+						if info, ok := typeCaseSingleCollection(c, content, namedColl); ok && info.elemType != "" {
+							*bindings = append(*bindings, identTypeBinding{c.StartByte(), c.EndByte(), alias, info.elemType})
+						}
+					}
+				}
+			}
 		case "var_spec":
 			names := varSpecNames(n, content)
 			typeN := ingest.ChildByField(n, "type")
