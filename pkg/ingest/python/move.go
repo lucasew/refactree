@@ -9416,6 +9416,11 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		if idx != nil && idx.Type() == "slice" {
 			return pythonIterableElemType(ingest.ChildByField(right, "value"), content, elemOf, egElems, typeOf)
 		}
+		// ChainMap(da).maps[0] / ca.maps[0] — maps list element is a mapping with
+		// the same scalar value leaf as the ChainMap (maps[0]["k"].run()).
+		if et := pythonChainMapMapsIndexValueType(right, content, elemOf); et != "" {
+			return et
+		}
 		// da["k"] when da: defaultdict[str, list[A]] — value is list of A;
 		// iterating / further [0] peels A (elemOf["@nested."+da]).
 		if nest := pythonNestedMappingSubscriptElemType(right, content, elemOf); nest != "" {
@@ -9845,22 +9850,27 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		// xs.data / da.data — UserList/UserDict underlying container shares
 		// element/value type of the collection local (xs.data[0].run() /
 		// for a in xs.data / d = xs.data; d[0].run() under foreign same-leaf).
+		// ChainMap(da, ea).parents / ca.parents — remaining maps ChainMap with
+		// same scalar value leaf (parents["k"].run() under foreign same-leaf).
 		obj := ingest.ChildByField(right, "object")
 		attr := ingest.ChildByField(right, "attribute")
-		if obj == nil || attr == nil || obj.Type() != "identifier" {
+		if obj == nil || attr == nil {
 			return ""
 		}
 		switch ingest.NodeText(attr, content) {
 		case "exceptions":
-			if egElems == nil {
+			if obj.Type() != "identifier" || egElems == nil {
 				return ""
 			}
 			return egElems[ingest.NodeText(obj, content)]
 		case "data":
-			if elemOf == nil {
+			if obj.Type() != "identifier" || elemOf == nil {
 				return ""
 			}
 			return elemOf[ingest.NodeText(obj, content)]
+		case "parents":
+			// ChainMap.parents is itself a ChainMap of remaining maps.
+			return pythonChainMapExprScalarValueType(obj, content, elemOf)
 		}
 		return ""
 	}
@@ -11781,6 +11791,36 @@ func pythonDictMergeArmNestedValueType(n *grammar.Node, content []byte, elemOf m
 		return et
 	}
 	return ""
+}
+
+// pythonChainMapMapsIndexValueType recovers T from ChainMap(da).maps[i] /
+// ca.maps[i] / ChainMap({"k": A()}).maps[0] when the ChainMap expression has
+// scalar mapping value leaf T. ChainMap.maps is list[Mapping]; indexing yields
+// a mapping of T (same leaf as ChainMap(da) / ca), so maps[0]["k"].run() /
+// maps[0].get("k").run() / ma = maps[0]; ma["k"].run() peel under foreign
+// same-leaf. Nested list-value maps / non-.maps receivers / slices fail closed.
+func pythonChainMapMapsIndexValueType(sub *grammar.Node, content []byte, elemOf map[string]string) string {
+	if sub == nil || sub.Type() != "subscript" {
+		return ""
+	}
+	for i := uint32(0); i < sub.ChildCount(); i++ {
+		if sub.Child(i).Type() == "slice" {
+			return ""
+		}
+	}
+	val := ingest.ChildByField(sub, "value")
+	for val != nil && val.Type() == "parenthesized_expression" {
+		val = pythonParenInner(val)
+	}
+	if val == nil || val.Type() != "attribute" {
+		return ""
+	}
+	attr := ingest.ChildByField(val, "attribute")
+	if attr == nil || ingest.NodeText(attr, content) != "maps" {
+		return ""
+	}
+	obj := ingest.ChildByField(val, "object")
+	return pythonChainMapExprScalarValueType(obj, content, elemOf)
 }
 
 // pythonChainMapLocalValueType recovers T from ChainMap(da[, ea...]) /

@@ -1536,6 +1536,10 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 		return jsRenameByTypeMaps(enclosingClass, ourReceivers, foreignReceivers, nil)
 	}
 	if obj.Type() == "new_expression" {
+		// new Proxy(a, {}) / new Proxy(new A(), {}) — identity of target.
+		if t := jsProxyTargetType(obj, content, typedLocals, factories); t != "" {
+			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
 		return jsRenameByTypeMaps(jsNewExpressionType(obj, content), ourReceivers, foreignReceivers, nil)
 	}
 	if obj.Type() == "identifier" {
@@ -1793,7 +1797,11 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// / const a = (await Promise.allSettled([new A()]))[0].value
 						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsIdentityCloneType(valN, content, out, factories); ourReceivers[t] {
-						// const a = structuredClone(new A()) / Object.assign(new A()[, …])
+						// const a = structuredClone(new A()) / Object.assign(new A()[, …]) /
+						// Object.create(a) / Object.create(new A())
+						out[ingest.NodeText(nameN, content)] = t
+					} else if t := jsProxyTargetType(valN, content, out, factories); ourReceivers[t] {
+						// const pa = new Proxy(a, {}) / new Proxy(new A(), {})
 						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsNestedArrayFlatElemType(valN, content, arrayLocals, out, factories, extra); t != "" {
 						// const aa = [[new A()]] — nested array local of element type A.
@@ -7858,11 +7866,16 @@ func jsStructuredCloneObjectValueType(n *grammar.Node, content []byte, typedLoca
 	return ""
 }
 
-// jsIdentityCloneType recovers T from structuredClone(x) / Object.assign(x[, …])
-// when the first positional arg peels to T (new T() / typed local / factory).
-// structuredClone returns a structured copy of its argument; Object.assign
-// returns its first argument (target). Extra assign sources ignored.
-// Non-matching callees / missing first arg fail closed.
+// jsIdentityCloneType recovers T from structuredClone(x) / Object.assign(x[, …]) /
+// Object.create(x) / Object.freeze(x) / Object.seal(x) / Object.preventExtensions(x)
+// when the first positional arg peels to T (new T() / typed local / factory /
+// Class.prototype for create). structuredClone returns a structured copy;
+// Object.assign returns its first argument (target); freeze/seal/preventExtensions
+// return the same object; Object.create returns an object whose [[Prototype]] is
+// the first arg (identity for method peels when the proto is an instance /
+// Class.prototype). Extra assign sources ignored. Object.create with property
+// descriptors (2nd arg) fails closed. Non-matching callees / missing first arg
+// fail closed.
 func jsIdentityCloneType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
 	if n == nil {
 		return ""
@@ -7901,6 +7914,7 @@ func jsIdentityCloneType(n *grammar.Node, content []byte, typedLocals, factories
 		return ""
 	}
 	ok := false
+	isCreate := false
 	switch fn.Type() {
 	case "identifier":
 		// structuredClone(x)
@@ -7908,19 +7922,94 @@ func jsIdentityCloneType(n *grammar.Node, content []byte, typedLocals, factories
 			ok = true
 		}
 	case "member_expression", "member_expression_optional", "optional_chain":
-		// Object.assign(x[, …])
+		// Object.assign(x[, …]) / Object.create(x) /
+		// Object.freeze(x) / Object.seal(x) / Object.preventExtensions(x)
 		prop := ingest.ChildByField(fn, "property")
 		obj := ingest.ChildByField(fn, "object")
 		if prop != nil && obj != nil &&
-			ingest.NodeText(prop, content) == "assign" &&
 			obj.Type() == "identifier" && ingest.NodeText(obj, content) == "Object" {
-			ok = true
+			switch ingest.NodeText(prop, content) {
+			case "assign", "freeze", "seal", "preventExtensions":
+				ok = true
+			case "create":
+				ok = true
+				isCreate = true
+			}
 		}
 	}
 	if !ok {
 		return ""
 	}
-	// First positional argument.
+	// First positional argument; Object.create rejects a second (props) arg.
+	var first *grammar.Node
+	posCount := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		posCount++
+		if first == nil {
+			first = ch
+		}
+	}
+	if first == nil {
+		return ""
+	}
+	if isCreate && posCount != 1 {
+		return ""
+	}
+	if t := jsExprConcreteType(first, content, typedLocals, factories); t != "" {
+		return t
+	}
+	// Object.create(A.prototype) — prototype of Class is identity for method peels.
+	if isCreate {
+		return jsPrototypeClassType(first, content)
+	}
+	return ""
+}
+
+// jsProxyTargetType recovers T from new Proxy(target[, handler]) when target
+// peels to T (new T() / typed local / factory). Enables new Proxy(a, {}).run() /
+// const pa = new Proxy(a, {}); pa.run() under foreign same-leaf. Missing target
+// / non-Proxy constructors fail closed. Handler ignored.
+func jsProxyTargetType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "new_expression" {
+		return ""
+	}
+	ctor := ingest.ChildByField(n, "constructor")
+	if ctor == nil || ctor.Type() != "identifier" || ingest.NodeText(ctor, content) != "Proxy" {
+		return ""
+	}
+	args := ingest.ChildByField(n, "arguments")
+	if args == nil {
+		// Some grammars attach args as sibling children after constructor.
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch != nil && ch.Type() == "arguments" {
+				args = ch
+				break
+			}
+		}
+	}
+	if args == nil {
+		return ""
+	}
 	var first *grammar.Node
 	for i := uint32(0); i < args.ChildCount(); i++ {
 		ch := args.Child(i)
@@ -7934,6 +8023,41 @@ func jsIdentityCloneType(n *grammar.Node, content []byte, typedLocals, factories
 		return ""
 	}
 	return jsExprConcreteType(first, content, typedLocals, factories)
+}
+
+// jsPrototypeClassType recovers Class from Class.prototype member access.
+// Used by Object.create(A.prototype) identity peels. Other members fail closed.
+func jsPrototypeClassType(n *grammar.Node, content []byte) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil {
+		return ""
+	}
+	switch n.Type() {
+	case "member_expression", "member_expression_optional", "optional_chain":
+		prop := ingest.ChildByField(n, "property")
+		obj := ingest.ChildByField(n, "object")
+		if prop == nil || obj == nil || ingest.NodeText(prop, content) != "prototype" {
+			return ""
+		}
+		if obj.Type() == "identifier" {
+			return ingest.NodeText(obj, content)
+		}
+	}
+	return ""
 }
 
 // jsIsIdentityCallback reports whether cb is an identity of its first formal
