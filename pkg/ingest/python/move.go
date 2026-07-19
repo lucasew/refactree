@@ -2420,10 +2420,10 @@ peeled:
 		if ft := pythonReplaceFieldAccessType(obj, content, fieldOf, funcReturns, typeOf); ft != "" {
 			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 		}
-		if ft := pythonNamedtupleReplaceFieldAccessType(obj, content, fieldOf); ft != "" {
+		if ft := pythonNamedtupleReplaceFieldAccessType(obj, content, fieldOf, funcReturns, typeOf); ft != "" {
 			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 		}
-		if ft := pythonNamedtupleMakeFieldAccessType(obj, content); ft != "" {
+		if ft := pythonNamedtupleMakeFieldAccessType(obj, content, funcReturns, typeOf, fieldOf); ft != "" {
 			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 		}
 		// SimpleNamespace(k=ba.get()).k / types.SimpleNamespace(k=A()).k —
@@ -2469,7 +2469,7 @@ peeled:
 			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 		}
 		// Box._make([A()])[0].run() — make sequence element peel.
-		if ft := pythonNamedtupleMakeIndexType(obj, content); ft != "" {
+		if ft := pythonNamedtupleMakeIndexType(obj, content, funcReturns, typeOf, fieldOf); ft != "" {
 			return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 		}
 		// pairSlots enables p[1].run() for assigned pair locals; typeOf for
@@ -5114,12 +5114,12 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					}
 					// ra = ba._replace(...) — same namedtuple instance fields with
 					// keyword overrides (dual-class under foreign same-leaf).
-					if pythonBindNamedtupleReplaceLocal(lname, right, content, typeOf, fieldOf, fieldNames, fieldIndex, ourReceivers, out) {
+					if pythonBindNamedtupleReplaceLocal(lname, right, content, funcReturns, typeOf, fieldOf, fieldNames, fieldIndex, ourReceivers, out) {
 						// bound
 					}
 					// ba = Box._make([A()]) — namedtuple from iterable; instance fields
 					// from sequence elements (dual-class under foreign same-leaf).
-					if pythonBindNamedtupleMakeLocal(lname, right, content, typeOf, fieldOf, fieldNames, fieldIndex, ourReceivers, out) {
+					if pythonBindNamedtupleMakeLocal(lname, right, content, funcReturns, typeOf, fieldOf, fieldNames, fieldIndex, ourReceivers, out) {
 						// bound
 					}
 					// t = astuple(box) / dataclasses.astuple(box) — tuple of field
@@ -5172,7 +5172,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						if ourReceivers[ft] {
 							out[lname] = true
 						}
-					} else if ft := pythonNamedtupleMakeIndexType(right, content); ft != "" {
+					} else if ft := pythonNamedtupleMakeIndexType(right, content, funcReturns, typeOf, fieldOf); ft != "" {
 						// xa = Box._make([A()])[0] — make sequence element peel.
 						typeOf[lname] = ft
 						bindFields(lname, ft)
@@ -5226,13 +5226,13 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						if ourReceivers[ft] {
 							out[lname] = true
 						}
-					} else if ft := pythonNamedtupleReplaceFieldAccessType(right, content, fieldOf); ft != "" {
+					} else if ft := pythonNamedtupleReplaceFieldAccessType(right, content, fieldOf, funcReturns, typeOf); ft != "" {
 						typeOf[lname] = ft
 						bindFields(lname, ft)
 						if ourReceivers[ft] {
 							out[lname] = true
 						}
-					} else if ft := pythonNamedtupleMakeFieldAccessType(right, content); ft != "" {
+					} else if ft := pythonNamedtupleMakeFieldAccessType(right, content, funcReturns, typeOf, fieldOf); ft != "" {
 						typeOf[lname] = ft
 						bindFields(lname, ft)
 						if ourReceivers[ft] {
@@ -6007,8 +6007,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				if valueN.Type() == "call" {
 					// da := SimpleNamespace(k=A()) — same fieldOf bind as plain assignment.
 					pythonBindSimpleNamespaceLocal(lname, valueN, content, fieldOf, funcReturns, typeOf)
-					pythonBindNamedtupleReplaceLocal(lname, valueN, content, typeOf, fieldOf, fieldNames, fieldIndex, ourReceivers, out)
-					pythonBindNamedtupleMakeLocal(lname, valueN, content, typeOf, fieldOf, fieldNames, fieldIndex, ourReceivers, out)
+					pythonBindNamedtupleReplaceLocal(lname, valueN, content, funcReturns, typeOf, fieldOf, fieldNames, fieldIndex, ourReceivers, out)
+					pythonBindNamedtupleMakeLocal(lname, valueN, content, funcReturns, typeOf, fieldOf, fieldNames, fieldIndex, ourReceivers, out)
 				}
 				// t := astuple(box) / dataclasses.astuple(box) — tuple of field
 				// values in declaration order (fieldOf["t.#i"] for t[i].run()).
@@ -7983,8 +7983,9 @@ func pythonNamedtupleReplaceObjectLocal(call *grammar.Node, content []byte) stri
 }
 
 // pythonBindNamedtupleReplaceLocal binds ra = ba._replace(a=A()) with instance
-// fieldOf copied from ba and keyword overrides applied. Dual-class solid.
-func pythonBindNamedtupleReplaceLocal(local string, call *grammar.Node, content []byte, typeOf, fieldOf map[string]string, fieldNames map[string][]string, fieldIndex map[string]map[string]string, ourReceivers, out map[string]bool) bool {
+// fieldOf copied from ba and keyword overrides applied. Dual-class solid under
+// foreign same-leaf: Class() kwargs and method-return kwargs (ba.get()).
+func pythonBindNamedtupleReplaceLocal(local string, call *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string, fieldNames map[string][]string, fieldIndex map[string]map[string]string, ourReceivers, out map[string]bool) bool {
 	src := pythonNamedtupleReplaceObjectLocal(call, content)
 	if src == "" || local == "" || fieldOf == nil {
 		return false
@@ -7996,7 +7997,7 @@ func pythonBindNamedtupleReplaceLocal(local string, call *grammar.Node, content 
 		pythonBindNamedtupleIndexFields(local, tn, fieldNames, fieldIndex, fieldOf)
 	}
 	pythonCopyLocalFieldOf(src, local, fieldOf)
-	// Keyword overrides: ba._replace(a=A()) → field a is A.
+	// Keyword overrides: ba._replace(a=A()) / ba._replace(a=ba.get()) → field a is A.
 	argList := ingest.ChildByField(call, "arguments")
 	if argList != nil {
 		for i := uint32(0); i < argList.ChildCount(); i++ {
@@ -8010,7 +8011,14 @@ func pythonBindNamedtupleReplaceLocal(local string, call *grammar.Node, content 
 				continue
 			}
 			fname := ingest.NodeText(nameN, content)
-			if et := pythonExprClassType(valN, content); et != "" && fname != "" {
+			if fname == "" {
+				continue
+			}
+			et := pythonObjectLeafType(valN, content, funcReturns, typeOf, fieldOf)
+			if et == "" {
+				et = pythonExprClassType(valN, content)
+			}
+			if et != "" {
 				fieldOf[local+"."+fname] = et
 			}
 		}
@@ -8029,9 +8037,10 @@ func pythonBindNamedtupleReplaceLocal(local string, call *grammar.Node, content 
 }
 
 // pythonNamedtupleReplaceFieldAccessType recovers T from ba._replace(...).a /
-// ba._replace(a=A()).a — keyword override wins, else fieldOf[ba.a].
-func pythonNamedtupleReplaceFieldAccessType(attr *grammar.Node, content []byte, fieldOf map[string]string) string {
-	if attr == nil || attr.Type() != "attribute" || fieldOf == nil {
+// ba._replace(a=A()).a / NTA(ba.get())._replace(x=ba.get()).x — keyword override
+// wins (Class() or method-return leaf), else fieldOf[ba.a].
+func pythonNamedtupleReplaceFieldAccessType(attr *grammar.Node, content []byte, fieldOf, funcReturns, typeOf map[string]string) string {
+	if attr == nil || attr.Type() != "attribute" {
 		return ""
 	}
 	field := ingest.ChildByField(attr, "attribute")
@@ -8043,7 +8052,7 @@ func pythonNamedtupleReplaceFieldAccessType(attr *grammar.Node, content []byte, 
 	if fname == "" {
 		return ""
 	}
-	// Keyword override on this _replace call.
+	// Keyword override on this _replace call (Class() or method-return).
 	argList := ingest.ChildByField(obj, "arguments")
 	if argList != nil {
 		for i := uint32(0); i < argList.ChildCount(); i++ {
@@ -8056,23 +8065,26 @@ func pythonNamedtupleReplaceFieldAccessType(attr *grammar.Node, content []byte, 
 			if nameN == nil || ingest.NodeText(nameN, content) != fname || valN == nil {
 				continue
 			}
+			if et := pythonObjectLeafType(valN, content, funcReturns, typeOf, fieldOf); et != "" {
+				return et
+			}
 			if et := pythonExprClassType(valN, content); et != "" {
 				return et
 			}
 		}
 	}
 	src := pythonNamedtupleReplaceObjectLocal(obj, content)
-	if src == "" {
+	if src == "" || fieldOf == nil {
 		return ""
 	}
 	return fieldOf[src+"."+fname]
 }
 
-// pythonNamedtupleMakeCallType recovers (typeName, field→Class) from
-// Box._make([A()]) / Box._make((A(), B())) when field order is known.
-// First arg must be list/tuple of Class() elems matching field count (or a
-// single-field list). Other forms fail closed.
-func pythonNamedtupleMakeInstanceFields(call *grammar.Node, content []byte, fieldNames map[string][]string) (typeName string, fields map[string]string) {
+// pythonNamedtupleMakeCallType recovers (typeName, field→T) from
+// Box._make([A()]) / Box._make([ba.get()]) / Box._make((A(), B())) when field
+// order is known. First arg must be list/tuple of Class() or method-return
+// elems matching field count (or a single-field list). Other forms fail closed.
+func pythonNamedtupleMakeInstanceFields(call *grammar.Node, content []byte, fieldNames map[string][]string, funcReturns, typeOf, fieldOf map[string]string) (typeName string, fields map[string]string) {
 	if call == nil || call.Type() != "call" || fieldNames == nil {
 		return "", nil
 	}
@@ -8114,7 +8126,10 @@ func pythonNamedtupleMakeInstanceFields(call *grammar.Node, content []byte, fiel
 	}
 	fields = map[string]string{}
 	for i, el := range elems {
-		et := pythonExprClassType(el, content)
+		et := pythonObjectLeafType(el, content, funcReturns, typeOf, fieldOf)
+		if et == "" {
+			et = pythonExprClassType(el, content)
+		}
 		if et == "" {
 			return "", nil
 		}
@@ -8123,9 +8138,10 @@ func pythonNamedtupleMakeInstanceFields(call *grammar.Node, content []byte, fiel
 	return typeName, fields
 }
 
-// pythonBindNamedtupleMakeLocal binds ba = Box._make([A()]) with instance fields.
-func pythonBindNamedtupleMakeLocal(local string, call *grammar.Node, content []byte, typeOf, fieldOf map[string]string, fieldNames map[string][]string, fieldIndex map[string]map[string]string, ourReceivers, out map[string]bool) bool {
-	tn, fields := pythonNamedtupleMakeInstanceFields(call, content, fieldNames)
+// pythonBindNamedtupleMakeLocal binds ba = Box._make([A()]) / Box._make([ba.get()])
+// with instance fields (Class or method-return sequence elems).
+func pythonBindNamedtupleMakeLocal(local string, call *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string, fieldNames map[string][]string, fieldIndex map[string]map[string]string, ourReceivers, out map[string]bool) bool {
+	tn, fields := pythonNamedtupleMakeInstanceFields(call, content, fieldNames, funcReturns, typeOf, fieldOf)
 	if tn == "" || len(fields) == 0 || local == "" || fieldOf == nil {
 		return false
 	}
@@ -8147,10 +8163,11 @@ func pythonBindNamedtupleMakeLocal(local string, call *grammar.Node, content []b
 	return true
 }
 
-// pythonNamedtupleMakeFieldAccessType recovers T from Box._make([A()]).a when
-// the make sequence has a single Class() element (single-field namedtuple —
-// dual-class solid). Multi-field inline .field fails closed (use assign bind).
-func pythonNamedtupleMakeFieldAccessType(attr *grammar.Node, content []byte) string {
+// pythonNamedtupleMakeFieldAccessType recovers T from Box._make([A()]).a /
+// Box._make([ba.get()]).a when the make sequence has a single Class() or
+// method-return element (single-field namedtuple — dual-class solid). Multi-field
+// inline .field fails closed (use assign bind).
+func pythonNamedtupleMakeFieldAccessType(attr *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
 	if attr == nil || attr.Type() != "attribute" {
 		return ""
 	}
@@ -8163,16 +8180,20 @@ func pythonNamedtupleMakeFieldAccessType(attr *grammar.Node, content []byte) str
 		return ""
 	}
 	elems := pythonNamedtupleMakeSeqElems(obj, content)
-	// Single-element make: only one field value; .a peels that Class leaf.
+	// Single-element make: only one field value; .a peels that leaf.
 	if len(elems) != 1 {
 		return ""
+	}
+	if et := pythonObjectLeafType(elems[0], content, funcReturns, typeOf, fieldOf); et != "" {
+		return et
 	}
 	return pythonExprClassType(elems[0], content)
 }
 
-// pythonNamedtupleMakeIndexType recovers T from Box._make([A(), B()])[i] when
-// index i is a decimal integer selecting a Class() sequence element.
-func pythonNamedtupleMakeIndexType(sub *grammar.Node, content []byte) string {
+// pythonNamedtupleMakeIndexType recovers T from Box._make([A(), B()])[i] /
+// Box._make([ba.get()])[0] when index i is a decimal integer selecting a Class()
+// or method-return sequence element.
+func pythonNamedtupleMakeIndexType(sub *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
 	if sub == nil || sub.Type() != "subscript" {
 		return ""
 	}
@@ -8191,6 +8212,9 @@ func pythonNamedtupleMakeIndexType(sub *grammar.Node, content []byte) string {
 	elems := pythonNamedtupleMakeSeqElems(val, content)
 	if idx >= len(elems) {
 		return ""
+	}
+	if et := pythonObjectLeafType(elems[idx], content, funcReturns, typeOf, fieldOf); et != "" {
+		return et
 	}
 	return pythonExprClassType(elems[idx], content)
 }
