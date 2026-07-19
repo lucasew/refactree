@@ -2568,19 +2568,32 @@ func jsClassFieldAccessType(obj *grammar.Node, content []byte, typedLocals map[s
 	return ""
 }
 
-// jsClassMethodReturns maps same-file class → zero-arg method name → return type
-// leaf recovered from body-only `return new T()` / `return this.field` when field
-// is indexed (new T() initializer). Private methods keep the '#' name.
-// Static methods included (A.create() → A). Methods with parameters fail closed.
-// Enables new BoxA().get().helper() / A.create().helper() / this.#get().helper()
-// under foreign same-leaf methods.
+// jsClassMethodReturns maps same-file class → method name → return type leaf.
+// Private methods keep the '#' name. Static methods included (A.create() → A).
+//
+// Harvest order (two-pass so method-return factory bodies peel even when BoxA
+// is declared after A — same leaf as pythonSameFileFuncReturnTypes):
+//  1. TS return type annotations (`static fromBox(ba: BoxA): A`) and zero-arg
+//     body peels (`return new T()` / `return this.field` / `return this`).
+//  2. Body peels that need other methods' returns (`return new BoxA().get()` /
+//     `return ba.get()` with typed param ba: BoxA / `return x` after assign).
+// Methods with parameters fail closed unless annotation or body peels to a
+// concrete leaf (A.fromBox(ba).run() under foreign same-leaf).
+// Enables new BoxA().get().helper() / A.create().helper() / A.fromBox(ba).run()
+// / this.#get().helper() under foreign same-leaf methods.
 func jsClassMethodReturns(root *grammar.Node, content []byte, classFields map[string]map[string]string) map[string]map[string]string {
 	out := map[string]map[string]string{}
 	if root == nil {
 		return out
 	}
-	var walk func(n *grammar.Node)
-	walk = func(n *grammar.Node) {
+	// Collect class bodies for two passes.
+	type classBody struct {
+		name string
+		body *grammar.Node
+	}
+	var classes []classBody
+	var collect func(n *grammar.Node)
+	collect = func(n *grammar.Node) {
 		if n == nil || n.IsNull() {
 			return
 		}
@@ -2588,58 +2601,124 @@ func jsClassMethodReturns(root *grammar.Node, content []byte, classFields map[st
 			nameN := ingest.ChildByField(n, "name")
 			body := ingest.ChildByField(n, "body")
 			if nameN != nil && body != nil {
-				typeName := ingest.NodeText(nameN, content)
-				if typeName != "" {
-					methods := map[string]string{}
-					for i := uint32(0); i < body.ChildCount(); i++ {
-						ch := body.Child(i)
-						if ch == nil || ch.Type() != "method_definition" {
-							continue
-						}
-						// Zero formal parameters only (fail closed on args).
-						if !jsMethodDefinitionZeroArg(ch) {
-							continue
-						}
-						prop := ingest.ChildByField(ch, "name")
-						if prop == nil {
-							// property / private name as first identifier-like child.
-							for j := uint32(0); j < ch.ChildCount(); j++ {
-								c := ch.Child(j)
-								if c == nil {
-									continue
-								}
-								switch c.Type() {
-								case "property_identifier", "private_property_identifier", "identifier":
-									prop = c
-								}
-								if prop != nil {
-									break
-								}
-							}
-						}
-						if prop == nil {
-							continue
-						}
-						mname := ingest.NodeText(prop, content)
-						if mname == "" || mname == "constructor" {
-							continue
-						}
-						if t := jsMethodBodyReturnType(ch, content, typeName, classFields); t != "" {
-							methods[mname] = t
-						}
-					}
-					if len(methods) > 0 {
-						out[typeName] = methods
-					}
+				if typeName := ingest.NodeText(nameN, content); typeName != "" {
+					classes = append(classes, classBody{name: typeName, body: body})
 				}
 			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
-			walk(n.Child(i))
+			collect(n.Child(i))
 		}
 	}
-	walk(root)
+	collect(root)
+
+	harvestMethod := func(ch *grammar.Node, typeName string, withMethodReturns bool) (mname, ret string) {
+		if ch == nil || ch.Type() != "method_definition" {
+			return "", ""
+		}
+		prop := ingest.ChildByField(ch, "name")
+		if prop == nil {
+			// property / private name as first identifier-like child.
+			for j := uint32(0); j < ch.ChildCount(); j++ {
+				c := ch.Child(j)
+				if c == nil {
+					continue
+				}
+				switch c.Type() {
+				case "property_identifier", "private_property_identifier", "identifier":
+					prop = c
+				}
+				if prop != nil {
+					break
+				}
+			}
+		}
+		if prop == nil {
+			return "", ""
+		}
+		mname = ingest.NodeText(prop, content)
+		if mname == "" || mname == "constructor" {
+			return "", ""
+		}
+		// Pass 1 preference: TS return type annotation (`: A`).
+		if !withMethodReturns {
+			if t := jsMethodReturnTypeAnnotation(ch, content); t != "" {
+				return mname, t
+			}
+			// Zero-arg body: return new T() / this.field / this (no methodReturns).
+			if jsMethodDefinitionZeroArg(ch) {
+				if t := jsMethodBodyReturnType(ch, content, typeName, classFields, nil); t != "" {
+					return mname, t
+				}
+			}
+			return mname, ""
+		}
+		// Pass 2: body peels with methodReturns (method-return / typed-param).
+		// Skip if already filled.
+		if methods := out[typeName]; methods != nil && methods[mname] != "" {
+			return mname, ""
+		}
+		if t := jsMethodBodyReturnType(ch, content, typeName, classFields, out); t != "" {
+			return mname, t
+		}
+		return mname, ""
+	}
+
+	// Pass 1: annotations + zero-arg Class/field peels.
+	for _, cl := range classes {
+		methods := out[cl.name]
+		if methods == nil {
+			methods = map[string]string{}
+		}
+		for i := uint32(0); i < cl.body.ChildCount(); i++ {
+			ch := cl.body.Child(i)
+			mname, ret := harvestMethod(ch, cl.name, false)
+			if mname != "" && ret != "" {
+				methods[mname] = ret
+			}
+		}
+		if len(methods) > 0 {
+			out[cl.name] = methods
+		}
+	}
+	// Pass 2: method-return / typed-param body peels (needs pass-1 index).
+	for _, cl := range classes {
+		methods := out[cl.name]
+		if methods == nil {
+			methods = map[string]string{}
+		}
+		for i := uint32(0); i < cl.body.ChildCount(); i++ {
+			ch := cl.body.Child(i)
+			mname, ret := harvestMethod(ch, cl.name, true)
+			if mname != "" && ret != "" {
+				methods[mname] = ret
+			}
+		}
+		if len(methods) > 0 {
+			out[cl.name] = methods
+		}
+	}
 	return out
+}
+
+// jsMethodReturnTypeAnnotation recovers T from a TS method return type
+// annotation: `static fromBox(ba: BoxA): A` / `get(): A`. Empty when absent
+// or not a simple type_identifier (generics peel via jsTypeName).
+func jsMethodReturnTypeAnnotation(method *grammar.Node, content []byte) string {
+	if method == nil {
+		return ""
+	}
+	// Field "return_type" when present; else sibling type_annotation after params.
+	if rt := ingest.ChildByField(method, "return_type"); rt != nil {
+		return jsTypeName(rt, content)
+	}
+	for i := uint32(0); i < method.ChildCount(); i++ {
+		ch := method.Child(i)
+		if ch != nil && ch.Type() == "type_annotation" {
+			return jsTypeName(ch, content)
+		}
+	}
+	return ""
 }
 
 // jsMethodDefinitionZeroArg reports whether a method_definition has no formal params.
@@ -2676,10 +2755,13 @@ func jsMethodDefinitionZeroArg(method *grammar.Node) bool {
 	return true
 }
 
-// jsMethodBodyReturnType recovers T when every return in method is `return new T()`
-// or `return this.field` / `return this.#field` with field typed as T in classFields.
+// jsMethodBodyReturnType recovers T when every return in method is
+// `return new T()` / `return this.field` / `return this` / `return ba.get()`
+// (typed param or local) / `return new BoxA().get()` (methodReturns) /
+// `return x` after `const x = …` local assignment.
 // Nested function bodies are skipped. Zero/mixed/unknown returns fail closed.
-func jsMethodBodyReturnType(method *grammar.Node, content []byte, className string, classFields map[string]map[string]string) string {
+// methodReturns may be nil (pass-1 Class/field peels only).
+func jsMethodBodyReturnType(method *grammar.Node, content []byte, className string, classFields, methodReturns map[string]map[string]string) string {
 	if method == nil {
 		return ""
 	}
@@ -2687,6 +2769,10 @@ func jsMethodBodyReturnType(method *grammar.Node, content []byte, className stri
 	if body == nil || body.Type() != "statement_block" {
 		return ""
 	}
+	// Seed typed params so return ba.get() peels under foreign same-leaf.
+	localCtor := map[string]string{}
+	jsHarvestMethodTypedParams(method, content, localCtor)
+
 	const fail = "-"
 	found := ""
 	saw := false
@@ -2700,6 +2786,26 @@ func jsMethodBodyReturnType(method *grammar.Node, content []byte, className stri
 			"function_expression", "generator_function", "arrow_function",
 			"method_definition", "class_declaration", "class":
 			return
+		case "lexical_declaration", "variable_declaration":
+			// const x = new T() / ba.get() / new BoxA().get() — track for return x.
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				child := n.Child(i)
+				if child == nil || child.Type() != "variable_declarator" {
+					continue
+				}
+				nameN := ingest.ChildByField(child, "name")
+				valN := ingest.ChildByField(child, "value")
+				if nameN == nil || nameN.Type() != "identifier" || valN == nil {
+					continue
+				}
+				name := ingest.NodeText(nameN, content)
+				if name == "" {
+					continue
+				}
+				if t := jsMethodBodyExprLeafType(valN, content, className, localCtor, classFields, methodReturns); t != "" {
+					localCtor[name] = t
+				}
+			}
 		case "return_statement":
 			var expr *grammar.Node
 			for i := uint32(0); i < n.ChildCount(); i++ {
@@ -2710,24 +2816,7 @@ func jsMethodBodyReturnType(method *grammar.Node, content []byte, className stri
 				expr = ch
 				break
 			}
-			t := ""
-			if expr != nil {
-				if nt := jsNewExpressionType(expr, content); nt != "" {
-					t = nt
-				} else if expr.Type() == "member_expression" || expr.Type() == "member_expression_optional" || expr.Type() == "optional_chain" {
-					// return this.#a / return this.a
-					base := ingest.ChildByField(expr, "object")
-					prop := ingest.ChildByField(expr, "property")
-					if base != nil && base.Type() == "this" && prop != nil && classFields != nil {
-						if fields := classFields[className]; fields != nil {
-							t = fields[ingest.NodeText(prop, content)]
-						}
-					}
-				} else if expr.Type() == "this" {
-					// return this — Self-like zero-arg identity.
-					t = className
-				}
-			}
+			t := jsMethodBodyExprLeafType(expr, content, className, localCtor, classFields, methodReturns)
 			if t == "" {
 				found = fail
 				return
@@ -2751,27 +2840,98 @@ func jsMethodBodyReturnType(method *grammar.Node, content []byte, className stri
 	return found
 }
 
+// jsHarvestMethodTypedParams seeds localCtor from TS formal params:
+// `static fromBox(ba: BoxA)` → localCtor["ba"]="BoxA". Plain JS has none.
+func jsHarvestMethodTypedParams(method *grammar.Node, content []byte, localCtor map[string]string) {
+	if method == nil || localCtor == nil {
+		return
+	}
+	params := ingest.ChildByField(method, "parameters")
+	if params == nil {
+		for i := uint32(0); i < method.ChildCount(); i++ {
+			c := method.Child(i)
+			if c != nil && (c.Type() == "formal_parameters" || c.Type() == "parameters") {
+				params = c
+				break
+			}
+		}
+	}
+	if params == nil {
+		return
+	}
+	for i := uint32(0); i < params.ChildCount(); i++ {
+		ch := params.Child(i)
+		if ch == nil {
+			continue
+		}
+		switch ch.Type() {
+		case "required_parameter", "optional_parameter", "assignment_pattern":
+			nameN := ingest.ChildByField(ch, "pattern")
+			if nameN == nil {
+				nameN = ingest.ChildByField(ch, "name")
+			}
+			if nameN == nil {
+				nameN = ingest.ChildByType(ch, "identifier")
+			}
+			typeN := ingest.ChildByField(ch, "type")
+			if nameN != nil && nameN.Type() == "identifier" && typeN != nil {
+				if tn := jsTypeName(typeN, content); tn != "" {
+					if name := ingest.NodeText(nameN, content); name != "" {
+						localCtor[name] = tn
+					}
+				}
+			}
+		}
+	}
+}
+
+// jsMethodBodyExprLeafType recovers T for a return/assign RHS inside a method
+// body: new T() / this.field / this / typed local / ba.get() / new BoxA().get().
+func jsMethodBodyExprLeafType(expr *grammar.Node, content []byte, className string, localCtor map[string]string, classFields, methodReturns map[string]map[string]string) string {
+	if expr == nil {
+		return ""
+	}
+	if nt := jsNewExpressionType(expr, content); nt != "" {
+		return nt
+	}
+	if expr.Type() == "identifier" {
+		name := ingest.NodeText(expr, content)
+		if localCtor != nil {
+			if t := localCtor[name]; t != "" {
+				return t
+			}
+		}
+		return ""
+	}
+	if expr.Type() == "this" {
+		return className
+	}
+	if expr.Type() == "member_expression" || expr.Type() == "member_expression_optional" || expr.Type() == "optional_chain" {
+		// return this.#a / return this.a
+		base := ingest.ChildByField(expr, "object")
+		prop := ingest.ChildByField(expr, "property")
+		if base != nil && base.Type() == "this" && prop != nil && classFields != nil {
+			if fields := classFields[className]; fields != nil {
+				return fields[ingest.NodeText(prop, content)]
+			}
+		}
+	}
+	if expr.Type() == "call_expression" && methodReturns != nil {
+		// return ba.get() / return new BoxA().get() — peel via methodReturns.
+		if t := jsMethodCallReturnType(expr, content, localCtor, classFields, methodReturns, className); t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
 // jsMethodCallReturnType recovers T from new BoxA().get() / A.create() /
-// this.#get() / ba.get() when the zero-arg method is indexed in methodReturns.
-// Unknown callees / methods with args fail closed.
+// A.fromBox(ba) / this.#get() / ba.get() when the method is indexed in
+// methodReturns. Arguments are ignored once the method return leaf is known
+// (factory/with-arg peels; unknown methods fail closed via missing index).
 func jsMethodCallReturnType(call *grammar.Node, content []byte, typedLocals map[string]string, classFields, methodReturns map[string]map[string]string, enclosingClass string) string {
 	if call == nil || call.Type() != "call_expression" || methodReturns == nil {
 		return ""
-	}
-	// Fail closed when the call has any real argument.
-	if args := ingest.ChildByField(call, "arguments"); args != nil {
-		for i := uint32(0); i < args.ChildCount(); i++ {
-			c := args.Child(i)
-			if c == nil {
-				continue
-			}
-			switch c.Type() {
-			case "(", ")", ",", "comment":
-				continue
-			default:
-				return ""
-			}
-		}
 	}
 	fn := ingest.ChildByField(call, "function")
 	if fn == nil {
