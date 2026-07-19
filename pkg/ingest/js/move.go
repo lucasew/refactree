@@ -2040,10 +2040,11 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 			// new Map([[k, new A()]]).forEach((v) => v.run()) /
 			// [new A()].forEach((v) => v.run()) — bind forEach value/elem param.
 			jsBindForEachParams(n, content, ourReceivers, out, arrayLocals, factories, mapLocals, entryArrayLocals, setLocals, extra)
-			// xs.push(new A()) / xs.unshift(new A()) — bare array mutation.
+			// xs.push(new A()) / xs.unshift(new A()) / xs.splice(0,0,new A()) /
+			// xs.push(...[new A()]) / xs.fill(new A()) — bare array mutation.
 			// Bind arrayLocals so xs[0].run() / for (const a of xs) peel under
 			// foreign same-leaf. Foreign elems too for shadowing.
-			if local, et := jsArrayMutationElemType(n, content, out, factories); local != "" && et != "" {
+			if local, et := jsArrayMutationElemType(n, content, arrayLocals, out, factories, extra); local != "" && et != "" {
 				arrayLocals[local] = et
 			}
 		case "assignment_expression":
@@ -3138,11 +3139,11 @@ func jsUniformArrayElemType(n *grammar.Node, content []byte, typedLocals, factor
 // groupBy also stores Object.values(groupBy) locals under "@values.<name>" so
 // va[i][0].run() peels after const va = Object.values(ga) (va[i] is T[]).
 type jsExtraLocals struct {
-	objValue         map[string]string // Object.fromEntries / Object.assign → value T
-	groupBy          map[string]string // Object.groupBy result → element T; @values.name → T
-	groupMap         map[string]string // Map.groupBy result → element T
-	groupEntry       map[string]string // [key, T[]] pair local from groupBy entries → T
-	groupEntryArray  map[string]string // Object.entries(groupBy) / ma.entries() local → T
+	objValue        map[string]string // Object.fromEntries / Object.assign → value T
+	groupBy         map[string]string // Object.groupBy result → element T; @values.name → T
+	groupMap        map[string]string // Map.groupBy result → element T
+	groupEntry      map[string]string // [key, T[]] pair local from groupBy entries → T
+	groupEntryArray map[string]string // Object.entries(groupBy) / ma.entries() local → T
 }
 
 // jsArraySourceElemType recovers T from an array-like expression whose elements
@@ -4131,14 +4132,15 @@ func jsArraySpreadElemTypeSelf(n *grammar.Node, content []byte, arrayLocals, typ
 // arr.toSpliced(…) / arr.toReversed() / arr.toSorted(…) / arr.copyWithin(…) /
 // arr.fill(val) / arr.with(i, val) / arr.filter(pred) / arr.map(x => x) /
 // arr.flatMap(x => [x]) when the receiver peels to uniform element type T and
-// any inserted/concatenated/replaced/filled values also peel to T.
+// any inserted/concatenated/replaced values also peel to T. fill is value-typed
+// (overwrite; prior receiver content discarded).
 // Enables [new A()].slice()[0].run() / as.concat([new A()])[0].run() /
 // [new A()].toSpliced(0, 0)[0].run() / [new A()].toReversed()[0].run() /
 // [new A()].toSorted()[0].run() / [new A()].copyWithin(0)[0].run() /
-// [new A()].fill(new A())[0].run() / [new A()].with(0, new A())[0].run() /
+// [null].fill(new A())[0].run() / [new A()].with(0, new A())[0].run() /
 // [new A()].filter(pred)[0].run() / [new A()].map(x => x)[0].run() /
 // [new A()].flatMap(x => [x])[0].run() under foreign same-leaf methods.
-// Mixed concat/toSpliced/with/fill inserts and non-identity map/flatMap fail closed.
+// Mixed concat/toSpliced/with inserts and non-identity map/flatMap fail closed.
 // filter predicate body ignored (not type-changing for uniform arrays).
 func jsArrayIdentityElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals) string {
 	if n == nil || n.Type() != "call_expression" {
@@ -4244,11 +4246,10 @@ func jsArrayIdentityElemType(n *grammar.Node, content []byte, arrayLocals, typed
 		}
 		return jsNestedArrayFlatElemType(obj, content, arrayLocals, typedLocals, factories, extra)
 	case "fill":
-		// arr.fill(val[, start[, end]]) — receiver elems T and val peels to T.
-		t := jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories, extra)
-		if t == "" {
-			return ""
-		}
+		// arr.fill(val[, start[, end]]) overwrites selected slots with val.
+		// Element type is val's type (prior content discarded). Enables
+		// [null].fill(new A())[0].run() / new Array(1).fill(new A())[0].run()
+		// under foreign same-leaf. Non-concrete val fails closed.
 		var val *grammar.Node
 		pos := 0
 		if args != nil {
@@ -4263,10 +4264,10 @@ func jsArrayIdentityElemType(n *grammar.Node, content []byte, arrayLocals, typed
 				}
 			}
 		}
-		if pos < 1 || val == nil || jsExprConcreteType(val, content, typedLocals, factories) != t {
+		if pos < 1 || val == nil {
 			return ""
 		}
-		return t
+		return jsExprConcreteType(val, content, typedLocals, factories)
 	case "concat":
 		// [].concat([new A()]) / [new A()].concat() / as.concat([new A()]) —
 		// empty-array receiver is a wildcard (type from args). Mixed inserts fail closed.
@@ -4452,7 +4453,6 @@ func jsNestedIdentityMapThenFlatElemType(n *grammar.Node, content []byte, arrayL
 	// Inline nest: [[new A()]].map(...).
 	return jsNestedArrayFlatElemType(obj, content, arrayLocals, typedLocals, factories, extra)
 }
-
 
 // jsNestedArrayIndexSourceElemType recovers T from aa[i] / [[new A()]][i] when the
 // receiver is a one-level nested array of T (elements are arrays of T). The
@@ -6258,12 +6258,17 @@ func jsArrayConcatElemType(obj, args *grammar.Node, content []byte, arrayLocals,
 	return argT
 }
 
-// jsArrayMutationElemType recovers (local, T) from xs.push(new A()) /
-// xs.unshift(new A()) / xs.push(new A(), new A()) when every positional arg is
-// a Class() (or typed local/factory) of the same T and the receiver is an
-// identifier. Enables bare array mutation peels under foreign same-leaf.
-// Spread args / mixed types / non-ident receivers fail closed.
-func jsArrayMutationElemType(call *grammar.Node, content []byte, typedLocals, factories map[string]string) (local, classType string) {
+// jsArrayMutationElemType recovers (local, T) from bare array mutations when
+// the receiver is an identifier and inserted/filled values peel to uniform T:
+//
+//	xs.push(new A()) / xs.unshift(new A()) / xs.push(new A(), new A())
+//	xs.push(...[new A()]) / xs.push(...as)  — spread of array-source of T
+//	xs.splice(0, 0, new A()) / xs.splice(i, d, new A(), new A())
+//	xs.fill(new A()) / xs.fill(new A(), 0, 1)
+//
+// Enables xs[0].run() / for (const a of xs) under foreign same-leaf.
+// Mixed types / non-ident receivers / non-array spreads fail closed.
+func jsArrayMutationElemType(call *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals) (local, classType string) {
 	if call == nil || call.Type() != "call_expression" {
 		return "", ""
 	}
@@ -6280,24 +6285,73 @@ func jsArrayMutationElemType(call *grammar.Node, content []byte, typedLocals, fa
 	if prop == nil || obj == nil || obj.Type() != "identifier" {
 		return "", ""
 	}
-	switch ingest.NodeText(prop, content) {
-	case "push", "unshift":
+	method := ingest.NodeText(prop, content)
+	switch method {
+	case "push", "unshift", "splice", "fill":
 		// ok
 	default:
 		return "", ""
 	}
+	// fill(val[, start[, end]]) — type from first arg only (overwrite).
+	if method == "fill" {
+		var val *grammar.Node
+		pos := 0
+		for i := uint32(0); i < args.ChildCount(); i++ {
+			ch := args.Child(i)
+			if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+				continue
+			}
+			pos++
+			if pos == 1 {
+				val = ch
+			}
+		}
+		if pos < 1 || val == nil {
+			return "", ""
+		}
+		t := jsExprConcreteType(val, content, typedLocals, factories)
+		if t == "" {
+			return "", ""
+		}
+		return ingest.NodeText(obj, content), t
+	}
+	// push/unshift: all args are inserts.
+	// splice(start, deleteCount, ...items): items after the first two.
+	skip := 0
+	if method == "splice" {
+		skip = 2
+	}
 	found := ""
 	saw := false
+	pos := 0
 	for i := uint32(0); i < args.ChildCount(); i++ {
 		ch := args.Child(i)
 		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
 			continue
 		}
-		// Spread / non-concrete — fail closed.
-		if ch.Type() == "spread_element" {
-			return "", ""
+		pos++
+		if pos <= skip {
+			continue
 		}
-		t := jsExprConcreteType(ch, content, typedLocals, factories)
+		var t string
+		if ch.Type() == "spread_element" {
+			// xs.push(...[new A()]) / xs.push(...as) — spread of array-source of T.
+			var arg *grammar.Node
+			for j := uint32(0); j < ch.ChildCount(); j++ {
+				c := ch.Child(j)
+				if c == nil || c.Type() == "..." {
+					continue
+				}
+				arg = c
+				break
+			}
+			if arg == nil {
+				return "", ""
+			}
+			t = jsArraySourceElemType(arg, content, arrayLocals, typedLocals, factories, extra)
+		} else {
+			t = jsExprConcreteType(ch, content, typedLocals, factories)
+		}
 		if t == "" {
 			return "", ""
 		}
