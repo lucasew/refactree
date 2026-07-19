@@ -3031,7 +3031,7 @@ func sameFileIfaceMethodCollectionResults(root *grammar.Node, content []byte) (m
 		return out, multi
 	}
 	namedColl := sameFileNamedCollectionResults(root, content)
-	edges := map[string]string{}     // type GA = GA0 / type GA GA0
+	edges := map[string]string{}    // type GA = GA0 / type GA GA0
 	embeds := map[string][]string{} // type HA interface { GA } — embedded ifaces
 	register := func(recv, name string, infos []rangeSourceInfo) {
 		if recv == "" || name == "" || name == "_" || len(infos) == 0 {
@@ -6440,6 +6440,7 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType, valueT
 		// concrete named result (*A / A / BoxA). Multi-result methods fail
 		// closed (not a lone call value). Enables dual-class under-rename peels
 		// when assigned form already works via typed locals.
+		// wa.BA.Get().M — nested named-struct field then method (selectorOperandStructType).
 		if fn != nil && fn.Type() == "selector_expression" && len(methodNamed) > 0 {
 			op := ingest.ChildByField(fn, "operand")
 			field := ingest.ChildByField(fn, "field")
@@ -6453,7 +6454,13 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType, valueT
 						recvType = strings.TrimPrefix(t, "*")
 					}
 				}
-				// Nested: sa.Self().Get() — peel Self() first.
+				// Nested field path: wa.BA / sa.Self() — named-struct intermediate.
+				if recvType == "" {
+					if t, ok := selectorOperandStructType(op, content, valueType, structFields, n.StartByte(), indexElemType, namedColl, funcResults, methodNamed); ok && t != "" {
+						recvType = strings.TrimPrefix(t, "*")
+					}
+				}
+				// Nested: sa.Self().Get() via goComplexOperandType (method/call peels).
 				if recvType == "" {
 					if t := goComplexOperandType(op, content, indexElemType, valueType, funcColl, funcResults, genericPeels, namedColl, funcRetFunc, structFields, ifaceColl, ifaceFunc, methodNamed); t != "" {
 						recvType = strings.TrimPrefix(t, "*")

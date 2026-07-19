@@ -1397,10 +1397,19 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					javaBindRecordLocalComps(name, inferred, recordIndex, compOf)
 					javaBindRecordLocalComps(name, inferred, fieldIndex, compOf)
 					javaBindRecordLocalComps(name, inferred, methodIndex, compOf)
-				} else if et := javaFieldAccessMemberType(valN, content, compOf); ourReceivers[et] {
+				} else if et := javaFieldAccessMemberType(valN, content, compOf); et != "" {
 					// var xa = box.a / var xa = ba.a — class/record field access when
 					// box/ba is a typed local with member type A.
-					out[name] = true
+					// var ha = oa.h — outer field of non-our type HolderA so ha.get()
+					// peels under foreign same-leaf (bind members, not only ourReceivers).
+					if ourReceivers[et] {
+						out[name] = true
+					}
+					if recordIndex[et] != nil || fieldIndex[et] != nil || methodIndex[et] != nil {
+						javaBindRecordLocalComps(name, et, recordIndex, compOf)
+						javaBindRecordLocalComps(name, et, fieldIndex, compOf)
+						javaBindRecordLocalComps(name, et, methodIndex, compOf)
+					}
 				} else if et := javaWindowListExprElemType(valN, content, elemOf, valOf, windowStreamOf, windowOptOf); et != "" {
 					// var w = stream.gather(Gatherers.windowFixed(n)).findFirst().get() /
 					// var w = s.findFirst().get() after var s = gather(window*) /
@@ -1582,7 +1591,6 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 	walk(root)
 	return out, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf
 }
-
 
 // javaMergeTypeMembers merges record component and class field indexes into a
 // single type → member → leaf map for new T(...).m() peels under foreign same-leaf.
@@ -1846,7 +1854,6 @@ func javaCollectionOfCollectionElemType(typeN *grammar.Node, content []byte) str
 	}
 	return args[0]
 }
-
 
 // javaMapOfCollectionElemType recovers T from Map/HashMap of List/Collection/Set of T
 // (one nesting level only). Map<K, List<A>> → "A"; Map<K,A> / List fail closed.
@@ -6950,6 +6957,12 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 	if t := javaRecordComponentAccessType(val, obj, method, content, compOf, typeMembers); t != "" {
 		return t
 	}
+	// Optional.of(ba.get()).get() / ofNullable / orElseThrow — zero-arg method
+	// return wrapped in Optional.of under foreign same-leaf (assigned form via
+	// typedLocals; bare Optional.of(a).get() already peels via ident unwrap).
+	if t := javaOptionalOfMethodReturnType(val, content, compOf, typeMembers); t != "" {
+		return t
+	}
 	switch method {
 	case "get", "getOrDefault",
 		// Map computeIfAbsent/putIfAbsent return V (same as get for typed locals).
@@ -7676,9 +7689,22 @@ func javaRecordComponentAccessType(call, obj *grammar.Node, method string, conte
 		return ""
 	}
 	// ba.a() / ba.get() when ba is a known record/class local.
-	if obj.Type() == "identifier" && compOf != nil {
-		if t := compOf[ingest.NodeText(obj, content)+"."+method]; t != "" {
-			return t
+	// A.create() — static/instance zero-arg method on class name (typeMembers["A"]).
+	if (obj.Type() == "identifier" || obj.Type() == "type_identifier") && (compOf != nil || typeMembers != nil) {
+		name := ingest.NodeText(obj, content)
+		if compOf != nil {
+			if t := compOf[name+"."+method]; t != "" {
+				return t
+			}
+		}
+		// Class-qualified static factory: A.create() → typeMembers[A][create].
+		// Prefer local compOf above so shadowed locals stay local peels.
+		if typeMembers != nil {
+			if comps := typeMembers[name]; comps != nil {
+				if t := comps[method]; t != "" {
+					return t
+				}
+			}
 		}
 	}
 	// new BoxA(new A()).a() — component type from same-file record/class header.
@@ -7700,6 +7726,17 @@ func javaRecordComponentAccessType(call, obj *grammar.Node, method string, conte
 			if tn != "" {
 				if comps := typeMembers[tn]; comps != nil {
 					return comps[method]
+				}
+			}
+		}
+	}
+	// oa.h.get() — field access peel then zero-arg method return (dual-class).
+	// oa is a typed local with field h of type HolderA; typeMembers[HolderA][get]=A.
+	if obj.Type() == "field_access" && typeMembers != nil {
+		if ft := javaFieldAccessMemberType(obj, content, compOf); ft != "" {
+			if comps := typeMembers[ft]; comps != nil {
+				if t := comps[method]; t != "" {
+					return t
 				}
 			}
 		}
@@ -7727,6 +7764,71 @@ func javaMethodInvocationName(call *grammar.Node, content []byte) string {
 		return ""
 	}
 	return ingest.NodeText(nameN, content)
+}
+
+// javaOptionalOfMethodReturnType recovers T from Optional.of(ba.get()).get() /
+// ofNullable(ba.get()).orElseThrow() when ba.get() is a same-file zero-arg method
+// with concrete return T (typeMembers). Bare Optional.of(a) uses typedLocals
+// via javaOptionalOfIdentUnwrap. Multi-arg / non-Optional / unknown methods fail closed.
+func javaOptionalOfMethodReturnType(call *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
+	if call == nil || call.Type() != "method_invocation" || typeMembers == nil {
+		return ""
+	}
+	nameN := ingest.ChildByField(call, "name")
+	if nameN == nil {
+		return ""
+	}
+	switch ingest.NodeText(nameN, content) {
+	case "get", "orElseThrow", "orElse", "orElseGet":
+		// ok — Optional unwrap
+	default:
+		return ""
+	}
+	method := ingest.NodeText(nameN, content)
+	if method == "get" || method == "orElseThrow" {
+		if !javaCallIsZeroArg(call) {
+			return ""
+		}
+	}
+	opt := ingest.ChildByField(call, "object")
+	for opt != nil && !opt.IsNull() && opt.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(opt, "expression")
+		if inner == nil {
+			for i := uint32(0); i < opt.ChildCount(); i++ {
+				ch := opt.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		opt = inner
+	}
+	if opt == nil || opt.Type() != "method_invocation" {
+		return ""
+	}
+	optName := ingest.ChildByField(opt, "name")
+	optRecv := ingest.ChildByField(opt, "object")
+	if optName == nil || optRecv == nil {
+		return ""
+	}
+	switch ingest.NodeText(optName, content) {
+	case "of", "ofNullable":
+		// ok
+	default:
+		return ""
+	}
+	if javaStaticFactoryReceiverName(optRecv, content) != "Optional" {
+		return ""
+	}
+	first := javaFirstMethodArg(opt)
+	if first == nil || first.Type() != "method_invocation" {
+		return ""
+	}
+	// ba.get() / oa.h.get() — zero-arg product method return.
+	return javaRecordComponentAccessType(first, ingest.ChildByField(first, "object"),
+		javaMethodInvocationName(first, content), content, compOf, typeMembers)
 }
 
 // javaSameFileMethodReturns maps same-file class/record type → zero-arg method
@@ -8487,7 +8589,6 @@ func javaSwitchExprTypedLocalType(sw *grammar.Node, content []byte, typedLocals 
 	}
 	return saw
 }
-
 
 // javaTernaryTypedLocalType reports whether both ternary arms are identifiers
 // bound in typedLocals (our receivers). Used for var xa = c ? a : x under

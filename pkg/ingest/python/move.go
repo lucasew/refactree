@@ -2237,7 +2237,7 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 			// factory recorded as "A.make" / "A.create" in funcReturns.
 			// ba.get().run() — instance method with annotated return (BoxA.get → A).
 			if fn.Type() == "attribute" {
-				if rt := pythonCallFuncReturnType(obj, content, funcReturns, typeOf); rt != "" {
+				if rt := pythonCallFuncReturnType(obj, content, funcReturns, typeOf, fieldOf); rt != "" {
 					return pythonRenameByTypeMaps(rt, ourReceivers, foreignReceivers, nil)
 				}
 			}
@@ -3632,8 +3632,8 @@ func pythonFuncBodyReturnsCls(fn *grammar.Node, content []byte) bool {
 // leaf of a call: make_a() (bare), A.make() / A.create() ("Class.method" keys),
 // or ba.get() when typeOf[ba]=BoxA and funcReturns["BoxA.get"]=A (instance
 // method with annotated return under foreign same-leaf).
-// typeOf may be nil (static/class factory paths only).
-func pythonCallFuncReturnType(call *grammar.Node, content []byte, funcReturns, typeOf map[string]string) string {
+// typeOf / fieldOf may be nil (static/class factory paths only).
+func pythonCallFuncReturnType(call *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
 	if call == nil || call.Type() != "call" || funcReturns == nil {
 		return ""
 	}
@@ -3671,8 +3671,18 @@ func pythonCallFuncReturnType(call *grammar.Node, content []byte, funcReturns, t
 		}
 		// ba.self().get() — peel nested call receiver type then method return.
 		if obj.Type() == "call" {
-			if rt := pythonCallFuncReturnType(obj, content, funcReturns, typeOf); rt != "" {
+			if rt := pythonCallFuncReturnType(obj, content, funcReturns, typeOf, fieldOf); rt != "" {
 				if t := funcReturns[rt+"."+mname]; t != "" {
+					return t
+				}
+			}
+		}
+		// oa.h.get() — field access peel then instance method return (dual-class).
+		// oa typed OuterA with field h: HolderA; funcReturns["HolderA.get"]=A.
+		// Assigned ha = oa.h; ha.get() already peels via typeOf.
+		if obj.Type() == "attribute" {
+			if ft := pythonFieldAccessType(obj, content, fieldOf, funcReturns, typeOf); ft != "" {
+				if t := funcReturns[ft+"."+mname]; t != "" {
 					return t
 				}
 			}
@@ -4243,7 +4253,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					// factory (attribute callee; "Class.method" keys in funcReturns).
 					// Bare make_a() is handled in the identifier branch below too.
 					if fn != nil && fn.Type() == "attribute" {
-						if rt := pythonCallFuncReturnType(right, content, funcReturns, typeOf); rt != "" {
+						if rt := pythonCallFuncReturnType(right, content, funcReturns, typeOf, fieldOf); rt != "" {
 							typeOf[lname] = rt
 							bindFields(lname, rt)
 							if ourReceivers[rt] {
@@ -5023,7 +5033,7 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// a := A.make() / a := A.create() — class factory attribute callee.
 				// a := ba.get() — instance method annotated return.
 				if fn != nil && fn.Type() == "attribute" {
-					if rt := pythonCallFuncReturnType(valueN, content, funcReturns, typeOf); rt != "" {
+					if rt := pythonCallFuncReturnType(valueN, content, funcReturns, typeOf, fieldOf); rt != "" {
 						typeOf[lname] = rt
 						if ourReceivers[rt] {
 							out[lname] = true
@@ -6528,7 +6538,7 @@ func pythonFieldAccessType(attr *grammar.Node, content []byte, fieldOf, funcRetu
 		if tn := pythonExprClassType(obj, content); tn != "" {
 			return fieldOf[tn+"."+fname]
 		}
-		if tn := pythonCallFuncReturnType(obj, content, funcReturns, typeOf); tn != "" {
+		if tn := pythonCallFuncReturnType(obj, content, funcReturns, typeOf, fieldOf); tn != "" {
 			return fieldOf[tn+"."+fname]
 		}
 	}

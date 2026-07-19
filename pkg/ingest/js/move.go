@@ -1245,8 +1245,9 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 
 	factories := jsSameFileFactoryReturns(pf.Root, content)
 	generators := jsSameFileGeneratorYields(pf.Root, content)
-	typedLocals, settledOf, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals := jsTypedLocals(pf.Root, content, ourReceivers, factories, generators)
 	classFields := jsClassFieldIndex(pf.Root, content)
+	methodReturns := jsClassMethodReturns(pf.Root, content, classFields)
+	typedLocals, settledOf, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals := jsTypedLocals(pf.Root, content, ourReceivers, factories, generators, classFields, methodReturns)
 	// Unique method leaf: ExtraRename already rewrites every simple obj.oldLeaf.
 	// Apply the same aggressiveness to object-pattern property keys.
 	uniqueLeaf := len(foreignReceivers) == 0
@@ -1288,7 +1289,7 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 			obj := ingest.ChildByField(n, "object")
 			prop := ingest.ChildByField(n, "property")
 			if obj != nil && prop != nil && ingest.NodeText(prop, content) == oldLeaf {
-				if jsShouldRenameMember(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, settledOf, factories, generators, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals, classFields) {
+				if jsShouldRenameMember(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, settledOf, factories, generators, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals, classFields, methodReturns) {
 					addEdit(prop.StartByte(), prop.EndByte(), newLeaf)
 				}
 			}
@@ -1305,7 +1306,7 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 			nameN := ingest.ChildByField(n, "name")
 			valN := ingest.ChildByField(n, "value")
 			if nameN != nil && nameN.Type() == "object_pattern" && valN != nil {
-				if uniqueLeaf || jsShouldRenameMember(valN, content, classHere, ourReceivers, foreignReceivers, typedLocals, settledOf, factories, generators, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals, classFields) {
+				if uniqueLeaf || jsShouldRenameMember(valN, content, classHere, ourReceivers, foreignReceivers, typedLocals, settledOf, factories, generators, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals, classFields, methodReturns) {
 					jsCollectObjectPatternMethodEdits(nameN, content, oldLeaf, newLeaf, addEdit)
 					// Shorthand `{ helper }` also renames the local binding — rewrite
 					// bare oldLeaf identifiers later in the same statement_block.
@@ -1504,7 +1505,7 @@ func jsRenameByTypeMaps(name string, ourReceivers, foreignReceivers map[string]b
 // (pair value is T[], not T — unlike scalar entryLocals).
 // groupEntryArrayLocals maps groupBy-entries array/iterator locals → element T
 // (const es = Object.entries(ga) → es:"A") so es[i][1][0].run() peels.
-func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers map[string]bool, typedLocals, settledOf, factories, generators, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals map[string]string, classFields map[string]map[string]string) bool {
+func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass string, ourReceivers, foreignReceivers map[string]bool, typedLocals, settledOf, factories, generators, genLocals, arrayLocals, entryLocals, entryArrayLocals, entryNextLocals, mapLocals, objValueLocals, setLocals, groupByLocals, groupMapLocals, groupEntryLocals, groupEntryArrayLocals map[string]string, classFields, methodReturns map[string]map[string]string) bool {
 	if obj == nil {
 		return false
 	}
@@ -1709,10 +1710,18 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 		}
 	}
 	// new BoxA().a.helper() / BoxA.sa.helper() / ba.a.helper() /
-	// this.#a.helper() / this.a.helper() — class field peels from same-file
-	// field initializers (new T()) under foreign same-leaf (private # too).
+	// this.#a.helper() / this.a.helper() / new OuterA().box.a.helper() —
+	// class field peels from same-file field initializers (new T()) under
+	// foreign same-leaf (private # too; nested field paths).
 	if obj.Type() == "member_expression" || obj.Type() == "member_expression_optional" || obj.Type() == "optional_chain" {
-		if t := jsClassFieldAccessType(obj, content, typedLocals, classFields, enclosingClass); t != "" {
+		if t := jsClassFieldAccessType(obj, content, typedLocals, classFields, methodReturns, enclosingClass); t != "" {
+			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		}
+	}
+	// new BoxA().get().helper() / A.create().helper() / this.#get().helper() —
+	// zero-arg same-file method return peels under foreign same-leaf.
+	if obj.Type() == "call_expression" {
+		if t := jsMethodCallReturnType(obj, content, typedLocals, classFields, methodReturns, enclosingClass); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 	}
@@ -1752,7 +1761,7 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 // (const ma = new Map([[k, new A()]]) → ma:"A") so ma.entries() / for-of peels.
 // objValueLocals maps plain-object locals → uniform property value type
 // (const o = Object.fromEntries([[k, new A()]]) → o:"A") so o.k.run() peels.
-func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool, factories, generators map[string]string) (map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string) {
+func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]bool, factories, generators map[string]string, classFields, methodReturns map[string]map[string]string) (map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string, map[string]string) {
 	out := map[string]string{}
 	settledOf := map[string]string{}
 	genLocals := map[string]string{}
@@ -1813,8 +1822,20 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 					continue
 				}
 				if nameN.Type() == "identifier" {
-					if ctor := jsNewExpressionType(valN, content); ourReceivers[ctor] {
+					if ctor := jsNewExpressionType(valN, content); ctor != "" && (ourReceivers[ctor] ||
+						(classFields != nil && classFields[ctor] != nil) ||
+						(methodReturns != nil && methodReturns[ctor] != nil)) {
+						// const a = new A() — our receiver.
+						// const oa = new OuterA() — non-our class with fields/methods so
+						// oa.box.a.helper() peels under foreign same-leaf (dual-class).
 						out[ingest.NodeText(nameN, content)] = ctor
+					} else if t := jsMethodCallReturnType(valN, content, out, classFields, methodReturns, ""); t != "" {
+						// const a = new BoxA().get() / A.create() — method return T.
+						// Bind foreign too so dual-class B rebinds fail closed.
+						out[ingest.NodeText(nameN, content)] = t
+					} else if t := jsClassFieldAccessType(valN, content, out, classFields, methodReturns, ""); t != "" {
+						// const xa = new BoxA().a / oa.box — field peel under foreign same-leaf.
+						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsTernaryExprType(valN, content, out, factories); t != "" {
 						// const xa = c ? a : x / c ? new A() : new A() — both arms agree.
 						// Bind foreign too so dual-class B rebinds fail closed.
@@ -2355,10 +2376,11 @@ func jsClassFieldIndex(root *grammar.Node, content []byte) map[string]map[string
 }
 
 // jsClassFieldAccessType recovers T from new BoxA().a / BoxA.sa / ba.a /
-// this.#a / this.a when the field is indexed from same-file class field
-// initializers (new T()). typedLocals may supply ba → BoxA for instance field
-// peels; enclosingClass supplies this → BoxA inside BoxA methods (private # too).
-func jsClassFieldAccessType(obj *grammar.Node, content []byte, typedLocals map[string]string, classFields map[string]map[string]string, enclosingClass string) string {
+// this.#a / this.a / new OuterA().box.a when the field is indexed from same-file
+// class field initializers (new T()). typedLocals may supply ba → BoxA for
+// instance field peels; enclosingClass supplies this → BoxA inside BoxA methods
+// (private # too). methodReturns peels new BoxA().get().a-style bases.
+func jsClassFieldAccessType(obj *grammar.Node, content []byte, typedLocals map[string]string, classFields, methodReturns map[string]map[string]string, enclosingClass string) string {
 	if obj == nil || classFields == nil {
 		return ""
 	}
@@ -2386,9 +2408,20 @@ func jsClassFieldAccessType(obj *grammar.Node, content []byte, typedLocals map[s
 		name := ingest.NodeText(base, content)
 		if _, isClass := classFields[name]; isClass {
 			typeName = name
-		} else if typedLocals != nil {
+		} else if methodReturns != nil {
+			if _, isClass := methodReturns[name]; isClass {
+				typeName = name
+			}
+		}
+		if typeName == "" && typedLocals != nil {
 			typeName = typedLocals[name]
 		}
+	case "member_expression", "member_expression_optional", "optional_chain":
+		// new OuterA().box.a — nested field path (outer type then field).
+		typeName = jsClassFieldAccessType(base, content, typedLocals, classFields, methodReturns, enclosingClass)
+	case "call_expression":
+		// new BoxA().get().… — method-return base then field (rare product form).
+		typeName = jsMethodCallReturnType(base, content, typedLocals, classFields, methodReturns, enclosingClass)
 	default:
 		return ""
 	}
@@ -2397,6 +2430,263 @@ func jsClassFieldAccessType(obj *grammar.Node, content []byte, typedLocals map[s
 	}
 	if fields := classFields[typeName]; fields != nil {
 		return fields[fname]
+	}
+	return ""
+}
+
+// jsClassMethodReturns maps same-file class → zero-arg method name → return type
+// leaf recovered from body-only `return new T()` / `return this.field` when field
+// is indexed (new T() initializer). Private methods keep the '#' name.
+// Static methods included (A.create() → A). Methods with parameters fail closed.
+// Enables new BoxA().get().helper() / A.create().helper() / this.#get().helper()
+// under foreign same-leaf methods.
+func jsClassMethodReturns(root *grammar.Node, content []byte, classFields map[string]map[string]string) map[string]map[string]string {
+	out := map[string]map[string]string{}
+	if root == nil {
+		return out
+	}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		if n.Type() == "class_declaration" || n.Type() == "class" {
+			nameN := ingest.ChildByField(n, "name")
+			body := ingest.ChildByField(n, "body")
+			if nameN != nil && body != nil {
+				typeName := ingest.NodeText(nameN, content)
+				if typeName != "" {
+					methods := map[string]string{}
+					for i := uint32(0); i < body.ChildCount(); i++ {
+						ch := body.Child(i)
+						if ch == nil || ch.Type() != "method_definition" {
+							continue
+						}
+						// Zero formal parameters only (fail closed on args).
+						if !jsMethodDefinitionZeroArg(ch) {
+							continue
+						}
+						prop := ingest.ChildByField(ch, "name")
+						if prop == nil {
+							// property / private name as first identifier-like child.
+							for j := uint32(0); j < ch.ChildCount(); j++ {
+								c := ch.Child(j)
+								if c == nil {
+									continue
+								}
+								switch c.Type() {
+								case "property_identifier", "private_property_identifier", "identifier":
+									prop = c
+								}
+								if prop != nil {
+									break
+								}
+							}
+						}
+						if prop == nil {
+							continue
+						}
+						mname := ingest.NodeText(prop, content)
+						if mname == "" || mname == "constructor" {
+							continue
+						}
+						if t := jsMethodBodyReturnType(ch, content, typeName, classFields); t != "" {
+							methods[mname] = t
+						}
+					}
+					if len(methods) > 0 {
+						out[typeName] = methods
+					}
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	return out
+}
+
+// jsMethodDefinitionZeroArg reports whether a method_definition has no formal params.
+func jsMethodDefinitionZeroArg(method *grammar.Node) bool {
+	if method == nil {
+		return false
+	}
+	params := ingest.ChildByField(method, "parameters")
+	if params == nil {
+		for i := uint32(0); i < method.ChildCount(); i++ {
+			c := method.Child(i)
+			if c != nil && (c.Type() == "formal_parameters" || c.Type() == "parameters") {
+				params = c
+				break
+			}
+		}
+	}
+	if params == nil {
+		// No params node — treat as zero-arg (getter/setter forms vary).
+		return true
+	}
+	for i := uint32(0); i < params.ChildCount(); i++ {
+		c := params.Child(i)
+		if c == nil {
+			continue
+		}
+		switch c.Type() {
+		case "(", ")", ",", "comment":
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// jsMethodBodyReturnType recovers T when every return in method is `return new T()`
+// or `return this.field` / `return this.#field` with field typed as T in classFields.
+// Nested function bodies are skipped. Zero/mixed/unknown returns fail closed.
+func jsMethodBodyReturnType(method *grammar.Node, content []byte, className string, classFields map[string]map[string]string) string {
+	if method == nil {
+		return ""
+	}
+	body := ingest.ChildByField(method, "body")
+	if body == nil || body.Type() != "statement_block" {
+		return ""
+	}
+	const fail = "-"
+	found := ""
+	saw := false
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() || found == fail {
+			return
+		}
+		switch n.Type() {
+		case "function_declaration", "generator_function_declaration",
+			"function_expression", "generator_function", "arrow_function",
+			"method_definition", "class_declaration", "class":
+			return
+		case "return_statement":
+			var expr *grammar.Node
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch == nil || ch.Type() == "return" || ch.Type() == ";" {
+					continue
+				}
+				expr = ch
+				break
+			}
+			t := ""
+			if expr != nil {
+				if nt := jsNewExpressionType(expr, content); nt != "" {
+					t = nt
+				} else if expr.Type() == "member_expression" || expr.Type() == "member_expression_optional" || expr.Type() == "optional_chain" {
+					// return this.#a / return this.a
+					base := ingest.ChildByField(expr, "object")
+					prop := ingest.ChildByField(expr, "property")
+					if base != nil && base.Type() == "this" && prop != nil && classFields != nil {
+						if fields := classFields[className]; fields != nil {
+							t = fields[ingest.NodeText(prop, content)]
+						}
+					}
+				} else if expr.Type() == "this" {
+					// return this — Self-like zero-arg identity.
+					t = className
+				}
+			}
+			if t == "" {
+				found = fail
+				return
+			}
+			if !saw {
+				found = t
+				saw = true
+			} else if found != t {
+				found = fail
+			}
+			return
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(body)
+	if !saw || found == fail {
+		return ""
+	}
+	return found
+}
+
+// jsMethodCallReturnType recovers T from new BoxA().get() / A.create() /
+// this.#get() / ba.get() when the zero-arg method is indexed in methodReturns.
+// Unknown callees / methods with args fail closed.
+func jsMethodCallReturnType(call *grammar.Node, content []byte, typedLocals map[string]string, classFields, methodReturns map[string]map[string]string, enclosingClass string) string {
+	if call == nil || call.Type() != "call_expression" || methodReturns == nil {
+		return ""
+	}
+	// Fail closed when the call has any real argument.
+	if args := ingest.ChildByField(call, "arguments"); args != nil {
+		for i := uint32(0); i < args.ChildCount(); i++ {
+			c := args.Child(i)
+			if c == nil {
+				continue
+			}
+			switch c.Type() {
+			case "(", ")", ",", "comment":
+				continue
+			default:
+				return ""
+			}
+		}
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil {
+		return ""
+	}
+	if fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain" {
+		return ""
+	}
+	base := ingest.ChildByField(fn, "object")
+	prop := ingest.ChildByField(fn, "property")
+	if base == nil || prop == nil {
+		return ""
+	}
+	mname := ingest.NodeText(prop, content)
+	if mname == "" {
+		return ""
+	}
+	var typeName string
+	switch base.Type() {
+	case "new_expression":
+		typeName = jsNewExpressionType(base, content)
+	case "this":
+		typeName = enclosingClass
+	case "identifier":
+		name := ingest.NodeText(base, content)
+		if _, isClass := methodReturns[name]; isClass {
+			typeName = name
+		} else if classFields != nil {
+			if _, isClass := classFields[name]; isClass {
+				typeName = name
+			}
+		}
+		if typeName == "" && typedLocals != nil {
+			typeName = typedLocals[name]
+		}
+	case "member_expression", "member_expression_optional", "optional_chain":
+		// new OuterA().box.get() — field peel then method.
+		typeName = jsClassFieldAccessType(base, content, typedLocals, classFields, methodReturns, enclosingClass)
+	case "call_expression":
+		// ba.self().get() — nested method return then method.
+		typeName = jsMethodCallReturnType(base, content, typedLocals, classFields, methodReturns, enclosingClass)
+	default:
+		return ""
+	}
+	if typeName == "" {
+		return ""
+	}
+	if methods := methodReturns[typeName]; methods != nil {
+		return methods[mname]
 	}
 	return ""
 }
@@ -5078,6 +5368,7 @@ func jsNestedArrayFlatElemType(n *grammar.Node, content []byte, arrayLocals, typ
 //   - 2-arg non-identity mapfn whose sole return peels to concrete T
 //     (Array.from({length: n}, () => new A()) / (_v, i) => a0) — mapfn return
 //     is the element type under foreign same-leaf.
+//
 // thisArg (3rd arg) / unknown mapfn returns / untyped first arg fail closed.
 func jsArrayFromElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals) string {
 	if n == nil || n.Type() != "call_expression" {
