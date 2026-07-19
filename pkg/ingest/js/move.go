@@ -2664,6 +2664,26 @@ func jsMethodCallReturnType(call *grammar.Node, content []byte, typedLocals map[
 	if mname == "" {
 		return ""
 	}
+	// Peel (new BoxA().self()).get() — parenthesized method receiver under
+	// foreign same-leaf (bare new BoxA().self().get already peels).
+	for base != nil && base.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < base.ChildCount(); i++ {
+			ch := base.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		if inner == nil {
+			return ""
+		}
+		base = inner
+	}
+	if base == nil {
+		return ""
+	}
 	var typeName string
 	switch base.Type() {
 	case "new_expression":
@@ -2688,6 +2708,10 @@ func jsMethodCallReturnType(call *grammar.Node, content []byte, typedLocals map[
 	case "call_expression":
 		// ba.self().get() — nested method return then method.
 		typeName = jsMethodCallReturnType(base, content, typedLocals, classFields, methodReturns, enclosingClass)
+	case "ternary_expression":
+		// (c ? ba : ba).get() — both arms agree on object type T then T.m
+		// (typed local / new / factory; factories nil is fine for new/local).
+		typeName = jsTernaryExprType(base, content, typedLocals, nil)
 	default:
 		return ""
 	}

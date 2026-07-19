@@ -7723,6 +7723,25 @@ func javaRecordComponentAccessType(call, obj *grammar.Node, method string, conte
 	if javaMethodCallArgCount(call) != 0 {
 		return ""
 	}
+	// Peel (ba.self()).get() — parenthesized zero-arg method receiver under
+	// foreign same-leaf (bare ba.self().get already peels).
+	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(obj, "expression")
+		if inner == nil {
+			for i := uint32(0); i < obj.ChildCount(); i++ {
+				ch := obj.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		obj = inner
+	}
+	if obj == nil || obj.IsNull() {
+		return ""
+	}
 	// ba.a() / ba.get() when ba is a known record/class local.
 	// A.create() — static/instance zero-arg method on class name (typeMembers["A"]).
 	if (obj.Type() == "identifier" || obj.Type() == "type_identifier") && (compOf != nil || typeMembers != nil) {
@@ -7784,6 +7803,19 @@ func javaRecordComponentAccessType(call, obj *grammar.Node, method string, conte
 			javaMethodInvocationName(obj, content), content, compOf, typeMembers); rt != "" {
 			if comps := typeMembers[rt]; comps != nil {
 				return comps[method]
+			}
+		}
+	}
+	// (c ? ba : ba).get() — both arms peel to the same method-return T under
+	// foreign same-leaf (typed-local / method-return / ctor arms).
+	if obj.Type() == "ternary_expression" {
+		cons := ingest.ChildByField(obj, "consequence")
+		alt := ingest.ChildByField(obj, "alternative")
+		if cons != nil && alt != nil {
+			t1 := javaRecordComponentAccessType(call, cons, method, content, compOf, typeMembers)
+			t2 := javaRecordComponentAccessType(call, alt, method, content, compOf, typeMembers)
+			if t1 != "" && t1 == t2 {
+				return t1
 			}
 		}
 	}

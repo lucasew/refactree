@@ -2073,22 +2073,40 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 	if obj == nil {
 		return false
 	}
-	for obj != nil && !obj.IsNull() && obj.Type() == "parenthesized_expression" {
-		inner := ingest.ChildByField(obj, "expression")
-		if inner == nil {
-			for i := uint32(0); i < obj.ChildCount(); i++ {
-				ch := obj.Child(i)
-				if ch.Type() == "(" || ch.Type() == ")" {
-					continue
+	// Peel (expr) / (name := expr) so (ba.get()).run() / (a := ba.get()).run()
+	// type under foreign same-leaf (assigned if (a := ba.get()): a.run already works).
+	for obj != nil && !obj.IsNull() {
+		switch obj.Type() {
+		case "parenthesized_expression":
+			inner := ingest.ChildByField(obj, "expression")
+			if inner == nil {
+				for i := uint32(0); i < obj.ChildCount(); i++ {
+					ch := obj.Child(i)
+					if ch.Type() == "(" || ch.Type() == ")" {
+						continue
+					}
+					inner = ch
+					break
 				}
-				inner = ch
-				break
 			}
+			if inner == nil {
+				return false
+			}
+			obj = inner
+		case "named_expression":
+			// (a := ba.get()).run() — walrus value is the expression type.
+			valueN := ingest.ChildByField(obj, "value")
+			if valueN == nil {
+				return false
+			}
+			obj = valueN
+		default:
+			goto peeled
 		}
-		if inner == nil {
-			break
-		}
-		obj = inner
+	}
+peeled:
+	if obj == nil || obj.IsNull() {
+		return false
 	}
 	// super().method(): rewrite when renaming Base.m in Child; leave alone when renaming Child.m.
 	if pythonIsSuperCall(obj, content) {
@@ -2358,12 +2376,22 @@ func pythonShouldRenameAttr(obj *grammar.Node, content []byte, enclosingClass st
 		return len(foreignReceivers) == 0
 	}
 	// (a if c else x).run() — both arms agree on Class leaf (typed local / Class()).
-	// Under foreign same-leaf methods when arms peel to the same T.
+	// (ba.get() if c else ba.get()).run() — method-return arms under foreign
+	// same-leaf (pythonConditionalExprType only peels local/Class()/nested).
+	// Infer early-return only on positive our-type; otherwise both arms must
+	// rename as ours (disagree / foreign fail closed). Mirrors Java/JS ternary.
 	if obj.Type() == "conditional_expression" {
-		if t := pythonConditionalExprType(obj, content, typeOf); t != "" {
-			return pythonRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
+		if t := pythonConditionalExprType(obj, content, typeOf); t != "" &&
+			pythonRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil) {
+			return true
 		}
-		return len(foreignReceivers) == 0
+		body, alt := pythonConditionalArms(obj)
+		if body != nil && alt != nil &&
+			pythonShouldRenameAttr(body, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf, funcReturns) &&
+			pythonShouldRenameAttr(alt, content, enclosingClass, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf, funcReturns) {
+			return true
+		}
+		return false
 	}
 	// await qa.get() — peel through await so Queue/collection accessors type.
 	if obj.Type() == "await" {
@@ -3654,6 +3682,22 @@ func pythonCallFuncReturnType(call *grammar.Node, content []byte, funcReturns, t
 		if mname == "" {
 			return ""
 		}
+		// Peel (expr) / (name := expr) receivers so (ba.self()).get() /
+		// (xa := ba.self()).get() peels under foreign same-leaf.
+		for obj != nil && !obj.IsNull() {
+			switch obj.Type() {
+			case "parenthesized_expression":
+				obj = pythonParenInner(obj)
+			case "named_expression":
+				obj = ingest.ChildByField(obj, "value")
+			default:
+				goto objPeeled
+			}
+		}
+	objPeeled:
+		if obj == nil || obj.IsNull() {
+			return ""
+		}
 		// A.make() — class-qualified factory / static method.
 		if obj.Type() == "identifier" {
 			oname := ingest.NodeText(obj, content)
@@ -3683,6 +3727,17 @@ func pythonCallFuncReturnType(call *grammar.Node, content []byte, funcReturns, t
 		if obj.Type() == "attribute" {
 			if ft := pythonFieldAccessType(obj, content, fieldOf, funcReturns, typeOf); ft != "" {
 				if t := funcReturns[ft+"."+mname]; t != "" {
+					return t
+				}
+			}
+		}
+		// (ba if c else ba).get() — both arms agree on object type T then T.m.
+		if obj.Type() == "conditional_expression" {
+			body, alt := pythonConditionalArms(obj)
+			t1 := pythonObjectExprType(body, content, typeOf)
+			t2 := pythonObjectExprType(alt, content, typeOf)
+			if t1 != "" && t1 == t2 {
+				if t := funcReturns[t1+"."+mname]; t != "" {
 					return t
 				}
 			}

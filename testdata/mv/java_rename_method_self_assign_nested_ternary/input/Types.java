@@ -67,8 +67,20 @@ class Uses {
     return (c ? ba.get() : ba.get()).run() + (c ? bb.get() : bb.get()).run();
   }
 
+  public static int useTernaryRecv(boolean c, BoxA ba, BoxB bb) {
+    return (c ? ba : ba).get().run() + (c ? bb : bb).get().run();
+  }
+
+  public static int useParenChain(BoxA ba, BoxB bb) {
+    return (ba.self()).get().run() + (bb.self()).get().run();
+  }
+
+  public static int useTernarySelf(boolean c, BoxA ba, BoxB bb) {
+    return (c ? ba.self() : ba).get().run() + (c ? bb.self() : bb).get().run();
+  }
+
   public static int usePreservesB(BoxB bb, OuterB ob) {
     var xb = bb.self();
-    return xb.get().run() + ob.h.box.get().run();
+    return xb.get().run() + ob.h.box.get().run() + (bb.self()).get().run();
   }
 }
