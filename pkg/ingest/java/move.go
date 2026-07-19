@@ -1508,6 +1508,14 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 					if ourReceivers[et] {
 						out[name] = true
 					}
+				} else if et := javaFutureTaskCreationObjectElemType(valN, content, compOf, typeMembers); et != "" {
+					// var ft = new FutureTask<>(() -> ba.get()) / FutureTask<>(runnable, ba.get()) —
+					// method-return Callable/result peels under foreign same-leaf (Class peels via
+					// javaStreamPipelineElemType above).
+					elemOf[name] = et
+					if ourReceivers[et] {
+						out[name] = true
+					}
 				} else if et := javaMapPipelineValueType(valN, content, elemOf, valOf); et != "" {
 					// var m = as.stream().collect(Collectors.toMap(k, a -> a[, …])) /
 					// Collections.unmodifiableMap(as) / Collections.singletonMap(k, new A()) /
@@ -3624,6 +3632,54 @@ func javaGatherMapConcurrentElemType(gatherCall, gArgs *grammar.Node, content []
 	default:
 		return ""
 	}
+}
+
+
+
+// javaGatherObjectResultElemType recovers R after Stream.gather under foreign
+// same-leaf when the gatherer clearly preserves or constructs a known element:
+//
+// Stream.of(ba.get()).gather(Gatherers.mapConcurrent(n, a -> a)) → A
+// Stream.of(ba.get()).gather(Gatherers.mapConcurrent(n, a -> new A())) → A
+// Stream.of(ba.get()).gather(Gatherers.mapConcurrent(n, a -> ba.get())) → A
+//
+// Identity mapConcurrent peels the upstream stream via
+// javaStaticCollectionOfObjectElemType; non-identity mappers peel via
+// javaObjectArgType. fold/scan/window fail closed (Class fold also UNDER).
+func javaGatherObjectResultElemType(call *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	_, gName, gArgs := javaGathererCallParts(call, content)
+	if gArgs == nil || gName != "mapConcurrent" {
+		return ""
+	}
+	var mapper *grammar.Node
+	for i := uint32(0); i < gArgs.ChildCount(); i++ {
+		ch := gArgs.Child(i)
+		if ch.Type() == "lambda_expression" {
+			mapper = ch
+			break
+		}
+	}
+	if mapper == nil {
+		return ""
+	}
+	params := javaInferredLambdaParamNames(mapper, content)
+	if len(params) != 1 {
+		return ""
+	}
+	body := javaLambdaExprBody(mapper)
+	if body == nil || body.IsNull() {
+		return ""
+	}
+	streamRecv := ingest.ChildByField(call, "object")
+	// a -> a — identity preserves method-return stream element.
+	if body.Type() == "identifier" && ingest.NodeText(body, content) == params[0] {
+		return javaStaticCollectionOfObjectElemType(streamRecv, content, compOf, typeMembers)
+	}
+	// a -> new A() / a -> ba.get() — peel mapper body.
+	return javaObjectArgType(body, content, compOf, typeMembers)
 }
 
 // javaGatherFoldScanElemType recovers R from Gatherers.fold/scan when the
@@ -6857,15 +6913,24 @@ func javaMapEntryObjectValueType(call *grammar.Node, content []byte, compOf map[
 // javaFutureTaskCreationElemType recovers V from
 // new FutureTask<>(() -> new T(...)) / new FutureTask<T>(…) /
 // new FutureTask<>(runnable, new T(...)).
+// Class()-only peels; method-return peels use javaFutureTaskCreationObjectElemType.
+func javaFutureTaskCreationElemType(call *grammar.Node, content []byte) string {
+	return javaFutureTaskCreationObjectElemType(call, content, nil, nil)
+}
+
+// javaFutureTaskCreationObjectElemType recovers V from
+// new FutureTask<>(() -> new T(...)) / new FutureTask<>(() -> ba.get()) /
+// new FutureTask<T>(…) / new FutureTask<>(runnable, new T(...)/ba.get()).
 // Prefers declared single type arg when present; diamond recovers V from:
-//   - Callable ctor: expression-bodied zero-arg lambda whose body is new T(...)
-//   - Runnable+result ctor: second arg new T(...) (first is Runnable)
+//   - Callable ctor: expression-bodied zero-arg lambda whose body peels via
+//     javaObjectArgType (new T(...) / ba.get())
+//   - Runnable+result ctor: second arg peels via javaObjectArgType
 //
 // Other types / arities / bodies fail closed.
-// Enables new FutureTask<>(() -> new A()).get().m() and
-// var ft = new FutureTask<>(() -> new A()); ft.get().m() under foreign
+// Enables new FutureTask<>(() -> ba.get()).get().m() and
+// var ft = new FutureTask<>(() -> ba.get()); ft.get().m() under foreign
 // same-leaf methods (pipeline peel + elemOf bind).
-func javaFutureTaskCreationElemType(call *grammar.Node, content []byte) string {
+func javaFutureTaskCreationObjectElemType(call *grammar.Node, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
 	if call == nil || call.Type() != "object_creation_expression" {
 		return ""
 	}
@@ -6884,50 +6949,11 @@ func javaFutureTaskCreationElemType(call *grammar.Node, content []byte) string {
 	ctorArgs := javaCallArgs(call)
 	switch len(ctorArgs) {
 	case 1:
-		// FutureTask(Callable<V>): () -> new T(...)
-		if ctorArgs[0].Type() != "lambda_expression" {
-			return ""
-		}
-		// Zero-arg lambda only (Callable.call has no params).
-		if len(javaInferredLambdaParamNames(ctorArgs[0], content)) != 0 {
-			// Typed/empty formal params: still accept zero-param forms via child scan.
-			// Inferred non-empty fails closed (not a Callable shape).
-			return ""
-		}
-		body := ingest.ChildByField(ctorArgs[0], "body")
-		for body != nil && !body.IsNull() && body.Type() == "parenthesized_expression" {
-			inner := ingest.ChildByField(body, "expression")
-			if inner == nil {
-				for i := uint32(0); i < body.ChildCount(); i++ {
-					ch := body.Child(i)
-					if ch.Type() == "(" || ch.Type() == ")" {
-						continue
-					}
-					inner = ch
-					break
-				}
-			}
-			body = inner
-		}
-		if body == nil || body.Type() != "object_creation_expression" {
-			return ""
-		}
-		argType := ingest.ChildByField(body, "type")
-		if argType == nil {
-			return ""
-		}
-		return javaTypeName(argType, content)
+		// FutureTask(Callable<V>): () -> new T(...) / () -> ba.get()
+		return javaZeroArgSupplierObjectElem(ctorArgs[0], content, compOf, typeMembers)
 	case 2:
-		// FutureTask(Runnable, V): second arg new T(...)
-		arg := ctorArgs[1]
-		if arg.Type() != "object_creation_expression" {
-			return ""
-		}
-		argType := ingest.ChildByField(arg, "type")
-		if argType == nil {
-			return ""
-		}
-		return javaTypeName(argType, content)
+		// FutureTask(Runnable, V): second arg new T(...) / ba.get()
+		return javaObjectArgType(ctorArgs[1], content, compOf, typeMembers)
 	default:
 		return ""
 	}
@@ -7767,6 +7793,24 @@ func javaStaticCollectionOfObjectElemType(obj *grammar.Node, content []byte, com
 				return t
 			}
 			return ""
+		case "gather":
+			// Stream.of(ba.get()).gather(Gatherers.mapConcurrent(n, a -> a)) —
+			// identity mapConcurrent preserves method-return stream element under
+			// foreign same-leaf (Class peels via javaGatherResultElemType).
+			// fold/scan/window fail closed here (Class fold also UNDER for new T seed).
+			if t := javaGatherObjectResultElemType(obj, content, compOf, typeMembers); t != "" {
+				return t
+			}
+			return ""
+		case "submit":
+			// executor.submit(() -> ba.get()) — Callable supplier method-return under
+			// foreign same-leaf (Class peels live in javaExecutorSubmitCallableElemType).
+			// Runnable submit / multi-arg / non-zero-arg lambdas fail closed.
+			args := javaCallArgs(obj)
+			if len(args) != 1 {
+				return ""
+			}
+			return javaZeroArgSupplierObjectElem(args[0], content, compOf, typeMembers)
 		case "unmodifiableList", "synchronizedList", "checkedList",
 			"unmodifiableSet", "synchronizedSet", "checkedSet",
 			"unmodifiableSortedSet", "synchronizedSortedSet", "checkedSortedSet",
@@ -8295,6 +8339,12 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 			// method-return holder peels under foreign same-leaf (Class peels via
 			// javaStreamPipelineElemType / javaReferenceHolderCreationElemType).
 			if et := javaReferenceHolderCreationObjectElemType(obj, content, compOf, typeMembers); et != "" {
+				return et
+			}
+			// new FutureTask<>(() -> ba.get()).get() / FutureTask<>(runnable, ba.get()).get() —
+			// method-return Callable/result peels under foreign same-leaf (Class peels via
+			// javaStreamPipelineElemType / javaFutureTaskCreationElemType).
+			if et := javaFutureTaskCreationObjectElemType(obj, content, compOf, typeMembers); et != "" {
 				return et
 			}
 			// stream.gather(windowFixed|windowSliding).findFirst().get().get(0) /

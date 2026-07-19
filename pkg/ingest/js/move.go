@@ -1613,8 +1613,8 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 			// (rejection handler ignored for typing; same leaf as finally).
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
-		if t := jsPromiseTryType(obj, content, typedLocals, factories); t != "" {
-			// Promise.try(() => new A()) / await Promise.try(() => a) — sole-return peel.
+		if t := jsPromiseTryTypeEx(obj, content, typedLocals, factories, classFields, methodReturns); t != "" {
+			// Promise.try(() => new A() / new BoxA().get()) / await Promise.try(...) — sole-return peel.
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 		if t := jsWeakRefDerefTypeEx(obj, content, typedLocals, factories, genLocals, classFields, methodReturns); t != "" {
@@ -1956,9 +1956,10 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// IteratorResult whose .value is pair of value T.
 						// Bind foreign too so dual-class B rebinds fail closed.
 						entryNextLocals[ingest.NodeText(nameN, content)] = t
-					} else if t := jsMapValueType(valN, content, out, factories, entryArrayLocals); t != "" {
-						// const ma = new Map([[k, new A()]]) / new Map(pa) —
-						// Map of value T. Bind BEFORE jsObjectEntriesArraySourceType:
+					} else if t := jsMapValueTypeEx(valN, content, out, factories, entryArrayLocals, classFields, methodReturns); t != "" {
+						// const ma = new Map([[k, new A()]]) / new WeakMap([[k, ba.get()]]) /
+						// new Map(pa) — Map/WeakMap of value T (method-return too). Bind BEFORE
+						// jsObjectEntriesArraySourceType:
 						// entries-array peels now accept bare Map / new Map (default
 						// iterator is entries) for [...ma][i][1] / Array.from(ma)[i][1],
 						// which would otherwise steal into entryArrayLocals and leave
@@ -2112,8 +2113,8 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 					} else if t := jsPromiseCatchType(valN, content, out, factories); ourReceivers[t] {
 						// const a = await Promise.resolve(new A()).catch(() => null)
 						out[ingest.NodeText(nameN, content)] = t
-					} else if t := jsPromiseTryType(valN, content, out, factories); ourReceivers[t] {
-						// const a = await Promise.try(() => new A())
+					} else if t := jsPromiseTryTypeEx(valN, content, out, factories, classFields, methodReturns); ourReceivers[t] {
+						// const a = await Promise.try(() => new A() / new BoxA().get())
 						out[ingest.NodeText(nameN, content)] = t
 					} else if t := jsWeakRefDerefTypeEx(valN, content, out, factories, genLocals, classFields, methodReturns); ourReceivers[t] {
 						// const a = new WeakRef(new A()).deref() / wa.deref() after
@@ -2292,7 +2293,8 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 			// m.set(k, new A()) / wm.set(k, new A()) — bare Map/WeakMap mutation.
 			// Bind mapLocals so m.get(k) / [...m.values()] peel under foreign
 			// same-leaf. Foreign values too for shadowing.
-			if local, et := jsMapSetMutationElemType(n, content, out, factories); local != "" && et != "" {
+			if local, et := jsMapSetMutationElemTypeEx(n, content, out, factories, classFields, methodReturns); local != "" && et != "" {
+				// m.set(k, new A()) / m.set(k, new BoxA().get()) — Class + method-return.
 				mapLocals[local] = et
 			}
 		case "assignment_expression":
@@ -3128,7 +3130,7 @@ func jsBindPromiseThenParams(call *grammar.Node, content []byte, ourReceivers ma
 	resolveT := jsPromiseResolveArgTypeEx(obj, content, out, factories, classFields, methodReturns)
 	// Promise.try(() => new T()) / Promise.try(() => a) → scalar param type.
 	if resolveT == "" {
-		resolveT = jsPromiseTryType(obj, content, out, factories)
+		resolveT = jsPromiseTryTypeEx(obj, content, out, factories, classFields, methodReturns)
 	}
 	// Promise.resolve(...).then(x => x) identity chain → scalar value type.
 	if resolveT == "" {
@@ -8013,12 +8015,19 @@ func jsSetAddMutationElemType(call *grammar.Node, content []byte, typedLocals, f
 // jsMapSetMutationElemType recovers (local, T) from bare Map/WeakMap mutations
 // when the receiver is an identifier and the value peels to concrete T:
 //
-//	m.set(k, new A()) / m.set(k, a) after const a = new A()
+// m.set(k, new A()) / wm.set(k, new A()) — bare Map/WeakMap mutation.
 //
 // Enables m.get(k).run() / [...m.values()][0].run() under foreign same-leaf
 // after const m = new Map() / new WeakMap(). Key shape free; non-ident
 // receivers / missing value / non-concrete value fail closed.
+// Method-return peels use jsMapSetMutationElemTypeEx.
 func jsMapSetMutationElemType(call *grammar.Node, content []byte, typedLocals, factories map[string]string) (local, classType string) {
+	return jsMapSetMutationElemTypeEx(call, content, typedLocals, factories, nil, nil)
+}
+
+// jsMapSetMutationElemTypeEx also peels m.set(k, new BoxA().get()) /
+// m.set(k, ba.get()) method-return values under foreign same-leaf.
+func jsMapSetMutationElemTypeEx(call *grammar.Node, content []byte, typedLocals, factories map[string]string, classFields, methodReturns map[string]map[string]string) (local, classType string) {
 	if call == nil || call.Type() != "call_expression" {
 		return "", ""
 	}
@@ -8053,7 +8062,7 @@ func jsMapSetMutationElemType(call *grammar.Node, content []byte, typedLocals, f
 	if pos < 2 || val == nil {
 		return "", ""
 	}
-	t := jsExprConcreteType(val, content, typedLocals, factories)
+	t := jsExprLeafType(val, content, typedLocals, factories, classFields, methodReturns)
 	if t == "" {
 		return "", ""
 	}
@@ -9054,7 +9063,14 @@ func jsReflectConstructType(n *grammar.Node, content []byte) string {
 // when the sole callback return peels to concrete T (new / local / factory).
 // Enables Promise.try(() => new A()).then(x => x.run()) under foreign same-leaf.
 // Multi-arg / non-Promise / non-sole-return fail closed.
+// Method-return peels use jsPromiseTryTypeEx.
 func jsPromiseTryType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+	return jsPromiseTryTypeEx(n, content, typedLocals, factories, nil, nil)
+}
+
+// jsPromiseTryTypeEx also peels Promise.try(() => new BoxA().get()) /
+// Promise.try(() => ba.get()) method-return callback bodies under foreign same-leaf.
+func jsPromiseTryTypeEx(n *grammar.Node, content []byte, typedLocals, factories map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -9068,7 +9084,7 @@ func jsPromiseTryType(n *grammar.Node, content []byte, typedLocals, factories ma
 			arg = ch
 			break
 		}
-		return jsPromiseTryType(arg, content, typedLocals, factories)
+		return jsPromiseTryTypeEx(arg, content, typedLocals, factories, classFields, methodReturns)
 	}
 	for n != nil && n.Type() == "parenthesized_expression" {
 		var inner *grammar.Node
@@ -9116,7 +9132,7 @@ func jsPromiseTryType(n *grammar.Node, content []byte, typedLocals, factories ma
 	if ret == nil {
 		return ""
 	}
-	return jsExprConcreteType(ret, content, typedLocals, factories)
+	return jsExprLeafType(ret, content, typedLocals, factories, classFields, methodReturns)
 }
 
 // jsIteratorToArrayElemType recovers T from iter.toArray() when the receiver
