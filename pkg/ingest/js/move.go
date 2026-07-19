@@ -1708,10 +1708,11 @@ func jsShouldRenameMember(obj *grammar.Node, content []byte, enclosingClass stri
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 	}
-	// new BoxA().a.helper() / BoxA.sa.helper() / ba.a.helper() — class field
-	// peels from same-file field initializers (new T()) under foreign same-leaf.
+	// new BoxA().a.helper() / BoxA.sa.helper() / ba.a.helper() /
+	// this.#a.helper() / this.a.helper() — class field peels from same-file
+	// field initializers (new T()) under foreign same-leaf (private # too).
 	if obj.Type() == "member_expression" || obj.Type() == "member_expression_optional" || obj.Type() == "optional_chain" {
-		if t := jsClassFieldAccessType(obj, content, typedLocals, classFields); t != "" {
+		if t := jsClassFieldAccessType(obj, content, typedLocals, classFields, enclosingClass); t != "" {
 			return jsRenameByTypeMaps(t, ourReceivers, foreignReceivers, nil)
 		}
 	}
@@ -2353,10 +2354,11 @@ func jsClassFieldIndex(root *grammar.Node, content []byte) map[string]map[string
 	return out
 }
 
-// jsClassFieldAccessType recovers T from new BoxA().a / BoxA.sa / ba.a when
-// the field is indexed from same-file class field initializers (new T()).
-// typedLocals may supply ba → BoxA for instance field peels.
-func jsClassFieldAccessType(obj *grammar.Node, content []byte, typedLocals map[string]string, classFields map[string]map[string]string) string {
+// jsClassFieldAccessType recovers T from new BoxA().a / BoxA.sa / ba.a /
+// this.#a / this.a when the field is indexed from same-file class field
+// initializers (new T()). typedLocals may supply ba → BoxA for instance field
+// peels; enclosingClass supplies this → BoxA inside BoxA methods (private # too).
+func jsClassFieldAccessType(obj *grammar.Node, content []byte, typedLocals map[string]string, classFields map[string]map[string]string, enclosingClass string) string {
 	if obj == nil || classFields == nil {
 		return ""
 	}
@@ -2376,8 +2378,11 @@ func jsClassFieldAccessType(obj *grammar.Node, content []byte, typedLocals map[s
 	switch base.Type() {
 	case "new_expression":
 		typeName = jsNewExpressionType(base, content)
+	case "this":
+		// this.#a / this.a / this.#sa (static method) inside enclosing class.
+		typeName = enclosingClass
 	case "identifier":
-		// BoxA.sa (static on class name) or ba.a (typed local).
+		// BoxA.sa / BoxA.#sa (static on class name) or ba.a (typed local).
 		name := ingest.NodeText(base, content)
 		if _, isClass := classFields[name]; isClass {
 			typeName = name

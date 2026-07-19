@@ -6436,6 +6436,38 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType, valueT
 				return t
 			}
 		}
+		// ba.Get().M / sa.Self().Get().M — same-file method with a single
+		// concrete named result (*A / A / BoxA). Multi-result methods fail
+		// closed (not a lone call value). Enables dual-class under-rename peels
+		// when assigned form already works via typed locals.
+		if fn != nil && fn.Type() == "selector_expression" && len(methodNamed) > 0 {
+			op := ingest.ChildByField(fn, "operand")
+			field := ingest.ChildByField(fn, "field")
+			if op != nil && field != nil {
+				mname := ingest.NodeText(field, content)
+				recvType := ""
+				// Bare / (*ba) receiver via valueType.
+				op2 := peelSelectorOperand(op, content)
+				if op2 != nil && op2.Type() == "identifier" && valueType != nil {
+					if t, ok := valueType(ingest.NodeText(op2, content), n.StartByte()); ok && t != "" {
+						recvType = strings.TrimPrefix(t, "*")
+					}
+				}
+				// Nested: sa.Self().Get() — peel Self() first.
+				if recvType == "" {
+					if t := goComplexOperandType(op, content, indexElemType, valueType, funcColl, funcResults, genericPeels, namedColl, funcRetFunc, structFields, ifaceColl, ifaceFunc, methodNamed); t != "" {
+						recvType = strings.TrimPrefix(t, "*")
+					}
+				}
+				if recvType != "" {
+					if methods := methodNamed[recvType]; methods != nil {
+						if t := methods[mname]; t != "" {
+							return t
+						}
+					}
+				}
+			}
+		}
 	case "unary_expression":
 		// (<-ch).M — channel receive payload type (same leaf as a := <-ch).
 		// Under foreign same-leaf methods, assigned receive already renames via

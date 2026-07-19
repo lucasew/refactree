@@ -790,7 +790,13 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 
 	typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf := javaTypedLocals(pf.Root, content, ourSimple)
 	// Same-file record/class members for new BoxA(...).a() peels (dual-class).
-	typeMembers := javaMergeTypeMembers(javaRecordComponentIndex(pf.Root, content), javaClassFieldIndex(pf.Root, content))
+	// Also zero-arg methods with concrete return types (get/self) so ba.get().run()
+	// / ba.self().a().run() peel under foreign same-leaf.
+	typeMembers := javaMergeTypeMembers(
+		javaRecordComponentIndex(pf.Root, content),
+		javaClassFieldIndex(pf.Root, content),
+		javaSameFileMethodReturns(pf.Root, content),
+	)
 
 	var edits []ingest.Edit
 	var walk func(n *grammar.Node, enclosingClass string, switchMatchesOur bool)
@@ -1302,7 +1308,8 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 	}
 	recordIndex := javaRecordComponentIndex(root, content)
 	fieldIndex := javaClassFieldIndex(root, content)
-	typeMembers := javaMergeTypeMembers(recordIndex, fieldIndex)
+	methodIndex := javaSameFileMethodReturns(root, content)
+	typeMembers := javaMergeTypeMembers(recordIndex, fieldIndex, methodIndex)
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
 		if n == nil || n.IsNull() {
@@ -1321,6 +1328,7 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 				tn := javaTypeName(typeN, content)
 				javaBindRecordLocalComps(name, tn, recordIndex, compOf)
 				javaBindRecordLocalComps(name, tn, fieldIndex, compOf)
+				javaBindRecordLocalComps(name, tn, methodIndex, compOf)
 				if ourReceivers[tn] {
 					out[name] = true
 				} else if vt := javaMapEntryDeclaredValueType(typeN, content); vt != "" {
@@ -1356,6 +1364,7 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 				if !inferFromInit {
 					javaBindRecordLocalComps(name, tn, recordIndex, compOf)
 					javaBindRecordLocalComps(name, tn, fieldIndex, compOf)
+					javaBindRecordLocalComps(name, tn, methodIndex, compOf)
 				}
 				if explicitOurs {
 					out[name] = true
@@ -1382,11 +1391,12 @@ func javaTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string
 				} else if valN != nil && valN.Type() == "ternary_expression" && javaTernaryTypedLocalType(valN, content, out) {
 					// var xa = c ? a : x — both arms typed locals of our receiver.
 					out[name] = true
-				} else if recordIndex[inferred] != nil || fieldIndex[inferred] != nil {
+				} else if recordIndex[inferred] != nil || fieldIndex[inferred] != nil || methodIndex[inferred] != nil {
 					// var ba = new BoxA(...) / var box = new Box() — track members when
-					// the outer type itself is not our receiver.
+					// the outer type itself is not our receiver (incl. zero-arg methods).
 					javaBindRecordLocalComps(name, inferred, recordIndex, compOf)
 					javaBindRecordLocalComps(name, inferred, fieldIndex, compOf)
+					javaBindRecordLocalComps(name, inferred, methodIndex, compOf)
 				} else if et := javaFieldAccessMemberType(valN, content, compOf); ourReceivers[et] {
 					// var xa = box.a / var xa = ba.a — class/record field access when
 					// box/ba is a typed local with member type A.
@@ -7656,6 +7666,8 @@ func javaFunctionIdentityApplyArgIdent(call *grammar.Node, content []byte) strin
 
 // javaRecordComponentAccessType recovers T from ba.a() when ba is a record local
 // with component a of type T (zero-arg accessor only; fail closed on args).
+// Also peels same-file zero-arg methods (ba.get() / ba.self().a()) via typeMembers
+// under foreign same-leaf methods.
 func javaRecordComponentAccessType(call, obj *grammar.Node, method string, content []byte, compOf map[string]string, typeMembers map[string]map[string]string) string {
 	if call == nil || method == "" || obj == nil {
 		return ""
@@ -7663,7 +7675,7 @@ func javaRecordComponentAccessType(call, obj *grammar.Node, method string, conte
 	if javaMethodCallArgCount(call) != 0 {
 		return ""
 	}
-	// ba.a() when ba is a known record/class local.
+	// ba.a() / ba.get() when ba is a known record/class local.
 	if obj.Type() == "identifier" && compOf != nil {
 		if t := compOf[ingest.NodeText(obj, content)+"."+method]; t != "" {
 			return t
@@ -7692,7 +7704,118 @@ func javaRecordComponentAccessType(call, obj *grammar.Node, method string, conte
 			}
 		}
 	}
+	// ba.self().a() / ba.self().get() — peel zero-arg method return type then
+	// look up member on that type (dual-class under foreign same-leaf).
+	if obj.Type() == "method_invocation" && typeMembers != nil {
+		if rt := javaRecordComponentAccessType(obj, ingest.ChildByField(obj, "object"),
+			javaMethodInvocationName(obj, content), content, compOf, typeMembers); rt != "" {
+			if comps := typeMembers[rt]; comps != nil {
+				return comps[method]
+			}
+		}
+	}
 	return ""
+}
+
+// javaMethodInvocationName returns the method leaf of a method_invocation.
+func javaMethodInvocationName(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	nameN := ingest.ChildByField(call, "name")
+	if nameN == nil {
+		return ""
+	}
+	return ingest.NodeText(nameN, content)
+}
+
+// javaSameFileMethodReturns maps same-file class/record type → zero-arg method
+// name → concrete return type leaf:
+//
+//	class HolderA { A get() { return item; } }
+//	record BoxA(A a) { BoxA self() { return this; } }
+//
+// Enables ba.get().run() / ba.self().a().run() under foreign same-leaf methods.
+// Methods with parameters fail closed (not a lone product accessor).
+func javaSameFileMethodReturns(root *grammar.Node, content []byte) map[string]map[string]string {
+	out := map[string]map[string]string{}
+	if root == nil {
+		return out
+	}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		if n.Type() == "class_declaration" || n.Type() == "record_declaration" {
+			nameN := ingest.ChildByField(n, "name")
+			body := ingest.ChildByField(n, "body")
+			if nameN != nil && body != nil {
+				typeName := ingest.NodeText(nameN, content)
+				methods := map[string]string{}
+				for i := uint32(0); i < body.ChildCount(); i++ {
+					ch := body.Child(i)
+					if ch == nil || ch.Type() != "method_declaration" {
+						continue
+					}
+					// Zero formal parameters only.
+					params := ingest.ChildByField(ch, "parameters")
+					if params == nil {
+						// Some grammars use formal_parameters.
+						for j := uint32(0); j < ch.ChildCount(); j++ {
+							c := ch.Child(j)
+							if c != nil && (c.Type() == "formal_parameters" || c.Type() == "parameters") {
+								params = c
+								break
+							}
+						}
+					}
+					if params != nil {
+						hasParam := false
+						for j := uint32(0); j < params.ChildCount(); j++ {
+							c := params.Child(j)
+							if c == nil {
+								continue
+							}
+							switch c.Type() {
+							case "(", ")", ",", "comment":
+								continue
+							default:
+								hasParam = true
+							}
+						}
+						if hasParam {
+							continue
+						}
+					}
+					retN := ingest.ChildByField(ch, "type")
+					mNameN := ingest.ChildByField(ch, "name")
+					if retN == nil || mNameN == nil {
+						continue
+					}
+					ret := javaTypeName(retN, content)
+					mname := ingest.NodeText(mNameN, content)
+					if ret == "" || mname == "" || ret == "void" {
+						continue
+					}
+					// Skip primitive returns (not product method receivers).
+					switch ret {
+					case "boolean", "byte", "short", "int", "long", "float", "double", "char":
+						continue
+					}
+					methods[mname] = ret
+				}
+				if len(methods) > 0 {
+					out[typeName] = methods
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	return out
 }
 
 // javaStreamReduceIdentityElemType recovers T from stream.reduce(identity, op[, comb]).
