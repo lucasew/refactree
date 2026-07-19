@@ -4163,7 +4163,9 @@ func rangeSourceFromNewArrayCall(n *grammar.Node, content []byte) (rangeSourceIn
 // make(T, …), new([n]T), append([]*T{}, …) / append(ident, …), []*T{…} /
 // map[K]*T{…}, x.([]*T) / ([]*T)(x), as[:n] / as[i:], same-file getA() []*A /
 // multi-return as, err := getA() with getA() ([]*A, error), fa() when fa is a
-// function-typed param/var with a single collection result.
+// function-typed param/var with a single collection result, and
+// fa := func() []*A { … } / var fa = func() map[K]*A { … } (func-literal with
+// a single collection result; multi-result func literals fail closed).
 // append(ident, …) and slice of ident resolve against params and earlier
 // collection bindings already recorded in *bindings. funcColl maps same-file
 // function names to positional collection result element types (may be nil).
@@ -4271,6 +4273,7 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 					break
 				}
 				// var as = make/append/getA()/[]*A{…}/append(ident,…) — bind element type positionally.
+				// var fa = func() []*A { … } — single collection-result func literal.
 				exprs := rhsExprs(valueN)
 				for i, name := range names {
 					if name == "" || name == "_" || i >= len(exprs) {
@@ -4278,12 +4281,17 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 					}
 					if info, ok := rangeSourceFromCollectionExprIdent(exprs[i], content, lookupElem, n.StartByte(), funcColl); ok && info.elemType != "" {
 						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
+					} else if infos := functionCollectionResults(exprs[i], content); len(infos) == 1 && infos[0].elemType != "" {
+						// var fa = func() []*A { … } / var fm = func() map[K]*A { … }.
+						// Multi-result func literals fail closed (len != 1).
+						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, infos[0].elemType})
 					}
 				}
 			}
 		case "short_var_declaration":
 			// as := make/append/getA()/[]*A{…}/append(ident,…) — same positional binding.
 			// as, err := getA() with getA() ([]*A, error) — multi-return slots.
+			// fa := func() []*A { … } / fa, fb := func() []*A{…}, func() []*B{…}.
 			names := identListNames(ingest.ChildByField(n, "left"), content)
 			right := ingest.ChildByField(n, "right")
 			if bindMultiReturnCall(n.StartByte(), names, right) {
@@ -4296,6 +4304,10 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 				}
 				if info, ok := rangeSourceFromCollectionExprIdent(exprs[i], content, lookupElem, n.StartByte(), funcColl); ok && info.elemType != "" {
 					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
+				} else if infos := functionCollectionResults(exprs[i], content); len(infos) == 1 && infos[0].elemType != "" {
+					// fa := func() []*A { … } / fa := func() map[K]*A { … }.
+					// Single collection result only; multi-result func literals fail closed.
+					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, infos[0].elemType})
 				}
 			}
 		}

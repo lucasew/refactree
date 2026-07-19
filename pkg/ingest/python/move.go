@@ -4622,10 +4622,27 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				// pairs = zip/enumerate/product/pairwise(...) /
 				// pairs = list/tuple/iter/reversed/sorted/filter(...zip...) —
 				// combos = combinations/permutations/batched(...) (literal r/n) — pair-iter slots.
+				// groups = groupby(items) / itertools.groupby(...) — @groupby local
+				// (not pair-iter slots: 2nd yield is a group iterator, not an element).
 				if right != nil {
 					if types := pythonPairIterSlotsOf(right, content, elemOf, egElems, typeOf, pairIterSlots); len(types) > 0 {
 						// Foreign slots too — shadow prior same-name pair-iters.
 						pairIterSlots[lname] = types
+					} else if et := pythonGroupbyGroupElemType(right, content, elemOf, egElems, typeOf); et != "" {
+						// groups = groupby(items) / groups = itertools.groupby(...) /
+						// groups = iter(groupby(items)) / groups2 = groups —
+						// group-iterator local (key, group) yields.
+						// Store under @groupby.* so next(groups) / for k, g in groups
+						// recover the group element leaf. Do not put into elemOf[lname]
+						// (groups itself is not an element collection).
+						// Foreign element types too — shadow prior same-name groupbys.
+						elemOf["@groupby."+lname] = et
+					} else if et := pythonNextGroupbyGroupSubElemType(right, content, elemOf, egElems, typeOf); et != "" {
+						// ga = next(groupby(items))[1] / ga = next(groups)[1] —
+						// group iterator (same leaf as _, ga = next(groupby(...))).
+						// Bind into elemOf so next(ga) / for a in ga type.
+						// Foreign too for shadowing.
+						elemOf[lname] = et
 					} else if et := pythonDictFromkeysValueType(right, content); et != "" {
 						elemOf[lname] = et
 					} else if et := pythonHomogeneousCtorElem(right, content); et != "" {
@@ -11520,13 +11537,32 @@ func pythonBatchedElemType(right *grammar.Node, content []byte, elemOf, egElems,
 }
 
 // pythonGroupbyGroupElemType recovers the element type of the group iterator
-// yielded by groupby(iterable[, key]) / itertools.groupby(...).
+// yielded by groupby(iterable[, key]) / itertools.groupby(...), or of an
+// assigned groupby local (`groups = groupby(items)` → elemOf["@groupby.groups"]).
 // Yields (key, group) pairs; group iterates elements of the 1st positional arg
 // (key function ignored). Bare or itertools-qualified only; other forms fail closed.
+// Identity wrappers iter/list/tuple(groupby(...)) peel (same leaf as bare).
 // Not registered in pythonIterableElemType — bare `for x in groupby(xs)` yields
-// pairs, not elements.
+// pairs, not elements. Assigned locals live under @groupby.* so
+// `_, ga = next(groups)` / `for k, g in groups` type under foreign same-leaf.
 func pythonGroupbyGroupElemType(right *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
-	if right == nil || right.Type() != "call" {
+	if right == nil {
+		return ""
+	}
+	for right != nil && right.Type() == "parenthesized_expression" {
+		right = pythonParenInner(right)
+	}
+	if right == nil {
+		return ""
+	}
+	// groups = groupby(items); next(groups) / for k, g in groups.
+	if right.Type() == "identifier" {
+		if elemOf == nil {
+			return ""
+		}
+		return elemOf["@groupby."+ingest.NodeText(right, content)]
+	}
+	if right.Type() != "call" {
 		return ""
 	}
 	fn := ingest.ChildByField(right, "function")
@@ -11535,7 +11571,17 @@ func pythonGroupbyGroupElemType(right *grammar.Node, content []byte, elemOf, egE
 	}
 	switch fn.Type() {
 	case "identifier":
-		if ingest.NodeText(fn, content) != "groupby" {
+		switch ingest.NodeText(fn, content) {
+		case "groupby":
+			// fall through to arg peel below
+		case "iter", "list", "tuple":
+			// groups = iter(groupby(items)) / list(groupby(...)) / tuple(...).
+			args, ok := pythonCallPositionalArgNodes(right)
+			if !ok || len(args) == 0 {
+				return ""
+			}
+			return pythonGroupbyGroupElemType(args[0], content, elemOf, egElems, typeOf)
+		default:
 			return ""
 		}
 	case "attribute":
@@ -11561,7 +11607,8 @@ func pythonGroupbyGroupElemType(right *grammar.Node, content []byte, elemOf, egE
 }
 
 // pythonNextGroupbyGroupElemType recovers the group-iterator element type from
-// next(groupby(iterable[, key])) / next(itertools.groupby(...)).
+// next(groupby(iterable[, key])) / next(itertools.groupby(...)) /
+// next(groups) when groups is an assigned groupby local.
 // next yields one (key, group) pair; group iterates elements of the groupby
 // iterable (key= ignored). Used for unpack `_, ga = next(groupby(items))` so
 // subsequent next(ga) / for a in ga type under foreign same-leaf methods.
@@ -11579,6 +11626,26 @@ func pythonNextGroupbyGroupElemType(call *grammar.Node, content []byte, elemOf, 
 		return ""
 	}
 	return pythonGroupbyGroupElemType(args[0], content, elemOf, egElems, typeOf)
+}
+
+// pythonNextGroupbyGroupSubElemType recovers the group-iterator element type from
+// next(groupby(...))[1] / next(groups)[1] / (next(groupby(...)))[1].
+// Index must be integer literal 1 (group slot of the (key, group) pair).
+// [0] (key) and other indices fail closed. Result is a group iterator of the
+// groupby iterable's elements (same leaf as `_, ga = next(groupby(...))`).
+func pythonNextGroupbyGroupSubElemType(sub *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
+	if sub == nil || sub.Type() != "subscript" {
+		return ""
+	}
+	idx := ingest.ChildByField(sub, "subscript")
+	if idx == nil || idx.Type() != "integer" || ingest.NodeText(idx, content) != "1" {
+		return ""
+	}
+	val := ingest.ChildByField(sub, "value")
+	for val != nil && val.Type() == "parenthesized_expression" {
+		val = pythonParenInner(val)
+	}
+	return pythonNextGroupbyGroupElemType(val, content, elemOf, egElems, typeOf)
 }
 
 // pythonTeeElemType recovers the element type of each independent iterator
