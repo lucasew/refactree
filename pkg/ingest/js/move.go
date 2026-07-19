@@ -2316,25 +2316,38 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 				// m.set(k, new A()) / m.set(k, new BoxA().get()) — Class + method-return.
 				mapLocals[local] = et
 			}
-		case "assignment_expression":
+		case "assignment_expression", "augmented_assignment_expression":
 			// xs = [...xs, new A()] / xs = xs.concat([new A()]) /
 			// xs = xs.toSpliced(0,0,new A()) / xs = [new A()] —
 			// rebind arrayLocals from RHS (self-target untyped arms are wildcards).
 			// Foreign too for shadowing (ys after xs).
+			// Also a = new A() / a ??= new A() / a ||= new BoxA().get() —
+			// scalar rebind of typedLocals so a.run() peels under foreign same-leaf
+			// (nullish/logical assign and plain assign).
 			left := ingest.ChildByField(n, "left")
 			right := ingest.ChildByField(n, "right")
 			if left != nil && left.Type() == "identifier" && right != nil {
 				name := ingest.NodeText(left, content)
-				if t := jsArrayAssignSourceElemType(right, content, arrayLocals, out, factories, extra, name); t != "" {
-					arrayLocals[name] = t
+				if name != "" {
+					if t := jsArrayAssignSourceElemType(right, content, arrayLocals, out, factories, extra, name); t != "" {
+						arrayLocals[name] = t
+					}
+					// Scalar: a = new A() / a ??= new BoxA().get() / a ||= makeA().
+					// Bind foreign too so dual-class B rebinds fail closed.
+					if t := jsExprLeafType(right, content, out, factories, classFields, methodReturns); t != "" {
+						out[name] = t
+					}
 				}
 			}
 			// xs[0] = new A() / xs[0] = new BoxA().get() — index assign binds
 			// arrayLocals so xs[0].run() / for (const a of xs) peel under foreign
 			// same-leaf. Numeric index only; non-ident receivers / non-concrete
 			// RHS fail closed. Foreign too. Method-return via extra.
-			if local, et := jsArrayIndexAssignElemTypeEx(n, content, out, factories, classFields, methodReturns); local != "" && et != "" {
-				arrayLocals[local] = et
+			// Only plain assignment_expression has array-index form here.
+			if n.Type() == "assignment_expression" {
+				if local, et := jsArrayIndexAssignElemTypeEx(n, content, out, factories, classFields, methodReturns); local != "" && et != "" {
+					arrayLocals[local] = et
+				}
 			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
