@@ -5582,10 +5582,12 @@ func jsArrayFromElemType(n *grammar.Node, content []byte, arrayLocals, typedLoca
 		if jsIsIdentityCallback(second, content) {
 			return jsArraySourceElemType(first, content, arrayLocals, typedLocals, factories, extra)
 		}
-		// Array.from({length: n}, () => new A()) / (_v, i) => a0 — non-identity
-		// mapfn: sole return peels to concrete element T (array-like length
-		// objects have no element source; mapfn creates each slot).
-		return jsArrayFromMapfnReturnType(second, content, typedLocals, factories)
+		// Array.from({length: n}, () => new A()) / (_v, i) => a0 /
+		// Array.from([0], () => new BoxA().get()) — non-identity mapfn: sole
+		// return peels to concrete element T (array-like length objects have
+		// no element source; mapfn creates each slot). Method-return peels
+		// under foreign same-leaf when extra.methodReturns is set.
+		return jsArrayFromMapfnReturnType(second, content, typedLocals, factories, extra.classFields, extra.methodReturns)
 	default:
 		return ""
 	}
@@ -5593,14 +5595,16 @@ func jsArrayFromElemType(n *grammar.Node, content []byte, arrayLocals, typedLoca
 
 // jsArrayFromMapfnReturnType recovers T from an Array.from mapfn whose sole
 // return expression peels to a concrete class leaf (new T() / typed local /
-// factory / ternary). Enables Array.from({length: n}, () => new A())[0].run()
-// under foreign same-leaf. Multi-statement / untyped returns fail closed.
-func jsArrayFromMapfnReturnType(cb *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+// factory / ternary / zero-arg method return ba.get() / new BoxA().get()).
+// Enables Array.from({length: n}, () => new A())[0].run() and
+// Array.from([0], () => new BoxA().get())[0].run() under foreign same-leaf.
+// Multi-statement / untyped returns fail closed.
+func jsArrayFromMapfnReturnType(cb *grammar.Node, content []byte, typedLocals, factories map[string]string, classFields, methodReturns map[string]map[string]string) string {
 	ret := jsCallbackSoleReturnExpr(cb, content)
 	if ret == nil {
 		return ""
 	}
-	return jsExprConcreteType(ret, content, typedLocals, factories)
+	return jsExprLeafType(ret, content, typedLocals, factories, classFields, methodReturns)
 }
 
 // jsArrayOfElemType recovers T from Array.of(x, …) when every positional arg

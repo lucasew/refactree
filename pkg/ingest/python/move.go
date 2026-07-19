@@ -2970,15 +2970,17 @@ func pythonCollectionMutationElemType(call *grammar.Node, content []byte) (local
 }
 
 // pythonDictMutationValueType recovers (local, T) from unannotated mapping
-// mutations that insert a Class() value:
+// mutations that insert a Class() or method-return value:
 //
 //	da.setdefault("k", A()) — 2nd positional is Class()
+//	da.setdefault("k", ba.get()) — 2nd positional is zero-arg method return
 //	da.update({"k": A()}) / da.update(k=A(), j=A()) — homogeneous Class values
 //
-// Enables da["k"].run() / a = da.setdefault(...) under foreign same-leaf after
-// da = {}. Non-ident receivers / mixed values / non-Class fail closed.
-// set.update([A()]) is handled by pythonCollectionMutationElemType (set elems).
-func pythonDictMutationValueType(call *grammar.Node, content []byte) (local, classType string) {
+// Enables da["k"].run() / a = da.setdefault(...) / da.setdefault(...).run()
+// under foreign same-leaf after da = {}. Non-ident receivers / mixed values /
+// non-Class fail closed. set.update([A()]) is handled by
+// pythonCollectionMutationElemType (set elems).
+func pythonDictMutationValueType(call *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) (local, classType string) {
 	if call == nil || call.Type() != "call" {
 		return "", ""
 	}
@@ -2998,13 +3000,14 @@ func pythonDictMutationValueType(call *grammar.Node, content []byte) (local, cla
 		if !ok || len(args) < 2 {
 			return "", ""
 		}
-		et := pythonClassCtorName(args[1], content)
+		// Class() first, then method-return / typed-local leaf (ba.get() → A).
+		et := pythonObjectLeafType(args[1], content, funcReturns, typeOf, fieldOf)
 		if et == "" {
 			return "", ""
 		}
 		return ingest.NodeText(obj, content), et
 	case "update":
-		et := pythonDictUpdateValueClassType(call, content)
+		et := pythonDictUpdateValueClassType(call, content, funcReturns, typeOf, fieldOf)
 		if et == "" {
 			return "", ""
 		}
@@ -3014,11 +3017,12 @@ func pythonDictMutationValueType(call *grammar.Node, content []byte) (local, cla
 	}
 }
 
-// pythonDictUpdateValueClassType recovers homogeneous Class() value type from
-// da.update({"k": A()}) / da.update(k=A(), j=A()). Positional list/set of
+// pythonDictUpdateValueClassType recovers homogeneous Class()/method-return
+// value type from da.update({"k": A()}) / da.update(k=A(), j=A()) /
+// da.update(k=ba.get()) / da.update({"k": ba.get()}). Positional list/set of
 // Class() is Counter/set path (not mapping values) — fail closed here.
 // Mixed / non-Class / splat fail closed.
-func pythonDictUpdateValueClassType(call *grammar.Node, content []byte) string {
+func pythonDictUpdateValueClassType(call *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
 	if call == nil || call.Type() != "call" {
 		return ""
 	}
@@ -3037,12 +3041,12 @@ func pythonDictUpdateValueClassType(call *grammar.Node, content []byte) string {
 		case "(", ")", ",", "comment":
 			continue
 		case "keyword_argument":
-			// k=A()
+			// k=A() / k=ba.get()
 			val := ingest.ChildByField(ch, "value")
 			if val == nil {
 				return ""
 			}
-			et := pythonClassCtorName(val, content)
+			et := pythonObjectLeafType(val, content, funcReturns, typeOf, fieldOf)
 			if et == "" {
 				return ""
 			}
@@ -3053,8 +3057,12 @@ func pythonDictUpdateValueClassType(call *grammar.Node, content []byte) string {
 				return ""
 			}
 		case "dictionary":
-			// {"k": A()}
-			et := pythonDictLiteralHomogeneousValueClass(ch, content)
+			// {"k": A()} / {"k": ba.get()}
+			et := pythonHomogeneousObjectDictLiteralValue(ch, content, funcReturns, typeOf, fieldOf)
+			if et == "" {
+				// Class()-only fallback when object maps unavailable.
+				et = pythonDictLiteralHomogeneousValueClass(ch, content)
+			}
 			if et == "" {
 				return ""
 			}
@@ -3065,8 +3073,8 @@ func pythonDictUpdateValueClassType(call *grammar.Node, content []byte) string {
 				return ""
 			}
 		case "list", "tuple":
-			// [("k", A())] / (("k", A()),) — homogeneous Class() pair values.
-			et := pythonDictUpdatePairsValueClass(ch, content)
+			// [("k", A())] / (("k", ba.get()),) — homogeneous pair values.
+			et := pythonDictUpdatePairsValueClass(ch, content, funcReturns, typeOf, fieldOf)
 			if et == "" {
 				return ""
 			}
@@ -3088,9 +3096,10 @@ func pythonDictUpdateValueClassType(call *grammar.Node, content []byte) string {
 }
 
 // pythonDictUpdatePairsValueClass recovers T from [("k", A()), ("j", A())] /
-// (("k", A()),) / [["k", A()]] when every element is a 2-slot list/tuple whose
-// second slot is Class() of the same leaf. Empty / mixed / non-pair fail closed.
-func pythonDictUpdatePairsValueClass(n *grammar.Node, content []byte) string {
+// (("k", ba.get()),) / [["k", A()]] when every element is a 2-slot list/tuple
+// whose second slot peels to the same Class leaf (ctor or method-return).
+// Empty / mixed / non-pair fail closed.
+func pythonDictUpdatePairsValueClass(n *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -3111,7 +3120,7 @@ func pythonDictUpdatePairsValueClass(n *grammar.Node, content []byte) string {
 		case "[", "]", "(", ")", ",", "comment":
 			continue
 		case "list", "tuple":
-			et := pythonPairSecondClassCtor(ch, content)
+			et := pythonPairSecondObjectLeaf(ch, content, funcReturns, typeOf, fieldOf)
 			if et == "" {
 				return ""
 			}
@@ -3131,9 +3140,9 @@ func pythonDictUpdatePairsValueClass(n *grammar.Node, content []byte) string {
 	return found
 }
 
-// pythonPairSecondClassCtor recovers T from (k, A()) / [k, A()] when the second
-// positional element is Class(). Other shapes / length fail closed.
-func pythonPairSecondClassCtor(n *grammar.Node, content []byte) string {
+// pythonPairSecondObjectLeaf recovers T from (k, A()) / [k, ba.get()] when the
+// second positional element peels to a Class leaf. Other shapes / length fail closed.
+func pythonPairSecondObjectLeaf(n *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -3159,7 +3168,13 @@ func pythonPairSecondClassCtor(n *grammar.Node, content []byte) string {
 	if len(elems) != 2 {
 		return ""
 	}
-	return pythonClassCtorName(elems[1], content)
+	return pythonObjectLeafType(elems[1], content, funcReturns, typeOf, fieldOf)
+}
+
+// pythonPairSecondClassCtor recovers T from (k, A()) / [k, A()] when the second
+// positional element is Class(). Other shapes / length fail closed.
+func pythonPairSecondClassCtor(n *grammar.Node, content []byte) string {
+	return pythonPairSecondObjectLeaf(n, content, nil, nil, nil)
 }
 
 // pythonDictLiteralHomogeneousValueClass recovers T from {"k": A(), "j": A()}
@@ -3226,10 +3241,11 @@ func pythonDictSubscriptAssignValueType(left, right *grammar.Node, content []byt
 	return ingest.NodeText(val, content), et
 }
 
-// pythonSetdefaultDefaultClassType recovers T from d.setdefault(k, A()) when
-// the 2nd positional arg is Class(). Used when the dict local is untyped so
+// pythonSetdefaultDefaultClassType recovers T from d.setdefault(k, A()) /
+// d.setdefault(k, ba.get()) when the 2nd positional arg peels to a Class leaf
+// (ctor or zero-arg method return). Used when the dict local is untyped so
 // elemOf cannot peel the return. Single-arg setdefault fails closed here.
-func pythonSetdefaultDefaultClassType(call *grammar.Node, content []byte) string {
+func pythonSetdefaultDefaultClassType(call *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
 	if call == nil || call.Type() != "call" {
 		return ""
 	}
@@ -3237,7 +3253,7 @@ func pythonSetdefaultDefaultClassType(call *grammar.Node, content []byte) string
 	if !ok || len(args) < 2 {
 		return ""
 	}
-	return pythonClassCtorName(args[1], content)
+	return pythonObjectLeafType(args[1], content, funcReturns, typeOf, fieldOf)
 }
 
 // pythonNamedtupleCtorInstanceFields recovers field→Class leaves from one
@@ -4782,9 +4798,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 									// a = {"k": A()}.get("k") / dict(k=A()).get("k")
 									out[lname] = true
 								} else if ingest.NodeText(attr, content) == "setdefault" {
-									// a = da.setdefault("k", A()) — unannotated dict: peel Class()
-									// default and bind elemOf so da["k"] peels under foreign same-leaf.
-									if et := pythonSetdefaultDefaultClassType(right, content); et != "" {
+									// a = da.setdefault("k", A()) / da.setdefault("k", ba.get()) —
+									// unannotated dict: peel Class()/method-return default and bind
+									// elemOf so da["k"] peels under foreign same-leaf.
+									if et := pythonSetdefaultDefaultClassType(right, content, funcReturns, typeOf, fieldOf); et != "" {
 										if obj != nil && obj.Type() == "identifier" {
 											elemOf[ingest.NodeText(obj, content)] = et
 										}
@@ -6106,10 +6123,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					elemOf[local] = et
 				}
 			}
-			// da.setdefault("k", A()) / da.update({"k": A()}) / da.update(k=A()) —
-			// unannotated mapping value mutation. Bind elemOf so da["k"].run() /
-			// setdefault return peels under foreign same-leaf. Foreign too for shadowing.
-			if local, et := pythonDictMutationValueType(n, content); local != "" && et != "" {
+			// da.setdefault("k", A()) / da.setdefault("k", ba.get()) /
+			// da.update({"k": A()}) / da.update(k=A()) — unannotated mapping value
+			// mutation. Bind elemOf so da["k"].run() / setdefault return peels under
+			// foreign same-leaf. Foreign too for shadowing.
+			if local, et := pythonDictMutationValueType(n, content, funcReturns, typeOf, fieldOf); local != "" && et != "" {
 				elemOf[local] = et
 			}
 		case "as_pattern":
