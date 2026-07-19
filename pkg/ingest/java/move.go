@@ -5242,6 +5242,108 @@ func javaIsIdentityThenApplyCall(call *grammar.Node, content []byte) bool {
 	return false
 }
 
+// javaIsIdentityHandleCall reports CF handle/handleAsync((a, e) -> a[, executor])
+// with a bi-lambda that returns its first parameter. Used by method-return object
+// peels so completedFuture(ba.get()).handle((x,e)->x).join() preserves T under
+// foreign same-leaf. Type-changing BiFunctions fail closed.
+func javaIsIdentityHandleCall(call *grammar.Node, content []byte) bool {
+	if call == nil || call.Type() != "method_invocation" {
+		return false
+	}
+	switch javaMethodInvocationName(call, content) {
+	case "handle", "handleAsync":
+	default:
+		return false
+	}
+	for _, a := range javaCallArgs(call) {
+		if a.Type() == "lambda_expression" {
+			params := javaInferredLambdaParamNames(a, content)
+			if len(params) != 2 {
+				return false
+			}
+			return javaLambdaBodyIsIdent(a, content, params[0])
+		}
+	}
+	return false
+}
+
+// javaIsIdentityThenComposeCall reports CF thenCompose/thenComposeAsync mappers
+// that rewrap T as CompletionStage of the same T:
+//
+//	x -> CompletableFuture.completedFuture(x) / completedStage(x)
+//	CompletableFuture::completedFuture / completedStage
+//
+// Used by method-return object peels so completedFuture(ba.get()).thenCompose(
+// x -> completedFuture(x)).join() preserves T under foreign same-leaf. Blocks /
+// type-changing mappers fail closed.
+func javaIsIdentityThenComposeCall(call *grammar.Node, content []byte) bool {
+	if call == nil || call.Type() != "method_invocation" {
+		return false
+	}
+	switch javaMethodInvocationName(call, content) {
+	case "thenCompose", "thenComposeAsync":
+	default:
+		return false
+	}
+	var first *grammar.Node
+	for _, a := range javaCallArgs(call) {
+		if a.Type() == "lambda_expression" || a.Type() == "method_reference" {
+			first = a
+			break
+		}
+	}
+	if first == nil {
+		return false
+	}
+	switch first.Type() {
+	case "method_reference":
+		return javaIsCompletedFutureMethodRef(first, content)
+	case "lambda_expression":
+		params := javaInferredLambdaParamNames(first, content)
+		if len(params) != 1 {
+			return false
+		}
+		param := params[0]
+		body := ingest.ChildByField(first, "body")
+		for body != nil && !body.IsNull() && body.Type() == "parenthesized_expression" {
+			inner := ingest.ChildByField(body, "expression")
+			if inner == nil {
+				for i := uint32(0); i < body.ChildCount(); i++ {
+					ch := body.Child(i)
+					if ch.Type() == "(" || ch.Type() == ")" {
+						continue
+					}
+					inner = ch
+					break
+				}
+			}
+			body = inner
+		}
+		if body == nil || body.IsNull() || body.Type() != "method_invocation" {
+			return false
+		}
+		nameN := ingest.ChildByField(body, "name")
+		if nameN == nil {
+			return false
+		}
+		name := ingest.NodeText(nameN, content)
+		if name != "completedFuture" && name != "completedStage" {
+			return false
+		}
+		obj := ingest.ChildByField(body, "object")
+		if obj == nil || (obj.Type() != "identifier" && obj.Type() != "type_identifier") {
+			return false
+		}
+		if ingest.NodeText(obj, content) != "CompletableFuture" {
+			return false
+		}
+		arg := javaFirstCallArg(body)
+		return arg != nil && arg.Type() == "identifier" && ingest.NodeText(arg, content) == param
+	default:
+		return false
+	}
+}
+
 // javaCallHasSoleIdentityLambda reports a call with exactly one positional arg
 // that is a unary identity lambda a -> a.
 func javaCallHasSoleIdentityLambda(call *grammar.Node, content []byte) bool {
@@ -7325,6 +7427,35 @@ func javaStaticCollectionOfObjectElemType(obj *grammar.Node, content []byte, com
 				continue
 			}
 			return ""
+		case "handle", "handleAsync":
+			// completedFuture(ba.get()).handle((x,e) -> x).join() — first-param
+			// BiFunction identity preserves method-return CF result under foreign
+			// same-leaf (Class peels via javaMapResultElemType). Type-changing fail closed.
+			if javaIsIdentityHandleCall(obj, content) {
+				obj = recv
+				continue
+			}
+			return ""
+		case "thenCompose", "thenComposeAsync":
+			// completedFuture(ba.get()).thenCompose(x -> completedFuture(x)).join() —
+			// identity CompletionStage rewrap preserves method-return CF result under
+			// foreign same-leaf (Class peels via javaFlatMapResultElemType).
+			if javaIsIdentityThenComposeCall(obj, content) {
+				obj = recv
+				continue
+			}
+			return ""
+		case "whenComplete", "whenCompleteAsync", "copy", "toCompletableFuture",
+			"orTimeout", "completeOnTimeout",
+			"exceptionally", "exceptionallyAsync",
+			"exceptionallyCompose", "exceptionallyComposeAsync",
+			"minimalCompletionStage":
+			// CF type-preserving stages by API signature (side-effect / timeout /
+			// recovery / Executor args do not change T). Enables
+			// completedFuture(ba.get()).whenComplete(...).join() under foreign
+			// same-leaf (Class peels via javaStreamPipelineElemType).
+			obj = recv
+			continue
 		case "flatMap":
 			// Stream.of(ba.get()).flatMap(x -> Stream.of(x)).findFirst().get() /
 			// Optional.of(ba.get()).flatMap(x -> Optional.of(x)).get() — identity
@@ -7336,10 +7467,12 @@ func javaStaticCollectionOfObjectElemType(obj *grammar.Node, content []byte, com
 			}
 			return ""
 		case "collect":
-			// Stream.of(ba.get()).collect(Collectors.toList()/toSet()/…) —
-			// type-preserving collector under foreign same-leaf (Class peels via
+			// Stream.of(ba.get()).collect(Collectors.toList()/toSet()/…) /
+			// collect(Collectors.reducing/maxBy/minBy(...)) — type-preserving
+			// collectors under foreign same-leaf (Class peels via
 			// javaStreamPipelineElemType). Other collectors fail closed.
-			if javaIsToListOrSetCollector(obj, content) {
+			// Optional-yielding reducing/maxBy/minBy preserve element for .get().
+			if javaIsToListOrSetCollector(obj, content) || javaIsReducingMaxMinCollector(obj, content) {
 				obj = recv
 				continue
 			}
@@ -7941,7 +8074,9 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// Collections.min(coll) / Collections.max(coll[, cmp]) return the element type.
 		// Stream.min/max return Optional — bind via orElse/ifPresent on the pipeline,
 		// not as a bare var of the element type.
-		return javaCollectionsMinMaxElemType(val, obj, content, elemOf, valOf)
+		// Collections.max(List.of(ba.get()), cmp) — method-return collection peels
+		// under foreign same-leaf (Class peels via javaStreamPipelineElemType).
+		return javaCollectionsMinMaxElemType(val, obj, content, elemOf, valOf, compOf, typeMembers)
 	case "requireNonNull", "requireNonNullElse", "requireNonNullElseGet":
 		// Objects.requireNonNull(x[, msg]) / requireNonNullElse(x, d) /
 		// requireNonNullElseGet(x, s) return T of x (first arg). Message, default,
@@ -7971,10 +8106,11 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// the finisher extracts one element (dual-class under foreign same-leaf).
 		// toList/toSet collect (identity finisher) is Collection — fails closed here
 		// (elemOf path).
-		if t := javaStreamCollectCollectingAndThenElemType(val, obj, content, elemOf, valOf); t != "" {
+		// Stream.of(ba.get()).collect(CAT/reducing) — method-return stream peels.
+		if t := javaStreamCollectCollectingAndThenElemType(val, obj, content, elemOf, valOf, compOf, typeMembers); t != "" {
 			return t
 		}
-		return javaStreamCollectReducingIdentityElemType(val, obj, content, elemOf, valOf)
+		return javaStreamCollectReducingIdentityElemType(val, obj, content, elemOf, valOf, compOf, typeMembers)
 	case "searchValues":
 		// ConcurrentHashMap.searchValues(threshold, Function<? super V,? extends U>)
 		// returns U. Identity Function (a -> a) yields V of the map receiver
@@ -8809,7 +8945,8 @@ func javaIsReducingMaxMinCollectorExpr(n *grammar.Node, content []byte) bool {
 // Result is scalar stream element T (not Collection). Identity finishers
 // (xs -> xs / Collections::unmodifiableList) stay on the toList Collection path.
 // Enables collect(...).run() / var xa = collect(...) under foreign same-leaf.
-func javaStreamCollectCollectingAndThenElemType(collectCall, streamObj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+// Stream.of(ba.get()).collect(CAT(...)) peels via javaStaticCollectionOfObjectElemType.
+func javaStreamCollectCollectingAndThenElemType(collectCall, streamObj *grammar.Node, content []byte, elemOf, valOf map[string]string, compOf map[string]string, typeMembers map[string]map[string]string) string {
 	if collectCall == nil || streamObj == nil {
 		return ""
 	}
@@ -8841,7 +8978,14 @@ func javaStreamCollectCollectingAndThenElemType(collectCall, streamObj *grammar.
 	if !javaIsCollectionElemFinisher(args[1], content) {
 		return ""
 	}
-	return javaStreamPipelineElemType(streamObj, content, elemOf, valOf)
+	if et := javaStreamPipelineElemType(streamObj, content, elemOf, valOf); et != "" {
+		return et
+	}
+	// Stream.of(ba.get()).collect(collectingAndThen(...)) — method-return stream.
+	if typeMembers != nil {
+		return javaStaticCollectionOfObjectElemType(streamObj, content, compOf, typeMembers)
+	}
+	return ""
 }
 
 // javaIsCollectionElemFinisher reports finishers that yield one element of a
@@ -8998,7 +9142,8 @@ func javaIsIntegerZero(n *grammar.Node, content []byte) bool {
 // stream.collect(Collectors.reducing(identity, op)) / reducing(identity, mapper, op)
 // when the result is T (not Optional). One-arg reducing / maxBy / minBy return
 // Optional and fail closed here. 3-arg requires identity mapper (a -> a) so U=T.
-func javaStreamCollectReducingIdentityElemType(collectCall, streamObj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+// Stream.of(ba.get()).collect(reducing(id, op)) peels via object stream path.
+func javaStreamCollectReducingIdentityElemType(collectCall, streamObj *grammar.Node, content []byte, elemOf, valOf map[string]string, compOf map[string]string, typeMembers map[string]map[string]string) string {
 	if collectCall == nil || streamObj == nil {
 		return ""
 	}
@@ -9019,13 +9164,22 @@ func javaStreamCollectReducingIdentityElemType(collectCall, streamObj *grammar.N
 		}
 	}
 	args := javaCallArgs(first)
+	streamElem := func() string {
+		if et := javaStreamPipelineElemType(streamObj, content, elemOf, valOf); et != "" {
+			return et
+		}
+		if typeMembers != nil {
+			return javaStaticCollectionOfObjectElemType(streamObj, content, compOf, typeMembers)
+		}
+		return ""
+	}
 	switch len(args) {
 	case 2:
 		// reducing(identity, BinaryOperator) → T. First arg must not be the op lambda.
 		if args[0].Type() == "lambda_expression" {
 			return ""
 		}
-		return javaStreamPipelineElemType(streamObj, content, elemOf, valOf)
+		return streamElem()
 	case 3:
 		// reducing(identity, mapper, BinaryOperator) → U. Identity mapper only (U=T).
 		if args[0].Type() == "lambda_expression" {
@@ -9034,7 +9188,7 @@ func javaStreamCollectReducingIdentityElemType(collectCall, streamObj *grammar.N
 		if !javaIsIdentityLambda(args[1], content) {
 			return ""
 		}
-		return javaStreamPipelineElemType(streamObj, content, elemOf, valOf)
+		return streamElem()
 	default:
 		// reducing(BinaryOperator) → Optional<T>; maxBy/minBy not here.
 		return ""
@@ -9136,7 +9290,9 @@ func javaMethodCallArgCount(call *grammar.Node) int {
 // javaCollectionsMinMaxElemType recovers T from Collections.min/max(coll[, cmp]).
 // First argument is the collection; Comparator does not change the element type.
 // Non-Collections receivers fail closed (Stream.min returns Optional, not T).
-func javaCollectionsMinMaxElemType(call, obj *grammar.Node, content []byte, elemOf, valOf map[string]string) string {
+// Collections.max(List.of(ba.get()), cmp) peels via method-return object path
+// under foreign same-leaf (Class peels via javaStreamPipelineElemType).
+func javaCollectionsMinMaxElemType(call, obj *grammar.Node, content []byte, elemOf, valOf map[string]string, compOf map[string]string, typeMembers map[string]map[string]string) string {
 	if call == nil || obj == nil {
 		return ""
 	}
@@ -9163,7 +9319,14 @@ func javaCollectionsMinMaxElemType(call, obj *grammar.Node, content []byte, elem
 			continue
 		default:
 			// Collections.min(as) / Collections.min(as, cmp) — element of first arg.
-			return javaStreamPipelineElemType(ch, content, elemOf, valOf)
+			if et := javaStreamPipelineElemType(ch, content, elemOf, valOf); et != "" {
+				return et
+			}
+			// Collections.max(List.of(ba.get()), cmp) — method-return collection.
+			if typeMembers != nil {
+				return javaStaticCollectionOfObjectElemType(ch, content, compOf, typeMembers)
+			}
+			return ""
 		}
 	}
 	return ""
