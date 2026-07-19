@@ -8124,6 +8124,13 @@ func jsArrayToSplicedElemType(obj, args *grammar.Node, content []byte, arrayLoca
 // from val). When selfTarget is set (assignment `xs = xs.with(…)`), an untyped
 // identifier receiver equal to selfTarget is also a wildcard. Numeric index
 // required; non-concrete val / mixed types fail closed.
+//
+// Val peels via jsExprLeafType so method-return args work under foreign same-leaf:
+//
+//	[].with(0, new BoxA().get())[0].run()
+//	[new BoxA().get()].with(0, new BoxA().get())[0].run()
+//
+// (Class peels via new A() already worked; fill uses the same leaf path.)
 func jsArrayWithElemType(obj, args *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals, selfTarget string) string {
 	recvT := jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories, extra)
 	wildRecv := false
@@ -8163,7 +8170,9 @@ func jsArrayWithElemType(obj, args *grammar.Node, content []byte, arrayLocals, t
 	if pos != 2 || idx == nil || val == nil || !jsIsNumericIndexArg(idx, content) {
 		return ""
 	}
-	valT := jsExprConcreteType(val, content, typedLocals, factories)
+	// Class/typed-local via concrete path; method-return when extra.methodReturns set
+	// (same leaf as arr.fill(new BoxA().get())).
+	valT := jsExprLeafType(val, content, typedLocals, factories, extra.classFields, extra.methodReturns)
 	if valT == "" {
 		return ""
 	}

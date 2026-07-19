@@ -2191,7 +2191,8 @@ peeled:
 			}
 			// ga(box).run() after ga = attrgetter("a") /
 			// gi(items).run() after gi = itemgetter(0) — stored operator getter.
-			if ft := pythonStoredOperatorGetterType(obj, content, getterOf, fieldOf, elemOf, nil, typeOf); ft != "" {
+			// Also gi([ba.get()]) / ga(w.get()) / ga(Box(A())) under foreign same-leaf.
+			if ft := pythonStoredOperatorGetterType(obj, content, getterOf, fieldOf, elemOf, nil, typeOf, funcReturns); ft != "" {
 				return pythonRenameByTypeMaps(ft, ourReceivers, foreignReceivers, nil)
 			}
 			// ex.submit(lambda: A()).result().run() / fa.result().run() after
@@ -4568,7 +4569,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// xa = ga(box) after ga = attrgetter("a") /
 						// a = gi(items) after gi = itemgetter(0) — stored operator
 						// getter application (same leaf as inline getter call).
-						if ft := pythonStoredOperatorGetterType(right, content, getterOf, fieldOf, elemOf, egElems, typeOf); ft != "" {
+						// Also a = gi([ba.get()]) / xa = ga(w.get()) under foreign same-leaf.
+						if ft := pythonStoredOperatorGetterType(right, content, getterOf, fieldOf, elemOf, egElems, typeOf, funcReturns); ft != "" {
 							spec := getterOf[fname]
 							if !strings.HasSuffix(spec, ":#") {
 								typeOf[lname] = ft
@@ -5509,7 +5511,8 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 					}
 					// xa := ga(box) after ga = attrgetter("a") /
 					// a := gi(items) after gi = itemgetter(0).
-					if ft := pythonStoredOperatorGetterType(valueN, content, getterOf, fieldOf, elemOf, egElems, typeOf); ft != "" {
+					// Also a := gi([ba.get()]) / xa := ga(w.get()) under foreign same-leaf.
+					if ft := pythonStoredOperatorGetterType(valueN, content, getterOf, fieldOf, elemOf, egElems, typeOf, funcReturns); ft != "" {
 						spec := getterOf[fname]
 						if !strings.HasSuffix(spec, ":#") {
 							typeOf[lname] = ft
@@ -7278,8 +7281,15 @@ func pythonOperatorGetterLocalSpec(call *grammar.Node, content []byte) string {
 // is a stored operator getter bound via getterOf (ga = attrgetter("a") /
 // gi = itemgetter(0) / operator.* forms). Field getters use fieldOf (same leaf
 // as box.a / box["a"]); single-index itemgetter uses collection element type
-// (same leaf as items[0]). Unknown locals / wrong arity / missing fieldOf fail closed.
-func pythonStoredOperatorGetterType(call *grammar.Node, content []byte, getterOf, fieldOf, elemOf, egElems, typeOf map[string]string) string {
+// (same leaf as items[0]). Also peels method-return / Class object collections
+// under foreign same-leaf:
+//
+//	gi = itemgetter(0); gi([ba.get()]) / gi([A()])
+//	gk = itemgetter("k"); gk({"k": ba.get()})
+//	ga = attrgetter("a"); ga(w.get()) / ga(Box(A()))
+//
+// Unknown locals / wrong arity / missing fieldOf fail closed.
+func pythonStoredOperatorGetterType(call *grammar.Node, content []byte, getterOf, fieldOf, elemOf, egElems, typeOf, funcReturns map[string]string) string {
 	if call == nil || call.Type() != "call" || getterOf == nil {
 		return ""
 	}
@@ -7310,20 +7320,57 @@ func pythonStoredOperatorGetterType(call *grammar.Node, content []byte, getterOf
 				return t
 			}
 		}
+		// ga(w.get()) / ga(Box(A())) after ga = attrgetter("a") — type-level
+		// fieldOf under foreign same-leaf (same leaf as inline attrgetter).
+		if fieldOf != nil && args[0].Type() == "call" {
+			if tn := pythonCallFuncReturnType(args[0], content, funcReturns, typeOf, fieldOf); tn != "" {
+				if t := fieldOf[tn+"."+field]; t != "" {
+					return t
+				}
+			}
+			if tn := pythonExprClassType(args[0], content); tn != "" {
+				if t := fieldOf[tn+"."+field]; t != "" {
+					return t
+				}
+			}
+		}
 		// ga(SimpleNamespace(k=A())) after ga = attrgetter("k") — inline SNS.
 		return pythonInlineSimpleNamespaceFieldType(args[0], content, field)
 	case "itemgetter":
 		if field == "#" {
-			return pythonIterableElemType(args[0], content, elemOf, egElems, typeOf)
+			// gi(items) — typed collection element.
+			if et := pythonIterableElemType(args[0], content, elemOf, egElems, typeOf); et != "" {
+				return et
+			}
+			// gi([ba.get()]) / gi([A()]) — method-return / Class object collection
+			// under foreign same-leaf (same leaf as inline itemgetter(0)([...])).
+			return pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf)
 		}
 		if field == "" {
 			return ""
 		}
 		objLocal := pythonOperatorGetterObjectLocal(args[0], content, "itemgetter")
-		if objLocal == "" || fieldOf == nil {
-			return ""
+		if objLocal != "" && fieldOf != nil {
+			if t := fieldOf[objLocal+"."+field]; t != "" {
+				return t
+			}
 		}
-		return fieldOf[objLocal+"."+field]
+		// gk(w.get()) / gk(Box(A())) after gk = itemgetter("a") — type-level fieldOf.
+		if fieldOf != nil && args[0].Type() == "call" {
+			if tn := pythonCallFuncReturnType(args[0], content, funcReturns, typeOf, fieldOf); tn != "" {
+				if t := fieldOf[tn+"."+field]; t != "" {
+					return t
+				}
+			}
+			if tn := pythonExprClassType(args[0], content); tn != "" {
+				if t := fieldOf[tn+"."+field]; t != "" {
+					return t
+				}
+			}
+		}
+		// gk({"k": ba.get()}) after gk = itemgetter("k") — homogeneous object-dict
+		// values under foreign same-leaf (same leaf as inline itemgetter("k")({...})).
+		return pythonHomogeneousObjectDictValue(args[0], content, funcReturns, typeOf, fieldOf)
 	}
 	return ""
 }

@@ -5140,6 +5140,99 @@ func javaIsIdentityMapCall(call *grammar.Node, content []byte) bool {
 	return count == 1 && javaIsIdentityLambda(first, content)
 }
 
+// javaIsIdentityFlatMapRewrapCall reports flatMap mappers that rewrap T as
+// Stream/Optional of the same T (type-preserving under foreign same-leaf):
+//
+//	x -> Stream.of(x) / Stream.ofNullable(x)
+//	x -> Optional.of(x) / Optional.ofNullable(x)
+//	Stream::of / Stream::ofNullable
+//	Optional::of / Optional::ofNullable
+//
+// Used by method-return object peels so Stream.of(ba.get()).flatMap(x -> Stream.of(x))
+// and Optional.of(ba.get()).flatMap(x -> Optional.of(x)) preserve T (Class peels
+// already work via javaStreamPipelineElemType). Blocks / other mappers fail closed.
+func javaIsIdentityFlatMapRewrapCall(call *grammar.Node, content []byte) bool {
+	if call == nil || call.Type() != "method_invocation" {
+		return false
+	}
+	if name := javaMethodInvocationName(call, content); name != "flatMap" {
+		return false
+	}
+	var args *grammar.Node
+	for i := uint32(0); i < call.ChildCount(); i++ {
+		if call.Child(i).Type() == "argument_list" {
+			args = call.Child(i)
+			break
+		}
+	}
+	if args == nil {
+		return false
+	}
+	var first *grammar.Node
+	count := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," || ch.Type() == "comment" {
+			continue
+		}
+		count++
+		if first == nil {
+			first = ch
+		}
+	}
+	if count != 1 || first == nil {
+		return false
+	}
+	switch first.Type() {
+	case "method_reference":
+		return javaIsOptionalOfMethodRef(first, content) || javaIsStreamOfMethodRef(first, content)
+	case "lambda_expression":
+		params := javaInferredLambdaParamNames(first, content)
+		if len(params) != 1 {
+			return false
+		}
+		param := params[0]
+		body := ingest.ChildByField(first, "body")
+		for body != nil && !body.IsNull() && body.Type() == "parenthesized_expression" {
+			inner := ingest.ChildByField(body, "expression")
+			if inner == nil {
+				for i := uint32(0); i < body.ChildCount(); i++ {
+					ch := body.Child(i)
+					if ch.Type() == "(" || ch.Type() == ")" {
+						continue
+					}
+					inner = ch
+					break
+				}
+			}
+			body = inner
+		}
+		if body == nil || body.IsNull() || body.Type() != "method_invocation" {
+			return false
+		}
+		nameN := ingest.ChildByField(body, "name")
+		if nameN == nil {
+			return false
+		}
+		name := ingest.NodeText(nameN, content)
+		if name != "of" && name != "ofNullable" {
+			return false
+		}
+		obj := ingest.ChildByField(body, "object")
+		if obj == nil || (obj.Type() != "identifier" && obj.Type() != "type_identifier") {
+			return false
+		}
+		recvName := ingest.NodeText(obj, content)
+		if recvName != "Optional" && recvName != "Stream" {
+			return false
+		}
+		arg := javaFirstCallArg(body)
+		return arg != nil && arg.Type() == "identifier" && ingest.NodeText(arg, content) == param
+	default:
+		return false
+	}
+}
+
 // javaIsValueIdentityBiLambda reports expression-bodied bi-lambdas that return
 // their second (value) parameter: (k, v) -> v. Used to recover U=V from
 // ConcurrentHashMap.search identity BiFunctions. Blocks / other bodies fail closed.
@@ -7063,6 +7156,16 @@ func javaStaticCollectionOfObjectElemType(obj *grammar.Node, content []byte, com
 			// already type-preserve; non-identity mappers fail closed here so
 			// type-changing map stays unbound on the Class pipeline path).
 			if javaIsIdentityMapCall(obj, content) {
+				obj = recv
+				continue
+			}
+			return ""
+		case "flatMap":
+			// Stream.of(ba.get()).flatMap(x -> Stream.of(x)).findFirst().get() /
+			// Optional.of(ba.get()).flatMap(x -> Optional.of(x)).get() — identity
+			// rewrap preserves method-return element under foreign same-leaf
+			// (Class peels via javaStreamPipelineElemType; non-identity fail closed).
+			if javaIsIdentityFlatMapRewrapCall(obj, content) {
 				obj = recv
 				continue
 			}
