@@ -1879,8 +1879,9 @@ type rangeSourceInfo struct {
 	// named slice does not (result is *[]T, not indexable without deref).
 	isArray bool
 	// typeName is set for non-collection struct fields that yield a named type
-	// (embedded SA in type WA struct { SA }) so nested wa.SA.Items peels under
-	// foreign same-leaf. Empty for ordinary collection/func field entries.
+	// (embedded SA in type WA struct { SA }, or named Inner SA) so nested
+	// wa.SA.Items / wa.Inner.Items peels under foreign same-leaf. Empty for
+	// ordinary collection/func field entries.
 	typeName string
 }
 
@@ -2628,10 +2629,13 @@ func callReturningFuncCollection(n *grammar.Node, content []byte, funcRetFunc ma
 //   - function-typed field Fa (type Box struct { Fa FA } with FA func() []*A)
 //   - collection field Items (type SA struct { Items []*A } / Items AS / M map[K]*A)
 //   - nested explicit embed path wa.SA.Items (type WA struct { SA })
+//   - named non-embed path wa.Inner.Items (type WA struct { Inner SA })
+//   - slice/map-of-struct index sas[0].Items (sas []SA / sas []*SA)
 //
 // Used for xa.Fa() call peels, sa.Items[0] index peels, and short-var
 // items := sa.Items / fa := xa.Fa under foreign same-leaf methods.
-func selectorNamedFuncField(n *grammar.Node, content []byte, valueType func(string, uint32) (string, bool), structFields map[string]map[string]rangeSourceInfo, at uint32) (rangeSourceInfo, bool) {
+// indexElem may be nil; when set, enables sas[0].Items peels.
+func selectorNamedFuncField(n *grammar.Node, content []byte, valueType func(string, uint32) (string, bool), structFields map[string]map[string]rangeSourceInfo, at uint32, indexElem func(string, uint32) (string, bool)) (rangeSourceInfo, bool) {
 	if n == nil || valueType == nil || len(structFields) == 0 {
 		return rangeSourceInfo{}, false
 	}
@@ -2641,7 +2645,7 @@ func selectorNamedFuncField(n *grammar.Node, content []byte, valueType func(stri
 			if c == nil || c.Type() == "," {
 				continue
 			}
-			return selectorNamedFuncField(c, content, valueType, structFields, at)
+			return selectorNamedFuncField(c, content, valueType, structFields, at, indexElem)
 		}
 		return rangeSourceInfo{}, false
 	}
@@ -2653,7 +2657,7 @@ func selectorNamedFuncField(n *grammar.Node, content []byte, valueType func(stri
 	if operand == nil || field == nil {
 		return rangeSourceInfo{}, false
 	}
-	recvType, ok := selectorOperandStructType(operand, content, valueType, structFields, at)
+	recvType, ok := selectorOperandStructType(operand, content, valueType, structFields, at, indexElem)
 	if !ok || recvType == "" {
 		return rangeSourceInfo{}, false
 	}
@@ -2669,9 +2673,11 @@ func selectorNamedFuncField(n *grammar.Node, content []byte, valueType func(stri
 }
 
 // selectorOperandStructType resolves the named struct type of a selector
-// operand: bare sa / (*sa) / wa.SA (embed intermediate with typeName).
-// Used so wa.SA.Items and (*sa).Items peel under foreign same-leaf methods.
-func selectorOperandStructType(operand *grammar.Node, content []byte, valueType func(string, uint32) (string, bool), structFields map[string]map[string]rangeSourceInfo, at uint32) (string, bool) {
+// operand: bare sa / (*sa) / wa.SA (embed intermediate with typeName) /
+// wa.Inner (named non-embed typeName) / sas[0] (collection index element).
+// Used so wa.SA.Items, wa.Inner.Items, sas[0].Items, and (*sa).Items peel
+// under foreign same-leaf methods. indexElem may be nil.
+func selectorOperandStructType(operand *grammar.Node, content []byte, valueType func(string, uint32) (string, bool), structFields map[string]map[string]rangeSourceInfo, at uint32, indexElem func(string, uint32) (string, bool)) (string, bool) {
 	operand = peelSelectorOperand(operand, content)
 	if operand == nil {
 		return "", false
@@ -2686,7 +2692,21 @@ func selectorOperandStructType(operand *grammar.Node, content []byte, valueType 
 		}
 		return strings.TrimPrefix(recvType, "*"), true
 	}
-	// Nested: wa.SA — field SA is an embed (typeName) or promoted embed path.
+	// sas[0] / mas["k"] — element/value of a typed collection is a named
+	// struct type (sas []SA / sas []*SA / mas map[string]SA) so sas[0].Items
+	// peels under foreign same-leaf methods.
+	if operand.Type() == "index_expression" {
+		op := ingest.ChildByField(operand, "operand")
+		op = peelSelectorOperand(op, content)
+		if op != nil && op.Type() == "identifier" && indexElem != nil {
+			el, ok := indexElem(ingest.NodeText(op, content), at)
+			if ok && el != "" {
+				return strings.TrimPrefix(el, "*"), true
+			}
+		}
+		return "", false
+	}
+	// Nested: wa.SA / wa.Inner — field is embed or named typeName intermediate.
 	if operand.Type() != "selector_expression" {
 		return "", false
 	}
@@ -2695,7 +2715,7 @@ func selectorOperandStructType(operand *grammar.Node, content []byte, valueType 
 	if base == nil || field == nil {
 		return "", false
 	}
-	baseType, ok := selectorOperandStructType(base, content, valueType, structFields, at)
+	baseType, ok := selectorOperandStructType(base, content, valueType, structFields, at, indexElem)
 	if !ok || baseType == "" {
 		return "", false
 	}
@@ -2765,7 +2785,8 @@ func peelSelectorOperand(n *grammar.Node, content []byte) *grammar.Node {
 
 // collectStructCollectionAndFuncFields walks a struct_type for named fields
 // whose type is either a function type with a single collection result or a
-// collection (slice/array/map/named/pointer-to). Also returns embedded named
+// collection (slice/array/map/named/pointer-to), or a named type intermediate
+// (Inner SA / Inner *SA) for nested field peels. Also returns embedded named
 // struct type identifiers (type WA struct { SA }) for field promotion.
 func collectStructCollectionAndFuncFields(structType *grammar.Node, content []byte, namedFunc, namedColl map[string]rangeSourceInfo) (map[string]rangeSourceInfo, []string) {
 	fields := map[string]rangeSourceInfo{}
@@ -2809,11 +2830,20 @@ func collectStructCollectionAndFuncFields(structType *grammar.Node, content []by
 			if !ok || info.elemType == "" {
 				info, ok = collectionTypeOrNamedResult(typeField, content, namedColl)
 			}
-			if !ok || info.elemType == "" {
+			if ok && info.elemType != "" {
+				for _, fname := range names {
+					fields[fname] = info
+				}
 				return
 			}
-			for _, fname := range names {
-				fields[fname] = info
+			// Named non-embed field of named type: Inner SA / Inner *SA so
+			// wa.Inner.Items peels under foreign same-leaf (like embed wa.SA.Items).
+			// Collection/func fields already handled above; plain type_identifier
+			// (or *T) is a typeName intermediate. Unknown types fail closed later.
+			if embName := embeddedStructTypeName(typeField, content); embName != "" {
+				for _, fname := range names {
+					fields[fname] = rangeSourceInfo{typeName: embName}
+				}
 			}
 			return
 		}
@@ -5427,10 +5457,11 @@ func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identEl
 	}
 	// sa.Items / sa.M — struct field of collection type (type SA struct {
 	// Items []*A } / Items AS / M map[K]*A). Also promoted embeds (type WA
-	// struct { SA } → wa.Items). Under foreign same-leaf for sa.Items[0].M
-	// and items := sa.Items short-var peels.
+	// struct { SA } → wa.Items), named non-embed (wa.Inner.Items), and
+	// slice-of-struct index (sas[0].Items). Under foreign same-leaf for
+	// sa.Items[0].M and items := sa.Items short-var peels.
 	if n.Type() == "selector_expression" {
-		if info, ok := selectorNamedFuncField(n, content, valueType, structFields, at); ok && info.elemType != "" {
+		if info, ok := selectorNamedFuncField(n, content, valueType, structFields, at, identElem); ok && info.elemType != "" {
 			return info, true
 		}
 		return rangeSourceInfo{}, false
@@ -5533,7 +5564,7 @@ func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identEl
 		if info, ok := selectorIfaceMethod(fn, content, valueType, ifaceColl, at); ok && info.elemType != "" {
 			return info, true
 		}
-		if info, ok := selectorNamedFuncField(fn, content, valueType, structFields, at); ok && info.elemType != "" {
+		if info, ok := selectorNamedFuncField(fn, content, valueType, structFields, at, identElem); ok && info.elemType != "" {
 			return info, true
 		}
 	}
@@ -5770,7 +5801,7 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 					} else if info, ok := callReturningFuncCollection(exprs[i], content, funcRetFunc); ok {
 						// var fa = getFA() with getFA() FA / func() []*A.
 						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
-					} else if info, ok := selectorNamedFuncField(exprs[i], content, valueType, structFields, n.StartByte()); ok {
+					} else if info, ok := selectorNamedFuncField(exprs[i], content, valueType, structFields, n.StartByte(), lookupElem); ok {
 						// var fa = xa.Fa with type Box struct { Fa FA }.
 						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
 					} else if info, ok := selectorIfaceMethod(exprs[i], content, valueType, ifaceFunc, n.StartByte()); ok {
@@ -5808,7 +5839,7 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 				} else if info, ok := callReturningFuncCollection(exprs[i], content, funcRetFunc); ok {
 					// fa := getFA() with getFA() FA / func() []*A.
 					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
-				} else if info, ok := selectorNamedFuncField(exprs[i], content, valueType, structFields, n.StartByte()); ok {
+				} else if info, ok := selectorNamedFuncField(exprs[i], content, valueType, structFields, n.StartByte(), lookupElem); ok {
 					// fa := xa.Fa with type Box struct { Fa FA }.
 					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
 				} else if info, ok := selectorIfaceMethod(exprs[i], content, valueType, ifaceFunc, n.StartByte()); ok {
