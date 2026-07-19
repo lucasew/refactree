@@ -6335,12 +6335,15 @@ func pythonAttrgetterFieldType(call *grammar.Node, content []byte, fieldOf map[s
 
 // pythonGetattrFieldType recovers T from getattr(box, "a") when box is a typed
 // local with annotated field a of type T (fieldOf; same leaf as box.a /
-// attrgetter("a")(box)). Exactly two positional args: identifier local + string
-// field name. Three-arg getattr(obj, name, default), non-string attr names, and
-// non-identifier objects fail closed. Bare builtin name only — getattr from
-// other modules / getattr stored in a variable are not tracked.
+// attrgetter("a")(box)). Also getattr(SimpleNamespace(k=A()), "k") /
+// getattr(types.SimpleNamespace(k=A()), "k") — inline SNS kwargs (same leaf as
+// vars(SimpleNamespace(...))["k"] / SimpleNamespace(...).k). Exactly two
+// positional args: object + string field name. Three-arg getattr(obj, name,
+// default), non-string attr names, and other objects fail closed. Bare builtin
+// name only — getattr from other modules / getattr stored in a variable are
+// not tracked.
 func pythonGetattrFieldType(call *grammar.Node, content []byte, fieldOf map[string]string) string {
-	if call == nil || call.Type() != "call" || fieldOf == nil {
+	if call == nil || call.Type() != "call" {
 		return ""
 	}
 	fn := ingest.ChildByField(call, "function")
@@ -6351,14 +6354,27 @@ func pythonGetattrFieldType(call *grammar.Node, content []byte, fieldOf map[stri
 	if !ok || len(args) != 2 {
 		return ""
 	}
-	if args[0].Type() != "identifier" || args[1].Type() != "string" {
+	if args[1].Type() != "string" {
 		return ""
 	}
 	_, field := pythonStringContent(args[1], content)
 	if field == "" {
 		return ""
 	}
-	return fieldOf[ingest.NodeText(args[0], content)+"."+field]
+	if args[0].Type() == "identifier" {
+		if fieldOf == nil {
+			return ""
+		}
+		return fieldOf[ingest.NodeText(args[0], content)+"."+field]
+	}
+	// getattr(SimpleNamespace(k=A()), "k") / types.SimpleNamespace — inline SNS.
+	if args[0].Type() == "call" {
+		fields, _ := pythonSimpleNamespaceFieldTypes(args[0], content)
+		if fields != nil {
+			return fields[field]
+		}
+	}
+	return ""
 }
 
 // pythonItemgetterFieldType recovers T from itemgetter("a")(box) /
@@ -7125,12 +7141,14 @@ func pythonDunderDictObjectType(attr *grammar.Node, content []byte, typeOf map[s
 // list(vars(box).values())[i] / list(box.__dict__.values())[i] /
 // d = asdict(box); list(d.values())[i] (dict preserves declaration order —
 // values()[i] is field i; same leaf as next(asdict(box).values()) / box.a).
+// Also list/tuple(vars(SimpleNamespace(...)).values())[i] /
+// list(SimpleNamespace(...).__dict__.values())[i] — inline SNS order (no fieldOf).
 // First positional arg must be an identifier local or replace(local); bare
 // dict_values is not indexable so list/tuple wrap is required; non-decimal
 // integer indices and other callees fail closed. Does not treat bare box[0]
 // as valid (synthetic @astuple. prefix — dataclasses are not indexable).
 func pythonAstupleIndexAccessType(sub *grammar.Node, content []byte, fieldOf map[string]string) string {
-	if sub == nil || sub.Type() != "subscript" || fieldOf == nil {
+	if sub == nil || sub.Type() != "subscript" {
 		return ""
 	}
 	val := ingest.ChildByField(sub, "value")
@@ -7150,15 +7168,89 @@ func pythonAstupleIndexAccessType(sub *grammar.Node, content []byte, fieldOf map
 			return ""
 		}
 	}
-	objLocal := pythonAstupleObjectLocal(val, content)
-	if objLocal == "" {
-		// list/tuple(asdict(box).values())[i] / list(d.values())[i]
-		objLocal = pythonDictViewValuesSeqLocal(val, content)
+	if fieldOf != nil {
+		objLocal := pythonAstupleObjectLocal(val, content)
+		if objLocal == "" {
+			// list/tuple(asdict(box).values())[i] / list(d.values())[i]
+			objLocal = pythonDictViewValuesSeqLocal(val, content)
+		}
+		if objLocal != "" {
+			if t := fieldOf["@astuple."+objLocal+".#"+idxText]; t != "" {
+				return t
+			}
+		}
 	}
-	if objLocal == "" {
+	// list(vars(SimpleNamespace(k=A())).values())[0] — inline SNS order.
+	return pythonInlineSimpleNamespaceDictViewValuesIndexType(val, content, idxText)
+}
+
+// pythonInlineSimpleNamespaceDictViewValuesIndexType recovers declaration-order
+// field i from list/tuple(vars(SimpleNamespace(...)).values()) /
+// list(SimpleNamespace(...).__dict__.values()) under foreign same-leaf.
+// Bare dict_values is not indexable — list/tuple wrap required. Out-of-range
+// / non-inline forms fail closed.
+func pythonInlineSimpleNamespaceDictViewValuesIndexType(n *grammar.Node, content []byte, idxText string) string {
+	order := pythonInlineSimpleNamespaceDictViewValuesOrder(n, content)
+	if len(order) == 0 || idxText == "" {
 		return ""
 	}
-	return fieldOf["@astuple."+objLocal+".#"+idxText]
+	idx := 0
+	for _, c := range idxText {
+		if c < '0' || c > '9' {
+			return ""
+		}
+		idx = idx*10 + int(c-'0')
+	}
+	if idx < 0 || idx >= len(order) {
+		return ""
+	}
+	return order[idx]
+}
+
+// pythonInlineSimpleNamespaceDictViewValuesOrder recovers declaration-order
+// Class leaves from list/tuple(vars(SimpleNamespace(...)).values()) /
+// vars(SimpleNamespace(...)).values() / SimpleNamespace(...).__dict__.values().
+// Peels list/tuple wrappers only. Other forms fail closed (nil).
+func pythonInlineSimpleNamespaceDictViewValuesOrder(n *grammar.Node, content []byte) []string {
+	if n == nil {
+		return nil
+	}
+	if n.Type() == "parenthesized_expression" {
+		return pythonInlineSimpleNamespaceDictViewValuesOrder(pythonParenInner(n), content)
+	}
+	if n.Type() != "call" {
+		return nil
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil {
+		return nil
+	}
+	name := pythonSimpleCalleeName(fn, content)
+	// list(...values()) / tuple(...values()) — materialize order-preserving sequence.
+	if name == "list" || name == "tuple" {
+		args, ok := pythonCallPositionalArgNodes(n)
+		if !ok || len(args) != 1 {
+			return nil
+		}
+		return pythonInlineSimpleNamespaceDictViewValuesOrder(args[0], content)
+	}
+	if name != "values" || fn.Type() != "attribute" {
+		return nil
+	}
+	args, ok := pythonCallPositionalArgNodes(n)
+	if !ok || len(args) != 0 {
+		return nil
+	}
+	obj := ingest.ChildByField(fn, "object")
+	call := pythonInlineSimpleNamespaceDictViewCall(obj, content)
+	if call == nil {
+		return nil
+	}
+	_, order := pythonSimpleNamespaceFieldTypes(call, content)
+	if len(order) == 0 {
+		return nil
+	}
+	return order
 }
 
 // pythonHomogeneousAstupleFieldType returns the shared field type when every
@@ -7618,7 +7710,8 @@ func pythonDictViewValuesHomogeneousType(n *grammar.Node, content []byte, fieldO
 		return pythonDictViewValuesHomogeneousType(args[1], content, fieldOf)
 	case "values":
 		// asdict(box).values() / vars(box).values() / box.__dict__.values() /
-		// d.values() after d = asdict(box) / vars / __dict__.
+		// d.values() after d = asdict(box) / vars / __dict__ /
+		// vars(SimpleNamespace(...)).values() / SimpleNamespace(...).__dict__.values().
 		if fn.Type() != "attribute" {
 			return ""
 		}
@@ -7637,7 +7730,11 @@ func pythonDictViewValuesHomogeneousType(n *grammar.Node, content []byte, fieldO
 		} else {
 			local = pythonDictViewObjectLocal(obj, content)
 		}
-		return pythonHomogeneousAstupleFieldType(local, fieldOf)
+		if t := pythonHomogeneousAstupleFieldType(local, fieldOf); t != "" {
+			return t
+		}
+		// Inline vars(SimpleNamespace(k=A())).values() — no fieldOf local needed.
+		return pythonInlineSimpleNamespaceDictViewHomogeneousType(obj, content)
 	}
 	return ""
 }
@@ -7873,6 +7970,41 @@ func pythonDictViewKeyFromSource(src *grammar.Node, content []byte, fieldOf map[
 	return fieldOf[objLocal+"."+key]
 }
 
+// pythonInlineSimpleNamespaceDictViewCall recovers the SimpleNamespace(...) /
+// types.SimpleNamespace(...) call from vars(SimpleNamespace(...)) /
+// SimpleNamespace(...).__dict__ under foreign same-leaf. Other forms fail closed.
+func pythonInlineSimpleNamespaceDictViewCall(src *grammar.Node, content []byte) *grammar.Node {
+	if src == nil {
+		return nil
+	}
+	switch src.Type() {
+	case "call":
+		fn := ingest.ChildByField(src, "function")
+		// vars(SimpleNamespace(...)) — bare vars only.
+		if fn == nil || fn.Type() != "identifier" || ingest.NodeText(fn, content) != "vars" {
+			return nil
+		}
+		args, ok := pythonCallPositionalArgNodes(src)
+		if !ok || len(args) == 0 || args[0].Type() != "call" {
+			return nil
+		}
+		return args[0]
+	case "attribute":
+		// SimpleNamespace(...).__dict__
+		field := ingest.ChildByField(src, "attribute")
+		obj := ingest.ChildByField(src, "object")
+		if field == nil || obj == nil || ingest.NodeText(field, content) != "__dict__" {
+			return nil
+		}
+		if obj.Type() != "call" {
+			return nil
+		}
+		return obj
+	default:
+		return nil
+	}
+}
+
 // pythonInlineSimpleNamespaceDictViewFieldType recovers T from
 // vars(SimpleNamespace(k=A())) / vars(types.SimpleNamespace(k=A())) /
 // SimpleNamespace(k=A()).__dict__ field key k under foreign same-leaf.
@@ -7882,31 +8014,8 @@ func pythonInlineSimpleNamespaceDictViewFieldType(src *grammar.Node, content []b
 	if src == nil || key == "" {
 		return ""
 	}
-	var call *grammar.Node
-	switch src.Type() {
-	case "call":
-		fn := ingest.ChildByField(src, "function")
-		// vars(SimpleNamespace(...)) — bare vars only.
-		if fn == nil || fn.Type() != "identifier" || ingest.NodeText(fn, content) != "vars" {
-			return ""
-		}
-		args, ok := pythonCallPositionalArgNodes(src)
-		if !ok || len(args) == 0 || args[0].Type() != "call" {
-			return ""
-		}
-		call = args[0]
-	case "attribute":
-		// SimpleNamespace(...).__dict__
-		field := ingest.ChildByField(src, "attribute")
-		obj := ingest.ChildByField(src, "object")
-		if field == nil || obj == nil || ingest.NodeText(field, content) != "__dict__" {
-			return ""
-		}
-		if obj.Type() != "call" {
-			return ""
-		}
-		call = obj
-	default:
+	call := pythonInlineSimpleNamespaceDictViewCall(src, content)
+	if call == nil {
 		return ""
 	}
 	fields, _ := pythonSimpleNamespaceFieldTypes(call, content)
@@ -7914,6 +8023,44 @@ func pythonInlineSimpleNamespaceDictViewFieldType(src *grammar.Node, content []b
 		return ""
 	}
 	return fields[key]
+}
+
+// pythonInlineSimpleNamespaceDictViewHomogeneousType recovers the shared value
+// type of vars(SimpleNamespace(k=A())) / SimpleNamespace(...).__dict__ when all
+// declaration-order field types agree. Enables for x in vars(SNS(...)).values()
+// under foreign same-leaf. Mixed fields fail closed.
+func pythonInlineSimpleNamespaceDictViewHomogeneousType(src *grammar.Node, content []byte) string {
+	call := pythonInlineSimpleNamespaceDictViewCall(src, content)
+	if call == nil {
+		return ""
+	}
+	_, order := pythonSimpleNamespaceFieldTypes(call, content)
+	if len(order) == 0 {
+		return ""
+	}
+	shared := order[0]
+	for _, t := range order[1:] {
+		if t != shared {
+			return ""
+		}
+	}
+	return shared
+}
+
+// pythonInlineSimpleNamespaceDictViewFirstFieldType recovers the first
+// declaration-order field type of vars(SimpleNamespace(k=A())) /
+// SimpleNamespace(...).__dict__. Enables next(iter(vars(SNS(...)).values()))
+// under foreign same-leaf (same leaf as next(asdict(box).values()) for field 0).
+func pythonInlineSimpleNamespaceDictViewFirstFieldType(src *grammar.Node, content []byte) string {
+	call := pythonInlineSimpleNamespaceDictViewCall(src, content)
+	if call == nil {
+		return ""
+	}
+	_, order := pythonSimpleNamespaceFieldTypes(call, content)
+	if len(order) == 0 {
+		return ""
+	}
+	return order[0]
 }
 
 // pythonDictViewObjectLocal recovers the identifier local whose field keys are
@@ -9096,6 +9243,8 @@ func pythonAstupleFirstFieldType(n *grammar.Node, content []byte, fieldOf map[st
 		// d = asdict(box); d.values() / d = vars(box); d.values() /
 		// d = box.__dict__; d.values() — assigned dict-view local (bindFields
 		// recorded @astuple.d.#i; same leaf as next(asdict(box).values())).
+		// vars(SimpleNamespace(k=A())).values() / SimpleNamespace(...).__dict__.values()
+		// — inline SNS (no fieldOf local; first kw field).
 		if fn.Type() != "attribute" {
 			return ""
 		}
@@ -9113,10 +9262,13 @@ func pythonAstupleFirstFieldType(n *grammar.Node, content []byte, fieldOf map[st
 			return fieldOf["@astuple."+ingest.NodeText(obj, content)+".#0"]
 		}
 		local := pythonDictViewObjectLocal(obj, content)
-		if local == "" {
-			return ""
+		if local != "" {
+			if t := fieldOf["@astuple."+local+".#0"]; t != "" {
+				return t
+			}
 		}
-		return fieldOf["@astuple."+local+".#0"]
+		// Inline vars(SimpleNamespace(k=A())).values() — first declaration-order field.
+		return pythonInlineSimpleNamespaceDictViewFirstFieldType(obj, content)
 	}
 	// astuple(box) / dataclasses.astuple(box) / list(astuple(box)) via ObjectLocal.
 	local := pythonAstupleObjectLocal(n, content)

@@ -7241,15 +7241,21 @@ func jsArrayAssignSourceElemType(n *grammar.Node, content []byte, arrayLocals, t
 
 // jsArrayToSplicedElemType recovers T from arr.toSpliced(start, deleteCount, ...items)
 // when the receiver and each insert peel to uniform element type T. Empty-array
-// receiver is a wildcard (type from inserts). When selfTarget is set (assignment
-// `xs = xs.toSpliced(…)`), an untyped identifier receiver equal to selfTarget is
-// also a wildcard. Zero-item toSpliced is identity of a typed receiver only.
-// Mixed inserts fail closed.
+// receiver is a wildcard (type from inserts). Nullish-only receivers
+// ([null] / [undefined]) are also wildcards — same overwrite/replace peel as
+// arr.with (e.g. [null].toSpliced(0,1,new A())[0]). When selfTarget is set
+// (assignment `xs = xs.toSpliced(…)`), an untyped identifier receiver equal to
+// selfTarget is also a wildcard. Zero-item toSpliced is identity of a typed
+// receiver only. Mixed inserts fail closed.
 func jsArrayToSplicedElemType(obj, args *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals, selfTarget string) string {
 	recvT := jsArraySourceElemType(obj, content, arrayLocals, typedLocals, factories, extra)
 	wildRecv := false
 	if recvT == "" {
 		if jsIsEmptyArrayLiteral(obj) {
+			wildRecv = true
+		} else if jsArrayIsNullishOnly(obj, content) {
+			// [null].toSpliced(0,1,new A()) / [undefined].toSpliced(...) —
+			// nullish slots are wildcards (overwrite/replace like with/fill).
 			wildRecv = true
 		} else if selfTarget != "" && obj != nil && obj.Type() == "identifier" {
 			name := ingest.NodeText(obj, content)
@@ -8416,7 +8422,8 @@ func jsIteratorFromYieldType(n *grammar.Node, content []byte, arrayLocals, typed
 
 // jsArrayIsNullishOnly reports [null] / [undefined] / [null, undefined, …]
 // (only null/undefined elements). Empty arrays fail closed (use jsIsEmptyArrayLiteral).
-// Enables [null].with(0, new A()) overwrite peels under foreign same-leaf.
+// Enables [null].with(0, new A()) / [null].toSpliced(0,1,new A()) overwrite peels
+// under foreign same-leaf.
 func jsArrayIsNullishOnly(n *grammar.Node, content []byte) bool {
 	if n == nil {
 		return false
