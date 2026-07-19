@@ -2207,6 +2207,14 @@ peeled:
 					if et := pythonAstupleNextFirstField(obj, content, fieldOf); et != "" {
 						return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 					}
+					// next(iter([ba.get()])) / next(dict(k=ba.get()).values()) —
+					// method-return collection / object-dict values under foreign
+					// same-leaf (pythonNextElemType only peels Class()/typed locals).
+					if args, ok := pythonCallPositionalArgNodes(obj); ok && len(args) > 0 {
+						if et := pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf); et != "" {
+							return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+						}
+					}
 				}
 				// min(...).run() / max(...).run() — before Class() ctor path.
 				// Covers min(items) / max(d.values()) / min(asdict(...).values()) /
@@ -2216,11 +2224,25 @@ peeled:
 					if et := pythonMinMaxElemType(obj, content, elemOf, nil, typeOf, fieldOf); et != "" {
 						return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 					}
+					// min([ba.get()], key=...) / max(dict(k=ba.get()).values()) —
+					// method-return collection / object-dict values under foreign
+					// same-leaf (single positional; kwargs ignored).
+					if args, ok := pythonCallPositionalArgNodes(obj); ok && len(args) == 1 {
+						if et := pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf); et != "" {
+							return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+						}
+					}
 				}
 				// choice(seq).run() — before Class() ctor path (bare from random).
 				if name == "choice" {
 					if et := pythonRandomChoiceElemType(obj, content, elemOf, nil, typeOf); et != "" {
 						return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+					}
+					// choice([ba.get()]) — method-return sequence under foreign same-leaf.
+					if args, ok := pythonCallPositionalArgNodes(obj); ok && len(args) > 0 {
+						if et := pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf); et != "" {
+							return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+						}
 					}
 				}
 				// heappop(heap).run() / heappushpop(...).run() / heapreplace(...).run()
@@ -2229,12 +2251,24 @@ peeled:
 					if et := pythonHeappopElemType(obj, content, elemOf, nil, typeOf); et != "" {
 						return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 					}
+					// heappop([ba.get()]) — method-return heap under foreign same-leaf.
+					if args, ok := pythonCallPositionalArgNodes(obj); ok && len(args) > 0 {
+						if et := pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf); et != "" {
+							return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+						}
+					}
 				}
 				// reduce(fn, iterable[, init]).run() — before Class() ctor path
 				// (bare from functools; fold result is iterable element).
 				if name == "reduce" {
 					if et := pythonReduceElemType(obj, content, elemOf, nil, typeOf); et != "" {
 						return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+					}
+					// reduce(fn, [ba.get()]) — method-return iterable under foreign same-leaf.
+					if args, ok := pythonCallPositionalArgNodes(obj); ok && len(args) >= 2 {
+						if et := pythonObjectIterableElemType(args[1], content, funcReturns, typeOf, fieldOf); et != "" {
+							return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+						}
 					}
 				}
 				// getitem(items, i).run() — before Class() ctor path (bare from operator).
@@ -2294,6 +2328,27 @@ peeled:
 			// functools.reduce(fn, iterable[, init]).run() — module-qualified form.
 			if et := pythonReduceElemType(obj, content, elemOf, nil, typeOf); et != "" {
 				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+			}
+			// random.choice([ba.get()]) / heapq.heappop([ba.get()]) /
+			// functools.reduce(fn, [ba.get()]) — method-return collections under
+			// foreign same-leaf (helpers above only peel Class()/typed locals).
+			if fn := ingest.ChildByField(obj, "function"); fn != nil && fn.Type() == "attribute" {
+				if attr := ingest.ChildByField(fn, "attribute"); attr != nil {
+					switch ingest.NodeText(attr, content) {
+					case "choice", "heappop", "heappushpop", "heapreplace":
+						if args, ok := pythonCallPositionalArgNodes(obj); ok && len(args) > 0 {
+							if et := pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf); et != "" {
+								return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+							}
+						}
+					case "reduce":
+						if args, ok := pythonCallPositionalArgNodes(obj); ok && len(args) >= 2 {
+							if et := pythonObjectIterableElemType(args[1], content, funcReturns, typeOf, fieldOf); et != "" {
+								return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
+							}
+						}
+					}
+				}
 			}
 			if et := pythonCollectionAccessElemType(obj, content, elemOf, funcReturns, typeOf, fieldOf); et != "" {
 				return pythonRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
@@ -4457,6 +4512,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								out[lname] = true
 							} else if et := pythonAstupleNextFirstField(right, content, fieldOf); ourReceivers[et] {
 								out[lname] = true
+							} else if args, ok := pythonCallPositionalArgNodes(right); ok && len(args) > 0 {
+								// a = next(iter([ba.get()])) / next(dict(k=ba.get()).values())
+								if et := pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
+									out[lname] = true
+								}
 							}
 						}
 						// a = min(items) / max(items) / min(items, key=...) —
@@ -4475,6 +4535,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 							} else if et := pythonMinMaxElemType(right, content, elemOf, egElems, typeOf, fieldOf); ourReceivers[et] {
 								out[lname] = true
+							} else if args, ok := pythonCallPositionalArgNodes(right); ok && len(args) == 1 {
+								// a = min([ba.get()], key=...) / max(dict(k=ba.get()).values())
+								if et := pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
+									out[lname] = true
+								}
 							}
 						}
 						// a = choice(items) — from random import choice; element of seq.
@@ -4485,6 +4550,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 							} else if et := pythonRandomChoiceElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
+							} else if args, ok := pythonCallPositionalArgNodes(right); ok && len(args) > 0 {
+								// a = choice([ba.get()])
+								if et := pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
+									out[lname] = true
+								}
 							}
 						}
 						// a = heappop(items) / heappushpop(items, x) / heapreplace(items, x)
@@ -4496,6 +4566,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 								pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 							} else if et := pythonHeappopElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
+							} else if args, ok := pythonCallPositionalArgNodes(right); ok && len(args) > 0 {
+								// a = heappop([ba.get()])
+								if et := pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
+									out[lname] = true
+								}
 							}
 						}
 						// a = reduce(fn, items) / reduce(fn, items, init) — from functools
@@ -4504,6 +4579,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						if fname == "reduce" {
 							if et := pythonReduceElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 								out[lname] = true
+							} else if args, ok := pythonCallPositionalArgNodes(right); ok && len(args) >= 2 {
+								// a = reduce(fn, [ba.get()])
+								if et := pythonObjectIterableElemType(args[1], content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
+									out[lname] = true
+								}
 							}
 						}
 						// a = copy(item) / deepcopy(item) — from copy import copy, deepcopy;
@@ -5210,6 +5290,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							out[lname] = true
 						} else if et := pythonAstupleNextFirstField(valueN, content, fieldOf); ourReceivers[et] {
 							out[lname] = true
+						} else if args, ok := pythonCallPositionalArgNodes(valueN); ok && len(args) > 0 {
+							// a := next(iter([ba.get()])) / next(dict(k=ba.get()).values())
+							if et := pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
+								out[lname] = true
+							}
 						}
 					}
 					// a := min(items) / max(items) / min(items, key=...) /
@@ -5222,6 +5307,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 						} else if et := pythonMinMaxElemType(valueN, content, elemOf, egElems, typeOf, fieldOf); ourReceivers[et] {
 							out[lname] = true
+						} else if args, ok := pythonCallPositionalArgNodes(valueN); ok && len(args) == 1 {
+							// a := min([ba.get()], key=...) / max(dict(k=ba.get()).values())
+							if et := pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
+								out[lname] = true
+							}
 						}
 					}
 					// a := choice(items) — from random import choice /
@@ -5231,6 +5321,11 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 						} else if et := pythonRandomChoiceElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 							out[lname] = true
+						} else if args, ok := pythonCallPositionalArgNodes(valueN); ok && len(args) > 0 {
+							// a := choice([ba.get()])
+							if et := pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
+								out[lname] = true
+							}
 						}
 					}
 					// a := heappop(items) / heappushpop(items, x) / heapreplace(items, x) /
@@ -5240,12 +5335,22 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 							pythonBindPairLoopTarget(lname, types, pairSlots, elemOf)
 						} else if et := pythonHeappopElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 							out[lname] = true
+						} else if args, ok := pythonCallPositionalArgNodes(valueN); ok && len(args) > 0 {
+							// a := heappop([ba.get()])
+							if et := pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
+								out[lname] = true
+							}
 						}
 					}
 					// a := reduce(fn, items) / reduce(fn, items, init)
 					if fname == "reduce" {
 						if et := pythonReduceElemType(valueN, content, elemOf, egElems, typeOf); ourReceivers[et] {
 							out[lname] = true
+						} else if args, ok := pythonCallPositionalArgNodes(valueN); ok && len(args) >= 2 {
+							// a := reduce(fn, [ba.get()])
+							if et := pythonObjectIterableElemType(args[1], content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
+								out[lname] = true
+							}
 						}
 					}
 					// a := copy(item) / deepcopy(item) — from copy import copy, deepcopy.
@@ -5633,10 +5738,13 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 				}
 				if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); ourReceivers[et] {
 					out[ingest.NodeText(left, content)] = true
-				} else if et := pythonObjectCollectionElem(right, content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
+				} else if et := pythonObjectIterableElemType(right, content, funcReturns, typeOf, fieldOf); ourReceivers[et] {
 					// for x in [ba.get()] / for x in (ba.get(),) /
-					// for x in list([ba.get()]) / for x in [ba.get()] + [ba.get()] —
-					// method-return elements under foreign same-leaf.
+					// for x in list([ba.get()]) / for x in [ba.get()] + [ba.get()] /
+					// for x in dict(k=ba.get()).values() /
+					// for x in {"k": ba.get()}.values() /
+					// for x in ChainMap({"k": ba.get()}).values() —
+					// method-return elements / object-dict values under foreign same-leaf.
 					out[ingest.NodeText(left, content)] = true
 				} else if et := pythonDictViewValuesHomogeneousType(right, content, fieldOf); ourReceivers[et] {
 					// for x in asdict(box).values() / vars / __dict__ / d.values()
@@ -13013,7 +13121,8 @@ func pythonHomogeneousObjectDictLiteralValue(collection *grammar.Node, content [
 
 // pythonHomogeneousObjectDictCallValue recovers T from dict(k=ba.get()) /
 // OrderedDict(k=ba.get()) / UserDict(k=ba.get()) / dict({"k": ba.get()}) /
-// dict([("k", ba.get())]) when every value peels to the same Class leaf.
+// dict([("k", ba.get())]) / ChainMap({"k": ba.get()}) when every value peels
+// to the same Class leaf.
 func pythonHomogeneousObjectDictCallValue(call *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
 	if call == nil || call.Type() != "call" {
 		return ""
@@ -13022,6 +13131,10 @@ func pythonHomogeneousObjectDictCallValue(call *grammar.Node, content []byte, fu
 	switch name {
 	case "dict", "OrderedDict", "UserDict":
 		// ok
+	case "ChainMap":
+		// ChainMap({"k": ba.get()}) / ChainMap(dict(k=ba.get()), {"m": a}) —
+		// every positional map peels to the same object-dict value leaf.
+		return pythonHomogeneousObjectChainMapValue(call, content, funcReturns, typeOf, fieldOf)
 	default:
 		return ""
 	}
@@ -13083,6 +13196,163 @@ func pythonHomogeneousObjectDictCallValue(call *grammar.Node, content []byte, fu
 	default:
 		return ""
 	}
+}
+
+// pythonHomogeneousObjectChainMapValue recovers T from
+// ChainMap({"k": ba.get()}) / ChainMap(dict(k=ba.get())) /
+// ChainMap(OrderedDict(k=ba.get()), {"m": a}) when every positional map has
+// homogeneous object-dict values of the same Class leaf. Dict literals and
+// dict/OrderedDict/UserDict (and nested ChainMap) object peels accepted;
+// mixed / kwargs / splat / Class()-only shapes that need
+// pythonHomogeneousDictValueCtorElem fail closed here (Class() path covers
+// those). Enables ChainMap({"k": ba.get()})["k"].run() /
+// ChainMap({"k": ba.get()}).get("k").run() / ca = ChainMap(...); ca["k"].run()
+// under foreign same-leaf.
+func pythonHomogeneousObjectChainMapValue(call *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	if call == nil || call.Type() != "call" {
+		return ""
+	}
+	argList := ingest.ChildByField(call, "arguments")
+	if argList == nil {
+		return ""
+	}
+	var elem string
+	saw := false
+	for i := uint32(0); i < argList.ChildCount(); i++ {
+		ch := argList.Child(i)
+		if ch == nil {
+			continue
+		}
+		switch ch.Type() {
+		case "(", ")", ",", "comment":
+			continue
+		case "keyword_argument", "list_splat", "dictionary_splat", "parenthesized_list_splat":
+			return ""
+		case "dictionary":
+			et := pythonHomogeneousObjectDictLiteralValue(ch, content, funcReturns, typeOf, fieldOf)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				elem = et
+				saw = true
+				continue
+			}
+			if et != elem {
+				return ""
+			}
+		case "call":
+			// ChainMap(dict(k=ba.get())) / ChainMap(OrderedDict(k=ba.get())) /
+			// ChainMap(UserDict(k=ba.get())) / nested ChainMap(...).
+			et := pythonHomogeneousObjectDictValue(ch, content, funcReturns, typeOf, fieldOf)
+			if et == "" {
+				return ""
+			}
+			if !saw {
+				elem = et
+				saw = true
+				continue
+			}
+			if et != elem {
+				return ""
+			}
+		default:
+			return ""
+		}
+	}
+	if !saw {
+		return ""
+	}
+	return elem
+}
+
+// pythonObjectDictValuesElemType recovers T from dict(k=ba.get()).values() /
+// {"k": ba.get()}.values() / ChainMap({"k": ba.get()}).values() /
+// OrderedDict(k=ba.get()).values() when the receiver peels as a homogeneous
+// object-dict of Class leaf T. Zero-arg values() only. Enables
+// for x in dict(k=ba.get()).values(): x.run() /
+// next(iter(dict(k=ba.get()).values())).run() under foreign same-leaf.
+func pythonObjectDictValuesElemType(n *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	for n != nil && !n.IsNull() {
+		switch n.Type() {
+		case "parenthesized_expression":
+			n = pythonParenInner(n)
+		case "named_expression":
+			n = ingest.ChildByField(n, "value")
+		default:
+			goto peeled
+		}
+	}
+peeled:
+	if n == nil || n.IsNull() || n.Type() != "call" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil || fn.Type() != "attribute" {
+		return ""
+	}
+	attr := ingest.ChildByField(fn, "attribute")
+	if attr == nil || ingest.NodeText(attr, content) != "values" {
+		return ""
+	}
+	args, ok := pythonCallPositionalArgNodes(n)
+	if !ok || len(args) != 0 {
+		return ""
+	}
+	obj := ingest.ChildByField(fn, "object")
+	return pythonHomogeneousObjectDictValue(obj, content, funcReturns, typeOf, fieldOf)
+}
+
+// pythonObjectIterableElemType recovers T from object-collection / object-dict
+// values iterables used under next/min/for when pythonIterableElemType only
+// peels Class() / typed locals:
+//
+//	[ba.get()] / iter([ba.get()]) / list([ba.get()])
+//	dict(k=ba.get()).values() / {"k": ba.get()}.values() /
+//	ChainMap({"k": ba.get()}).values()
+//	list(dict(k=ba.get()).values()) / iter(...values())
+//
+// Enables next(iter([ba.get()])).run() / min([ba.get()], key=...).run() /
+// for x in dict(k=ba.get()).values(): x.run() under foreign same-leaf.
+func pythonObjectIterableElemType(n *grammar.Node, content []byte, funcReturns, typeOf, fieldOf map[string]string) string {
+	for n != nil && !n.IsNull() {
+		switch n.Type() {
+		case "parenthesized_expression":
+			n = pythonParenInner(n)
+		case "named_expression":
+			n = ingest.ChildByField(n, "value")
+		default:
+			goto peeled
+		}
+	}
+peeled:
+	if n == nil || n.IsNull() {
+		return ""
+	}
+	// [ba.get()] / iter([ba.get()]) / list([ba.get()] + [ba.get()]) / etc.
+	if et := pythonObjectCollectionElem(n, content, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
+	// dict(k=ba.get()).values() / {"k": ba.get()}.values() / ChainMap(...).values()
+	if et := pythonObjectDictValuesElemType(n, content, funcReturns, typeOf, fieldOf); et != "" {
+		return et
+	}
+	// list/iter/reversed/... of an object-dict values view (objectCollection
+	// peels list of method-return elems but not list(dict(...).values())).
+	if n.Type() == "call" {
+		fn := ingest.ChildByField(n, "function")
+		if fn != nil && fn.Type() == "identifier" {
+			switch ingest.NodeText(fn, content) {
+			case "list", "tuple", "set", "frozenset", "iter", "reversed", "sorted", "deque":
+				args, ok := pythonCallPositionalArgNodes(n)
+				if !ok || len(args) == 0 {
+					return ""
+				}
+				return pythonObjectIterableElemType(args[0], content, funcReturns, typeOf, fieldOf)
+			}
+		}
+	}
+	return ""
 }
 
 // pythonHomogeneousObjectDictPairsValue recovers T from [("k", ba.get())] /
