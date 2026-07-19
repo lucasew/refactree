@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/lucasew/refactree/pkg/ingest"
@@ -1786,6 +1787,13 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 	// a, b := makeAB() with makeAB() (*A, *B) binds a→A, b→B so foreign same-leaf
 	// methods on b are not fail-open rewritten.
 	funcResults := sameFileFuncResultTypes(pf.Root, content)
+	genericPeels := sameFileGenericPeelFuncs(pf.Root, content)
+	// Named collection types: type AS []*A / type AM = map[K]*A — param peels.
+	namedColl := sameFileNamedCollectionResults(pf.Root, content)
+	// Named-struct fields: ba := wa.BA binds BoxA so ba.Get().Run peels dual-class.
+	structFields := sameFileStructNamedFuncFields(pf.Root, content)
+	// Method single named results: a := ba.Get() / xa := ba.Self() dual-class binds.
+	methodNamed := sameFileMethodNamedResults(pf.Root, content)
 
 	// Collect method/function scopes and local typed bindings.
 	var walk func(n *grammar.Node)
@@ -1802,34 +1810,34 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 			}
 			rangeSrc := map[string]rangeSourceInfo{}
 			if params := ingest.ChildByField(n, "parameters"); params != nil {
-				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &bindings, rangeSrc)
+				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &bindings, rangeSrc, namedColl)
 			}
 			// Named results: func (r *T) M() (a *A, b *B) — a/b used in body.
-			collectResultParameterBindings(n, content, &bindings, rangeSrc)
+			collectResultParameterBindings(n, content, &bindings, rangeSrc, namedColl)
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl, structFields, methodNamed)
 			}
 		case "function_declaration":
 			rangeSrc := map[string]rangeSourceInfo{}
 			if params := ingest.ChildByField(n, "parameters"); params != nil {
-				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &bindings, rangeSrc)
+				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &bindings, rangeSrc, namedColl)
 			}
 			// Named results: func Use() (a *A, b *B) { a.Run(); b.Run() }.
 			// Without this, same-leaf foreign methods are fail-open rewritten.
-			collectResultParameterBindings(n, content, &bindings, rangeSrc)
+			collectResultParameterBindings(n, content, &bindings, rangeSrc, namedColl)
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl, structFields, methodNamed)
 			}
 		case "func_literal":
 			// Nested / package-level func literals: func(a *A, b *B) { a.Run(); b.Run() }.
 			// Without param bindings, foreign same-leaf call sites are rewritten (fail-open).
 			rangeSrc := map[string]rangeSourceInfo{}
 			if params := ingest.ChildByField(n, "parameters"); params != nil {
-				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &bindings, rangeSrc)
+				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &bindings, rangeSrc, namedColl)
 			}
-			collectResultParameterBindings(n, content, &bindings, rangeSrc)
+			collectResultParameterBindings(n, content, &bindings, rangeSrc, namedColl)
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults)
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl, structFields, methodNamed)
 			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -1864,18 +1872,38 @@ func selectorCallTargetTypeFunc(content []byte) func(leafStart uint32) (string, 
 	}
 }
 
+// chanCollBindPrefix marks scoped bindings for channel-of-collection params
+// (ch <-chan []*T). Real collection idents never use this prefix; receive peels
+// look up "\x00chan:"+name via the same indexElem binding table.
+const chanCollBindPrefix = "\x00chan:"
+
 // rangeSourceInfo describes how to type range variables and channel receives
 // over a named collection.
 type rangeSourceInfo struct {
 	elemType string // element (slice/array/chan) or map value named type
 	keyType  string // map key named type (only when isMap)
 	isMap    bool
+	// isArray is true when the collection is (or is a named alias of) an array
+	// type. Used so new(AA) peels under foreign same-leaf while new(AS) for a
+	// named slice does not (result is *[]T, not indexable without deref).
+	isArray bool
+	// typeName is set for non-collection struct fields that yield a named type
+	// (embedded SA in type WA struct { SA }, or named Inner SA) so nested
+	// wa.SA.Items / wa.Inner.Items peels under foreign same-leaf. Empty for
+	// ordinary collection/func field entries.
+	typeName string
+	// payloadIsColl is true when this is a channel source whose payload is
+	// itself a collection (chan []*T / chan map[K]*T / chan AS). elemType /
+	// keyType / isMap then describe the payload collection. Receive peels bind
+	// a collection local (as := <-ch; as[0].M); scalar (<-ch).M fails closed.
+	payloadIsColl bool
 }
 
 // collectResultParameterBindings records named result params from a
 // function/method/func-literal declaration (result field is a parameter_list).
 // Unnamed results (func f() *A) have no identifiers and are skipped.
-func collectResultParameterBindings(decl *grammar.Node, content []byte, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo) {
+// namedColl may be nil (see collectParameterListBindings).
+func collectResultParameterBindings(decl *grammar.Node, content []byte, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo, namedColl map[string]rangeSourceInfo) {
 	if decl == nil {
 		return
 	}
@@ -1883,12 +1911,26 @@ func collectResultParameterBindings(decl *grammar.Node, content []byte, bindings
 	if result == nil || result.Type() != "parameter_list" {
 		return
 	}
-	collectParameterListBindings(result, content, decl.StartByte(), decl.EndByte(), bindings, rangeSrc)
+	collectParameterListBindings(result, content, decl.StartByte(), decl.EndByte(), bindings, rangeSrc, namedColl)
+}
+
+// inlineIfaceTypeKey is a synthetic type name for params typed as an inline
+// interface{ … } so ga.GetAS peels can look up methods without a named type.
+// Keyed by the interface_type node's start byte (unique within a file).
+func inlineIfaceTypeKey(ifaceType *grammar.Node) string {
+	if ifaceType == nil {
+		return ""
+	}
+	return "·inlineiface·" + strconv.FormatUint(uint64(ifaceType.StartByte()), 10)
 }
 
 // collectParameterListBindings records concrete-typed params (a *A, a, b *A)
 // and container params usable as range sources (as []*A, m map[K]*B, c ...T).
-func collectParameterListBindings(paramList *grammar.Node, content []byte, scopeStart, scopeEnd uint32, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo) {
+// namedColl maps same-file type names (type AS []*A) to collection element
+// info so params typed as AS / *AS / AM peel under foreign same-leaf (may be nil).
+// Inline interface params (ga interface{ GetAS() AS }) bind a synthetic type key
+// matching sameFileIfaceMethodCollectionResults registration.
+func collectParameterListBindings(paramList *grammar.Node, content []byte, scopeStart, scopeEnd uint32, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo, namedColl map[string]rangeSourceInfo) {
 	if paramList == nil {
 		return
 	}
@@ -1908,8 +1950,39 @@ func collectParameterListBindings(paramList *grammar.Node, content []byte, scope
 					}
 					*bindings = append(*bindings, identTypeBinding{scopeStart, scopeEnd, name, typ})
 				}
+			} else if typeN != nil && typeN.Type() == "interface_type" {
+				// ga interface{ GetAS() AS } — synthetic key for method peels.
+				if key := inlineIfaceTypeKey(typeN); key != "" {
+					for _, name := range names {
+						if name == "" || name == "_" {
+							continue
+						}
+						*bindings = append(*bindings, identTypeBinding{scopeStart, scopeEnd, name, key})
+					}
+				}
 			}
 			if info, ok := rangeSourceFromTypeNode(typeN, content); ok {
+				// chan AS where AS is a same-file named collection: upgrade scalar
+				// payload type name to collection payload (as := <-ch; as[0].M).
+				if !info.payloadIsColl && info.elemType != "" && namedColl != nil {
+					if coll, ok := namedColl[strings.TrimPrefix(info.elemType, "*")]; ok && coll.elemType != "" {
+						// Only upgrade when the param type is a channel (payload name
+						// matched a named collection). Bare AS params already take the
+						// collectionTypeOrNamedResult branch below.
+						if typeN != nil && typeN.Type() == "channel_type" {
+							coll.payloadIsColl = true
+							info = coll
+						}
+					}
+				}
+				for _, name := range names {
+					if name == "" || name == "_" {
+						continue
+					}
+					rangeSrc[name] = info
+				}
+			} else if info, ok := collectionTypeOrNamedResult(typeN, content, namedColl); ok {
+				// as AS / pas *AS / am AM with type AS []*A / AM map[K]*A.
 				for _, name := range names {
 					if name == "" || name == "_" {
 						continue
@@ -1933,6 +2006,9 @@ func collectParameterListBindings(paramList *grammar.Node, content []byte, scope
 			typeN := ingest.ChildByField(p, "type")
 			if typ := typeNameFromTypeNode(typeN, content); typ != "" {
 				rangeSrc[name] = rangeSourceInfo{elemType: typ, isMap: false}
+			} else if info, ok := collectionTypeOrNamedResult(typeN, content, namedColl); ok {
+				// c ...AS with type AS []*A — element type is A (same as ...*A).
+				rangeSrc[name] = info
 			}
 		}
 	}
@@ -2007,10 +2083,25 @@ func rangeSourceFromTypeNode(n *grammar.Node, content []byte) (rangeSourceInfo, 
 		return rangeSourceInfo{}, false
 	}
 	switch n.Type() {
-	case "slice_type", "array_type":
+	case "parenthesized_type":
+		// ([]*T) in type conversions — peel parens to the inner collection type.
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "(" || c.Type() == ")" {
+				continue
+			}
+			return rangeSourceFromTypeNode(c, content)
+		}
+	case "slice_type":
 		if el := ingest.ChildByField(n, "element"); el != nil {
 			if typ := typeNameFromTypeNode(el, content); typ != "" {
 				return rangeSourceInfo{elemType: typ, isMap: false}, true
+			}
+		}
+	case "array_type":
+		if el := ingest.ChildByField(n, "element"); el != nil {
+			if typ := typeNameFromTypeNode(el, content); typ != "" {
+				return rangeSourceInfo{elemType: typ, isMap: false, isArray: true}, true
 			}
 		}
 	case "map_type":
@@ -2026,9 +2117,19 @@ func rangeSourceFromTypeNode(n *grammar.Node, content []byte) (rangeSourceInfo, 
 		}
 	case "channel_type":
 		// chan T / <-chan T — prefer the value field; else first non-keyword child.
+		// Named/pointer payload (chan *A / chan SA): elemType is the payload type
+		// for a := <-ch and (<-ch).M. Collection payload (chan []*A / chan map[K]*A):
+		// payloadIsColl so as := <-ch; as[0].M peels under foreign same-leaf.
+		// Use concreteNamedType (not typeNameFromTypeNode) for the scalar path —
+		// typeNameFromTypeNode walks into slice/map children and would treat
+		// chan []*A as payload A and chan map[string]*A as payload "string".
 		if v := ingest.ChildByField(n, "value"); v != nil {
-			if typ := typeNameFromTypeNode(v, content); typ != "" {
+			if typ := concreteNamedType(v, content); typ != "" {
 				return rangeSourceInfo{elemType: typ, isMap: false}, true
+			}
+			if info, ok := rangeSourceFromTypeNode(v, content); ok && info.elemType != "" {
+				info.payloadIsColl = true
+				return info, true
 			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -2036,8 +2137,12 @@ func rangeSourceFromTypeNode(n *grammar.Node, content []byte) (rangeSourceInfo, 
 			if c == nil || c.Type() == "chan" || c.Type() == "<-" {
 				continue
 			}
-			if typ := typeNameFromTypeNode(c, content); typ != "" {
+			if typ := concreteNamedType(c, content); typ != "" {
 				return rangeSourceInfo{elemType: typ, isMap: false}, true
+			}
+			if info, ok := rangeSourceFromTypeNode(c, content); ok && info.elemType != "" {
+				info.payloadIsColl = true
+				return info, true
 			}
 		}
 	case "pointer_type":
@@ -2051,6 +2156,1386 @@ func rangeSourceFromTypeNode(n *grammar.Node, content []byte) (rangeSourceInfo, 
 		}
 	}
 	return rangeSourceInfo{}, false
+}
+
+// functionTypeSingleCollectionResult reports element/value type when typeN is a
+// function_type with a single collection result:
+//
+//	func() []*T
+//	func() map[K]*T
+//	func() ([]*T) / func() (as []*T)  — parenthesized single result
+//
+// Multi-result signatures (func() ([]*T, error)) fail closed — same policy as
+// multi-result same-file helpers used as lone call values. Parameter types of
+// the function type are ignored (only the result matters for fa() peels).
+func functionTypeSingleCollectionResult(typeN *grammar.Node, content []byte) (rangeSourceInfo, bool) {
+	if typeN == nil || typeN.Type() != "function_type" {
+		return rangeSourceInfo{}, false
+	}
+	result := ingest.ChildByField(typeN, "result")
+	if result == nil {
+		return rangeSourceInfo{}, false
+	}
+	if result.Type() == "parameter_list" {
+		// Parenthesized results: ( []*T ) / ( as []*T ) / ( []*T, error ).
+		var only rangeSourceInfo
+		count := 0
+		for i := uint32(0); i < result.ChildCount(); i++ {
+			p := result.Child(i)
+			if p == nil || (p.Type() != "parameter_declaration" && p.Type() != "variadic_parameter_declaration") {
+				continue
+			}
+			count++
+			typeN := ingest.ChildByField(p, "type")
+			info, ok := rangeSourceFromTypeNode(typeN, content)
+			if !ok || info.elemType == "" {
+				// Non-collection slot (error, bool, …) or multi mixed — fail closed.
+				return rangeSourceInfo{}, false
+			}
+			only = info
+		}
+		if count != 1 {
+			return rangeSourceInfo{}, false
+		}
+		return only, true
+	}
+	return rangeSourceFromTypeNode(result, content)
+}
+
+// sameFileNamedFuncCollectionResults maps same-file type names whose underlying
+// type is a function type with a single collection result:
+//
+//	type FA func() []*A
+//	type FMA = func() map[K]*A
+//	type FPA = func() ([]*A)
+//	type FA = FA0          // chained alias of a named func type
+//	type FA FA0            // defined type whose base is a named func type
+//
+// Multi-result function types fail closed (same as inline function_type peels).
+// Chained aliases / defined-of-named resolve via fixed-point over type_identifier
+// RHS edges; cycles and unresolved targets stay absent (fail closed).
+func sameFileNamedFuncCollectionResults(root *grammar.Node, content []byte) map[string]rangeSourceInfo {
+	out := map[string]rangeSourceInfo{}
+	if root == nil {
+		return out
+	}
+	edges := map[string]string{}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil {
+			return
+		}
+		switch n.Type() {
+		case "type_spec", "type_alias":
+			nameN := ingest.ChildByField(n, "name")
+			typeN := ingest.ChildByField(n, "type")
+			if nameN == nil || typeN == nil {
+				break
+			}
+			name := ingest.NodeText(nameN, content)
+			if name == "" {
+				break
+			}
+			if info, ok := functionTypeSingleCollectionResult(typeN, content); ok && info.elemType != "" {
+				out[name] = info
+			} else if tgt := typeIdentifierName(typeN, content); tgt != "" && tgt != name {
+				// type FA = FA0 / type FA FA0 — resolve after direct peels.
+				edges[name] = tgt
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	resolveNamedTypeAliasEdges(out, edges)
+	return out
+}
+
+// sameFileNamedCollectionResults maps same-file type names whose underlying
+// type is a slice/array/map/channel (or pointer-to-those):
+//
+//	type AS []*A
+//	type AM = map[string]*A
+//	type CA chan *A
+//	type AA [1]*A
+//	type PAS *[]*A
+//	type AS = AS0          // chained alias of a named collection type
+//	type AS AS0            // defined type whose base is a named collection
+//	type PAS *AS0          // pointer-to-named collection (param (*pas)[0])
+//
+// Chained aliases / defined-of-named resolve via fixed-point over type_identifier
+// RHS edges; pointer-to-named (*AS0) peels after the base is known. Cycles and
+// unresolved targets stay absent (fail closed).
+// isArray is set only when the declared type is (paren of) array_type, not when
+// reached only via pointer peel (type PAS *[n]T) so new(AA) peels but new(PAS) does not.
+// Chained aliases of an array-named type inherit isArray from the resolved base;
+// pointer-to-named always clears isArray (new(PAS) is not indexable).
+func sameFileNamedCollectionResults(root *grammar.Node, content []byte) map[string]rangeSourceInfo {
+	out := map[string]rangeSourceInfo{}
+	if root == nil {
+		return out
+	}
+	edges := map[string]string{}
+	ptrEdges := map[string]string{} // name → target for type PAS *AS0
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil {
+			return
+		}
+		switch n.Type() {
+		case "type_spec", "type_alias":
+			nameN := ingest.ChildByField(n, "name")
+			typeN := ingest.ChildByField(n, "type")
+			if nameN == nil || typeN == nil {
+				break
+			}
+			name := ingest.NodeText(nameN, content)
+			if name == "" {
+				break
+			}
+			if info, ok := rangeSourceFromTypeNode(typeN, content); ok && info.elemType != "" {
+				// Clear isArray unless the declared type is directly an array
+				// (possibly parenthesized). Pointer-to-array named types stay
+				// indexable via (*pas) but not via new(PAS).
+				info.isArray = typeNodeIsDirectArray(typeN)
+				out[name] = info
+			} else if tgt := typeIdentifierName(typeN, content); tgt != "" && tgt != name {
+				// type AS = AS0 / type AS AS0 — resolve after direct peels.
+				edges[name] = tgt
+			} else if tgt := pointerToTypeIdentifierName(typeN, content); tgt != "" && tgt != name {
+				// type PAS *AS0 — resolve after AS0 (or chained AS) is known.
+				ptrEdges[name] = tgt
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	// Alias edges first (AS = AS0), then pointer-to-named (PAS *AS0 / PAS *AS),
+	// then alias edges again so type PAS2 = PAS resolves after PAS.
+	resolveNamedTypeAliasEdges(out, edges)
+	resolveNamedPointerToCollectionEdges(out, ptrEdges)
+	resolveNamedTypeAliasEdges(out, edges)
+	return out
+}
+
+// typeIdentifierName returns the text of a type_identifier node (after peeling
+// parenthesized_type wrappers), or "" when n is not a bare type name.
+func typeIdentifierName(n *grammar.Node, content []byte) string {
+	for n != nil && n.Type() == "parenthesized_type" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "(" || c.Type() == ")" {
+				continue
+			}
+			inner = c
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "type_identifier" {
+		return ""
+	}
+	return ingest.NodeText(n, content)
+}
+
+// pointerToTypeIdentifierName returns T for *T / (*T) when T is a type_identifier,
+// or "" when n is not a single-level pointer to a named type.
+func pointerToTypeIdentifierName(n *grammar.Node, content []byte) string {
+	for n != nil && n.Type() == "parenthesized_type" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "(" || c.Type() == ")" {
+				continue
+			}
+			inner = c
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "pointer_type" {
+		return ""
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		c := n.Child(i)
+		if c == nil || c.Type() == "*" {
+			continue
+		}
+		return typeIdentifierName(c, content)
+	}
+	return ""
+}
+
+// resolveNamedTypeAliasEdges follows type-identifier RHS chains into out using
+// fixed-point iteration (type AS = AS0 where AS0 already peels; multi-hop
+// type AS2 = AS). Cycles and unresolved targets stay absent (fail closed).
+func resolveNamedTypeAliasEdges(out map[string]rangeSourceInfo, edges map[string]string) {
+	if len(edges) == 0 {
+		return
+	}
+	for {
+		progress := false
+		for name, target := range edges {
+			if name == "" || target == "" || name == target {
+				continue
+			}
+			if _, ok := out[name]; ok {
+				continue
+			}
+			info, ok := out[target]
+			if !ok || info.elemType == "" {
+				continue
+			}
+			out[name] = info
+			progress = true
+		}
+		if !progress {
+			return
+		}
+	}
+}
+
+// resolveNamedPointerToCollectionEdges peels type PAS *AS0 once AS0 (or a chain
+// to a collection) is in out. isArray is cleared so new(PAS) stays fail-closed.
+func resolveNamedPointerToCollectionEdges(out map[string]rangeSourceInfo, ptrEdges map[string]string) {
+	if len(ptrEdges) == 0 {
+		return
+	}
+	for {
+		progress := false
+		for name, target := range ptrEdges {
+			if name == "" || target == "" || name == target {
+				continue
+			}
+			if _, ok := out[name]; ok {
+				continue
+			}
+			info, ok := out[target]
+			if !ok || info.elemType == "" {
+				continue
+			}
+			info.isArray = false
+			out[name] = info
+			progress = true
+		}
+		if !progress {
+			return
+		}
+	}
+}
+
+// typeNodeIsDirectArray reports whether n is (or is parenthesized) an array_type.
+func typeNodeIsDirectArray(n *grammar.Node) bool {
+	for n != nil && n.Type() == "parenthesized_type" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "(" || c.Type() == ")" {
+				continue
+			}
+			inner = c
+			break
+		}
+		n = inner
+	}
+	return n != nil && n.Type() == "array_type"
+}
+
+// functionTypeOrNamedCollectionResult peels an inline function_type or a
+// same-file named type alias/def whose RHS is such a function type
+// (type FA func() []*A / type FA = func() map[K]*A).
+func functionTypeOrNamedCollectionResult(typeN *grammar.Node, content []byte, named map[string]rangeSourceInfo) (rangeSourceInfo, bool) {
+	if info, ok := functionTypeSingleCollectionResult(typeN, content); ok {
+		return info, true
+	}
+	if typeN == nil || typeN.Type() != "type_identifier" || len(named) == 0 {
+		return rangeSourceInfo{}, false
+	}
+	info, ok := named[ingest.NodeText(typeN, content)]
+	if !ok || info.elemType == "" {
+		return rangeSourceInfo{}, false
+	}
+	return info, true
+}
+
+// sameFileFuncReturningFuncCollection maps same-file function names whose
+// single result is a function type with a single collection result:
+//
+//	func getFA() FA          // type FA func() []*A
+//	func getFA() func() []*A // inline function type
+//
+// Multi-result signatures (func getFA() (FA, error)) fail closed. Used so
+// fa := getFA(); fa()[0].M and getFA()()[0].M resolve under foreign same-leaf.
+func sameFileFuncReturningFuncCollection(root *grammar.Node, content []byte) map[string]rangeSourceInfo {
+	out := map[string]rangeSourceInfo{}
+	if root == nil {
+		return out
+	}
+	namedFunc := sameFileNamedFuncCollectionResults(root, content)
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type() == "function_declaration" {
+			nameN := ingest.ChildByField(n, "name")
+			if nameN != nil && nameN.Type() == "identifier" {
+				name := ingest.NodeText(nameN, content)
+				if name != "" {
+					if info, ok := functionDeclSingleFuncCollectionResult(n, content, namedFunc); ok && info.elemType != "" {
+						out[name] = info
+					}
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	return out
+}
+
+// functionDeclSingleFuncCollectionResult reports the collection element of a
+// function's single result when that result is itself a function type with a
+// single collection result (named FA or inline func() []*T). Multi-result
+// parameter_list fails closed.
+func functionDeclSingleFuncCollectionResult(decl *grammar.Node, content []byte, namedFunc map[string]rangeSourceInfo) (rangeSourceInfo, bool) {
+	if decl == nil {
+		return rangeSourceInfo{}, false
+	}
+	result := ingest.ChildByField(decl, "result")
+	if result == nil {
+		return rangeSourceInfo{}, false
+	}
+	if result.Type() == "parameter_list" {
+		var only rangeSourceInfo
+		count := 0
+		for i := uint32(0); i < result.ChildCount(); i++ {
+			p := result.Child(i)
+			if p == nil || (p.Type() != "parameter_declaration" && p.Type() != "variadic_parameter_declaration") {
+				continue
+			}
+			count++
+			typeN := ingest.ChildByField(p, "type")
+			info, ok := functionTypeOrNamedCollectionResult(typeN, content, namedFunc)
+			if !ok || info.elemType == "" {
+				return rangeSourceInfo{}, false
+			}
+			only = info
+		}
+		if count != 1 {
+			return rangeSourceInfo{}, false
+		}
+		return only, true
+	}
+	return functionTypeOrNamedCollectionResult(result, content, namedFunc)
+}
+
+// sameFileStructNamedFuncFields maps same-file struct type → field name →
+// collection result of a function-typed field (type Box struct { Fa FA } with
+// type FA func() []*A). Only direct same-file named/inline function types;
+// multi-result function types fail closed. Embedded fields without names skipped.
+func sameFileStructNamedFuncFields(root *grammar.Node, content []byte) map[string]map[string]rangeSourceInfo {
+	out := map[string]map[string]rangeSourceInfo{}
+	if root == nil {
+		return out
+	}
+	namedFunc := sameFileNamedFuncCollectionResults(root, content)
+	namedColl := sameFileNamedCollectionResults(root, content)
+	// type WA struct { SA } — embedded named struct; promote collection/func fields.
+	embeds := map[string][]string{}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type() == "type_spec" {
+			nameN := ingest.ChildByField(n, "name")
+			typeN := ingest.ChildByField(n, "type")
+			if nameN != nil && typeN != nil && typeN.Type() == "struct_type" {
+				structName := ingest.NodeText(nameN, content)
+				if structName != "" {
+					fields, emb := collectStructCollectionAndFuncFields(typeN, content, namedFunc, namedColl)
+					if len(fields) > 0 {
+						out[structName] = fields
+					}
+					if len(emb) > 0 {
+						embeds[structName] = emb
+					}
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	// Register embedded field names as type-yielding intermediates so nested
+	// explicit paths peel: type WA struct { SA } → wa.SA.Items (SA has Items).
+	// Direct named fields win over embed typeName entries.
+	for recv, embList := range embeds {
+		dst := out[recv]
+		if dst == nil {
+			dst = map[string]rangeSourceInfo{}
+		}
+		for _, emb := range embList {
+			if emb == "" {
+				continue
+			}
+			if _, exists := dst[emb]; exists {
+				continue
+			}
+			dst[emb] = rangeSourceInfo{typeName: emb}
+		}
+		if len(dst) > 0 {
+			out[recv] = dst
+		}
+	}
+	// Promote embedded struct fields fixed-point (WA embeds SA → wa.Items peels).
+	// Direct fields win over promoted; cycles / unresolved embeds fail closed.
+	// typeName-only embed entries promote too (XA embeds WA embeds SA → xa.SA).
+	for changed := true; changed; {
+		changed = false
+		for recv, embList := range embeds {
+			dst := out[recv]
+			if dst == nil {
+				dst = map[string]rangeSourceInfo{}
+			}
+			before := len(dst)
+			for _, emb := range embList {
+				src := out[emb]
+				if len(src) == 0 {
+					continue
+				}
+				for fname, info := range src {
+					if info.elemType == "" && info.typeName == "" {
+						continue
+					}
+					if _, exists := dst[fname]; exists {
+						continue
+					}
+					dst[fname] = info
+				}
+			}
+			if len(dst) > before {
+				out[recv] = dst
+				changed = true
+			} else if len(dst) > 0 && out[recv] == nil {
+				out[recv] = dst
+			}
+		}
+	}
+	return out
+}
+
+// callReturningFuncCollection reports collection result element info when n is
+// a call to a same-file helper that returns a function type with a single
+// collection result (getFA() FA / getFA() func() []*A). Used to bind
+// fa := getFA() so fa()[0].M peels under foreign same-leaf.
+func callReturningFuncCollection(n *grammar.Node, content []byte, funcRetFunc map[string]rangeSourceInfo) (rangeSourceInfo, bool) {
+	if n == nil || len(funcRetFunc) == 0 {
+		return rangeSourceInfo{}, false
+	}
+	if n.Type() == "expression_list" {
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			return callReturningFuncCollection(c, content, funcRetFunc)
+		}
+		return rangeSourceInfo{}, false
+	}
+	if n.Type() != "call_expression" {
+		return rangeSourceInfo{}, false
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil || fn.Type() != "identifier" {
+		return rangeSourceInfo{}, false
+	}
+	info, ok := funcRetFunc[ingest.NodeText(fn, content)]
+	if !ok || info.elemType == "" {
+		return rangeSourceInfo{}, false
+	}
+	return info, true
+}
+
+// selectorNamedFuncField reports collection element info when n is a selector
+// xa.Fa / sa.Items and xa/sa has a known same-file struct type with:
+//   - function-typed field Fa (type Box struct { Fa FA } with FA func() []*A)
+//   - collection field Items (type SA struct { Items []*A } / Items AS / M map[K]*A)
+//   - nested explicit embed path wa.SA.Items (type WA struct { SA })
+//   - named non-embed path wa.Inner.Items (type WA struct { Inner SA })
+//   - slice/map-of-struct index sas[0].Items (sas []SA / sas []*SA)
+//   - composite/make index []SA{…}[0].Items / SAS{…}[0].Items (namedColl)
+//
+// Used for xa.Fa() call peels, sa.Items[0] index peels, and short-var
+// items := sa.Items / fa := xa.Fa under foreign same-leaf methods.
+// indexElem / namedColl may be nil; when set, enable sas[0].Items and SAS{…}[0].Items.
+func selectorNamedFuncField(n *grammar.Node, content []byte, valueType func(string, uint32) (string, bool), structFields map[string]map[string]rangeSourceInfo, at uint32, indexElem func(string, uint32) (string, bool), namedColl map[string]rangeSourceInfo, funcResults map[string][]string, methodNamed map[string]map[string]string) (rangeSourceInfo, bool) {
+	if n == nil || valueType == nil || len(structFields) == 0 {
+		return rangeSourceInfo{}, false
+	}
+	if n.Type() == "expression_list" {
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			return selectorNamedFuncField(c, content, valueType, structFields, at, indexElem, namedColl, funcResults, methodNamed)
+		}
+		return rangeSourceInfo{}, false
+	}
+	if n.Type() != "selector_expression" {
+		return rangeSourceInfo{}, false
+	}
+	operand := ingest.ChildByField(n, "operand")
+	field := ingest.ChildByField(n, "field")
+	if operand == nil || field == nil {
+		return rangeSourceInfo{}, false
+	}
+	recvType, ok := selectorOperandStructType(operand, content, valueType, structFields, at, indexElem, namedColl, funcResults, methodNamed)
+	if !ok || recvType == "" {
+		return rangeSourceInfo{}, false
+	}
+	fields := structFields[recvType]
+	if len(fields) == 0 {
+		return rangeSourceInfo{}, false
+	}
+	info, ok := fields[ingest.NodeText(field, content)]
+	if !ok || info.elemType == "" {
+		return rangeSourceInfo{}, false
+	}
+	return info, true
+}
+
+// selectorOperandStructType resolves the named struct type of a selector
+// operand: bare sa / (*sa) / wa.SA (embed intermediate with typeName) /
+// wa.Inner (named non-embed typeName) / sas[0] (collection index element) /
+// []SA{…}[0] / SAS{…}[0] / make([]SA,n)[0] / map[string]SA{…}["k"] /
+// getSA() (same-file single named-struct result) / sa.Self() (method named
+// result) / x.(SA) / (<-ch) when ch carries a named struct payload.
+// Used so wa.SA.Items, wa.Inner.Items, sas[0].Items, []SA{…}[0].Items,
+// getSA().Items, sa.Self().Items, x.(SA).Items, (<-ch).Items, and (*sa).Items
+// peel under foreign same-leaf methods. indexElem / namedColl / funcResults /
+// methodNamed may be nil.
+func selectorOperandStructType(operand *grammar.Node, content []byte, valueType func(string, uint32) (string, bool), structFields map[string]map[string]rangeSourceInfo, at uint32, indexElem func(string, uint32) (string, bool), namedColl map[string]rangeSourceInfo, funcResults map[string][]string, methodNamed map[string]map[string]string) (string, bool) {
+	operand = peelSelectorOperand(operand, content)
+	if operand == nil {
+		return "", false
+	}
+	if operand.Type() == "identifier" {
+		if valueType == nil {
+			return "", false
+		}
+		recvType, ok := valueType(ingest.NodeText(operand, content), at)
+		if !ok || recvType == "" {
+			return "", false
+		}
+		return strings.TrimPrefix(recvType, "*"), true
+	}
+	// sas[0] / mas["k"] — element/value of a typed collection is a named
+	// struct type (sas []SA / sas []*SA / mas map[string]SA) so sas[0].Items
+	// peels under foreign same-leaf methods.
+	// Also []SA{…}[0] / SAS{…}[0] / make([]SA,n)[0] / map[string]SA{…}["k"]
+	// / append([]SA{}, …)[0] via collection-expr element type (dual-class).
+	if operand.Type() == "index_expression" {
+		op := ingest.ChildByField(operand, "operand")
+		op = peelSelectorOperand(op, content)
+		if op != nil && op.Type() == "identifier" && indexElem != nil {
+			el, ok := indexElem(ingest.NodeText(op, content), at)
+			if ok && el != "" {
+				return strings.TrimPrefix(el, "*"), true
+			}
+		}
+		// Composite / make / append / named collection of named struct elements.
+		if op != nil {
+			if info, ok := rangeSourceFromCollectionExprIdent(op, content, nil, 0, nil, namedColl, nil, nil, nil, nil, nil, nil, nil); ok && info.elemType != "" {
+				return strings.TrimPrefix(info.elemType, "*"), true
+			}
+		}
+		return "", false
+	}
+	// getSA() — same-file helper with a single concrete named-struct result
+	// so getSA().Items peels like sa := getSA(); sa.Items (dual-class).
+	// sa.Self() — method with a single named-struct result (same dual-class).
+	// Multi-result helpers/methods cannot appear as a lone call value.
+	if operand.Type() == "call_expression" {
+		fn := ingest.ChildByField(operand, "function")
+		if fn != nil && fn.Type() == "identifier" && len(funcResults) > 0 {
+			name := ingest.NodeText(fn, content)
+			if types := funcResults[name]; len(types) == 1 && types[0] != "" {
+				t := strings.TrimPrefix(types[0], "*")
+				if _, ok := structFields[t]; ok {
+					return t, true
+				}
+			}
+		}
+		// sa.Self() / (*sa).SelfP() — method named-struct result.
+		if fn != nil && fn.Type() == "selector_expression" && len(methodNamed) > 0 && valueType != nil {
+			op := ingest.ChildByField(fn, "operand")
+			field := ingest.ChildByField(fn, "field")
+			if op != nil && field != nil {
+				// Resolve receiver type: bare sa / (*sa) / nested field path.
+				recvType, ok := selectorOperandStructType(op, content, valueType, structFields, at, indexElem, namedColl, funcResults, methodNamed)
+				if !ok || recvType == "" {
+					// Fall back to bare identifier valueType (params/locals).
+					op2 := peelSelectorOperand(op, content)
+					if op2 != nil && op2.Type() == "identifier" {
+						if t, ok2 := valueType(ingest.NodeText(op2, content), at); ok2 && t != "" {
+							recvType = strings.TrimPrefix(t, "*")
+							ok = recvType != ""
+						}
+					}
+				}
+				if ok && recvType != "" {
+					if methods := methodNamed[recvType]; len(methods) > 0 {
+						if t := methods[ingest.NodeText(field, content)]; t != "" {
+							if _, has := structFields[t]; has {
+								return t, true
+							}
+						}
+					}
+				}
+			}
+		}
+		return "", false
+	}
+	// x.(SA) / (SA)(x) — type assert/convert to a named struct so
+	// x.(SA).Items peels under foreign same-leaf (short-var already works).
+	if operand.Type() == "type_assertion_expression" || operand.Type() == "type_conversion_expression" {
+		if t := ingest.ChildByField(operand, "type"); t != nil {
+			name := concreteNamedType(t, content)
+			if name == "" {
+				name = typeNameFromTypeNode(t, content)
+			}
+			name = strings.TrimPrefix(name, "*")
+			if name != "" {
+				if _, ok := structFields[name]; ok {
+					return name, true
+				}
+			}
+		}
+		return "", false
+	}
+	// (<-ch) — channel payload is a named struct (ch <-chan SA) so
+	// (<-ch).Items peels like sa := <-ch; sa.Items (dual-class).
+	if operand.Type() == "unary_expression" {
+		opField := ingest.ChildByField(operand, "operator")
+		if opField != nil && ingest.NodeText(opField, content) == "<-" {
+			right := ingest.ChildByField(operand, "operand")
+			right = peelSelectorOperand(right, content)
+			if right != nil && right.Type() == "identifier" && indexElem != nil {
+				el, ok := indexElem(ingest.NodeText(right, content), at)
+				if ok && el != "" {
+					t := strings.TrimPrefix(el, "*")
+					if _, ok := structFields[t]; ok {
+						return t, true
+					}
+				}
+			}
+			return "", false
+		}
+	}
+	// Nested: wa.SA / wa.Inner — field is embed or named typeName intermediate.
+	if operand.Type() != "selector_expression" {
+		return "", false
+	}
+	base := ingest.ChildByField(operand, "operand")
+	field := ingest.ChildByField(operand, "field")
+	if base == nil || field == nil {
+		return "", false
+	}
+	baseType, ok := selectorOperandStructType(base, content, valueType, structFields, at, indexElem, namedColl, funcResults, methodNamed)
+	if !ok || baseType == "" {
+		return "", false
+	}
+	fields := structFields[baseType]
+	if len(fields) == 0 {
+		return "", false
+	}
+	info, ok := fields[ingest.NodeText(field, content)]
+	if !ok || info.typeName == "" {
+		return "", false
+	}
+	return info.typeName, true
+}
+
+// peelSelectorOperand peels parenthesized and pointer-deref unary wrappers
+// from a selector operand: (x) / (*x) / (*(*x)) → x. Used for pointer-to-
+// interface (*ga).GetAS and (*sa).Items under foreign same-leaf methods.
+func peelSelectorOperand(n *grammar.Node, content []byte) *grammar.Node {
+	for n != nil {
+		switch n.Type() {
+		case "parenthesized_expression":
+			var inner *grammar.Node
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch == nil || ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+			n = inner
+		case "unary_expression":
+			star := false
+			var inner *grammar.Node
+			if opField := ingest.ChildByField(n, "operator"); opField != nil && ingest.NodeText(opField, content) == "*" {
+				star = true
+			}
+			if opField := ingest.ChildByField(n, "operand"); opField != nil {
+				inner = opField
+			}
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch == nil {
+					continue
+				}
+				if ch.Type() == "*" || (ch.Type() == "unary_operator" && ingest.NodeText(ch, content) == "*") {
+					star = true
+					continue
+				}
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				if inner == nil {
+					inner = ch
+				}
+			}
+			if !star || inner == nil {
+				// Non-star unary (<-ch) is not a peel wrapper — keep the node so
+				// (<-ch).Items can resolve channel payload as a named struct.
+				return n
+			}
+			n = inner
+		default:
+			return n
+		}
+	}
+	return nil
+}
+
+// collectStructCollectionAndFuncFields walks a struct_type for named fields
+// whose type is either a function type with a single collection result or a
+// collection (slice/array/map/named/pointer-to), or a named type intermediate
+// (Inner SA / Inner *SA) for nested field peels. Also returns embedded named
+// struct type identifiers (type WA struct { SA }) for field promotion.
+func collectStructCollectionAndFuncFields(structType *grammar.Node, content []byte, namedFunc, namedColl map[string]rangeSourceInfo) (map[string]rangeSourceInfo, []string) {
+	fields := map[string]rangeSourceInfo{}
+	var embeds []string
+	if structType == nil {
+		return fields, embeds
+	}
+	var walk func(*grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type() == "field_declaration" {
+			typeField := ingest.ChildByField(n, "type")
+			// Collect named field identifiers (Items []*A / Fa FA / X, Y []*A).
+			var names []string
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch == nil || ch.Type() != "field_identifier" {
+					continue
+				}
+				fname := ingest.NodeText(ch, content)
+				if fname == "" || fname == "_" {
+					continue
+				}
+				names = append(names, fname)
+			}
+			if len(names) == 0 {
+				// Embedded field: type SA / *SA only (no field_identifier).
+				// Record named struct types for promotion; skip *T embeds that
+				// are not same-file structs (fail closed).
+				embName := embeddedStructTypeName(typeField, content)
+				if embName != "" {
+					embeds = append(embeds, embName)
+				}
+				return
+			}
+			// Prefer function-type fields (Fa FA) over collection peels so
+			// func() []*A is not treated as a bare collection.
+			info, ok := functionTypeOrNamedCollectionResult(typeField, content, namedFunc)
+			if !ok || info.elemType == "" {
+				info, ok = collectionTypeOrNamedResult(typeField, content, namedColl)
+			}
+			if ok && info.elemType != "" {
+				for _, fname := range names {
+					fields[fname] = info
+				}
+				return
+			}
+			// Named non-embed field of named type: Inner SA / Inner *SA so
+			// wa.Inner.Items peels under foreign same-leaf (like embed wa.SA.Items).
+			// Collection/func fields already handled above; plain type_identifier
+			// (or *T) is a typeName intermediate. Unknown types fail closed later.
+			if embName := embeddedStructTypeName(typeField, content); embName != "" {
+				for _, fname := range names {
+					fields[fname] = rangeSourceInfo{typeName: embName}
+				}
+			}
+			return
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(structType)
+	return fields, embeds
+}
+
+// embeddedStructTypeName returns the type_identifier of an embedded field type
+// SA / *SA (pointer peel). Non-identifier embeds fail closed.
+func embeddedStructTypeName(typeN *grammar.Node, content []byte) string {
+	if typeN == nil {
+		return ""
+	}
+	if typeN.Type() == "pointer_type" {
+		for i := uint32(0); i < typeN.ChildCount(); i++ {
+			c := typeN.Child(i)
+			if c == nil || c.Type() == "*" {
+				continue
+			}
+			return embeddedStructTypeName(c, content)
+		}
+		return ""
+	}
+	if typeN.Type() == "type_identifier" {
+		return ingest.NodeText(typeN, content)
+	}
+	return ""
+}
+
+// sameFileIfaceMethodCollectionResults maps same-file receiver type → method
+// name → collection element/value info for single-result methods:
+//
+//	type GA interface { GetAS() AS }           // type AS []*A
+//	type GA interface { GetAS() []*A }         // inline
+//	type GA interface { GetAM() AM }           // map
+//	func (s SA) GetAS() AS                     // concrete method
+//	type GA = GA0                              // alias of interface with methods
+//	func Use(ga interface{ GetAS() AS })       // inline param (synthetic key)
+//
+// multi maps multi-result methods (GetAS() (AS, error)) → positional slots for
+// short-var as, err := ga.GetAS(). Single-result stays in the first map for
+// ga.GetAS()[0].M / as := ga.GetAS() peels under foreign same-leaf methods.
+func sameFileIfaceMethodCollectionResults(root *grammar.Node, content []byte) (map[string]map[string]rangeSourceInfo, map[string]map[string][]rangeSourceInfo) {
+	out := map[string]map[string]rangeSourceInfo{}
+	multi := map[string]map[string][]rangeSourceInfo{}
+	if root == nil {
+		return out, multi
+	}
+	namedColl := sameFileNamedCollectionResults(root, content)
+	edges := map[string]string{}    // type GA = GA0 / type GA GA0
+	embeds := map[string][]string{} // type HA interface { GA } — embedded ifaces
+	register := func(recv, name string, infos []rangeSourceInfo) {
+		if recv == "" || name == "" || name == "_" || len(infos) == 0 {
+			return
+		}
+		if len(infos) == 1 {
+			if infos[0].elemType == "" {
+				return
+			}
+			if out[recv] == nil {
+				out[recv] = map[string]rangeSourceInfo{}
+			}
+			out[recv][name] = infos[0]
+			return
+		}
+		// Multi-result: keep positional slots when any is a collection.
+		any := false
+		for _, info := range infos {
+			if info.elemType != "" {
+				any = true
+				break
+			}
+		}
+		if !any {
+			return
+		}
+		if multi[recv] == nil {
+			multi[recv] = map[string][]rangeSourceInfo{}
+		}
+		cp := make([]rangeSourceInfo, len(infos))
+		copy(cp, infos)
+		multi[recv][name] = cp
+	}
+	var walk func(n *grammar.Node, ifaceName string, inIface bool)
+	walk = func(n *grammar.Node, ifaceName string, inIface bool) {
+		if n == nil {
+			return
+		}
+		nextName, nextIface := ifaceName, inIface
+		switch n.Type() {
+		case "type_spec":
+			if id := ingest.ChildByType(n, "type_identifier"); id != nil {
+				nextName = ingest.NodeText(id, content)
+			}
+			if t := ingest.ChildByField(n, "type"); t != nil {
+				if t.Type() == "interface_type" {
+					nextIface = true
+				} else if tgt := typeIdentifierName(t, content); tgt != "" && nextName != "" && tgt != nextName {
+					// type GA GA0 — defined type whose base is another named type.
+					edges[nextName] = tgt
+				}
+			}
+		case "type_alias":
+			var nameNode *grammar.Node
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch != nil && ch.Type() == "type_identifier" {
+					nameNode = ch
+					break
+				}
+			}
+			if nameNode != nil {
+				nextName = ingest.NodeText(nameNode, content)
+			}
+			typeN := ingest.ChildByField(n, "type")
+			if typeN != nil && typeN.Type() == "interface_type" {
+				nextIface = true
+			} else if tgt := typeIdentifierName(typeN, content); tgt != "" && nextName != "" && tgt != nextName {
+				// type GA = GA0
+				edges[nextName] = tgt
+			} else {
+				for i := uint32(0); i < n.ChildCount(); i++ {
+					if n.Child(i) != nil && n.Child(i).Type() == "interface_type" {
+						nextIface = true
+						break
+					}
+				}
+			}
+		case "parameter_declaration":
+			// ga interface{ GetAS() AS } — synthetic key matches param binding.
+			if t := ingest.ChildByField(n, "type"); t != nil && t.Type() == "interface_type" {
+				if key := inlineIfaceTypeKey(t); key != "" {
+					nextName = key
+					nextIface = true
+				}
+			}
+		case "method_declaration":
+			// Concrete method: func (s SA) GetAS() AS / GetAS() (AS, error)
+			recv := methodDeclReceiverType(n, content)
+			nameN := ingest.ChildByField(n, "name")
+			if recv != "" && nameN != nil {
+				name := ingest.NodeText(nameN, content)
+				register(recv, name, functionCollectionResults(n, content, namedColl))
+			}
+		}
+		if inIface && (n.Type() == "method_elem" || n.Type() == "field_declaration") {
+			nameN := ingest.ChildByField(n, "name")
+			if nameN != nil && ifaceName != "" {
+				name := ingest.NodeText(nameN, content)
+				register(ifaceName, name, functionCollectionResults(n, content, namedColl))
+			}
+		}
+		// Embedded interface: type HA interface { GA } — type_elem with a single
+		// type_identifier (unions have multiple; ~T is negated_type).
+		if inIface && n.Type() == "type_elem" && ifaceName != "" {
+			if tgt := singleEmbeddedIfaceName(n, content); tgt != "" && tgt != ifaceName {
+				embeds[ifaceName] = appendUniqueString(embeds[ifaceName], tgt)
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i), nextName, nextIface)
+		}
+	}
+	walk(root, "", false)
+	// Copy methods along alias/defined-type edges (type GA = GA0) so params typed
+	// as GA peel the base interface's methods. Fixed-point; cycles fail closed.
+	// Single-result and multi-result maps are copied independently.
+	copyEdges := func(dst map[string]map[string]rangeSourceInfo) {
+		for round := 0; round < len(edges)+1; round++ {
+			progress := false
+			for name, tgt := range edges {
+				if _, has := dst[name]; has {
+					continue
+				}
+				base, ok := dst[tgt]
+				if !ok || len(base) == 0 {
+					continue
+				}
+				cp := make(map[string]rangeSourceInfo, len(base))
+				for k, v := range base {
+					cp[k] = v
+				}
+				dst[name] = cp
+				progress = true
+			}
+			if !progress {
+				break
+			}
+		}
+	}
+	copyMultiEdges := func(dst map[string]map[string][]rangeSourceInfo) {
+		for round := 0; round < len(edges)+1; round++ {
+			progress := false
+			for name, tgt := range edges {
+				if _, has := dst[name]; has {
+					continue
+				}
+				base, ok := dst[tgt]
+				if !ok || len(base) == 0 {
+					continue
+				}
+				cp := make(map[string][]rangeSourceInfo, len(base))
+				for k, v := range base {
+					slot := make([]rangeSourceInfo, len(v))
+					copy(slot, v)
+					cp[k] = slot
+				}
+				dst[name] = cp
+				progress = true
+			}
+			if !progress {
+				break
+			}
+		}
+	}
+	// Merge promoted methods from embedded interfaces (HA embeds GA). Merge
+	// (not replace) so HA's own methods stay; fixed-point for embed chains.
+	mergeEmbeds := func(dst map[string]map[string]rangeSourceInfo) {
+		for round := 0; round < len(embeds)+1; round++ {
+			progress := false
+			for name, bases := range embeds {
+				for _, base := range bases {
+					src, ok := dst[base]
+					if !ok || len(src) == 0 {
+						continue
+					}
+					if dst[name] == nil {
+						dst[name] = map[string]rangeSourceInfo{}
+					}
+					for k, v := range src {
+						if _, has := dst[name][k]; has {
+							continue
+						}
+						dst[name][k] = v
+						progress = true
+					}
+				}
+			}
+			if !progress {
+				break
+			}
+		}
+	}
+	mergeMultiEmbeds := func(dst map[string]map[string][]rangeSourceInfo) {
+		for round := 0; round < len(embeds)+1; round++ {
+			progress := false
+			for name, bases := range embeds {
+				for _, base := range bases {
+					src, ok := dst[base]
+					if !ok || len(src) == 0 {
+						continue
+					}
+					if dst[name] == nil {
+						dst[name] = map[string][]rangeSourceInfo{}
+					}
+					for k, v := range src {
+						if _, has := dst[name][k]; has {
+							continue
+						}
+						slot := make([]rangeSourceInfo, len(v))
+						copy(slot, v)
+						dst[name][k] = slot
+						progress = true
+					}
+				}
+			}
+			if !progress {
+				break
+			}
+		}
+	}
+	copyEdges(out)
+	copyMultiEdges(multi)
+	mergeEmbeds(out)
+	mergeMultiEmbeds(multi)
+	return out, multi
+}
+
+// singleEmbeddedIfaceName reports the embedded interface name when n is a
+// type_elem with exactly one type_identifier child (type HA interface { GA }).
+// Unions (int | string) and approximations (~T) return empty.
+func singleEmbeddedIfaceName(typeElem *grammar.Node, content []byte) string {
+	if typeElem == nil || typeElem.Type() != "type_elem" {
+		return ""
+	}
+	var only *grammar.Node
+	count := 0
+	for i := uint32(0); i < typeElem.ChildCount(); i++ {
+		ch := typeElem.Child(i)
+		if ch == nil || !ch.IsNamed() {
+			continue
+		}
+		count++
+		only = ch
+	}
+	if count != 1 || only == nil || only.Type() != "type_identifier" {
+		return ""
+	}
+	return ingest.NodeText(only, content)
+}
+
+// appendUniqueString appends s to xs when not already present.
+func appendUniqueString(xs []string, s string) []string {
+	if s == "" {
+		return xs
+	}
+	for _, x := range xs {
+		if x == s {
+			return xs
+		}
+	}
+	return append(xs, s)
+}
+
+// sameFileIfaceMethodFuncCollectionResults maps same-file receiver type →
+// method name → collection element of a single function-type result:
+//
+//	type GA interface { GetFA() FA }            // type FA func() []*A
+//	type GA interface { GetFA() func() []*A }   // inline
+//	func (s SA) GetFA() FA                      // concrete method
+//	type GA = GA0                               // alias of interface with methods
+//	func Use(ga interface{ GetFA() FA })        // inline param (synthetic key)
+//
+// Multi-result methods fail closed. Used so ga.GetFA()()[0].M and
+// fa := ga.GetFA(); fa()[0].M resolve under foreign same-leaf methods.
+func sameFileIfaceMethodFuncCollectionResults(root *grammar.Node, content []byte) map[string]map[string]rangeSourceInfo {
+	out := map[string]map[string]rangeSourceInfo{}
+	if root == nil {
+		return out
+	}
+	namedFunc := sameFileNamedFuncCollectionResults(root, content)
+	edges := map[string]string{}
+	embeds := map[string][]string{}
+	var walk func(n *grammar.Node, ifaceName string, inIface bool)
+	walk = func(n *grammar.Node, ifaceName string, inIface bool) {
+		if n == nil {
+			return
+		}
+		nextName, nextIface := ifaceName, inIface
+		switch n.Type() {
+		case "type_spec":
+			if id := ingest.ChildByType(n, "type_identifier"); id != nil {
+				nextName = ingest.NodeText(id, content)
+			}
+			if t := ingest.ChildByField(n, "type"); t != nil {
+				if t.Type() == "interface_type" {
+					nextIface = true
+				} else if tgt := typeIdentifierName(t, content); tgt != "" && nextName != "" && tgt != nextName {
+					edges[nextName] = tgt
+				}
+			}
+		case "type_alias":
+			var nameNode *grammar.Node
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch != nil && ch.Type() == "type_identifier" {
+					nameNode = ch
+					break
+				}
+			}
+			if nameNode != nil {
+				nextName = ingest.NodeText(nameNode, content)
+			}
+			typeN := ingest.ChildByField(n, "type")
+			if typeN != nil && typeN.Type() == "interface_type" {
+				nextIface = true
+			} else if tgt := typeIdentifierName(typeN, content); tgt != "" && nextName != "" && tgt != nextName {
+				edges[nextName] = tgt
+			} else {
+				for i := uint32(0); i < n.ChildCount(); i++ {
+					if n.Child(i) != nil && n.Child(i).Type() == "interface_type" {
+						nextIface = true
+						break
+					}
+				}
+			}
+		case "parameter_declaration":
+			// ga interface{ GetFA() FA } — synthetic key matches param binding.
+			if t := ingest.ChildByField(n, "type"); t != nil && t.Type() == "interface_type" {
+				if key := inlineIfaceTypeKey(t); key != "" {
+					nextName = key
+					nextIface = true
+				}
+			}
+		case "method_declaration":
+			recv := methodDeclReceiverType(n, content)
+			nameN := ingest.ChildByField(n, "name")
+			if recv != "" && nameN != nil {
+				name := ingest.NodeText(nameN, content)
+				if name != "" && name != "_" {
+					if info, ok := functionDeclSingleFuncCollectionResult(n, content, namedFunc); ok && info.elemType != "" {
+						if out[recv] == nil {
+							out[recv] = map[string]rangeSourceInfo{}
+						}
+						out[recv][name] = info
+					}
+				}
+			}
+		}
+		if inIface && (n.Type() == "method_elem" || n.Type() == "field_declaration") {
+			nameN := ingest.ChildByField(n, "name")
+			if nameN != nil && ifaceName != "" {
+				name := ingest.NodeText(nameN, content)
+				if name != "" && name != "_" {
+					if info, ok := functionDeclSingleFuncCollectionResult(n, content, namedFunc); ok && info.elemType != "" {
+						if out[ifaceName] == nil {
+							out[ifaceName] = map[string]rangeSourceInfo{}
+						}
+						out[ifaceName][name] = info
+					}
+				}
+			}
+		}
+		if inIface && n.Type() == "type_elem" && ifaceName != "" {
+			if tgt := singleEmbeddedIfaceName(n, content); tgt != "" && tgt != ifaceName {
+				embeds[ifaceName] = appendUniqueString(embeds[ifaceName], tgt)
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i), nextName, nextIface)
+		}
+	}
+	walk(root, "", false)
+	for round := 0; round < len(edges)+1; round++ {
+		progress := false
+		for name, tgt := range edges {
+			if _, has := out[name]; has {
+				continue
+			}
+			base, ok := out[tgt]
+			if !ok || len(base) == 0 {
+				continue
+			}
+			cp := make(map[string]rangeSourceInfo, len(base))
+			for k, v := range base {
+				cp[k] = v
+			}
+			out[name] = cp
+			progress = true
+		}
+		if !progress {
+			break
+		}
+	}
+	// Merge promoted methods from embedded interfaces (HA embeds GA).
+	for round := 0; round < len(embeds)+1; round++ {
+		progress := false
+		for name, bases := range embeds {
+			for _, base := range bases {
+				src, ok := out[base]
+				if !ok || len(src) == 0 {
+					continue
+				}
+				if out[name] == nil {
+					out[name] = map[string]rangeSourceInfo{}
+				}
+				for k, v := range src {
+					if _, has := out[name][k]; has {
+						continue
+					}
+					out[name][k] = v
+					progress = true
+				}
+			}
+		}
+		if !progress {
+			break
+		}
+	}
+	return out
+}
+
+// selectorIfaceMethod reports collection element info when n is a selector
+// g.GetX or a call g.GetX() whose receiver is typed as a same-file interface
+// with method GetX registered in methods (iface → method → info).
+// Also peels (*ga).GetX / (*ga).GetX() for pointer-to-interface params.
+func selectorIfaceMethod(n *grammar.Node, content []byte, valueType func(string, uint32) (string, bool), methods map[string]map[string]rangeSourceInfo, at uint32) (rangeSourceInfo, bool) {
+	if n == nil || valueType == nil || len(methods) == 0 {
+		return rangeSourceInfo{}, false
+	}
+	if n.Type() == "expression_list" {
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			return selectorIfaceMethod(c, content, valueType, methods, at)
+		}
+		return rangeSourceInfo{}, false
+	}
+	sel := n
+	if n.Type() == "call_expression" {
+		sel = ingest.ChildByField(n, "function")
+		if sel == nil {
+			return rangeSourceInfo{}, false
+		}
+	}
+	if sel.Type() != "selector_expression" {
+		return rangeSourceInfo{}, false
+	}
+	operand := peelSelectorOperand(ingest.ChildByField(sel, "operand"), content)
+	field := ingest.ChildByField(sel, "field")
+	if operand == nil || field == nil || operand.Type() != "identifier" {
+		return rangeSourceInfo{}, false
+	}
+	recvType, ok := valueType(ingest.NodeText(operand, content), at)
+	if !ok || recvType == "" {
+		return rangeSourceInfo{}, false
+	}
+	recvType = strings.TrimPrefix(recvType, "*")
+	ms := methods[recvType]
+	if len(ms) == 0 {
+		return rangeSourceInfo{}, false
+	}
+	info, ok := ms[ingest.NodeText(field, content)]
+	if !ok || info.elemType == "" {
+		return rangeSourceInfo{}, false
+	}
+	return info, true
+}
+
+// collectionTypeOrNamedResult peels an inline collection type or a same-file
+// named type alias/def whose RHS is a collection (type AS []*A / type AM = map[K]*A).
+// Also peels *AS when AS is a named collection.
+func collectionTypeOrNamedResult(typeN *grammar.Node, content []byte, named map[string]rangeSourceInfo) (rangeSourceInfo, bool) {
+	if info, ok := rangeSourceFromTypeNode(typeN, content); ok && info.elemType != "" {
+		return info, true
+	}
+	if typeN == nil || len(named) == 0 {
+		return rangeSourceInfo{}, false
+	}
+	// *AS / *AM when AS/AM is a named collection.
+	if typeN.Type() == "pointer_type" {
+		for i := uint32(0); i < typeN.ChildCount(); i++ {
+			c := typeN.Child(i)
+			if c == nil || c.Type() == "*" {
+				continue
+			}
+			return collectionTypeOrNamedResult(c, content, named)
+		}
+		return rangeSourceInfo{}, false
+	}
+	if typeN.Type() != "type_identifier" {
+		return rangeSourceInfo{}, false
+	}
+	info, ok := named[ingest.NodeText(typeN, content)]
+	if !ok || info.elemType == "" {
+		return rangeSourceInfo{}, false
+	}
+	return info, true
 }
 
 // selectorReceiverIdent returns the identifier immediately before '.' at leafStart.
@@ -2157,12 +3642,44 @@ func methodDeclReceiverType(method *grammar.Node, content []byte) string {
 // (params/vars) to their range element/value/key types and channel payloads.
 // funcResults maps same-file function names to positional concrete result types
 // for multi-return call binding (a, b := makeAB()).
-func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo, funcResults map[string][]string) {
+// namedColl maps same-file type AS []*A / AM map[K]*A (may be nil).
+func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]identTypeBinding, rangeSrc map[string]rangeSourceInfo, funcResults map[string][]string, genericPeels map[string]string, namedColl map[string]rangeSourceInfo, structFields map[string]map[string]rangeSourceInfo, methodNamed map[string]map[string]string) {
 	if node == nil {
 		return
 	}
 	if rangeSrc == nil {
 		rangeSrc = map[string]rangeSourceInfo{}
+	}
+	// rangeSrc-backed element lookup for First(xs) assign peels.
+	rangeElem := func(name string, at uint32) (string, bool) {
+		if info, ok := rangeSrc[name]; ok && info.elemType != "" {
+			return strings.TrimPrefix(info.elemType, "*"), true
+		}
+		return "", false
+	}
+	// valueType from bindings already collected (params + prior locals) so
+	// ba := wa.BA peels when wa is a typed param/local.
+	valueType := func(name string, at uint32) (string, bool) {
+		if name == "" || name == "_" || bindings == nil {
+			return "", false
+		}
+		var best *identTypeBinding
+		for i := range *bindings {
+			b := &(*bindings)[i]
+			if b.name != name {
+				continue
+			}
+			if at < b.start || at >= b.end {
+				continue
+			}
+			if best == nil || (b.end-b.start) < (best.end-best.start) {
+				best = b
+			}
+		}
+		if best == nil {
+			return "", false
+		}
+		return best.typ, true
 	}
 	scopeEnd := node.EndByte()
 	var walk func(n *grammar.Node)
@@ -2176,6 +3693,12 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 			// Multi-value RHS is position-wise: a, b := &A{}, &B{} binds a→A, b→B
 			// so foreign same-leaf methods on b are not rewritten.
 			// Multi-return call: a, b := makeAB() with makeAB() (*A, *B) likewise.
+			// Func-literal result: f := func() *A { … } binds f→A so f().Run renames.
+			// Index of known collection: sa := sas[0] / a := as[0] / sa, ok := mas["k"]
+			// binds element/value type so sa.Items and a.Run peel dual-class (no
+			// fail-open rewrite of foreign same-leaf).
+			// Named-struct field: ba := wa.BA / ba := &wa.BA binds BoxA so
+			// ba.Get().Run peels under foreign same-leaf (inline wa.BA.Get already works).
 			names := identListNames(ingest.ChildByField(n, "left"), content)
 			right := ingest.ChildByField(n, "right")
 			if chTyp, ok := channelReceiveElemType(right, content, rangeSrc); ok {
@@ -2192,7 +3715,44 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, types[i]})
 					}
 				}
-			} else if types := typeNamesFromCallResults(right, content, funcResults); len(types) > 0 {
+			} else if types := typeNamesFromCallResults(right, content, funcResults, genericPeels, rangeElem); len(types) > 0 {
+				for i, name := range names {
+					if name == "" || name == "_" {
+						continue
+					}
+					if i < len(types) && types[i] != "" {
+						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, types[i]})
+					}
+				}
+			} else if types := typeNamesFromFuncLiteralResults(right, content); len(types) > 0 {
+				// f := func() *A { … } / f, g := func() *A {…}, func() *B {…}
+				for i, name := range names {
+					if name == "" || name == "_" {
+						continue
+					}
+					if i < len(types) && types[i] != "" {
+						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, types[i]})
+					}
+				}
+			} else if typ, ok := elemTypeFromIndexExpr(right, content, rangeSrc, namedColl); ok {
+				// sa := sas[0] / a := as[0] / sa, ok := mas["k"] — only the value
+				// (first name) is the element/value type; ok stays unbound.
+				if len(names) > 0 && names[0] != "" && names[0] != "_" {
+					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, names[0], typ})
+				}
+			} else if types := typeNamesFromNamedStructFieldRHS(right, content, valueType, structFields, n.StartByte(), rangeElem, namedColl, funcResults); len(types) > 0 {
+				// ba := wa.BA / ba, bb := wa.BA, wb.BB — named-struct field peels.
+				for i, name := range names {
+					if name == "" || name == "_" {
+						continue
+					}
+					if i < len(types) && types[i] != "" {
+						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, types[i]})
+					}
+				}
+			} else if types := typeNamesFromMethodCallRHS(right, content, valueType, structFields, methodNamed, n.StartByte(), rangeElem, namedColl, funcResults); len(types) > 0 {
+				// a := ba.Get() / xa := ba.Self() — single named method results.
+				// Prevents fail-open OVER on foreign same-leaf (b := bb.Get(); b.Run).
 				for i, name := range names {
 					if name == "" || name == "_" {
 						continue
@@ -2202,6 +3762,10 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 					}
 				}
 			}
+			// Register collection short-vars into rangeSrc so later sa := sas[0]
+			// and range clauses peel under foreign same-leaf (sas := make([]SA,n)
+			// / sas := []SA{…} / sas := append(...)).
+			registerCollectionNames(names, right, content, rangeSrc, namedColl)
 		case "var_spec":
 			// var a, b T / var a, b = … — name is a repeated field; ChildByField
 			// only returns the first, so collect every name field (like params).
@@ -2216,7 +3780,16 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 					// var a, b = makeAB() / var a, b = &A{}, &B{} — bind positionally.
 					types := typeNamesFromMultiRHS(valueN, content)
 					if len(types) == 0 {
-						types = typeNamesFromCallResults(valueN, content, funcResults)
+						types = typeNamesFromCallResults(valueN, content, funcResults, genericPeels, rangeElem)
+					}
+					if len(types) == 0 {
+						types = typeNamesFromFuncLiteralResults(valueN, content)
+					}
+					if len(types) == 0 {
+						types = typeNamesFromNamedStructFieldRHS(valueN, content, valueType, structFields, n.StartByte(), rangeElem, namedColl, funcResults)
+					}
+					if len(types) == 0 {
+						types = typeNamesFromMethodCallRHS(valueN, content, valueType, structFields, methodNamed, n.StartByte(), rangeElem, namedColl, funcResults)
 					}
 					if len(types) > 0 {
 						for i, name := range names {
@@ -2227,9 +3800,22 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 								*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, types[i]})
 							}
 						}
+						registerCollectionNames(names, valueN, content, rangeSrc, namedColl)
 						break
 					}
 					typ = typeNameFromRHS(valueN, content)
+				} else if types := typeNamesFromFuncLiteralResults(valueN, content); len(types) == 1 && types[0] != "" {
+					// var f = func() *A { … } — single-name func-literal result.
+					typ = types[0]
+				} else if el, ok := elemTypeFromIndexExpr(valueN, content, rangeSrc, namedColl); ok {
+					// var sa = sas[0] / var a = as[0] — element/value type.
+					typ = el
+				} else if fieldTypes := typeNamesFromNamedStructFieldRHS(valueN, content, valueType, structFields, n.StartByte(), rangeElem, namedColl, funcResults); len(fieldTypes) == 1 && fieldTypes[0] != "" {
+					// var ba = wa.BA / var ba = &wa.BA — named-struct field peel.
+					typ = fieldTypes[0]
+				} else if methodTypes := typeNamesFromMethodCallRHS(valueN, content, valueType, structFields, methodNamed, n.StartByte(), rangeElem, namedColl, funcResults); len(methodTypes) == 1 && methodTypes[0] != "" {
+					// var a = ba.Get() / var xa = ba.Self() — method named result.
+					typ = methodTypes[0]
 				} else {
 					typ = typeNameFromRHS(valueN, content)
 				}
@@ -2245,6 +3831,16 @@ func collectLocalTypeBindings(node *grammar.Node, content []byte, bindings *[]id
 						rangeSrc[name] = info
 					}
 				}
+			} else if info, ok := collectionTypeOrNamedResult(typeN, content, namedColl); ok {
+				// var xa AS / var pas *AS with type AS []*A.
+				for _, name := range names {
+					if name != "" && name != "_" {
+						rangeSrc[name] = info
+					}
+				}
+			} else {
+				// var sas = make([]SA, n) / var sas = []SA{…} — collection value.
+				registerCollectionNames(names, valueN, content, rangeSrc, namedColl)
 			}
 		case "type_switch_statement":
 			// switch v := x.(type) { case *T: v.M() } — bind v to T only
@@ -2330,10 +3926,60 @@ func channelReceiveElemType(right *grammar.Node, content []byte, rangeSrc map[st
 		return "", false
 	}
 	info, ok := rangeSrc[ingest.NodeText(operand, content)]
-	if !ok || info.isMap || info.elemType == "" {
+	if !ok || info.isMap || info.elemType == "" || info.payloadIsColl {
+		// payloadIsColl: channel of collection — scalar a := <-ch fails closed;
+		// collection receive binds via channelReceiveCollInfo.
 		return "", false
 	}
 	return info.elemType, true
+}
+
+// channelReceiveCollInfo returns collection element info for <-ch when ch is a
+// channel-of-collection source (chan []*T / chan map[K]*T / chan AS). Used so
+// as := <-ch; as[0].M and (<-ch)[0].M peel under foreign same-leaf methods.
+func channelReceiveCollInfo(right *grammar.Node, content []byte, chanColl map[string]rangeSourceInfo) (rangeSourceInfo, bool) {
+	if right == nil || chanColl == nil {
+		return rangeSourceInfo{}, false
+	}
+	if right.Type() == "expression_list" {
+		for i := uint32(0); i < right.ChildCount(); i++ {
+			c := right.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			return channelReceiveCollInfo(c, content, chanColl)
+		}
+		return rangeSourceInfo{}, false
+	}
+	if right.Type() == "parenthesized_expression" {
+		for i := uint32(0); i < right.ChildCount(); i++ {
+			ch := right.Child(i)
+			if ch == nil || ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			return channelReceiveCollInfo(ch, content, chanColl)
+		}
+		return rangeSourceInfo{}, false
+	}
+	if right.Type() != "unary_expression" {
+		return rangeSourceInfo{}, false
+	}
+	op := ingest.ChildByField(right, "operator")
+	if op == nil || ingest.NodeText(op, content) != "<-" {
+		return rangeSourceInfo{}, false
+	}
+	operand := ingest.ChildByField(right, "operand")
+	operand = peelSelectorOperand(operand, content)
+	if operand == nil || operand.Type() != "identifier" {
+		return rangeSourceInfo{}, false
+	}
+	info, ok := chanColl[ingest.NodeText(operand, content)]
+	if !ok || info.elemType == "" {
+		return rangeSourceInfo{}, false
+	}
+	out := info
+	out.payloadIsColl = false
+	return out, true
 }
 
 // collectRangeClauseBindings binds range variables inside a for_statement when
@@ -2443,6 +4089,35 @@ func typeCaseSingleType(typeCase *grammar.Node, content []byte) (string, bool) {
 	return types[0], true
 }
 
+// typeCaseSingleCollection returns collection element info when a type_case
+// lists exactly one collection type ([]*A / map[K]*A / AS / *AS). Multi-type
+// arms and non-collection types fail closed.
+func typeCaseSingleCollection(typeCase *grammar.Node, content []byte, namedColl map[string]rangeSourceInfo) (rangeSourceInfo, bool) {
+	if typeCase == nil {
+		return rangeSourceInfo{}, false
+	}
+	var infos []rangeSourceInfo
+	for i := uint32(0); i < typeCase.ChildCount(); i++ {
+		if typeCase.FieldNameForChild(i) != "type" {
+			continue
+		}
+		c := typeCase.Child(i)
+		if c == nil || c.IsNull() || c.Type() == "," {
+			continue
+		}
+		if info, ok := collectionTypeOrNamedResult(c, content, namedColl); ok && info.elemType != "" {
+			infos = append(infos, info)
+		} else {
+			// Non-collection type in this arm — fail closed for multi-mixed too.
+			infos = append(infos, rangeSourceInfo{})
+		}
+	}
+	if len(infos) != 1 || infos[0].elemType == "" {
+		return rangeSourceInfo{}, false
+	}
+	return infos[0], true
+}
+
 func identListNames(n *grammar.Node, content []byte) []string {
 	if n == nil {
 		return nil
@@ -2466,6 +4141,85 @@ func identListNames(n *grammar.Node, content []byte) []string {
 	}
 	walk(n)
 	return names
+}
+
+// elemTypeFromIndexExpr returns the element/value named type of an index
+// expression: sas[0] / mas["k"] / []SA{…}[0] / make([]SA,n)[0] /
+// append([]SA{},…)[0]. Used for short-var / var value bindings
+// (sa := sas[0]; sa.Items / a := as[0]; a.Run) under foreign same-leaf.
+// For map two-value form sa, ok := mas["k"] only the value type is returned
+// (caller binds the first name only). namedColl may be nil.
+func elemTypeFromIndexExpr(n *grammar.Node, content []byte, rangeSrc map[string]rangeSourceInfo, namedColl map[string]rangeSourceInfo) (string, bool) {
+	if n == nil {
+		return "", false
+	}
+	// expression_list → first expression only (single index RHS).
+	if n.Type() == "expression_list" {
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			return elemTypeFromIndexExpr(c, content, rangeSrc, namedColl)
+		}
+		return "", false
+	}
+	n = peelSelectorOperand(n, content)
+	if n == nil || n.Type() != "index_expression" {
+		return "", false
+	}
+	op := ingest.ChildByField(n, "operand")
+	op = peelSelectorOperand(op, content)
+	if op == nil {
+		return "", false
+	}
+	if op.Type() == "identifier" {
+		if rangeSrc == nil {
+			return "", false
+		}
+		info, ok := rangeSrc[ingest.NodeText(op, content)]
+		if !ok || info.elemType == "" {
+			return "", false
+		}
+		return info.elemType, true
+	}
+	// []SA{…}[0] / make([]SA,n)[0] / map[string]SA{…}["k"] / append([]SA{},…)[0]
+	// and named collection make(SAS,n) via namedColl.
+	if info, ok := rangeSourceFromCollectionExprIdent(op, content, nil, 0, nil, namedColl, nil, nil, nil, nil, nil, nil, nil); ok && info.elemType != "" {
+		return info.elemType, true
+	}
+	return "", false
+}
+
+// registerCollectionNames records rangeSrc entries for names bound to
+// collection constructors (make / composite / append / slice expr). Positional
+// for multi-value RHS. Enables sa := sas[0] after sas := make([]SA, n) and
+// range over short-var collections under foreign same-leaf. Fail closed when
+// the RHS is not a known collection expr.
+func registerCollectionNames(names []string, right *grammar.Node, content []byte, rangeSrc map[string]rangeSourceInfo, namedColl map[string]rangeSourceInfo) {
+	if rangeSrc == nil || len(names) == 0 || right == nil {
+		return
+	}
+	var exprs []*grammar.Node
+	if right.Type() == "expression_list" {
+		for i := uint32(0); i < right.ChildCount(); i++ {
+			c := right.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			exprs = append(exprs, c)
+		}
+	} else {
+		exprs = []*grammar.Node{right}
+	}
+	for i, name := range names {
+		if name == "" || name == "_" || i >= len(exprs) {
+			continue
+		}
+		if info, ok := rangeSourceFromCollectionExprIdent(exprs[i], content, nil, 0, nil, namedColl, nil, nil, nil, nil, nil, nil, nil); ok && info.elemType != "" {
+			rangeSrc[name] = info
+		}
+	}
 }
 
 // typeNamesFromMultiRHS returns position-wise concrete types for a short-var /
@@ -2537,6 +4291,682 @@ func sameFileFuncResultTypes(root *grammar.Node, content []byte) map[string][]st
 	return out
 }
 
+// sameFileMethodNamedResults maps same-file receiver type → method name →
+// single concrete named result type (star-stripped):
+//
+//	func (s SA) Self() SA
+//	func (s *SA) SelfP() *SA
+//	type GA interface { Self() SA }
+//
+// Multi-result methods fail closed (not a lone call value). Used so
+// sa.Self().Items peels under foreign same-leaf like getSA().Items.
+func sameFileMethodNamedResults(root *grammar.Node, content []byte) map[string]map[string]string {
+	out := map[string]map[string]string{}
+	if root == nil {
+		return out
+	}
+	edges := map[string]string{}
+	embeds := map[string][]string{}
+	register := func(recv, name, typ string) {
+		if recv == "" || name == "" || name == "_" || typ == "" {
+			return
+		}
+		if out[recv] == nil {
+			out[recv] = map[string]string{}
+		}
+		out[recv][name] = typ
+	}
+	var walk func(n *grammar.Node, ifaceName string, inIface bool)
+	walk = func(n *grammar.Node, ifaceName string, inIface bool) {
+		if n == nil {
+			return
+		}
+		nextName, nextIface := ifaceName, inIface
+		switch n.Type() {
+		case "type_spec":
+			if id := ingest.ChildByType(n, "type_identifier"); id != nil {
+				nextName = ingest.NodeText(id, content)
+			}
+			if t := ingest.ChildByField(n, "type"); t != nil {
+				if t.Type() == "interface_type" {
+					nextIface = true
+				} else if tgt := typeIdentifierName(t, content); tgt != "" && nextName != "" && tgt != nextName {
+					edges[nextName] = tgt
+				}
+			}
+		case "type_alias":
+			var nameNode *grammar.Node
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch != nil && ch.Type() == "type_identifier" {
+					nameNode = ch
+					break
+				}
+			}
+			if nameNode != nil {
+				nextName = ingest.NodeText(nameNode, content)
+			}
+			typeN := ingest.ChildByField(n, "type")
+			if typeN != nil && typeN.Type() == "interface_type" {
+				nextIface = true
+			} else if tgt := typeIdentifierName(typeN, content); tgt != "" && nextName != "" && tgt != nextName {
+				edges[nextName] = tgt
+			} else {
+				for i := uint32(0); i < n.ChildCount(); i++ {
+					if n.Child(i) != nil && n.Child(i).Type() == "interface_type" {
+						nextIface = true
+						break
+					}
+				}
+			}
+		case "parameter_declaration":
+			if t := ingest.ChildByField(n, "type"); t != nil && t.Type() == "interface_type" {
+				if key := inlineIfaceTypeKey(t); key != "" {
+					nextName = key
+					nextIface = true
+				}
+			}
+		case "method_declaration":
+			recv := methodDeclReceiverType(n, content)
+			nameN := ingest.ChildByField(n, "name")
+			if recv != "" && nameN != nil {
+				types := functionResultTypes(n, content)
+				if len(types) == 1 && types[0] != "" {
+					register(recv, ingest.NodeText(nameN, content), strings.TrimPrefix(types[0], "*"))
+				}
+			}
+		}
+		if inIface && (n.Type() == "method_elem" || n.Type() == "field_declaration") {
+			nameN := ingest.ChildByField(n, "name")
+			if nameN != nil && ifaceName != "" {
+				// Interface method: result type via functionResultTypes shape.
+				types := functionResultTypes(n, content)
+				if len(types) == 1 && types[0] != "" {
+					register(ifaceName, ingest.NodeText(nameN, content), strings.TrimPrefix(types[0], "*"))
+				}
+			}
+		}
+		if inIface && n.Type() == "type_elem" && ifaceName != "" {
+			if tgt := singleEmbeddedIfaceName(n, content); tgt != "" && tgt != ifaceName {
+				embeds[ifaceName] = appendUniqueString(embeds[ifaceName], tgt)
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i), nextName, nextIface)
+		}
+	}
+	walk(root, "", false)
+	// Alias/defined-type edges.
+	for round := 0; round < len(edges)+1; round++ {
+		progress := false
+		for name, tgt := range edges {
+			if _, has := out[name]; has {
+				continue
+			}
+			base, ok := out[tgt]
+			if !ok || len(base) == 0 {
+				continue
+			}
+			cp := make(map[string]string, len(base))
+			for k, v := range base {
+				cp[k] = v
+			}
+			out[name] = cp
+			progress = true
+		}
+		if !progress {
+			break
+		}
+	}
+	// Embed promotion.
+	for round := 0; round < len(embeds)+1; round++ {
+		progress := false
+		for name, bases := range embeds {
+			for _, base := range bases {
+				srcMap, ok := out[base]
+				if !ok || len(srcMap) == 0 {
+					continue
+				}
+				if out[name] == nil {
+					out[name] = map[string]string{}
+				}
+				for k, v := range srcMap {
+					if _, has := out[name][k]; !has {
+						out[name][k] = v
+						progress = true
+					}
+				}
+			}
+		}
+		if !progress {
+			break
+		}
+	}
+	return out
+}
+
+// sameFileGenericPeelFuncs maps same-file generic helpers whose call result
+// peels from the first argument under foreign same-leaf methods:
+//
+//	"arg"  — func Id[T any](v T) T / First2[T, U any](a T, b U) T:
+//	         peel first-arg concrete type (first value param type = result
+//	         type param; extra type/value params allowed)
+//	         (Id(A{}).Run / First2(A{}, B{}).Run / a := Id(A{}); a.Run)
+//	"elem" — func First[T any](xs []T) T / At[T](xs []T, i int) T /
+//	         Get[K comparable, V any](m map[K]V, k K) V:
+//	         peel first-arg slice/array element or map value type
+//	         (First([]A{{}}).Run / Get(map[string]A{…}, k).Run /
+//	         a := First(xs); a.Run with xs []A)
+//
+// Only these shapes are recognized; other generics fail closed.
+func sameFileGenericPeelFuncs(root *grammar.Node, content []byte) map[string]string {
+	if root == nil {
+		return nil
+	}
+	out := map[string]string{}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type() == "function_declaration" {
+			if name := goGenericIdentityFuncName(n, content); name != "" {
+				out[name] = "arg"
+			} else if name := goGenericSliceElemFuncName(n, content); name != "" {
+				out[name] = "elem"
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// goGenericTypeParamNames returns the ordered type-parameter names of a
+// generic function_declaration (including multi-name decls like [T, U any]).
+// Empty when the decl is non-generic or malformed.
+func goGenericTypeParamNames(decl *grammar.Node, content []byte) []string {
+	if decl == nil {
+		return nil
+	}
+	tpList := ingest.ChildByField(decl, "type_parameters")
+	if tpList == nil {
+		// Some grammars expose type_parameter_list as a child without field name.
+		for i := uint32(0); i < decl.ChildCount(); i++ {
+			ch := decl.Child(i)
+			if ch != nil && ch.Type() == "type_parameter_list" {
+				tpList = ch
+				break
+			}
+		}
+	}
+	if tpList == nil || tpList.Type() != "type_parameter_list" {
+		return nil
+	}
+	var typeParams []string
+	for i := uint32(0); i < tpList.ChildCount(); i++ {
+		ch := tpList.Child(i)
+		if ch == nil || ch.Type() != "type_parameter_declaration" {
+			continue
+		}
+		// Collect every identifier before the constraint (T / T, U any).
+		sawName := false
+		for j := uint32(0); j < ch.ChildCount(); j++ {
+			c := ch.Child(j)
+			if c == nil {
+				continue
+			}
+			switch c.Type() {
+			case "identifier":
+				pname := ingest.NodeText(c, content)
+				if pname != "" {
+					typeParams = append(typeParams, pname)
+					sawName = true
+				}
+			case ",", "comment":
+				continue
+			default:
+				// type_constraint / other — stop name harvest for this decl.
+				if sawName {
+					break
+				}
+			}
+		}
+		if !sawName {
+			return nil
+		}
+	}
+	return typeParams
+}
+
+// goGenericResultTypeParam returns the bare type-param name of the function
+// result when it is a type_identifier matching one of typeParams.
+func goGenericResultTypeParam(decl *grammar.Node, content []byte, typeParams []string) string {
+	if decl == nil || len(typeParams) == 0 {
+		return ""
+	}
+	paramSet := map[string]bool{}
+	for _, p := range typeParams {
+		paramSet[p] = true
+	}
+	result := ingest.ChildByField(decl, "result")
+	if result == nil {
+		for i := uint32(0); i < decl.ChildCount(); i++ {
+			ch := decl.Child(i)
+			if ch != nil && ch.Type() == "type_identifier" {
+				// Last type_identifier before block is typically the result.
+				result = ch
+			}
+		}
+	}
+	if result == nil || result.Type() != "type_identifier" {
+		return ""
+	}
+	r := ingest.NodeText(result, content)
+	if !paramSet[r] {
+		return ""
+	}
+	return r
+}
+
+// goGenericIdentityFuncName returns the function name when decl is
+// func Name[T …](v T[, …]) T (or multi-param First2[T, U any](a T, b U) T):
+// result is a type param Ti and the first value param's type is bare Ti.
+// Extra type params and extra value params are allowed. Other shapes fail closed.
+func goGenericIdentityFuncName(decl *grammar.Node, content []byte) string {
+	if decl == nil || decl.Type() != "function_declaration" {
+		return ""
+	}
+	nameN := ingest.ChildByField(decl, "name")
+	if nameN == nil || nameN.Type() != "identifier" {
+		return ""
+	}
+	name := ingest.NodeText(nameN, content)
+	if name == "" {
+		return ""
+	}
+	typeParams := goGenericTypeParamNames(decl, content)
+	if len(typeParams) == 0 {
+		return ""
+	}
+	tParam := goGenericResultTypeParam(decl, content, typeParams)
+	if tParam == "" {
+		return ""
+	}
+
+	// First value parameter of type Ti (bare type_identifier). Extra params OK.
+	params := ingest.ChildByField(decl, "parameters")
+	if params == nil || params.Type() != "parameter_list" {
+		return ""
+	}
+	var firstParamType *grammar.Node
+	for i := uint32(0); i < params.ChildCount(); i++ {
+		p := params.Child(i)
+		if p == nil || p.Type() != "parameter_declaration" {
+			continue
+		}
+		firstParamType = ingest.ChildByField(p, "type")
+		// Multi-name first param (a, b T) — still one type slot; allow only if
+		// single name so dual-class First2(a T, b U) stays first-arg peel.
+		names := parameterDeclNames(p, content)
+		if len(names) > 1 {
+			return ""
+		}
+		break
+	}
+	if firstParamType == nil || firstParamType.Type() != "type_identifier" {
+		return ""
+	}
+	if ingest.NodeText(firstParamType, content) != tParam {
+		return ""
+	}
+	return name
+}
+
+// goGenericSliceElemFuncName returns the function name when decl is
+// func Name[T …](xs []T[, …]) T / ([N]T) / map[K]T value peel:
+//
+//	First[T](xs []T) T / At[T](xs []T, i int) T — slice/array element
+//	Get[K comparable, V any](m map[K]V, k K) V — map value
+//
+// Result is type param Ti; first value param is []Ti / [N]Ti / map[K]Ti.
+// Extra type/value params allowed. Other shapes fail closed.
+func goGenericSliceElemFuncName(decl *grammar.Node, content []byte) string {
+	if decl == nil || decl.Type() != "function_declaration" {
+		return ""
+	}
+	nameN := ingest.ChildByField(decl, "name")
+	if nameN == nil || nameN.Type() != "identifier" {
+		return ""
+	}
+	name := ingest.NodeText(nameN, content)
+	if name == "" {
+		return ""
+	}
+	typeParams := goGenericTypeParamNames(decl, content)
+	if len(typeParams) == 0 {
+		return ""
+	}
+	tParam := goGenericResultTypeParam(decl, content, typeParams)
+	if tParam == "" {
+		return ""
+	}
+	paramSet := map[string]bool{}
+	for _, p := range typeParams {
+		paramSet[p] = true
+	}
+
+	// First value parameter is []T / [N]T / map[K]T; further params allowed.
+	params := ingest.ChildByField(decl, "parameters")
+	if params == nil || params.Type() != "parameter_list" {
+		return ""
+	}
+	var firstParamType *grammar.Node
+	paramCount := 0
+	for i := uint32(0); i < params.ChildCount(); i++ {
+		p := params.Child(i)
+		if p == nil || p.Type() != "parameter_declaration" {
+			continue
+		}
+		paramCount++
+		if firstParamType == nil {
+			firstParamType = ingest.ChildByField(p, "type")
+		}
+		// Multi-name first param (a, b []T) is still one type slot — allow.
+	}
+	if paramCount < 1 || firstParamType == nil {
+		return ""
+	}
+	// Peel []T / [N]T / map[K]T (and parenthesized).
+	pt := firstParamType
+	for pt != nil && pt.Type() == "parenthesized_type" {
+		var inner *grammar.Node
+		for i := uint32(0); i < pt.ChildCount(); i++ {
+			c := pt.Child(i)
+			if c == nil || c.Type() == "(" || c.Type() == ")" {
+				continue
+			}
+			inner = c
+			break
+		}
+		pt = inner
+	}
+	if pt == nil {
+		return ""
+	}
+	switch pt.Type() {
+	case "slice_type", "array_type":
+		el := ingest.ChildByField(pt, "element")
+		if el == nil || el.Type() != "type_identifier" || ingest.NodeText(el, content) != tParam {
+			return ""
+		}
+	case "map_type":
+		// map[K]V with V == result type param; K should be a type param too
+		// (Get[K, V]) so non-generic map helpers fail closed.
+		val := ingest.ChildByField(pt, "value")
+		if val == nil || val.Type() != "type_identifier" || ingest.NodeText(val, content) != tParam {
+			return ""
+		}
+		key := ingest.ChildByField(pt, "key")
+		if key == nil || key.Type() != "type_identifier" || !paramSet[ingest.NodeText(key, content)] {
+			return ""
+		}
+	default:
+		return ""
+	}
+	return name
+}
+
+// goCallFirstArgNode returns the first positional argument of a call_expression.
+func goCallFirstArgNode(call *grammar.Node) *grammar.Node {
+	if call == nil || call.Type() != "call_expression" {
+		return nil
+	}
+	args := ingest.ChildByField(call, "arguments")
+	if args == nil {
+		return nil
+	}
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		c := args.Child(i)
+		if c == nil || c.Type() == "(" || c.Type() == ")" || c.Type() == "," {
+			continue
+		}
+		return c
+	}
+	return nil
+}
+
+// goCallFirstArgType recovers the concrete named type of the first positional
+// argument of a call_expression (A{} / &A{} / new(A) / nested peels). Used by
+// generic identity Id(arg) and multi-param First2(a, b) peels (first value
+// param is the result type param; extra args ignored).
+func goCallFirstArgType(call *grammar.Node, content []byte, indexElemType, valueType func(name string, at uint32) (string, bool), funcColl map[string][]rangeSourceInfo, funcResults map[string][]string, genericPeels map[string]string, namedColl map[string]rangeSourceInfo, funcRetFunc map[string]rangeSourceInfo, structFields map[string]map[string]rangeSourceInfo, ifaceColl, ifaceFunc map[string]map[string]rangeSourceInfo, methodNamed map[string]map[string]string) string {
+	if call == nil || call.Type() != "call_expression" {
+		return ""
+	}
+	first := goCallFirstArgNode(call)
+	if first == nil {
+		return ""
+	}
+	// Prefer composite / unary peels (A{} / &A{}) before full complex (avoids
+	// re-entering identity on the same shape awkwardly).
+	if t := compositeLiteralTypeName(first, content); t != "" {
+		return t
+	}
+	if t := typeNameFromRHS(first, content); t != "" {
+		return strings.TrimPrefix(t, "*")
+	}
+	return goComplexOperandType(first, content, indexElemType, valueType, funcColl, funcResults, genericPeels, namedColl, funcRetFunc, structFields, ifaceColl, ifaceFunc, methodNamed)
+}
+
+// goCallFirstArgElemType recovers the element type of the first positional
+// argument when it is a slice/array collection (composite, make, typed local,
+// append, …). Used by generic First[T](xs []T) T / At[T](xs []T, i int) T peels.
+// Extra args after the collection are ignored (At index). Missing first arg
+// fails closed.
+func goCallFirstArgElemType(call *grammar.Node, content []byte, indexElemType func(name string, at uint32) (string, bool), funcColl map[string][]rangeSourceInfo, namedColl map[string]rangeSourceInfo, funcRetFunc map[string]rangeSourceInfo, structFields map[string]map[string]rangeSourceInfo, valueType func(string, uint32) (string, bool), ifaceColl, ifaceFunc map[string]map[string]rangeSourceInfo, methodNamed map[string]map[string]string) string {
+	first := goCallFirstArgNode(call)
+	if first == nil {
+		return ""
+	}
+	at := call.StartByte()
+	if info, ok := rangeSourceFromCollectionExprIdent(first, content, indexElemType, at, funcColl, namedColl, funcRetFunc, structFields, valueType, ifaceColl, ifaceFunc, nil, methodNamed); ok && info.elemType != "" {
+		return strings.TrimPrefix(info.elemType, "*")
+	}
+	return ""
+}
+
+// sameFileFuncCollectionResults maps same-file function names to positional
+// collection element/value info for each result slot
+// (func getA() []*A / func getA() ([]*A, error) / func getM() map[K]*A /
+// named (as []*A, err error) / func getAS() AS with type AS []*A). Empty-elem
+// slots keep multi-return indices aligned so as, err := getA(); as[0].M and
+// getA()[0].M (single-result only) resolve under foreign same-leaf methods.
+func sameFileFuncCollectionResults(root *grammar.Node, content []byte) map[string][]rangeSourceInfo {
+	if root == nil {
+		return nil
+	}
+	namedColl := sameFileNamedCollectionResults(root, content)
+	out := map[string][]rangeSourceInfo{}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type() == "function_declaration" {
+			nameN := ingest.ChildByField(n, "name")
+			if nameN != nil && nameN.Type() == "identifier" {
+				name := ingest.NodeText(nameN, content)
+				if name != "" {
+					if infos := functionCollectionResults(n, content, namedColl); len(infos) > 0 {
+						out[name] = infos
+					}
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// functionCollectionResults returns positional collection element/value info
+// from a function_declaration's (or func_literal's) result list. Non-collection
+// slots (error, bool, scalars) keep empty elemType so multi-return indices stay
+// aligned (e.g. ([]*A, error) → [{A}, {}]). namedColl peels same-file named
+// collection result types (func getAS() AS with type AS []*A; may be nil).
+// Returns nil when no result is a collection.
+func functionCollectionResults(decl *grammar.Node, content []byte, namedColl map[string]rangeSourceInfo) []rangeSourceInfo {
+	if decl == nil {
+		return nil
+	}
+	result := ingest.ChildByField(decl, "result")
+	if result == nil {
+		return nil
+	}
+	if result.Type() == "parameter_list" {
+		var infos []rangeSourceInfo
+		any := false
+		for i := uint32(0); i < result.ChildCount(); i++ {
+			p := result.Child(i)
+			if p == nil || (p.Type() != "parameter_declaration" && p.Type() != "variadic_parameter_declaration") {
+				continue
+			}
+			typeN := ingest.ChildByField(p, "type")
+			info, ok := collectionTypeOrNamedResult(typeN, content, namedColl)
+			if !ok || info.elemType == "" {
+				// Non-collection slot — keep alignment (e.g. error in ([]*A, error)).
+				info = rangeSourceInfo{}
+			} else {
+				any = true
+			}
+			// Multi-name rare in results; one slot per declaration name, or one
+			// if unnamed.
+			names := parameterDeclNames(p, content)
+			if len(names) == 0 {
+				infos = append(infos, info)
+			} else {
+				for range names {
+					infos = append(infos, info)
+				}
+			}
+		}
+		if !any {
+			return nil
+		}
+		return infos
+	}
+	if info, ok := collectionTypeOrNamedResult(result, content, namedColl); ok && info.elemType != "" {
+		return []rangeSourceInfo{info}
+	}
+	return nil
+}
+
+// collectionInfosFromCallResults returns positional collection infos when n is
+// a call to a same-file function known in funcColl (or expression_list of one
+// such call). Used for as, err := getA() / var as, err = getA().
+func collectionInfosFromCallResults(n *grammar.Node, content []byte, funcColl map[string][]rangeSourceInfo) []rangeSourceInfo {
+	if n == nil || len(funcColl) == 0 {
+		return nil
+	}
+	// expression_list → single call only (multi-return, not multi-expr).
+	if n.Type() == "expression_list" {
+		var exprs []*grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			exprs = append(exprs, c)
+		}
+		if len(exprs) != 1 {
+			return nil
+		}
+		n = exprs[0]
+	}
+	if n.Type() != "call_expression" {
+		return nil
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil || fn.Type() != "identifier" {
+		return nil
+	}
+	name := ingest.NodeText(fn, content)
+	if name == "" {
+		return nil
+	}
+	infos := funcColl[name]
+	if len(infos) == 0 {
+		return nil
+	}
+	out := make([]rangeSourceInfo, len(infos))
+	copy(out, infos)
+	return out
+}
+
+// collectionInfosFromIfaceMethodCall returns positional collection infos when
+// n is ga.GetAS() / sa.GetAS() (or expression_list of one such call) and the
+// receiver type has a multi-result collection method registered in multi.
+// Used for as, err := ga.GetAS() with GetAS() (AS, error) under foreign same-leaf.
+func collectionInfosFromIfaceMethodCall(n *grammar.Node, content []byte, valueType func(string, uint32) (string, bool), multi map[string]map[string][]rangeSourceInfo, at uint32) []rangeSourceInfo {
+	if n == nil || valueType == nil || len(multi) == 0 {
+		return nil
+	}
+	if n.Type() == "expression_list" {
+		var exprs []*grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			exprs = append(exprs, c)
+		}
+		if len(exprs) != 1 {
+			return nil
+		}
+		n = exprs[0]
+	}
+	if n.Type() != "call_expression" {
+		return nil
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil || fn.Type() != "selector_expression" {
+		return nil
+	}
+	// (*ga).GetAS() multi-result short-var — same peel as selectorIfaceMethod.
+	operand := peelSelectorOperand(ingest.ChildByField(fn, "operand"), content)
+	field := ingest.ChildByField(fn, "field")
+	if operand == nil || field == nil || operand.Type() != "identifier" {
+		return nil
+	}
+	recvType, ok := valueType(ingest.NodeText(operand, content), at)
+	if !ok || recvType == "" {
+		return nil
+	}
+	recvType = strings.TrimPrefix(recvType, "*")
+	ms := multi[recvType]
+	if len(ms) == 0 {
+		return nil
+	}
+	infos := ms[ingest.NodeText(field, content)]
+	if len(infos) == 0 {
+		return nil
+	}
+	out := make([]rangeSourceInfo, len(infos))
+	copy(out, infos)
+	return out
+}
+
 // functionResultTypes returns positional concrete type names from a
 // function_declaration's result (parameter_list or single type).
 func functionResultTypes(decl *grammar.Node, content []byte) []string {
@@ -2584,11 +5014,51 @@ func functionResultTypes(decl *grammar.Node, content []byte) []string {
 	return nil
 }
 
+// typeNamesFromFuncLiteralResults returns positional concrete result types when
+// n is a func_literal (or expression_list of func_literals):
+//
+//	f := func() *A { return &A{} }     → ["A"]
+//	f, g := func() *A {…}, func() *B {…} → ["A","B"]
+//
+// Multi-result func literals (func() (*A, error)) fail closed (not a lone
+// method receiver). Used so f().Run renames under foreign same-leaf methods.
+func typeNamesFromFuncLiteralResults(n *grammar.Node, content []byte) []string {
+	if n == nil {
+		return nil
+	}
+	if n.Type() == "expression_list" {
+		var out []string
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			types := typeNamesFromFuncLiteralResults(c, content)
+			if len(types) != 1 || types[0] == "" {
+				// Position must be a single-result func literal.
+				return nil
+			}
+			out = append(out, types[0])
+		}
+		return out
+	}
+	if n.Type() != "func_literal" {
+		return nil
+	}
+	types := functionResultTypes(n, content)
+	if len(types) != 1 || types[0] == "" {
+		return nil
+	}
+	return types
+}
+
 // typeNamesFromCallResults returns positional result types when n is a call to
 // a same-file function known in funcResults (or expression_list of one such call).
 // Used for a, b := makeAB() / var a, b = makeAB().
-func typeNamesFromCallResults(n *grammar.Node, content []byte, funcResults map[string][]string) []string {
-	if n == nil || len(funcResults) == 0 {
+// indexElemType is optional: enables First(xs) assign peels when xs is a typed
+// slice/array param or local (via rangeSrc-backed lookup).
+func typeNamesFromCallResults(n *grammar.Node, content []byte, funcResults map[string][]string, genericPeels map[string]string, indexElemType func(name string, at uint32) (string, bool)) []string {
+	if n == nil {
 		return nil
 	}
 	// expression_list → single call only (multi-return, not multi-expr).
@@ -2617,6 +5087,37 @@ func typeNamesFromCallResults(n *grammar.Node, content []byte, funcResults map[s
 	if name == "" {
 		return nil
 	}
+	// Generic peels before funcResults so result type-param "T" is not used as a leaf.
+	// "arg":  Id(A{}) peels arg type.
+	// "elem": First([]A{{}})/First(xs) peels first-arg element type.
+	if mode := genericPeels[name]; mode == "arg" {
+		args := ingest.ChildByField(n, "arguments")
+		if args != nil {
+			for i := uint32(0); i < args.ChildCount(); i++ {
+				c := args.Child(i)
+				if c == nil || c.Type() == "(" || c.Type() == ")" || c.Type() == "," {
+					continue
+				}
+				if t := compositeLiteralTypeName(c, content); t != "" {
+					return []string{t}
+				}
+				if t := typeNameFromRHS(c, content); t != "" {
+					return []string{strings.TrimPrefix(t, "*")}
+				}
+				break
+			}
+		}
+		return nil
+	} else if mode == "elem" {
+		// Element peel for assign: a := First([]A{{}}) / a := First(xs).
+		if t := goCallFirstArgElemType(n, content, indexElemType, nil, nil, nil, nil, nil, nil, nil, nil); t != "" {
+			return []string{t}
+		}
+		return nil
+	}
+	if len(funcResults) == 0 {
+		return nil
+	}
 	types := funcResults[name]
 	if len(types) == 0 {
 		return nil
@@ -2624,6 +5125,156 @@ func typeNamesFromCallResults(n *grammar.Node, content []byte, funcResults map[s
 	// Copy so callers cannot mutate the shared map entry.
 	out := make([]string, len(types))
 	copy(out, types)
+	return out
+}
+
+// typeNamesFromNamedStructFieldRHS returns position-wise named struct types for
+// short-var / var RHS that are field selectors of a typed struct:
+//
+//	ba := wa.BA          // WA{BA BoxA} → BoxA
+//	ba := &wa.BA         // address-of same field
+//	ba, bb := wa.BA, wb.BB
+//
+// Enables ba.Get().Run under foreign same-leaf when inline wa.BA.Get().Run
+// already peels via selectorOperandStructType. Unknown / non-field RHS yield
+// empty strings; all-empty → nil (fail closed).
+func typeNamesFromNamedStructFieldRHS(n *grammar.Node, content []byte, valueType func(string, uint32) (string, bool), structFields map[string]map[string]rangeSourceInfo, at uint32, indexElem func(string, uint32) (string, bool), namedColl map[string]rangeSourceInfo, funcResults map[string][]string) []string {
+	if n == nil || len(structFields) == 0 {
+		return nil
+	}
+	var exprs []*grammar.Node
+	if n.Type() == "expression_list" {
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			exprs = append(exprs, c)
+		}
+	} else {
+		exprs = []*grammar.Node{n}
+	}
+	out := make([]string, len(exprs))
+	any := false
+	for i, e := range exprs {
+		e = peelAmpParenForFieldType(e, content)
+		if e == nil {
+			continue
+		}
+		if t, ok := selectorOperandStructType(e, content, valueType, structFields, at, indexElem, namedColl, funcResults, nil); ok && t != "" {
+			out[i] = t
+			any = true
+		}
+	}
+	if !any {
+		return nil
+	}
+	return out
+}
+
+// peelAmpParenForFieldType peels outer parenthesized_expression and unary & so
+// ba := &wa.BA / ba := (wa.BA) resolve like ba := wa.BA.
+func peelAmpParenForFieldType(n *grammar.Node, content []byte) *grammar.Node {
+	for n != nil {
+		switch n.Type() {
+		case "parenthesized_expression":
+			var inner *grammar.Node
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch == nil || ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+			n = inner
+		case "unary_expression":
+			// &wa.BA — take operand; other unaries (<-, *) fail closed for field bind.
+			op := ingest.ChildByField(n, "operator")
+			if op == nil || ingest.NodeText(op, content) != "&" {
+				return n
+			}
+			n = ingest.ChildByField(n, "operand")
+		default:
+			return n
+		}
+	}
+	return n
+}
+
+// typeNamesFromMethodCallRHS returns position-wise single named method result
+// types for short-var / var RHS:
+//
+//	a := ba.Get()           // (*BoxA).Get() *A → A
+//	xa := ba.Self()         // (*BoxA).Self() *BoxA → BoxA
+//	a, b := ba.Get(), bb.Get()
+//
+// Uses sameFileMethodNamedResults (concrete + iface single results). Multi-result
+// methods are absent from methodNamed (fail closed). Fixes fail-open OVER when
+// a/b stay unbound under foreign same-leaf methods.
+func typeNamesFromMethodCallRHS(n *grammar.Node, content []byte, valueType func(string, uint32) (string, bool), structFields map[string]map[string]rangeSourceInfo, methodNamed map[string]map[string]string, at uint32, indexElem func(string, uint32) (string, bool), namedColl map[string]rangeSourceInfo, funcResults map[string][]string) []string {
+	if n == nil || len(methodNamed) == 0 {
+		return nil
+	}
+	var exprs []*grammar.Node
+	if n.Type() == "expression_list" {
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			exprs = append(exprs, c)
+		}
+	} else {
+		exprs = []*grammar.Node{n}
+	}
+	out := make([]string, len(exprs))
+	any := false
+	for i, e := range exprs {
+		e = peelAmpParenForFieldType(e, content)
+		if e == nil || e.Type() != "call_expression" {
+			continue
+		}
+		fn := ingest.ChildByField(e, "function")
+		if fn == nil || fn.Type() != "selector_expression" {
+			continue
+		}
+		op := ingest.ChildByField(fn, "operand")
+		field := ingest.ChildByField(fn, "field")
+		if op == nil || field == nil {
+			continue
+		}
+		mname := ingest.NodeText(field, content)
+		if mname == "" {
+			continue
+		}
+		recvType := ""
+		// Bare / (*ba) receiver via valueType.
+		op2 := peelSelectorOperand(op, content)
+		if op2 != nil && op2.Type() == "identifier" && valueType != nil {
+			if t, ok := valueType(ingest.NodeText(op2, content), at); ok && t != "" {
+				recvType = strings.TrimPrefix(t, "*")
+			}
+		}
+		// Nested field path: wa.BA.Get() assign form.
+		if recvType == "" && len(structFields) > 0 {
+			if t, ok := selectorOperandStructType(op, content, valueType, structFields, at, indexElem, namedColl, funcResults, methodNamed); ok && t != "" {
+				recvType = strings.TrimPrefix(t, "*")
+			}
+		}
+		if recvType == "" {
+			continue
+		}
+		if methods := methodNamed[recvType]; methods != nil {
+			if t := methods[mname]; t != "" {
+				out[i] = t
+				any = true
+			}
+		}
+	}
+	if !any {
+		return nil
+	}
 	return out
 }
 
@@ -2658,7 +5309,10 @@ func typeNameFromRHS(n *grammar.Node, content []byte) string {
 			return typeNameFromTypeNode(t, content)
 		}
 	case "call_expression":
-		// new(T) / make — function is "new"
+		// new(T) — type is the first type argument. Other calls (Get(map[string]A{}, k),
+		// First2(A{}, B{}), helpers) must not fall through into argument type nodes:
+		// typeNameFromTypeNode would harvest the first type_identifier (e.g. map key
+		// "string") and poison short-var bindings ahead of generic peels.
 		if fn := ingest.ChildByField(n, "function"); fn != nil && ingest.NodeText(fn, content) == "new" {
 			if args := ingest.ChildByField(n, "arguments"); args != nil && args.ChildCount() > 0 {
 				// argument_list children
@@ -2669,6 +5323,7 @@ func typeNameFromRHS(n *grammar.Node, content []byte) string {
 				}
 			}
 		}
+		return ""
 	case "type_conversion_expression", "type_assertion_expression":
 		if t := ingest.ChildByField(n, "type"); t != nil {
 			return typeNameFromTypeNode(t, content)
@@ -3020,7 +5675,9 @@ func compositeLiteralTypeName(n *grammar.Node, content []byte) string {
 }
 
 // findComplexOperandSelectorEdits rewrites recv.Method when recv is not a bare
-// identifier: v.(T).M, (v.(T)).M, xs[i].M, Make().M, T{}.M / &T{}.M, (*T).M.
+// identifier: v.(T).M, (v.(T)).M, xs[i].M, Make().M, T{}.M / &T{}.M, (*T).M,
+// new(T).M, getA().M, (*pa).M, (<-ch).M (channel receive payload),
+// A(x).M / (*A)(p).M (type conversion call forms under foreign same-leaf).
 //
 // When foreign same-leaf methods exist, only rewrite when the operand type is
 // known and not a foreign receiver (same filter as identifier selectors).
@@ -3035,8 +5692,20 @@ func findComplexOperandSelectorEdits(file string, content []byte, oldLeaf, newLe
 
 	// Slice/map index: as[0].M / m[k].M — resolve element/value type from
 	// typed params and locals so foreign same-leaf methods are not fail-open
-	// rewritten and ours are not skipped.
-	indexElemType := collectionIndexElemTypeFunc(pf.Root, content)
+	// rewritten and ours are not skipped. Same-file func results (getA() []*A)
+	// feed short-var / inline index too.
+	funcColl := sameFileFuncCollectionResults(pf.Root, content)
+	namedColl := sameFileNamedCollectionResults(pf.Root, content)
+	funcRetFunc := sameFileFuncReturningFuncCollection(pf.Root, content)
+	structFields := sameFileStructNamedFuncFields(pf.Root, content)
+	ifaceColl, _ := sameFileIfaceMethodCollectionResults(pf.Root, content)
+	ifaceFunc := sameFileIfaceMethodFuncCollectionResults(pf.Root, content)
+	indexElemType := collectionIndexElemTypeFunc(pf.Root, content, funcColl)
+	// new(T).M / getA().M / (*pa).M under foreign same-leaf methods.
+	funcResults := sameFileFuncResultTypes(pf.Root, content)
+	genericPeels := sameFileGenericPeelFuncs(pf.Root, content)
+	valueType := goIdentTypeAtFunc(pf.Root, content, funcResults)
+	methodNamed := sameFileMethodNamedResults(pf.Root, content)
 
 	uniqueLeaf := len(foreignReceivers) == 0
 	var edits []ingest.Edit
@@ -3050,7 +5719,7 @@ func findComplexOperandSelectorEdits(file string, content []byte, oldLeaf, newLe
 			field := ingest.ChildByField(n, "field")
 			if field != nil && ingest.NodeText(field, content) == oldLeaf && operand != nil && !goOperandIsBareIdent(operand) {
 				ok := false
-				if typ := goComplexOperandType(operand, content, indexElemType); typ != "" {
+				if typ := goComplexOperandType(operand, content, indexElemType, valueType, funcColl, funcResults, genericPeels, namedColl, funcRetFunc, structFields, ifaceColl, ifaceFunc, methodNamed); typ != "" {
 					typ = strings.TrimPrefix(typ, "*")
 					if ourReceivers[typ] {
 						ok = true
@@ -3079,6 +5748,77 @@ func findComplexOperandSelectorEdits(file string, content []byte, oldLeaf, newLe
 	return edits
 }
 
+// goIdentTypeAtFunc returns the concrete type of a named local/param/receiver
+// covering byte offset at (innermost scope wins). Same bindings as
+// selectorCallTargetTypeFunc; used for (*pa).M when pa is typed.
+func goIdentTypeAtFunc(root *grammar.Node, content []byte, funcResults map[string][]string) func(name string, at uint32) (string, bool) {
+	if root == nil {
+		return func(string, uint32) (string, bool) { return "", false }
+	}
+	genericPeels := sameFileGenericPeelFuncs(root, content)
+	namedColl := sameFileNamedCollectionResults(root, content)
+	structFields := sameFileStructNamedFuncFields(root, content)
+	methodNamed := sameFileMethodNamedResults(root, content)
+	var bindings []identTypeBinding
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil {
+			return
+		}
+		switch n.Type() {
+		case "method_declaration":
+			recvType := methodDeclReceiverType(n, content)
+			recvName := methodDeclReceiverName(n, content)
+			if recvType != "" && recvName != "" {
+				bindings = append(bindings, identTypeBinding{n.StartByte(), n.EndByte(), recvName, recvType})
+			}
+			rangeSrc := map[string]rangeSourceInfo{}
+			if params := ingest.ChildByField(n, "parameters"); params != nil {
+				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &bindings, rangeSrc, namedColl)
+			}
+			collectResultParameterBindings(n, content, &bindings, rangeSrc, namedColl)
+			if body := ingest.ChildByField(n, "body"); body != nil {
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl, structFields, methodNamed)
+			}
+		case "function_declaration", "func_literal":
+			rangeSrc := map[string]rangeSourceInfo{}
+			if params := ingest.ChildByField(n, "parameters"); params != nil {
+				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &bindings, rangeSrc, namedColl)
+			}
+			collectResultParameterBindings(n, content, &bindings, rangeSrc, namedColl)
+			if body := ingest.ChildByField(n, "body"); body != nil {
+				collectLocalTypeBindings(body, content, &bindings, rangeSrc, funcResults, genericPeels, namedColl, structFields, methodNamed)
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+	return func(name string, at uint32) (string, bool) {
+		if name == "" || name == "_" {
+			return "", false
+		}
+		var best *identTypeBinding
+		for i := range bindings {
+			b := &bindings[i]
+			if b.name != name {
+				continue
+			}
+			if at < b.start || at >= b.end {
+				continue
+			}
+			if best == nil || (b.end-b.start) < (best.end-best.start) {
+				best = b
+			}
+		}
+		if best == nil {
+			return "", false
+		}
+		return best.typ, true
+	}
+}
+
 // goOperandIsBareIdent reports whether n is a plain identifier. Parenthesized
 // and other complex operands are handled by findComplexOperandSelectorEdits
 // (findSelectorLeafEdits only matches identifier characters immediately before '.').
@@ -3088,10 +5828,32 @@ func goOperandIsBareIdent(n *grammar.Node) bool {
 
 // collectionIndexElemTypeFunc returns the element/value named type for a
 // collection identifier at a byte offset (as in as[0] / m[k]). Built from
-// function/method/func-literal params and typed local var_specs (slice, array,
-// map). ok=false when unknown.
-func collectionIndexElemTypeFunc(root *grammar.Node, content []byte) func(name string, at uint32) (string, bool) {
+// function/method/func-literal params, typed local var_specs (slice, array,
+// map), and collection short-var / var initializers (make, new([n]T), append,
+// composite []*T{…} / map[K]*T{…}, same-file getA() []*A /
+// as, err := getA() with getA() ([]*A, error)). ok=false when unknown.
+// funcColl is same-file function → positional collection result element types
+// (may be nil).
+func collectionIndexElemTypeFunc(root *grammar.Node, content []byte, funcColl map[string][]rangeSourceInfo) func(name string, at uint32) (string, bool) {
 	var bindings []identTypeBinding
+	// Named function types: type FA func() []*A / type FA = func() map[K]*A.
+	namedFunc := sameFileNamedFuncCollectionResults(root, content)
+	// Named collection types: type AS []*A / type AM = map[K]*A.
+	namedColl := sameFileNamedCollectionResults(root, content)
+	// func getFA() FA / func getFA() func() []*A — result is callable with collection result.
+	funcRetFunc := sameFileFuncReturningFuncCollection(root, content)
+	// type Box struct { Fa FA } — field call peels.
+	structFields := sameFileStructNamedFuncFields(root, content)
+	// Concrete types for xa.Fa / ga.GetAS peels (params/locals like xa BoxA / ga GA).
+	funcResults := sameFileFuncResultTypes(root, content)
+	valueType := goIdentTypeAtFunc(root, content, funcResults)
+	// sa.Self() named-struct method results for sa.Self().Items peels.
+	methodNamed := sameFileMethodNamedResults(root, content)
+	// Interface methods returning named collections / func types:
+	// ga.GetAS() AS / ga.GetFA() FA under foreign same-leaf.
+	// Multi-result GetAS() (AS, error) for as, err := ga.GetAS() short-var.
+	ifaceColl, ifaceMulti := sameFileIfaceMethodCollectionResults(root, content)
+	ifaceFunc := sameFileIfaceMethodFuncCollectionResults(root, content)
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
 		if n == nil {
@@ -3102,18 +5864,49 @@ func collectionIndexElemTypeFunc(root *grammar.Node, content []byte) func(name s
 			rangeSrc := map[string]rangeSourceInfo{}
 			var dummy []identTypeBinding
 			if params := ingest.ChildByField(n, "parameters"); params != nil {
-				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &dummy, rangeSrc)
+				collectParameterListBindings(params, content, n.StartByte(), n.EndByte(), &dummy, rangeSrc, namedColl)
 			}
 			// Receiver is not a collection; skip. Bind collection params to
 			// the whole decl so as[0] inside the body resolves.
+			// Channel-of-collection params (ch <-chan []*T) use chanCollBindPrefix
+			// so (<-ch)[0] / as := <-ch peels without treating ch as a scalar coll.
+			chanColl := map[string]rangeSourceInfo{}
 			for name, info := range rangeSrc {
 				if name == "" || name == "_" || info.elemType == "" {
 					continue
 				}
+				if info.payloadIsColl {
+					chanColl[name] = info
+					bindings = append(bindings, identTypeBinding{n.StartByte(), n.EndByte(), chanCollBindPrefix + name, info.elemType})
+					continue
+				}
 				bindings = append(bindings, identTypeBinding{n.StartByte(), n.EndByte(), name, info.elemType})
 			}
+			// Function-typed params with a single collection result:
+			// fa func() []*A / fm func() map[K]*A / fa FA with type FA func() []*A —
+			// bind fa→A so fa()[0].M and as := fa(); as[0].M resolve under foreign
+			// same-leaf methods. Multi-result func types fail closed.
+			if params := ingest.ChildByField(n, "parameters"); params != nil {
+				for i := uint32(0); i < params.ChildCount(); i++ {
+					p := params.Child(i)
+					if p == nil || p.Type() != "parameter_declaration" {
+						continue
+					}
+					typeN := ingest.ChildByField(p, "type")
+					info, ok := functionTypeOrNamedCollectionResult(typeN, content, namedFunc)
+					if !ok || info.elemType == "" {
+						continue
+					}
+					for _, name := range parameterDeclNames(p, content) {
+						if name == "" || name == "_" {
+							continue
+						}
+						bindings = append(bindings, identTypeBinding{n.StartByte(), n.EndByte(), name, info.elemType})
+					}
+				}
+			}
 			if body := ingest.ChildByField(n, "body"); body != nil {
-				collectLocalCollectionElemBindings(body, content, &bindings)
+				collectLocalCollectionElemBindings(body, content, &bindings, funcColl, namedFunc, namedColl, funcRetFunc, structFields, valueType, ifaceColl, ifaceFunc, ifaceMulti, funcResults, chanColl, methodNamed)
 			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
@@ -3146,26 +5939,601 @@ func collectionIndexElemTypeFunc(root *grammar.Node, content []byte) func(name s
 	}
 }
 
+// rangeSourceFromMakeCall reports element/value (and map key) type for
+// make(T, n[, cap]) when T is a slice, array, map, channel, or same-file named
+// collection type (type AS []*A / type AM map[K]*A). Len/cap args are ignored.
+// expression_list peels to its first expression only. namedColl may be nil.
+func rangeSourceFromMakeCall(n *grammar.Node, content []byte, namedColl map[string]rangeSourceInfo) (rangeSourceInfo, bool) {
+	if n == nil {
+		return rangeSourceInfo{}, false
+	}
+	if n.Type() == "expression_list" {
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			return rangeSourceFromMakeCall(c, content, namedColl)
+		}
+		return rangeSourceInfo{}, false
+	}
+	if n.Type() != "call_expression" {
+		return rangeSourceInfo{}, false
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil || ingest.NodeText(fn, content) != "make" {
+		return rangeSourceInfo{}, false
+	}
+	args := ingest.ChildByField(n, "arguments")
+	if args == nil {
+		return rangeSourceInfo{}, false
+	}
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		c := args.Child(i)
+		if c == nil || c.Type() == "(" || c.Type() == ")" || c.Type() == "," {
+			continue
+		}
+		// First argument is the type: make([]*T, n) / make(map[K]*T) / make(AS).
+		return collectionTypeOrNamedResult(c, content, namedColl)
+	}
+	return rangeSourceInfo{}, false
+}
+
+// rangeSourceFromCollectionExpr reports element/value (and map key) type for
+// expressions that construct or retype a slice/array/map: composite literals
+// ([]*T{…} / map[K]*T{…}), make(T, …), new([n]T) (pointer-to-array is
+// indexable), append(slice, …) when the first argument is itself such an
+// expression, type assert/convert to a collection type (x.([]*T) / ([]*T)(x) /
+// x.(map[K]*T)), slice expressions (as[:n] / as[i:] / as[:]) which preserve
+// the operand's element type, and same-file calls with a single collection
+// result (getA() []*A). Used for short-var / untyped-var collection locals
+// and inline index operands (append([]*A{}, x)[0] / x.([]*A)[0] / as[:1][0] /
+// new([1]*A)[0] / getA()[0]).
+//
+// Prefer rangeSourceFromCollectionExprIdent when the first append argument may
+// be a known collection param/local (append(as, x) where as []*A).
+func rangeSourceFromCollectionExpr(n *grammar.Node, content []byte) (rangeSourceInfo, bool) {
+	return rangeSourceFromCollectionExprIdent(n, content, nil, 0, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+}
+
+// rangeSourceFromCollectionExprIdent is rangeSourceFromCollectionExpr plus
+// optional resolution of bare collection identifiers via identElem (params and
+// prior short-var/var bindings), function-typed params/vars with a single
+// collection result (fa func() []*A → fa() peels via identElem), and same-file
+// function collection results via funcColl. That covers append(as, …) /
+// append(append(as, …), …) when as is a typed slice/map local or parameter,
+// as[:n] / s := as[:n] when as is known, getA() / as := getA() when getA
+// returns a single slice/array/map, and fa() / as := fa() when fa is
+// func() []*A / func() map[K]*A (param or var).
+// Multi-result helpers (getA() ([]*A, error)) are not valid as a lone call
+// expression value — those bind via collectLocalCollectionElemBindings.
+func rangeSourceFromCollectionExprIdent(n *grammar.Node, content []byte, identElem func(name string, at uint32) (string, bool), at uint32, funcColl map[string][]rangeSourceInfo, namedColl map[string]rangeSourceInfo, funcRetFunc map[string]rangeSourceInfo, structFields map[string]map[string]rangeSourceInfo, valueType func(string, uint32) (string, bool), ifaceColl, ifaceFunc map[string]map[string]rangeSourceInfo, funcResults map[string][]string, methodNamed map[string]map[string]string) (rangeSourceInfo, bool) {
+	if n == nil {
+		return rangeSourceInfo{}, false
+	}
+	if n.Type() == "expression_list" {
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			return rangeSourceFromCollectionExprIdent(c, content, identElem, at, funcColl, namedColl, funcRetFunc, structFields, valueType, ifaceColl, ifaceFunc, funcResults, methodNamed)
+		}
+		return rangeSourceInfo{}, false
+	}
+	if n.Type() == "parenthesized_expression" {
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch == nil || ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			return rangeSourceFromCollectionExprIdent(ch, content, identElem, at, funcColl, namedColl, funcRetFunc, structFields, valueType, ifaceColl, ifaceFunc, funcResults, methodNamed)
+		}
+		return rangeSourceInfo{}, false
+	}
+	// (*pas) / (*pam) — pointer-to-collection param/local (pas *[]*A / *map[K]*A).
+	// indexElemType peels *[]T / *map to element T; enable (*pas)[1:][0] and
+	// range over *pas under foreign same-leaf (same leaf as (*pas)[0]).
+	// (*&as)[0] / (*&aa)[0] — address-of then deref of a collection local/param:
+	// peel unary & so the subsequent * (or pointer-to-array index) reaches the
+	// identifier (dual-class under foreign same-leaf).
+	// (<-ch) — channel-of-collection receive payload (ch <-chan []*T) so
+	// (<-ch)[0].M peels like as := <-ch; as[0].M under foreign same-leaf.
+	if n.Type() == "unary_expression" {
+		opText := ""
+		var inner *grammar.Node
+		if opField := ingest.ChildByField(n, "operator"); opField != nil {
+			opText = ingest.NodeText(opField, content)
+		}
+		if opField := ingest.ChildByField(n, "operand"); opField != nil {
+			inner = opField
+		}
+		// Channel receive of a collection payload before * / & peels.
+		if opText == "<-" && identElem != nil {
+			right := peelSelectorOperand(inner, content)
+			if right != nil && right.Type() == "identifier" {
+				if el, ok := identElem(chanCollBindPrefix+ingest.NodeText(right, content), at); ok && el != "" {
+					return rangeSourceInfo{elemType: el}, true
+				}
+			}
+			return rangeSourceInfo{}, false
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch == nil {
+				continue
+			}
+			if ch.Type() == "*" || ch.Type() == "&" {
+				if opText == "" {
+					opText = ch.Type()
+				}
+				continue
+			}
+			if ch.Type() == "unary_operator" {
+				t := ingest.NodeText(ch, content)
+				if t == "*" || t == "&" {
+					if opText == "" {
+						opText = t
+					}
+					continue
+				}
+			}
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			if inner == nil {
+				inner = ch
+			}
+		}
+		if (opText == "*" || opText == "&") && inner != nil {
+			for inner != nil && inner.Type() == "parenthesized_expression" {
+				var in2 *grammar.Node
+				for i := uint32(0); i < inner.ChildCount(); i++ {
+					ch := inner.Child(i)
+					if ch == nil || ch.Type() == "(" || ch.Type() == ")" {
+						continue
+					}
+					in2 = ch
+					break
+				}
+				inner = in2
+			}
+			return rangeSourceFromCollectionExprIdent(inner, content, identElem, at, funcColl, namedColl, funcRetFunc, structFields, valueType, ifaceColl, ifaceFunc, funcResults, methodNamed)
+		}
+	}
+	// as[:n] / as[i:] / as[i:j] / as[:] — result has the same element type as
+	// the sliced collection (param, local, make/append/composite, nested slice).
+	if n.Type() == "slice_expression" {
+		if op := ingest.ChildByField(n, "operand"); op != nil {
+			return rangeSourceFromCollectionExprIdent(op, content, identElem, at, funcColl, namedColl, funcRetFunc, structFields, valueType, ifaceColl, ifaceFunc, funcResults, methodNamed)
+		}
+		return rangeSourceInfo{}, false
+	}
+	if n.Type() == "identifier" {
+		if identElem != nil {
+			if el, ok := identElem(ingest.NodeText(n, content), at); ok && el != "" {
+				return rangeSourceInfo{elemType: el}, true
+			}
+		}
+		return rangeSourceInfo{}, false
+	}
+	if n.Type() == "composite_literal" {
+		if t := ingest.ChildByField(n, "type"); t != nil {
+			// []*T{…} / map[K]*T{…} / AS{…} / AM{…} with type AS []*A.
+			return collectionTypeOrNamedResult(t, content, namedColl)
+		}
+		return rangeSourceInfo{}, false
+	}
+	// x.([]*T) / x.(AS) / x.(map[K]*T) / ([]*T)(x) / (AS)(x) — type field.
+	if n.Type() == "type_assertion_expression" || n.Type() == "type_conversion_expression" {
+		if t := ingest.ChildByField(n, "type"); t != nil {
+			return collectionTypeOrNamedResult(t, content, namedColl)
+		}
+		return rangeSourceInfo{}, false
+	}
+	// sa.Items / sa.M — struct field of collection type (type SA struct {
+	// Items []*A } / Items AS / M map[K]*A). Also promoted embeds (type WA
+	// struct { SA } → wa.Items), named non-embed (wa.Inner.Items), and
+	// slice-of-struct index (sas[0].Items). Under foreign same-leaf for
+	// sa.Items[0].M and items := sa.Items short-var peels.
+	if n.Type() == "selector_expression" {
+		if info, ok := selectorNamedFuncField(n, content, valueType, structFields, at, identElem, namedColl, funcResults, methodNamed); ok && info.elemType != "" {
+			return info, true
+		}
+		return rangeSourceInfo{}, false
+	}
+	if n.Type() != "call_expression" {
+		return rangeSourceInfo{}, false
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil {
+		return rangeSourceInfo{}, false
+	}
+	switch ingest.NodeText(fn, content) {
+	case "make":
+		return rangeSourceFromMakeCall(n, content, namedColl)
+	case "new":
+		// new([n]*T) returns *[n]*T; Go allows indexing the pointer-to-array
+		// without dereference. new([]*T) / new(map[…]) return non-indexable
+		// pointers — only array type args count as collection sources.
+		return rangeSourceFromNewArrayCall(n, content, namedColl)
+	case "append":
+		args := ingest.ChildByField(n, "arguments")
+		if args == nil {
+			return rangeSourceInfo{}, false
+		}
+		for i := uint32(0); i < args.ChildCount(); i++ {
+			c := args.Child(i)
+			if c == nil || c.Type() == "(" || c.Type() == ")" || c.Type() == "," {
+				continue
+			}
+			// First argument is the slice: append([]*T{}, …) / append(as, …) /
+			// append(make(...), …) / append(getA(), …).
+			return rangeSourceFromCollectionExprIdent(c, content, identElem, at, funcColl, namedColl, funcRetFunc, structFields, valueType, ifaceColl, ifaceFunc, funcResults, methodNamed)
+		}
+		return rangeSourceInfo{}, false
+	}
+	// Callable with a single collection result:
+	//  1. Function-typed params/vars in scope: fa func() []*A / var fa func() map[K]*A
+	//     (registered in identElem with the *result* element type). Prefer these
+	//     over same-file helpers so params shadow file-level functions.
+	//  2. Same-file helper: getA() []*A / getM() map[K]*A / getAS() AS.
+	// Multi-result signatures cannot appear as a lone call value (compile
+	// error); those bind positionally via short-var / var.
+	// Note: bare collection idents (as []*A) also live in identElem; as() is
+	// invalid Go so a peel here is harmless on real code.
+	if fn.Type() == "identifier" {
+		name := ingest.NodeText(fn, content)
+		if identElem != nil {
+			if el, ok := identElem(name, at); ok && el != "" {
+				return rangeSourceInfo{elemType: el}, true
+			}
+		}
+		if funcColl != nil {
+			if infos := funcColl[name]; len(infos) == 1 && infos[0].elemType != "" {
+				return infos[0], true
+			}
+		}
+		// AS(x) — named type conversion parsed as call_expression (not
+		// type_conversion_expression). Prefer real funcs above; only peel when
+		// name is a same-file named collection type.
+		if info, ok := namedColl[name]; ok && info.elemType != "" {
+			return info, true
+		}
+	}
+	// (AS)(x) / (AM)(x) — parenthesized named type as call callee (tree-sitter-go).
+	// Inline ([]*A)(x) is type_conversion_expression (handled above).
+	if fn.Type() == "parenthesized_expression" && len(namedColl) > 0 {
+		for i := uint32(0); i < fn.ChildCount(); i++ {
+			ch := fn.Child(i)
+			if ch == nil || ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			// (AS) → identifier / type_identifier; (*AS) not a conversion form here.
+			if ch.Type() == "identifier" || ch.Type() == "type_identifier" {
+				if info, ok := namedColl[ingest.NodeText(ch, content)]; ok && info.elemType != "" {
+					return info, true
+				}
+			}
+			break
+		}
+	}
+	// getFA()() / ga.GetFA()() — nested call when the inner call returns a
+	// function type with a single collection result (type FA func() []*A /
+	// interface method GetFA() FA). Multi-result helpers fail closed.
+	if fn.Type() == "call_expression" {
+		if info, ok := selectorIfaceMethod(fn, content, valueType, ifaceFunc, at); ok && info.elemType != "" {
+			return info, true
+		}
+		if len(funcRetFunc) > 0 {
+			innerFn := ingest.ChildByField(fn, "function")
+			if innerFn != nil && innerFn.Type() == "identifier" {
+				if info, ok := funcRetFunc[ingest.NodeText(innerFn, content)]; ok && info.elemType != "" {
+					return info, true
+				}
+			}
+		}
+	}
+	// ga.GetAS() — interface method returning a single named/inline collection.
+	// xa.Fa() — struct field of named/inline function type with collection result.
+	if fn.Type() == "selector_expression" {
+		if info, ok := selectorIfaceMethod(fn, content, valueType, ifaceColl, at); ok && info.elemType != "" {
+			return info, true
+		}
+		if info, ok := selectorNamedFuncField(fn, content, valueType, structFields, at, identElem, namedColl, funcResults, methodNamed); ok && info.elemType != "" {
+			return info, true
+		}
+	}
+	return rangeSourceInfo{}, false
+}
+
+// rangeSourceFromNewArrayCall reports element type for new([n]T) / new(AA) when
+// the type argument is an array (possibly parenthesized) or a same-file named
+// array type (type AA [n]*T with isArray). Len is ignored. new([]*T) / new(AS)
+// and other non-array type args return false (result is not indexable).
+// namedColl may be nil.
+func rangeSourceFromNewArrayCall(n *grammar.Node, content []byte, namedColl map[string]rangeSourceInfo) (rangeSourceInfo, bool) {
+	if n == nil {
+		return rangeSourceInfo{}, false
+	}
+	if n.Type() == "expression_list" {
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			return rangeSourceFromNewArrayCall(c, content, namedColl)
+		}
+		return rangeSourceInfo{}, false
+	}
+	if n.Type() != "call_expression" {
+		return rangeSourceInfo{}, false
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil || ingest.NodeText(fn, content) != "new" {
+		return rangeSourceInfo{}, false
+	}
+	args := ingest.ChildByField(n, "arguments")
+	if args == nil {
+		return rangeSourceInfo{}, false
+	}
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		c := args.Child(i)
+		if c == nil || c.Type() == "(" || c.Type() == ")" || c.Type() == "," {
+			continue
+		}
+		// Peel new(([n]*T)).
+		for c != nil && c.Type() == "parenthesized_type" {
+			var inner *grammar.Node
+			for j := uint32(0); j < c.ChildCount(); j++ {
+				ch := c.Child(j)
+				if ch == nil || ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+			c = inner
+		}
+		if c == nil {
+			return rangeSourceInfo{}, false
+		}
+		if c.Type() == "array_type" {
+			return rangeSourceFromTypeNode(c, content)
+		}
+		// new(AA) with type AA [n]*T — only named arrays (isArray), not slices.
+		if c.Type() == "type_identifier" && len(namedColl) > 0 {
+			info, ok := namedColl[ingest.NodeText(c, content)]
+			if ok && info.elemType != "" && info.isArray {
+				return info, true
+			}
+		}
+		return rangeSourceInfo{}, false
+	}
+	return rangeSourceInfo{}, false
+}
+
 // collectLocalCollectionElemBindings records slice/array/map locals from
-// var_spec with an explicit type (var as []*A / var m map[K]*B).
-func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bindings *[]identTypeBinding) {
+// var_spec with an explicit type (var as []*A / var m map[K]*B), function-typed
+// vars with a single collection result (var fa func() []*A / var fa FA with
+// type FA func() []*A), and from collection short-var / untyped var initializers:
+// make(T, …), new([n]T), append([]*T{}, …) / append(ident, …), []*T{…} /
+// map[K]*T{…}, x.([]*T) / ([]*T)(x), as[:n] / as[i:], same-file getA() []*A /
+// multi-return as, err := getA() with getA() ([]*A, error), fa() when fa is a
+// function-typed param/var with a single collection result, and
+// fa := func() []*A { … } / var fa = func() map[K]*A { … } (func-literal with
+// a single collection result; multi-result func literals fail closed).
+// append(ident, …) and slice of ident resolve against params and earlier
+// collection bindings already recorded in *bindings. funcColl maps same-file
+// function names to positional collection result element types (may be nil).
+// namedFunc maps same-file type names (type FA func() []*A) to collection
+// result element info (may be nil). namedColl maps type AS []*A / AM map[K]*A
+// (may be nil).
+func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bindings *[]identTypeBinding, funcColl map[string][]rangeSourceInfo, namedFunc map[string]rangeSourceInfo, namedColl map[string]rangeSourceInfo, funcRetFunc map[string]rangeSourceInfo, structFields map[string]map[string]rangeSourceInfo, valueType func(string, uint32) (string, bool), ifaceColl, ifaceFunc map[string]map[string]rangeSourceInfo, ifaceMulti map[string]map[string][]rangeSourceInfo, funcResults map[string][]string, chanColl map[string]rangeSourceInfo, methodNamed map[string]map[string]string) {
 	if body == nil {
 		return
 	}
 	scopeEnd := body.EndByte()
+	// Lookup collection element type for a name in already-recorded bindings
+	// (params bound by the caller, plus locals bound earlier in this walk).
+	lookupElem := func(name string, at uint32) (string, bool) {
+		if name == "" {
+			return "", false
+		}
+		var best *identTypeBinding
+		for i := range *bindings {
+			b := &(*bindings)[i]
+			if b.name != name {
+				continue
+			}
+			if at < b.start || at >= b.end {
+				continue
+			}
+			if best == nil || (b.end-b.start) < (best.end-best.start) {
+				best = b
+			}
+		}
+		if best == nil {
+			return "", false
+		}
+		return best.typ, true
+	}
+	bindElem := func(start uint32, names []string, info rangeSourceInfo) {
+		if info.elemType == "" {
+			return
+		}
+		for _, name := range names {
+			if name == "" || name == "_" {
+				continue
+			}
+			*bindings = append(*bindings, identTypeBinding{start, scopeEnd, name, info.elemType})
+		}
+	}
+	// Positional RHS expressions for multi-value short-var / var_spec.
+	rhsExprs := func(right *grammar.Node) []*grammar.Node {
+		if right == nil {
+			return nil
+		}
+		if right.Type() != "expression_list" {
+			return []*grammar.Node{right}
+		}
+		var out []*grammar.Node
+		for i := uint32(0); i < right.ChildCount(); i++ {
+			c := right.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			out = append(out, c)
+		}
+		return out
+	}
+	// Bind names from a multi-return same-file collection call
+	// (as, err := getA() / var as, err = getA() / as, err := ga.GetAS()).
+	// Returns true when the RHS was such a call (even if no collection slot
+	// bound — skip expr walk).
+	bindMultiReturnCall := func(start uint32, names []string, right *grammar.Node) bool {
+		infos := collectionInfosFromCallResults(right, content, funcColl)
+		if len(infos) == 0 {
+			// as, err := ga.GetAS() / sa.GetAS() with GetAS() (AS, error).
+			infos = collectionInfosFromIfaceMethodCall(right, content, valueType, ifaceMulti, start)
+		}
+		if len(infos) == 0 {
+			return false
+		}
+		// Only multi-return needs positional slots here; single-result
+		// as := getA() still goes through the per-expr path below so
+		// getA()[0]-style inline stays consistent.
+		if len(infos) < 2 {
+			return false
+		}
+		for i, name := range names {
+			if name == "" || name == "_" || i >= len(infos) {
+				continue
+			}
+			if infos[i].elemType == "" {
+				continue
+			}
+			*bindings = append(*bindings, identTypeBinding{start, scopeEnd, name, infos[i].elemType})
+		}
+		return true
+	}
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
 		if n == nil {
 			return
 		}
-		if n.Type() == "var_spec" {
+		switch n.Type() {
+		case "type_switch_statement":
+			// switch as := x.(type) { case []*A: as[0].M() } / case AS: —
+			// bind alias to collection element type inside each single-type
+			// collection case (multi-type arms fail closed). Concrete *A
+			// cases stay on collectLocalTypeBindings value path.
+			aliasNames := identListNames(ingest.ChildByField(n, "alias"), content)
+			if len(aliasNames) == 1 {
+				alias := aliasNames[0]
+				if alias != "" && alias != "_" {
+					for i := uint32(0); i < n.ChildCount(); i++ {
+						c := n.Child(i)
+						if c == nil || c.Type() != "type_case" {
+							continue
+						}
+						if info, ok := typeCaseSingleCollection(c, content, namedColl); ok && info.elemType != "" {
+							*bindings = append(*bindings, identTypeBinding{c.StartByte(), c.EndByte(), alias, info.elemType})
+						}
+					}
+				}
+			}
+		case "var_spec":
 			names := varSpecNames(n, content)
 			typeN := ingest.ChildByField(n, "type")
 			if info, ok := rangeSourceFromTypeNode(typeN, content); ok && info.elemType != "" {
-				for _, name := range names {
-					if name == "" || name == "_" {
+				bindElem(n.StartByte(), names, info)
+			} else if info, ok := collectionTypeOrNamedResult(typeN, content, namedColl); ok && info.elemType != "" {
+				// var xa AS / var pas *AS with type AS []*A.
+				bindElem(n.StartByte(), names, info)
+			} else if info, ok := functionTypeOrNamedCollectionResult(typeN, content, namedFunc); ok && info.elemType != "" {
+				// var fa func() []*A / var fa FA (type FA func() []*A) —
+				// fa() peels to result elem.
+				bindElem(n.StartByte(), names, info)
+			} else {
+				valueN := ingest.ChildByField(n, "value")
+				// var as, err = getA() — multi-return collection + non-collection.
+				if bindMultiReturnCall(n.StartByte(), names, valueN) {
+					break
+				}
+				// var as = make/append/getA()/[]*A{…}/append(ident,…) — bind element type positionally.
+				// var fa = func() []*A { … } — single collection-result func literal.
+				// var as = <-ch when ch is <-chan []*T — channel-of-collection receive.
+				exprs := rhsExprs(valueN)
+				for i, name := range names {
+					if name == "" || name == "_" || i >= len(exprs) {
 						continue
 					}
+					if info, ok := channelReceiveCollInfo(exprs[i], content, chanColl); ok && info.elemType != "" {
+						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
+						continue
+					}
+					if info, ok := rangeSourceFromCollectionExprIdent(exprs[i], content, lookupElem, n.StartByte(), funcColl, namedColl, funcRetFunc, structFields, valueType, ifaceColl, ifaceFunc, funcResults, methodNamed); ok && info.elemType != "" {
+						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
+					} else if infos := functionCollectionResults(exprs[i], content, namedColl); len(infos) == 1 && infos[0].elemType != "" {
+						// var fa = func() []*A { … } / var fm = func() map[K]*A { … }.
+						// Multi-result func literals fail closed (len != 1).
+						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, infos[0].elemType})
+					} else if info, ok := callReturningFuncCollection(exprs[i], content, funcRetFunc); ok {
+						// var fa = getFA() with getFA() FA / func() []*A.
+						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
+					} else if info, ok := selectorNamedFuncField(exprs[i], content, valueType, structFields, n.StartByte(), lookupElem, namedColl, funcResults, methodNamed); ok {
+						// var fa = xa.Fa with type Box struct { Fa FA }.
+						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
+					} else if info, ok := selectorIfaceMethod(exprs[i], content, valueType, ifaceFunc, n.StartByte()); ok {
+						// var fa = ga.GetFA() with interface method GetFA() FA.
+						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
+					} else if info, ok := selectorIfaceMethod(exprs[i], content, valueType, ifaceColl, n.StartByte()); ok {
+						// var fa = sa.Get method value of Get() []*A / Get() AS —
+						// method value type is func() coll; fa() peels to elem.
+						*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
+					}
+				}
+			}
+		case "short_var_declaration":
+			// as := make/append/getA()/[]*A{…}/append(ident,…) — same positional binding.
+			// as, err := getA() with getA() ([]*A, error) — multi-return slots.
+			// fa := func() []*A { … } / fa, fb := func() []*A{…}, func() []*B{…}.
+			// fa := getFA() / fa := xa.Fa — named func type returns / struct fields.
+			// fa := sa.Get — method value of collection-returning method.
+			// as := <-ch when ch is <-chan []*T — channel-of-collection receive.
+			names := identListNames(ingest.ChildByField(n, "left"), content)
+			right := ingest.ChildByField(n, "right")
+			if bindMultiReturnCall(n.StartByte(), names, right) {
+				break
+			}
+			exprs := rhsExprs(right)
+			for i, name := range names {
+				if name == "" || name == "_" || i >= len(exprs) {
+					continue
+				}
+				if info, ok := channelReceiveCollInfo(exprs[i], content, chanColl); ok && info.elemType != "" {
+					// as := <-chA with chA <-chan []*A — bind as→A for as[0].M.
+					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
+					continue
+				}
+				if info, ok := rangeSourceFromCollectionExprIdent(exprs[i], content, lookupElem, n.StartByte(), funcColl, namedColl, funcRetFunc, structFields, valueType, ifaceColl, ifaceFunc, funcResults, methodNamed); ok && info.elemType != "" {
+					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
+				} else if infos := functionCollectionResults(exprs[i], content, namedColl); len(infos) == 1 && infos[0].elemType != "" {
+					// fa := func() []*A { … } / fa := func() map[K]*A { … }.
+					// Single collection result only; multi-result func literals fail closed.
+					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, infos[0].elemType})
+				} else if info, ok := callReturningFuncCollection(exprs[i], content, funcRetFunc); ok {
+					// fa := getFA() with getFA() FA / func() []*A.
+					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
+				} else if info, ok := selectorNamedFuncField(exprs[i], content, valueType, structFields, n.StartByte(), lookupElem, namedColl, funcResults, methodNamed); ok {
+					// fa := xa.Fa with type Box struct { Fa FA }.
+					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
+				} else if info, ok := selectorIfaceMethod(exprs[i], content, valueType, ifaceFunc, n.StartByte()); ok {
+					// fa := ga.GetFA() with interface method GetFA() FA.
+					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
+				} else if info, ok := selectorIfaceMethod(exprs[i], content, valueType, ifaceColl, n.StartByte()); ok {
+					// fa := sa.Get method value of Get() []*A / Get() AS.
 					*bindings = append(*bindings, identTypeBinding{n.StartByte(), scopeEnd, name, info.elemType})
 				}
 			}
@@ -3179,9 +6547,10 @@ func collectLocalCollectionElemBindings(body *grammar.Node, content []byte, bind
 
 // goComplexOperandType returns a type name for operands we can resolve without
 // full type inference: type assert/convert, composite lit, &T{}, (*T), paren,
-// and index expressions (as[0] / m[k]) when indexElemType knows the collection.
-// indexElemType may be nil when collection typing is unavailable.
-func goComplexOperandType(n *grammar.Node, content []byte, indexElemType func(name string, at uint32) (string, bool)) string {
+// new(T), same-file getA(), (*pa) via valueType, and index expressions
+// (as[0] / m[k]) when indexElemType knows the collection.
+// indexElemType / valueType / funcColl / funcResults may be nil when unavailable.
+func goComplexOperandType(n *grammar.Node, content []byte, indexElemType, valueType func(name string, at uint32) (string, bool), funcColl map[string][]rangeSourceInfo, funcResults map[string][]string, genericPeels map[string]string, namedColl map[string]rangeSourceInfo, funcRetFunc map[string]rangeSourceInfo, structFields map[string]map[string]rangeSourceInfo, ifaceColl, ifaceFunc map[string]map[string]rangeSourceInfo, methodNamed map[string]map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -3200,14 +6569,153 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType func(na
 			if ch.Type() == "(" || ch.Type() == ")" {
 				continue
 			}
-			return goComplexOperandType(ch, content, indexElemType)
+			return goComplexOperandType(ch, content, indexElemType, valueType, funcColl, funcResults, genericPeels, namedColl, funcRetFunc, structFields, ifaceColl, ifaceFunc, methodNamed)
 		}
 	case "type_assertion_expression", "type_conversion_expression":
 		if t := ingest.ChildByField(n, "type"); t != nil {
 			return typeNameFromTypeNode(t, content)
 		}
+	case "call_expression":
+		// new(T).M — allocated value is *T; methods promote, type name is T.
+		// Under foreign same-leaf methods, a := new(T); a.M already peels via
+		// typeNameFromRHS; inline new(T).M must recover T from the type arg.
+		fn := ingest.ChildByField(n, "function")
+		if fn != nil && ingest.NodeText(fn, content) == "new" {
+			if args := ingest.ChildByField(n, "arguments"); args != nil {
+				for i := uint32(0); i < args.ChildCount(); i++ {
+					c := args.Child(i)
+					if c == nil || c.Type() == "(" || c.Type() == ")" || c.Type() == "," {
+						continue
+					}
+					if t := concreteNamedType(c, content); t != "" {
+						return t
+					}
+					// new((*T)) / parenthesized type args.
+					if t := typeNameFromTypeNode(c, content); t != "" {
+						return t
+					}
+				}
+			}
+			return ""
+		}
+		// getA().M — same-file helper with a single concrete result (*A / A).
+		// Collection results (getA() []*A) are not method receivers here;
+		// those go through index (getA()[0].M). Multi-result calls cannot
+		// appear as a lone value (compile error).
+		if fn != nil && fn.Type() == "identifier" {
+			name := ingest.NodeText(fn, content)
+			// Generic peels before funcResults so result type-param "T" is not used as a leaf.
+			// "arg":  Id(A{}).M — identity peels arg type.
+			// "elem": First([]A{{}}).M / At(xs, i).M — peels first-arg element type.
+			if mode := genericPeels[name]; mode == "arg" {
+				if t := goCallFirstArgType(n, content, indexElemType, valueType, funcColl, funcResults, genericPeels, namedColl, funcRetFunc, structFields, ifaceColl, ifaceFunc, methodNamed); t != "" {
+					return t
+				}
+				return ""
+			} else if mode == "elem" {
+				if t := goCallFirstArgElemType(n, content, indexElemType, funcColl, namedColl, funcRetFunc, structFields, valueType, ifaceColl, ifaceFunc, methodNamed); t != "" {
+					return t
+				}
+				return ""
+			}
+			if len(funcResults) > 0 {
+				if types := funcResults[name]; len(types) == 1 && types[0] != "" {
+					return types[0]
+				}
+				// Multi-result / empty-concrete same-file func: not a conversion.
+				if _, isFunc := funcResults[name]; isFunc {
+					return ""
+				}
+			}
+			// f().M — local func var f := func() *A { … } bound via valueType
+			// (func-literal result leaf). Enables f().Run under foreign same-leaf.
+			if valueType != nil {
+				if t, ok := valueType(name, n.StartByte()); ok && t != "" {
+					return t
+				}
+			}
+			// A(x).M — type conversion parsed as call_expression by tree-sitter-go
+			// (not type_conversion_expression). When the callee is not a same-file
+			// function / typed func var, treat the identifier as the conversion
+			// type name. Under foreign same-leaf methods, caller filters via
+			// ourReceivers so B(x).Run is preserved when renaming A.Run.
+			if name != "" {
+				return name
+			}
+		}
+		// (*A)(p).M / (A)(p).M — parenthesized conversion type as call callee.
+		// tree-sitter-go parses these as call_expression too; peel the type from
+		// the parenthesized operand (unary *A / type_identifier A).
+		if fn != nil && fn.Type() == "parenthesized_expression" {
+			if t := goComplexOperandType(fn, content, indexElemType, valueType, funcColl, funcResults, genericPeels, namedColl, funcRetFunc, structFields, ifaceColl, ifaceFunc, methodNamed); t != "" {
+				return t
+			}
+		}
+		// ba.Get().M / sa.Self().Get().M — same-file method with a single
+		// concrete named result (*A / A / BoxA). Multi-result methods fail
+		// closed (not a lone call value). Enables dual-class under-rename peels
+		// when assigned form already works via typed locals.
+		// wa.BA.Get().M — nested named-struct field then method (selectorOperandStructType).
+		if fn != nil && fn.Type() == "selector_expression" && len(methodNamed) > 0 {
+			op := ingest.ChildByField(fn, "operand")
+			field := ingest.ChildByField(fn, "field")
+			if op != nil && field != nil {
+				mname := ingest.NodeText(field, content)
+				recvType := ""
+				// Bare / (*ba) receiver via valueType.
+				op2 := peelSelectorOperand(op, content)
+				if op2 != nil && op2.Type() == "identifier" && valueType != nil {
+					if t, ok := valueType(ingest.NodeText(op2, content), n.StartByte()); ok && t != "" {
+						recvType = strings.TrimPrefix(t, "*")
+					}
+				}
+				// Nested field path: wa.BA / sa.Self() — named-struct intermediate.
+				if recvType == "" {
+					if t, ok := selectorOperandStructType(op, content, valueType, structFields, n.StartByte(), indexElemType, namedColl, funcResults, methodNamed); ok && t != "" {
+						recvType = strings.TrimPrefix(t, "*")
+					}
+				}
+				// Nested: sa.Self().Get() via goComplexOperandType (method/call peels).
+				if recvType == "" {
+					if t := goComplexOperandType(op, content, indexElemType, valueType, funcColl, funcResults, genericPeels, namedColl, funcRetFunc, structFields, ifaceColl, ifaceFunc, methodNamed); t != "" {
+						recvType = strings.TrimPrefix(t, "*")
+					}
+				}
+				if recvType != "" {
+					if methods := methodNamed[recvType]; methods != nil {
+						if t := methods[mname]; t != "" {
+							return t
+						}
+					}
+				}
+			}
+		}
 	case "unary_expression":
-		// (*T).M method expressions where the operand is not a composite.
+		// (<-ch).M — channel receive payload type (same leaf as a := <-ch).
+		// Under foreign same-leaf methods, assigned receive already renames via
+		// typed locals; inline (<-ch).M must recover T from the channel param.
+		if op := ingest.ChildByField(n, "operator"); op != nil && ingest.NodeText(op, content) == "<-" {
+			operand := ingest.ChildByField(n, "operand")
+			for operand != nil && operand.Type() == "parenthesized_expression" {
+				var inner *grammar.Node
+				for i := uint32(0); i < operand.ChildCount(); i++ {
+					ch := operand.Child(i)
+					if ch == nil || ch.Type() == "(" || ch.Type() == ")" {
+						continue
+					}
+					inner = ch
+					break
+				}
+				operand = inner
+			}
+			if operand != nil && operand.Type() == "identifier" && indexElemType != nil {
+				if el, ok := indexElemType(ingest.NodeText(operand, content), n.StartByte()); ok {
+					return el
+				}
+			}
+			return ""
+		}
+		// (*pa).M — typed local/param; (*T).M method expression when unbound.
 		var starIdent string
 		for i := uint32(0); i < n.ChildCount(); i++ {
 			ch := n.Child(i)
@@ -3215,22 +6723,32 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType func(na
 				starIdent = ingest.NodeText(ch, content)
 				continue
 			}
-			if t := goComplexOperandType(ch, content, indexElemType); t != "" {
+			if t := goComplexOperandType(ch, content, indexElemType, valueType, funcColl, funcResults, genericPeels, namedColl, funcRetFunc, structFields, ifaceColl, ifaceFunc, methodNamed); t != "" {
 				return t
 			}
 		}
 		if starIdent != "" {
+			if valueType != nil {
+				if t, ok := valueType(starIdent, n.StartByte()); ok {
+					return t
+				}
+			}
+			// (*T).M method expression — identifier is the type name.
 			return strings.TrimPrefix(starIdent, "*")
 		}
 	case "pointer_type", "type_identifier":
 		return typeNameFromTypeNode(n, content)
 	case "index_expression":
 		// as[0].M / m[k].M — element/value type of the collection operand.
+		// (*pas)[0].M — pointer-to-slice/map param (pas *[]*A / *map[K]*A):
+		// indexElemType already peels *[]T / *map to element T via
+		// rangeSourceFromTypeNode pointer_type; only the unary * operand needs
+		// unwrapping here (dual-class under foreign same-leaf).
 		op := ingest.ChildByField(n, "operand")
 		if op == nil {
 			return ""
 		}
-		// Peel (as)[0].
+		// Peel (as)[0] / (*pas)[0] outer parens.
 		for op != nil && op.Type() == "parenthesized_expression" {
 			var inner *grammar.Node
 			for i := uint32(0); i < op.ChildCount(); i++ {
@@ -3246,18 +6764,66 @@ func goComplexOperandType(n *grammar.Node, content []byte, indexElemType func(na
 		if op == nil {
 			return ""
 		}
+		// (*pas)[0] — unary * of collection pointer local/param.
+		if op.Type() == "unary_expression" {
+			star := false
+			var inner *grammar.Node
+			for i := uint32(0); i < op.ChildCount(); i++ {
+				ch := op.Child(i)
+				if ch == nil {
+					continue
+				}
+				if ch.Type() == "*" || (ch.Type() == "unary_operator" && ingest.NodeText(ch, content) == "*") {
+					star = true
+					continue
+				}
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				// Prefer field-named operand when present.
+				inner = ch
+			}
+			if opField := ingest.ChildByField(op, "operand"); opField != nil {
+				inner = opField
+			}
+			if opField := ingest.ChildByField(op, "operator"); opField != nil && ingest.NodeText(opField, content) == "*" {
+				star = true
+			}
+			if star && inner != nil {
+				// Peel (*pas) inner parens if any.
+				for inner != nil && inner.Type() == "parenthesized_expression" {
+					var in2 *grammar.Node
+					for i := uint32(0); i < inner.ChildCount(); i++ {
+						ch := inner.Child(i)
+						if ch == nil || ch.Type() == "(" || ch.Type() == ")" {
+							continue
+						}
+						in2 = ch
+						break
+					}
+					inner = in2
+				}
+				if inner != nil && inner.Type() == "identifier" && indexElemType != nil {
+					if el, ok := indexElemType(ingest.NodeText(inner, content), n.StartByte()); ok {
+						return el
+					}
+				}
+				if info, ok := rangeSourceFromCollectionExprIdent(inner, content, indexElemType, n.StartByte(), funcColl, namedColl, funcRetFunc, structFields, valueType, ifaceColl, ifaceFunc, funcResults, methodNamed); ok {
+					return info.elemType
+				}
+			}
+		}
 		if op.Type() == "identifier" && indexElemType != nil {
 			if el, ok := indexElemType(ingest.NodeText(op, content), n.StartByte()); ok {
 				return el
 			}
 		}
-		// Typed composite index: []*A{…}[0] / map[string]*A{…}["k"].
-		if op.Type() == "composite_literal" {
-			if t := ingest.ChildByField(op, "type"); t != nil {
-				if info, ok := rangeSourceFromTypeNode(t, content); ok {
-					return info.elemType
-				}
-			}
+		// Typed collection index: []*A{…}[0] / make([]*A,n)[0] /
+		// append([]*A{}, x)[0] / append(as, x)[0] / map[string]*A{…}["k"] /
+		// x.([]*A)[0] / ([]*A)(x)[0] / as[:1][0] / make([]*A,n)[:1][0] /
+		// new([1]*A)[0] / getA()[0].
+		if info, ok := rangeSourceFromCollectionExprIdent(op, content, indexElemType, n.StartByte(), funcColl, namedColl, funcRetFunc, structFields, valueType, ifaceColl, ifaceFunc, funcResults, methodNamed); ok {
+			return info.elemType
 		}
 	}
 	return ""

@@ -1,0 +1,86 @@
+package demo;
+
+public class A {
+  public int execute() {
+    return 1;
+  }
+}
+
+class B {
+  public int run() {
+    return 2;
+  }
+}
+
+class BoxA {
+  A a = new A();
+
+  A get() {
+    return a;
+  }
+
+  BoxA self() {
+    return this;
+  }
+}
+
+class BoxB {
+  B b = new B();
+
+  B get() {
+    return b;
+  }
+
+  BoxB self() {
+    return this;
+  }
+}
+
+class HolderA {
+  BoxA box = new BoxA();
+}
+
+class HolderB {
+  BoxB box = new BoxB();
+}
+
+class OuterA {
+  HolderA h = new HolderA();
+}
+
+class OuterB {
+  HolderB h = new HolderB();
+}
+
+class Uses {
+  public static int useSelfAssign(BoxA ba, BoxB bb) {
+    var xa = ba.self();
+    var xb = bb.self();
+    return xa.get().execute() + xb.get().run();
+  }
+
+  public static int useNestedField(OuterA oa, OuterB ob) {
+    return oa.h.box.get().execute() + ob.h.box.get().run();
+  }
+
+  public static int useTernary(boolean c, BoxA ba, BoxB bb) {
+    return (c ? ba.get() : ba.get()).execute() + (c ? bb.get() : bb.get()).run();
+  }
+
+  public static int useTernaryRecv(boolean c, BoxA ba, BoxB bb) {
+    return (c ? ba : ba).get().execute() + (c ? bb : bb).get().run();
+  }
+
+  public static int useParenChain(BoxA ba, BoxB bb) {
+    return (ba.self()).get().execute() + (bb.self()).get().run();
+  }
+
+  public static int useTernarySelf(boolean c, BoxA ba, BoxB bb) {
+    return (c ? ba.self() : ba).get().execute() + (c ? bb.self() : bb).get().run();
+  }
+
+  public static int usePreservesB(BoxB bb, OuterB ob) {
+    var xb = bb.self();
+    return xb.get().run() + ob.h.box.get().run() + (bb.self()).get().run();
+  }
+}
