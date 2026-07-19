@@ -1882,6 +1882,71 @@ func javaOptionalOfCollectionFactoryElemType(opt *grammar.Node, content []byte) 
 	}
 }
 
+// javaOptionalOrElseFallbackType recovers T from Optional.orElse(new T(...)) /
+// Optional.orElseGet(() -> new T(...)) when the Optional receiver is untyped
+// (Optional.empty() / unknown) but the default/supplier peels to concrete T.
+// Enables Optional.<A>empty().orElseGet(() -> new A()).run() under foreign
+// same-leaf. orElseThrow has no value default — fail closed here.
+func javaOptionalOrElseFallbackType(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "method_invocation" {
+		return ""
+	}
+	nameN := ingest.ChildByField(call, "name")
+	if nameN == nil {
+		return ""
+	}
+	name := ingest.NodeText(nameN, content)
+	if name != "orElse" && name != "orElseGet" {
+		return ""
+	}
+	args := javaCallArgs(call)
+	if len(args) != 1 {
+		return ""
+	}
+	arg := args[0]
+	if name == "orElse" {
+		// orElse(new A()) — default is object creation of T.
+		if arg.Type() != "object_creation_expression" {
+			return ""
+		}
+		typeN := ingest.ChildByField(arg, "type")
+		if typeN == nil {
+			return ""
+		}
+		return javaTypeName(typeN, content)
+	}
+	// orElseGet(() -> new A()) — zero-arg expression-bodied supplier.
+	if arg.Type() != "lambda_expression" {
+		return ""
+	}
+	if n := javaInferredLambdaParamNames(arg, content); len(n) != 0 {
+		return ""
+	}
+	body := ingest.ChildByField(arg, "body")
+	for body != nil && !body.IsNull() && body.Type() == "parenthesized_expression" {
+		inner := ingest.ChildByField(body, "expression")
+		if inner == nil {
+			for i := uint32(0); i < body.ChildCount(); i++ {
+				ch := body.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
+			}
+		}
+		body = inner
+	}
+	if body == nil || body.Type() != "object_creation_expression" {
+		return ""
+	}
+	typeN := ingest.ChildByField(body, "type")
+	if typeN == nil {
+		return ""
+	}
+	return javaTypeName(typeN, content)
+}
+
 // javaNestedCollectionIdentElemType recovers T from a bare identifier that is a
 // collection/Optional of list-of-T (elemOf["@nested."+name]). Used for
 // for (var ga : sa) when sa: Set<List<A>> — ga is List of A (elemOf), not A.
@@ -6722,7 +6787,12 @@ func javaCollectionAccessElemType(val *grammar.Node, content []byte, elemOf, val
 		// Optional<A> local or a pipeline that yields Optional
 		// (findFirst/findAny / Optional.of). Exception supplier on orElseThrow
 		// does not change the value type leaf.
-		return javaStreamPipelineElemType(obj, content, elemOf, valOf)
+		// Prefer pipeline T; fall back to orElseGet/orElse supplier/default
+		// creation peels when the Optional source is untyped (Optional.empty()).
+		if t := javaStreamPipelineElemType(obj, content, elemOf, valOf); t != "" {
+			return t
+		}
+		return javaOptionalOrElseFallbackType(val, content)
 	case "min", "max":
 		// Collections.min(coll) / Collections.max(coll[, cmp]) return the element type.
 		// Stream.min/max return Optional — bind via orElse/ifPresent on the pipeline,

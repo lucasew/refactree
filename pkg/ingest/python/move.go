@@ -4371,6 +4371,9 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// xs = xs + [A()] / zs = xs + [A()] / xs = [] + [A()] —
 						// self-target untyped arms are wildcards (assign-concat).
 						elemOf[lname] = et
+					} else if et := pythonListRepeatElemType(right, content, elemOf, egElems, typeOf); et != "" {
+						// xs = [A()] * n / n * [A()] — list/tuple repeat element type.
+						elemOf[lname] = et
 					} else if et := pythonHomogeneousSplatListCtorElem(right, content, elemOf, egElems, typeOf, lname); et != "" {
 						// xs = [*xs, A()] / zs = [*xs, A()] — star-list peels.
 						elemOf[lname] = et
@@ -4405,6 +4408,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						// preserve @nested leaf (literal ChainMap peels above).
 						// Foreign too for shadowing.
 						elemOf["@nested."+lname] = nest
+					} else if nest := pythonChainMapNewChildNestedValueType(right, content, elemOf); nest != "" {
+						// ca = ChainMap(da).new_child({"j": [A()]}) / ca.new_child() nested —
+						// preserve @nested leaf. Foreign too for shadowing.
+						elemOf["@nested."+lname] = nest
 					} else if et := pythonHomogeneousDictValueCtorElem(right, content); et != "" {
 						// da = {"k": A()} / dict(k=A()) / OrderedDict(k=A()) /
 						// ChainMap({"k": A()}) / {k: A() for k in ...} — scalar values.
@@ -4416,6 +4423,10 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						elemOf[lname] = et
 					} else if et := pythonChainMapLocalValueType(right, content, elemOf); et != "" {
 						// ca = ChainMap(da) when da is scalar mapping of A.
+						// Foreign too for shadowing.
+						elemOf[lname] = et
+					} else if et := pythonChainMapNewChildValueType(right, content, elemOf); et != "" {
+						// ca = ChainMap(da).new_child({"j": A()}) / ca.new_child() scalar.
 						// Foreign too for shadowing.
 						elemOf[lname] = et
 					} else if et := pythonIterableElemType(right, content, elemOf, egElems, typeOf); et != "" {
@@ -4935,6 +4946,28 @@ func pythonTypedLocals(root *grammar.Node, content []byte, ourReceivers map[stri
 						out[lname] = true
 					}
 				}
+			}
+			// aa := [A()] / aa := [[A()]] / da := {"k": A()} / da := {"k": [A()]} —
+			// collection peels mirror plain assignment so if (aa := [A()]): aa[0].run()
+			// / if (da := {"k": A()}): da["k"].run() bind under foreign same-leaf.
+			// Scalar Class() / next / etc. already handled above (out/typeOf).
+			if et := pythonHomogeneousCtorElem(valueN, content); et != "" {
+				elemOf[lname] = et
+			} else if et := pythonListConcatElemType(valueN, content, elemOf, egElems, typeOf, lname); et != "" {
+				elemOf[lname] = et
+			} else if et := pythonListRepeatElemType(valueN, content, elemOf, egElems, typeOf); et != "" {
+				elemOf[lname] = et
+			} else if nest := pythonNestedHomogeneousCtorElem(valueN, content); nest != "" {
+				elemOf["@nested."+lname] = nest
+			} else if nest := pythonNestedDictHomogeneousListCtorElem(valueN, content); nest != "" {
+				elemOf["@nested."+lname] = nest
+			} else if et := pythonHomogeneousDictValueCtorElem(valueN, content); et != "" {
+				elemOf[lname] = et
+			} else if nest := pythonNestedMappingSubscriptElemType(valueN, content, elemOf); nest != "" {
+				// row := aa[0] / row := [[A()]][0] when nested — row is list of nest leaf.
+				elemOf[lname] = nest
+			} else if et := pythonIterableElemType(valueN, content, elemOf, egElems, typeOf); et != "" {
+				elemOf[lname] = et
 			}
 		case "except_clause":
 			// except* A as e: e is ExceptionGroup, not A. Skip as_pattern typing of e
@@ -9135,6 +9168,12 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		if et := pythonListConcatElemType(right, content, elemOf, egElems, typeOf, ""); et != "" {
 			return et
 		}
+		// [A()] * n / n * [A()] / (A(),) * n — list/tuple repeat preserves element
+		// type (integer arm ignored). Annotated list[A] locals already peel; this
+		// covers unannotated [A()] * 2 under foreign same-leaf.
+		if et := pythonListRepeatElemType(right, content, elemOf, egElems, typeOf); et != "" {
+			return et
+		}
 		// da | ea / da | {"j": A()} / {} | {"k": A()} — dict merge value leaf
 		// (PEP 584). Empty dict is a wildcard. Nested list values fail closed here
 		// (use pythonDictMergeNestedValueType / nested subscript peels).
@@ -9171,6 +9210,10 @@ func pythonIterableElemType(right *grammar.Node, content []byte, elemOf, egElems
 		// leaf for subscript peels (same model as elemOf[da] for dict locals).
 		// Nested list-value maps fail closed here (pythonChainMapLocalNestedValueType).
 		if et := pythonChainMapLocalValueType(right, content, elemOf); et != "" {
+			return et
+		}
+		// ChainMap(da).new_child() / ChainMap(da).new_child({"j": A()}) scalar.
+		if et := pythonChainMapNewChildValueType(right, content, elemOf); et != "" {
 			return et
 		}
 		// Literal ChainMap({"k": A()}) / ChainMap(OrderedDict(k=A())) without locals.
@@ -9835,6 +9878,269 @@ func pythonListConcatArmWildcard(n *grammar.Node, content []byte, elemOf map[str
 		}
 	}
 	return false
+}
+
+// pythonListRepeatElemType recovers T from list/tuple repetition:
+//
+//	[A()] * n / n * [A()] / (A(),) * n / xs * n when xs peels to element T
+//
+// One arm must be an integer literal; the other is a list/tuple source of T.
+// Non-* operators / non-integer counters / mixed leaves fail closed.
+func pythonListRepeatElemType(n *grammar.Node, content []byte, elemOf, egElems, typeOf map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		n = pythonParenInner(n)
+	}
+	if n == nil || n.Type() != "binary_operator" {
+		return ""
+	}
+	op := ingest.ChildByField(n, "operator")
+	if op == nil || ingest.NodeText(op, content) != "*" {
+		return ""
+	}
+	left := ingest.ChildByField(n, "left")
+	right := ingest.ChildByField(n, "right")
+	if left == nil || right == nil {
+		return ""
+	}
+	leftInt := pythonIsIntegerLiteral(left, content)
+	rightInt := pythonIsIntegerLiteral(right, content)
+	if leftInt == rightInt {
+		return ""
+	}
+	coll := right
+	if rightInt {
+		coll = left
+	}
+	for coll != nil && coll.Type() == "parenthesized_expression" {
+		coll = pythonParenInner(coll)
+	}
+	if coll == nil {
+		return ""
+	}
+	if et := pythonHomogeneousCtorElem(coll, content); et != "" {
+		return et
+	}
+	return pythonIterableElemType(coll, content, elemOf, egElems, typeOf)
+}
+
+// pythonIsIntegerLiteral reports integer / unary +/- integer expressions.
+func pythonIsIntegerLiteral(n *grammar.Node, content []byte) bool {
+	if n == nil {
+		return false
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		n = pythonParenInner(n)
+	}
+	if n == nil {
+		return false
+	}
+	if n.Type() == "integer" {
+		return true
+	}
+	if n.Type() == "unary_operator" {
+		arg := ingest.ChildByField(n, "argument")
+		if arg == nil {
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch.Type() == "integer" {
+					return true
+				}
+			}
+			return false
+		}
+		return pythonIsIntegerLiteral(arg, content)
+	}
+	return false
+}
+
+// pythonChainMapNewChildValueType recovers T from ChainMap(da).new_child() /
+// ChainMap(da).new_child({"j": A()}) / ca.new_child() when parent and optional
+// child agree on scalar mapping value leaf T. Zero-arg new_child preserves
+// parent; one positional mapping arg merges when leaves agree. Nested list
+// values use pythonChainMapNewChildNestedValueType. Mixed / kwargs / splat fail closed.
+func pythonChainMapNewChildValueType(call *grammar.Node, content []byte, elemOf map[string]string) string {
+	parent, child, ok := pythonChainMapNewChildParts(call, content)
+	if !ok {
+		return ""
+	}
+	pt := pythonChainMapExprScalarValueType(parent, content, elemOf)
+	if pt == "" {
+		return ""
+	}
+	if child == nil {
+		return pt
+	}
+	ct := pythonChainMapChildScalarValueType(child, content, elemOf)
+	if ct == "" || ct != pt {
+		return ""
+	}
+	return pt
+}
+
+// pythonChainMapNewChildNestedValueType recovers T from ChainMap(da).new_child() /
+// ChainMap(da).new_child({"j": [A()]}) / ca.new_child() when parent and optional
+// child agree on nested mapping-of-list/set leaf T.
+func pythonChainMapNewChildNestedValueType(call *grammar.Node, content []byte, elemOf map[string]string) string {
+	parent, child, ok := pythonChainMapNewChildParts(call, content)
+	if !ok {
+		return ""
+	}
+	pt := pythonChainMapExprNestedValueType(parent, content, elemOf)
+	if pt == "" {
+		return ""
+	}
+	if child == nil {
+		return pt
+	}
+	ct := pythonChainMapChildNestedValueType(child, content, elemOf)
+	if ct == "" || ct != pt {
+		return ""
+	}
+	return pt
+}
+
+// pythonChainMapNewChildParts returns (parent, childOrNil, ok) for
+// parent.new_child([child]). Only the new_child attribute form is accepted.
+func pythonChainMapNewChildParts(call *grammar.Node, content []byte) (parent, child *grammar.Node, ok bool) {
+	if call == nil || call.Type() != "call" {
+		return nil, nil, false
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil || fn.Type() != "attribute" {
+		return nil, nil, false
+	}
+	attr := ingest.ChildByField(fn, "attribute")
+	if attr == nil || ingest.NodeText(attr, content) != "new_child" {
+		return nil, nil, false
+	}
+	parent = ingest.ChildByField(fn, "object")
+	if parent == nil {
+		return nil, nil, false
+	}
+	argList := ingest.ChildByField(call, "arguments")
+	if argList == nil {
+		return parent, nil, true
+	}
+	var args []*grammar.Node
+	for i := uint32(0); i < argList.ChildCount(); i++ {
+		ch := argList.Child(i)
+		if ch == nil {
+			continue
+		}
+		switch ch.Type() {
+		case "(", ")", ",", "comment":
+			continue
+		case "keyword_argument", "list_splat", "dictionary_splat", "parenthesized_list_splat":
+			return nil, nil, false
+		default:
+			args = append(args, ch)
+		}
+	}
+	switch len(args) {
+	case 0:
+		return parent, nil, true
+	case 1:
+		return parent, args[0], true
+	default:
+		return nil, nil, false
+	}
+}
+
+func pythonChainMapExprScalarValueType(n *grammar.Node, content []byte, elemOf map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		n = pythonParenInner(n)
+	}
+	if n == nil {
+		return ""
+	}
+	if et := pythonChainMapLocalValueType(n, content, elemOf); et != "" {
+		return et
+	}
+	if et := pythonChainMapNewChildValueType(n, content, elemOf); et != "" {
+		return et
+	}
+	if n.Type() == "call" {
+		if et := pythonHomogeneousDictValueCtorElem(n, content); et != "" &&
+			pythonSimpleCalleeName(ingest.ChildByField(n, "function"), content) == "ChainMap" {
+			return et
+		}
+	}
+	if n.Type() == "identifier" && elemOf != nil {
+		if elemOf["@nested."+ingest.NodeText(n, content)] != "" {
+			return ""
+		}
+		return elemOf[ingest.NodeText(n, content)]
+	}
+	return ""
+}
+
+func pythonChainMapExprNestedValueType(n *grammar.Node, content []byte, elemOf map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		n = pythonParenInner(n)
+	}
+	if n == nil {
+		return ""
+	}
+	if et := pythonChainMapLocalNestedValueType(n, content, elemOf); et != "" {
+		return et
+	}
+	if et := pythonChainMapNewChildNestedValueType(n, content, elemOf); et != "" {
+		return et
+	}
+	if n.Type() == "call" {
+		if et := pythonNestedDictHomogeneousListCtorElem(n, content); et != "" &&
+			pythonSimpleCalleeName(ingest.ChildByField(n, "function"), content) == "ChainMap" {
+			return et
+		}
+	}
+	if n.Type() == "identifier" && elemOf != nil {
+		return elemOf["@nested."+ingest.NodeText(n, content)]
+	}
+	return ""
+}
+
+func pythonChainMapChildScalarValueType(n *grammar.Node, content []byte, elemOf map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		n = pythonParenInner(n)
+	}
+	if n == nil {
+		return ""
+	}
+	if n.Type() == "identifier" && elemOf != nil {
+		if elemOf["@nested."+ingest.NodeText(n, content)] != "" {
+			return ""
+		}
+		return elemOf[ingest.NodeText(n, content)]
+	}
+	return pythonHomogeneousDictValueCtorElem(n, content)
+}
+
+func pythonChainMapChildNestedValueType(n *grammar.Node, content []byte, elemOf map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		n = pythonParenInner(n)
+	}
+	if n == nil {
+		return ""
+	}
+	if n.Type() == "identifier" && elemOf != nil {
+		return elemOf["@nested."+ingest.NodeText(n, content)]
+	}
+	return pythonNestedDictHomogeneousListCtorElem(n, content)
 }
 
 // pythonHomogeneousSplatListCtorElem recovers T from star-lists of Class() and
@@ -12265,11 +12571,19 @@ func pythonNestedMappingSubscriptElemType(sub *grammar.Node, content []byte, ele
 		if nest := pythonNestedMappingCopyCallType(val, content, elemOf); nest != "" {
 			return nest
 		}
+		// ChainMap(da).new_child(...)["k"] — nested new_child merge.
+		if nest := pythonChainMapNewChildNestedValueType(val, content, elemOf); nest != "" {
+			return nest
+		}
 		// ChainMap(da)["k"] / ChainMap({"k": [A()]})["k"] — nested ChainMap.
 		if nest := pythonChainMapLocalNestedValueType(val, content, elemOf); nest != "" {
 			return nest
 		}
 		return pythonNestedDictHomogeneousListCtorElem(val, content)
+	case "list", "tuple":
+		// [[A()]][0] / ((A(),),)[0] — outer nested ctor; row is list/tuple of T.
+		// Enables aa = [[A()]][0]; aa[0].run() under foreign same-leaf.
+		return pythonNestedHomogeneousCtorElem(val, content)
 	default:
 		return ""
 	}

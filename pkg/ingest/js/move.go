@@ -1863,7 +1863,7 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// property values T; o.k peels via objValueLocals.
 						// Bind foreign too so dual-class B rebinds fail closed.
 						objValueLocals[ingest.NodeText(nameN, content)] = t
-					} else if t := jsObjectAssignValueType(valN, content, out, factories); t != "" {
+					} else if t := jsObjectAssignValueType(valN, content, out, factories, objValueLocals); t != "" {
 						// const o = Object.assign({}, {k: new A()}, …) — plain object of
 						// uniform property values T; Object.values(o) peels via objValueLocals.
 						// Bind foreign too so dual-class B rebinds fail closed.
@@ -3232,17 +3232,35 @@ func jsArraySourceElemType(n *grammar.Node, content []byte, arrayLocals, typedLo
 	if n == nil {
 		return ""
 	}
-	for n != nil && n.Type() == "parenthesized_expression" {
-		var inner *grammar.Node
-		for i := uint32(0); i < n.ChildCount(); i++ {
-			ch := n.Child(i)
-			if ch.Type() == "(" || ch.Type() == ")" {
-				continue
+	// Unwrap (await Array.fromAsync(...)) / (arr) so await peels match call forms.
+	for n != nil {
+		switch n.Type() {
+		case "parenthesized_expression":
+			var inner *grammar.Node
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch.Type() == "(" || ch.Type() == ")" {
+					continue
+				}
+				inner = ch
+				break
 			}
-			inner = ch
-			break
+			n = inner
+			continue
+		case "await_expression":
+			var arg *grammar.Node
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				ch := n.Child(i)
+				if ch == nil || ch.Type() == "await" {
+					continue
+				}
+				arg = ch
+				break
+			}
+			n = arg
+			continue
 		}
-		n = inner
+		break
 	}
 	if n == nil {
 		return ""
@@ -3317,6 +3335,19 @@ func jsArraySourceElemType(n *grammar.Node, content []byte, arrayLocals, typedLo
 	// new Set([new A()]) / set local — Array.from(xs) / [...xs] element source.
 	// Bare Map intentionally excluded (entries, not values).
 	if t := jsSetSourceValueType(n, content, arrayLocals, typedLocals, factories, extra.setLocals); t != "" {
+		return t
+	}
+	// structuredClone(arr) / structuredClone([new A()]) — identity of array source.
+	if t := jsStructuredCloneArrayElemType(n, content, arrayLocals, typedLocals, factories, extra); t != "" {
+		return t
+	}
+	// iter.take(n).toArray() / iter.toArray() — materialize iterator of T as array.
+	if t := jsIteratorToArrayElemType(n, content, arrayLocals, typedLocals, factories, extra); t != "" {
+		return t
+	}
+	// arr.values().take(n) / .drop(n) / .filter(pred) as array source of T
+	// (spread / Array.from of iterator helpers).
+	if t := jsIteratorHelperYieldType(n, content, nil, nil, arrayLocals, typedLocals, factories, extra.mapLocals, extra.entryArrayLocals, extra.setLocals); t != "" {
 		return t
 	}
 	return ""
@@ -4608,15 +4639,20 @@ func jsArrayFromElemType(n *grammar.Node, content []byte, arrayLocals, typedLoca
 	if fn == nil || args == nil {
 		return ""
 	}
-	// Array.from
+	// Array.from / Array.fromAsync
 	if fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain" {
 		return ""
 	}
 	obj := ingest.ChildByField(fn, "object")
 	prop := ingest.ChildByField(fn, "property")
 	if obj == nil || prop == nil ||
-		obj.Type() != "identifier" || ingest.NodeText(obj, content) != "Array" ||
-		ingest.NodeText(prop, content) != "from" {
+		obj.Type() != "identifier" || ingest.NodeText(obj, content) != "Array" {
+		return ""
+	}
+	switch ingest.NodeText(prop, content) {
+	case "from", "fromAsync":
+		// ok
+	default:
 		return ""
 	}
 	// 1-arg: Array.from(arr). 2-arg: Array.from(arr, x => x) identity mapfn only.
@@ -4811,18 +4847,19 @@ func jsObjectValuesAssignType(n *grammar.Node, content []byte, typedLocals, fact
 	if count != 1 || first == nil {
 		return ""
 	}
-	return jsObjectAssignValueType(first, content, typedLocals, factories)
+	return jsObjectAssignValueType(first, content, typedLocals, factories, extra.objValue)
 }
 
 // jsObjectAssignValueType recovers T from Object.assign(…sources) when every
 // property value across all object-literal arguments peels to the same concrete
 // type T. Empty object literals ({}) contribute nothing (common target). At
-// least one property value required. Non-object-literal args / mixed / method /
-// spread entries fail closed.
-// Enables Object.values(Object.assign({}, {k: new A()}))[0].run() under foreign
-// same-leaf methods. Object.assign(new A()) identity target peels stay in
-// jsIdentityCloneType (first-arg return).
-func jsObjectAssignValueType(n *grammar.Node, content []byte, typedLocals, factories map[string]string) string {
+// least one property value required. Identifier sources peel via objValueLocals
+// (Object.assign(oa) after const oa = {k: new A()}). Mixed / method / spread
+// entries fail closed.
+// Enables Object.values(Object.assign({}, {k: new A()}))[0].run() and
+// Object.assign(oa).k.run() under foreign same-leaf methods. Object.assign(new A())
+// identity target peels stay in jsIdentityCloneType (first-arg return).
+func jsObjectAssignValueType(n *grammar.Node, content []byte, typedLocals, factories, objValueLocals map[string]string) string {
 	if n == nil {
 		return ""
 	}
@@ -4878,9 +4915,29 @@ func jsObjectAssignValueType(n *grammar.Node, content []byte, typedLocals, facto
 			}
 			arg = inner
 		}
-		if arg == nil || arg.Type() != "object" {
-			// Non-object-literal source (ident / call / new) — fail closed for
-			// values peels (identity first-arg return is jsIdentityCloneType).
+		if arg == nil {
+			return ""
+		}
+		if arg.Type() == "identifier" {
+			// Object.assign(oa[, …]) — plain-object local of uniform value T.
+			if objValueLocals == nil {
+				return ""
+			}
+			t := objValueLocals[ingest.NodeText(arg, content)]
+			if t == "" {
+				return ""
+			}
+			if !saw {
+				found = t
+				saw = true
+			} else if found != t {
+				return ""
+			}
+			continue
+		}
+		if arg.Type() != "object" {
+			// Non-object-literal source (call / new) — fail closed for values
+			// peels (identity first-arg return is jsIdentityCloneType).
 			return ""
 		}
 		// Collect property values; empty {} is fine (no contribution).
@@ -5108,6 +5165,10 @@ func jsObjectFromEntriesPropType(n *grammar.Node, content []byte, typedLocals, f
 	if t := jsObjectFromEntriesValueType(obj, content, typedLocals, factories, entryArrayLocals, mapLocals); t != "" {
 		return t
 	}
+	// Object.assign({}, {k: new A()}) / Object.assign(oa) — property values T.
+	if t := jsObjectAssignValueType(obj, content, typedLocals, factories, objValueLocals); t != "" {
+		return t
+	}
 	if obj.Type() == "identifier" && objValueLocals != nil {
 		if t := objValueLocals[ingest.NodeText(obj, content)]; t != "" {
 			return t
@@ -5132,7 +5193,7 @@ func jsObjectEntriesValueType(n *grammar.Node, content []byte, typedLocals, fact
 	if first == nil {
 		return ""
 	}
-	if t := jsObjectAssignValueType(first, content, typedLocals, factories); t != "" {
+	if t := jsObjectAssignValueType(first, content, typedLocals, factories, objValueLocals); t != "" {
 		return t
 	}
 	if t := jsObjectFromEntriesValueType(first, content, typedLocals, factories, nil, nil); t != "" {
@@ -7240,8 +7301,9 @@ func jsArrayIteratorYieldType(n *grammar.Node, content []byte, arrayLocals, type
 
 // jsIteratorSourceYieldType recovers T from a generator call/local or an array
 // iterator call (arr.values() / arr[Symbol.iterator]()) / array-iterator local /
-// map.values() / set.values() / set.keys() / set[Symbol.iterator]() when the
-// source peels to uniform element/value type T.
+// map.values() / set.values() / set.keys() / set[Symbol.iterator]() /
+// iter.take(n) / iter.drop(n) / iter.filter(pred) when the source peels to
+// uniform element/value type T.
 func jsIteratorSourceYieldType(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals map[string]string) string {
 	if t := jsGeneratorCallYieldType(n, content, generators, genLocals); t != "" {
 		return t
@@ -7252,7 +7314,11 @@ func jsIteratorSourceYieldType(n *grammar.Node, content []byte, generators, genL
 	if t := jsMapValuesYieldType(n, content, typedLocals, factories, mapLocals, entryArrayLocals); t != "" {
 		return t
 	}
-	return jsSetIteratorYieldType(n, content, arrayLocals, typedLocals, factories, setLocals)
+	if t := jsSetIteratorYieldType(n, content, arrayLocals, typedLocals, factories, setLocals); t != "" {
+		return t
+	}
+	// arr.values().take(1) / .drop(0) / .filter(pred) — identity iterator helpers.
+	return jsIteratorHelperYieldType(n, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals)
 }
 
 // jsForOfElemType recovers T from the right-hand side of for…of / for await…of:
@@ -7347,6 +7413,144 @@ func jsGeneratorNextValueType(n *grammar.Node, content []byte, generators, genLo
 	}
 	obj := ingest.ChildByField(n, "object")
 	return jsGeneratorNextResultType(obj, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals)
+}
+
+// jsStructuredCloneArrayElemType recovers T from structuredClone(arr) when arr
+// peels as an array source of T. Enables structuredClone([new A()])[0].run() /
+// structuredClone(as)[0].run() under foreign same-leaf. Non-array args fail closed
+// (scalar structuredClone stays on jsIdentityCloneType).
+func jsStructuredCloneArrayElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	args := ingest.ChildByField(n, "arguments")
+	if fn == nil || args == nil || fn.Type() != "identifier" ||
+		ingest.NodeText(fn, content) != "structuredClone" {
+		return ""
+	}
+	var first *grammar.Node
+	count := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		count++
+		if first == nil {
+			first = ch
+		}
+	}
+	if count != 1 || first == nil {
+		return ""
+	}
+	return jsArraySourceElemType(first, content, arrayLocals, typedLocals, factories, extra)
+}
+
+// jsIteratorHelperYieldType recovers T from iter.take(n) / iter.drop(n) /
+// iter.filter(pred) when the receiver peels as an iterator yielding T.
+// Limit / predicate args ignored (not type-changing). Unknown receivers fail closed.
+func jsIteratorHelperYieldType(n *grammar.Node, content []byte, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals map[string]string) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil || (fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain") {
+		return ""
+	}
+	prop := ingest.ChildByField(fn, "property")
+	if prop == nil {
+		return ""
+	}
+	name := ingest.NodeText(prop, content)
+	switch name {
+	case "take", "drop", "filter":
+		// ok — identity iterator helpers
+	default:
+		return ""
+	}
+	args := ingest.ChildByField(n, "arguments")
+	if args == nil {
+		return ""
+	}
+	count := 0
+	for i := uint32(0); i < args.ChildCount(); i++ {
+		ch := args.Child(i)
+		if ch == nil || ch.Type() == "(" || ch.Type() == ")" || ch.Type() == "," {
+			continue
+		}
+		count++
+	}
+	if count < 1 {
+		return ""
+	}
+	obj := ingest.ChildByField(fn, "object")
+	return jsIteratorSourceYieldType(obj, content, generators, genLocals, arrayLocals, typedLocals, factories, mapLocals, entryArrayLocals, setLocals)
+}
+
+// jsIteratorToArrayElemType recovers T from iter.toArray() when the receiver
+// peels as an iterator yielding T. Zero-arg only. Enables
+// aa.values().toArray()[0].run() / aa.values().take(1).toArray()[0].run() under
+// foreign same-leaf methods.
+func jsIteratorToArrayElemType(n *grammar.Node, content []byte, arrayLocals, typedLocals, factories map[string]string, extra jsExtraLocals) string {
+	if n == nil {
+		return ""
+	}
+	for n != nil && n.Type() == "parenthesized_expression" {
+		var inner *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			inner = ch
+			break
+		}
+		n = inner
+	}
+	if n == nil || n.Type() != "call_expression" || !jsCallIsZeroArg(n) {
+		return ""
+	}
+	fn := ingest.ChildByField(n, "function")
+	if fn == nil || (fn.Type() != "member_expression" && fn.Type() != "member_expression_optional" && fn.Type() != "optional_chain") {
+		return ""
+	}
+	prop := ingest.ChildByField(fn, "property")
+	if prop == nil || ingest.NodeText(prop, content) != "toArray" {
+		return ""
+	}
+	obj := ingest.ChildByField(fn, "object")
+	return jsIteratorSourceYieldType(obj, content, nil, nil, arrayLocals, typedLocals, factories, extra.mapLocals, extra.entryArrayLocals, extra.setLocals)
 }
 
 // jsIdentityCloneType recovers T from structuredClone(x) / Object.assign(x[, …])
