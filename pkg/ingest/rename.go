@@ -365,12 +365,42 @@ func readModulePathForRename(rootDir string) string {
 
 // SymbolLeaf returns the identifier text written at a definition/use span.
 // Qualified symbols use "." separators; pointer receivers may prefix "*".
+//
+// String-keyed members keep their quotes in the symbol path (e.g. Type.'.md'
+// for a TS property named '.md'). A naive last-dot split would peel inside the
+// quotes ("md'"); treat a trailing single- or double-quoted segment as the leaf.
 func SymbolLeaf(symbol string) string {
 	leaf := symbol
+	if q := quotedSymbolLeaf(leaf); q != "" {
+		return q
+	}
 	if i := strings.LastIndex(leaf, "."); i >= 0 {
 		leaf = leaf[i+1:]
 	}
 	return strings.TrimPrefix(leaf, "*")
+}
+
+// quotedSymbolLeaf returns a trailing '…' or "…" leaf when it is a full path
+// segment (start of symbol or immediately after "."). Empty string means fall back.
+func quotedSymbolLeaf(symbol string) string {
+	if len(symbol) < 2 {
+		return ""
+	}
+	q := symbol[len(symbol)-1]
+	if q != '\'' && q != '"' {
+		return ""
+	}
+	// Scan left for the matching opener; content may contain "." ('.md').
+	for i := len(symbol) - 2; i >= 0; i-- {
+		if symbol[i] != q {
+			continue
+		}
+		if i == 0 || symbol[i-1] == '.' {
+			return symbol[i:]
+		}
+		// Quote mid-segment (unlikely); keep scanning for an earlier opener.
+	}
+	return ""
 }
 
 // applyEditsToString applies byte-offset edits to an in-memory buffer.
