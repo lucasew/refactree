@@ -2176,6 +2176,11 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 						// group-array / array-source element T.
 						// Bind foreign too so dual-class B rebinds fail closed.
 						jsBindArrayPatternNames(nameN, content, t, out)
+					} else if valN.Type() == "array" {
+						// const [a, b] = [new A(), new B()] — positional new slots
+						// when elements do not share one type (uniform path above fails).
+						// Bind foreign too so dual-class B rebinds fail closed.
+						jsBindArrayPatternFromNewArray(nameN, valN, content, out)
 					} else if valN.Type() == "identifier" && entryLocals != nil {
 						// const [, a] = e after const e = Object.entries({k: new A()})[0]
 						// / after const e = [new A()].entries().next().value
@@ -2272,7 +2277,9 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 				}
 			}
 		case "required_parameter", "optional_parameter", "assignment_pattern":
-			// TS: (b: Box) / (b: Box = ...)
+			// TS: (b: Box) / (b: Box = ...) / (xs: A[]) / (xs: Array<A>) /
+			// (xs: ReadonlyArray<A>) — scalar types → typedLocals; array forms →
+			// arrayLocals so for-of / forEach / map peels under foreign same-leaf.
 			nameN := ingest.ChildByField(n, "pattern")
 			if nameN == nil {
 				nameN = ingest.ChildByField(n, "name")
@@ -2282,8 +2289,14 @@ func jsTypedLocals(root *grammar.Node, content []byte, ourReceivers map[string]b
 			}
 			typeN := ingest.ChildByField(n, "type")
 			if nameN != nil && nameN.Type() == "identifier" && typeN != nil {
+				name := ingest.NodeText(nameN, content)
 				if tn := jsTypeName(typeN, content); ourReceivers[tn] {
-					out[ingest.NodeText(nameN, content)] = tn
+					out[name] = tn
+				}
+				// Bind foreign element types too so dual-class B rebinds fail closed
+				// (ys: Array<B> after xs: A[] under same-leaf methods).
+				if el := jsArrayElementType(typeN, content); el != "" {
+					arrayLocals[name] = el
 				}
 			}
 		case "formal_parameters":
@@ -4131,6 +4144,103 @@ func jsTypeName(typeN *grammar.Node, content []byte) string {
 		}
 	}
 	return ""
+}
+
+// jsArrayElementType returns the element type for A[] / Array<A> / ReadonlyArray<A>
+// annotations (type_annotation or bare type node). Empty when not an array form.
+// Enables for (const a of xs) / xs.forEach(a => …) when xs: A[] under foreign same-leaf.
+func jsArrayElementType(typeN *grammar.Node, content []byte) string {
+	if typeN == nil {
+		return ""
+	}
+	if typeN.Type() == "type_annotation" {
+		for i := uint32(0); i < typeN.ChildCount(); i++ {
+			c := typeN.Child(i)
+			if c == nil || c.Type() == ":" {
+				continue
+			}
+			typeN = c
+			break
+		}
+	}
+	switch typeN.Type() {
+	case "array_type":
+		for i := uint32(0); i < typeN.ChildCount(); i++ {
+			c := typeN.Child(i)
+			if c == nil || c.Type() == "[" || c.Type() == "]" {
+				continue
+			}
+			return jsTypeName(c, content)
+		}
+	case "generic_type":
+		nameN := ingest.ChildByField(typeN, "name")
+		if nameN == nil {
+			return ""
+		}
+		name := ingest.NodeText(nameN, content)
+		if name != "Array" && name != "ReadonlyArray" {
+			return ""
+		}
+		args := ingest.ChildByField(typeN, "type_arguments")
+		if args == nil {
+			return ""
+		}
+		for i := uint32(0); i < args.ChildCount(); i++ {
+			c := args.Child(i)
+			if c == nil || c.Type() == "<" || c.Type() == ">" || c.Type() == "," {
+				continue
+			}
+			return jsTypeName(c, content)
+		}
+	}
+	return ""
+}
+
+// jsBindArrayPatternFromNewArray binds array-pattern names to constructors from
+// a positional [new A(), new B()] RHS. Nested patterns / rest stop the scan.
+// Bind foreign constructors too so dual-class B rebinds fail closed on rename.
+func jsBindArrayPatternFromNewArray(pattern, val *grammar.Node, content []byte, out map[string]string) {
+	if pattern == nil || val == nil || pattern.Type() != "array_pattern" || val.Type() != "array" || out == nil {
+		return
+	}
+	var elems []*grammar.Node
+	for i := uint32(0); i < val.ChildCount(); i++ {
+		c := val.Child(i)
+		if c == nil {
+			continue
+		}
+		switch c.Type() {
+		case "[", "]", ",":
+			continue
+		default:
+			elems = append(elems, c)
+		}
+	}
+	pi := 0
+	for i := uint32(0); i < pattern.ChildCount(); i++ {
+		c := pattern.Child(i)
+		if c == nil {
+			continue
+		}
+		switch c.Type() {
+		case "[", "]", ",":
+			continue
+		case "identifier":
+			if pi >= len(elems) {
+				return
+			}
+			if ctor := jsNewExpressionType(elems[pi], content); ctor != "" {
+				name := ingest.NodeText(c, content)
+				if name != "" && name != "_" {
+					out[name] = ctor
+				}
+			}
+			pi++
+		default:
+			// rest_pattern, nested array_pattern, assignment_pattern — fail closed.
+			return
+		}
+	}
 }
 
 // jsSameFileGeneratorYields maps same-file generator names → yield type leaf
