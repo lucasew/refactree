@@ -34,7 +34,7 @@ builds:
       - goos: android
         goarch: amd64
       - goos: android
-        goarch: "386
+        goarch: "386"
 archives:
   - formats: [tar.gz]
     # this name template makes the OS and Arch compatible with the results of `uname`.
