@@ -1427,6 +1427,14 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 			// typed as imported interfaces that carry this method (var d a.Driver)
 			// or as our concrete receiver types (b pkga.Box / b := pkga.Box{}).
 			allowed := importAllowedReceivers(content, pkgDirs, ourPkgDirs, ourReceivers, rootDir, result, oldLeaf)
+			// Field renames: also allow range/short-var locals typed from methods
+			// that return []T / T for field receiver T (e.g. for _, rf := range
+			// provider.Resolve(...); rf.AbsPath when renaming ResolvedFile.AbsPath).
+			if len(fieldReceivers) > 0 {
+				for name := range identsFromImportedFieldReturns(content, ourPkgDirs, fieldReceivers, rootDir, result) {
+					allowed[name] = true
+				}
+			}
 			selectorEdits = findSelectorLeafEdits(rel, content, oldLeaf, newLeaf, allowed)
 		}
 		// Filter same-package renames by the *call target* type (selector receiver),
@@ -1453,6 +1461,11 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 			// Non-identifier receivers: Type{}.M, v.(T).M, xs[i].M, Make().M, (*T).M.
 			// Identifier receivers are handled by findSelectorLeafEdits.
 			edits = appendUnoccupiedAll(edits, occ, findComplexOperandSelectorEdits(rel, content, oldLeaf, newLeaf, ourReceivers, foreignReceivers))
+		} else if importsRelated && len(fieldReceivers) > 0 {
+			// Cross-package: pkg.Type{OldLeaf: …} / &pkg.Type{OldLeaf: …} when
+			// pkg imports our package and Type is a field receiver (not a method).
+			importLocals := importLocalsForPackages(content, ourPkgDirs)
+			edits = appendUnoccupiedAll(edits, occ, findImportedCompositeFieldKeyEdits(rel, content, oldLeaf, newLeaf, fieldReceivers, importLocals))
 		}
 		if inOurPkg {
 			// Interface method decls: do not mark occupied (matches prior behavior).
@@ -1529,6 +1542,322 @@ func importAllowedReceivers(content []byte, pkgDirs, ourPkgDirs, ourReceivers ma
 	return allowed
 }
 
+// identsFromImportedFieldReturns finds identifiers that hold a field-receiver
+// type (or element of []T) via cross-package method/interface returns:
+//
+//	files, err := provider.Resolve(...)   // Resolve returns []ResolvedFile
+//	for _, rf := range files { rf.AbsPath }
+//
+// Returns the element idents (rf) and also direct T values from single-return
+// calls. Used only for pure field renames (not method leaves).
+func identsFromImportedFieldReturns(content []byte, ourPkgDirs, fieldReceivers map[string]bool, rootDir string, result *ingest.Result) map[string]bool {
+	out := map[string]bool{}
+	if len(fieldReceivers) == 0 {
+		return out
+	}
+	// method leaf → element type name (T for []T / *T / T returns).
+	retMethods := ourMethodsReturningFieldReceivers(rootDir, result, ourPkgDirs, fieldReceivers)
+	if len(retMethods) == 0 {
+		return out
+	}
+	pf, err := ingest.ParseSource(content, ".go", "")
+	if err != nil {
+		return out
+	}
+	defer pf.Close()
+
+	// Collections assigned from multi/single-return calls of retMethods.
+	rangeSrc := map[string]rangeSourceInfo{}
+	var walkAssign func(n *grammar.Node)
+	walkAssign = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		if n.Type() == "short_var_declaration" || n.Type() == "assignment_statement" {
+			left := ingest.ChildByField(n, "left")
+			right := ingest.ChildByField(n, "right")
+			if left != nil && right != nil {
+				names := identListNames(left, content)
+				if len(names) > 0 {
+					if call := firstCallExpr(right); call != nil {
+						if methodLeaf := callSelectorMethodLeaf(call, content); methodLeaf != "" {
+							if elem := retMethods[methodLeaf]; elem != "" && names[0] != "" && names[0] != "_" {
+								// First result is the []T or T value.
+								rangeSrc[names[0]] = rangeSourceInfo{elemType: elem}
+								// Also allow direct selector on bare T returns.
+								out[names[0]] = true
+							}
+						}
+					}
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walkAssign(n.Child(i))
+		}
+	}
+	walkAssign(pf.Root)
+
+	// Range value vars over those collections.
+	var walkRange func(n *grammar.Node)
+	walkRange = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		if n.Type() == "for_statement" {
+			var bindings []identTypeBinding
+			collectRangeClauseBindings(n, content, &bindings, rangeSrc)
+			for _, b := range bindings {
+				if b.name != "" && b.name != "_" && fieldReceivers[b.typ] {
+					out[b.name] = true
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walkRange(n.Child(i))
+		}
+	}
+	walkRange(pf.Root)
+	return out
+}
+
+// ourMethodsReturningFieldReceivers maps method leaf names declared in our
+// packages (methods + interface method_elem) whose result is T, *T, []T, or
+// []*T for some field receiver T. Ambiguous same-leaf methods with different
+// T results last-write; rare for field-return helpers.
+func ourMethodsReturningFieldReceivers(rootDir string, result *ingest.Result, ourPkgDirs, fieldReceivers map[string]bool) map[string]string {
+	out := map[string]string{}
+	for _, f := range result.Files {
+		if f.Language != "go" {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Path, "./")
+		if !ourPkgDirs[dirOf(rel)] {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		pf, err := ingest.ParseSource(content, rel, "go")
+		if err != nil {
+			continue
+		}
+		var walk func(n *grammar.Node, inIface bool)
+		walk = func(n *grammar.Node, inIface bool) {
+			if n == nil || n.IsNull() {
+				return
+			}
+			switch n.Type() {
+			case "interface_type":
+				for i := uint32(0); i < n.ChildCount(); i++ {
+					walk(n.Child(i), true)
+				}
+				return
+			case "method_declaration":
+				nameN := ingest.ChildByField(n, "name")
+				if nameN == nil {
+					break
+				}
+				leaf := ingest.NodeText(nameN, content)
+				if leaf == "" {
+					break
+				}
+				if elem := fieldReceiverFromResult(ingest.ChildByField(n, "result"), content, fieldReceivers); elem != "" {
+					out[leaf] = elem
+				}
+			case "method_elem":
+				if !inIface {
+					break
+				}
+				nameN := ingest.ChildByField(n, "name")
+				if nameN == nil {
+					// Some grammars put name as first field_identifier.
+					for i := uint32(0); i < n.ChildCount(); i++ {
+						c := n.Child(i)
+						if c.Type() == "field_identifier" || c.Type() == "identifier" {
+							nameN = c
+							break
+						}
+					}
+				}
+				if nameN == nil {
+					break
+				}
+				leaf := ingest.NodeText(nameN, content)
+				if leaf == "" {
+					break
+				}
+				// method_elem: name parameters result (result may be type node).
+				var resultNode *grammar.Node
+				if r := ingest.ChildByField(n, "result"); r != nil {
+					resultNode = r
+				} else {
+					// Last non-parameter type-ish child.
+					for i := n.ChildCount(); i > 0; i-- {
+						c := n.Child(i - 1)
+						switch c.Type() {
+						case "parameter_list", "field_identifier", "identifier", "comment":
+							continue
+						default:
+							resultNode = c
+						}
+						if resultNode != nil {
+							break
+						}
+					}
+				}
+				if elem := fieldReceiverFromResult(resultNode, content, fieldReceivers); elem != "" {
+					out[leaf] = elem
+				}
+			}
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				walk(n.Child(i), inIface)
+			}
+		}
+		walk(pf.Root, false)
+		pf.Close()
+	}
+	return out
+}
+
+// fieldReceiverFromResult returns T when result is T/*T/[]T/[]*T/parameter_list
+// whose first result is one of those, and T is in fieldReceivers.
+func fieldReceiverFromResult(result *grammar.Node, content []byte, fieldReceivers map[string]bool) string {
+	if result == nil {
+		return ""
+	}
+	if result.Type() == "parameter_list" {
+		// (a []T, err error) or ([]T, error) — first parameter's type.
+		for i := uint32(0); i < result.ChildCount(); i++ {
+			c := result.Child(i)
+			if c == nil || c.Type() != "parameter_declaration" {
+				continue
+			}
+			typ := ingest.ChildByField(c, "type")
+			if typ == nil {
+				// Unnamed: type is a direct child.
+				for j := uint32(0); j < c.ChildCount(); j++ {
+					ch := c.Child(j)
+					if ch.Type() == "," || ch.Type() == "identifier" {
+						continue
+					}
+					typ = ch
+					break
+				}
+			}
+			return fieldReceiverFromTypeNode(typ, content, fieldReceivers)
+		}
+		return ""
+	}
+	return fieldReceiverFromTypeNode(result, content, fieldReceivers)
+}
+
+func fieldReceiverFromTypeNode(n *grammar.Node, content []byte, fieldReceivers map[string]bool) string {
+	if n == nil {
+		return ""
+	}
+	switch n.Type() {
+	case "type_identifier":
+		t := ingest.NodeText(n, content)
+		if fieldReceivers[t] {
+			return t
+		}
+	case "pointer_type", "slice_type", "array_type", "element":
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			if t := fieldReceiverFromTypeNode(n.Child(i), content, fieldReceivers); t != "" {
+				return t
+			}
+		}
+	case "qualified_type":
+		// Same package usually uses bare type; still accept leaf.
+		t := typeNameFromTypeNode(n, content)
+		if fieldReceivers[t] {
+			return t
+		}
+	default:
+		// Unwrap one level of children for parenthesized etc.
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			if t := fieldReceiverFromTypeNode(n.Child(i), content, fieldReceivers); t != "" {
+				return t
+			}
+		}
+	}
+	return ""
+}
+
+// firstCallExpr returns the sole call_expression under n (or n itself).
+func firstCallExpr(n *grammar.Node) *grammar.Node {
+	if n == nil {
+		return nil
+	}
+	if n.Type() == "call_expression" {
+		return n
+	}
+	if n.Type() == "expression_list" {
+		var found *grammar.Node
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			c := n.Child(i)
+			if c == nil || c.Type() == "," {
+				continue
+			}
+			if c.Type() == "call_expression" {
+				if found != nil {
+					return nil // multi-expr, not multi-return
+				}
+				found = c
+				continue
+			}
+			return nil
+		}
+		return found
+	}
+	return nil
+}
+
+// callSelectorMethodLeaf returns the method name for x.Method(...) calls.
+func callSelectorMethodLeaf(call *grammar.Node, content []byte) string {
+	if call == nil || call.Type() != "call_expression" {
+		return ""
+	}
+	fn := ingest.ChildByField(call, "function")
+	if fn == nil {
+		return ""
+	}
+	if fn.Type() == "selector_expression" {
+		field := ingest.ChildByField(fn, "field")
+		if field != nil {
+			return ingest.NodeText(field, content)
+		}
+		// Fallback: last field_identifier/identifier child.
+		for i := call.ChildCount(); i > 0; i-- {
+			// walk fn children
+		}
+		for i := uint32(0); i < fn.ChildCount(); i++ {
+			c := fn.Child(i)
+			if c.Type() == "field_identifier" || c.Type() == "identifier" {
+				// Prefer the last one as the method leaf.
+				if i+1 == fn.ChildCount() || fn.Child(i+1).Type() == "(" {
+					return ingest.NodeText(c, content)
+				}
+			}
+		}
+		// Last identifier-like child of selector.
+		var last string
+		for i := uint32(0); i < fn.ChildCount(); i++ {
+			c := fn.Child(i)
+			if c.Type() == "field_identifier" || c.Type() == "identifier" {
+				last = ingest.NodeText(c, content)
+			}
+		}
+		return last
+	}
+	if fn.Type() == "identifier" {
+		return ingest.NodeText(fn, content)
+	}
+	return ""
+}
+
 // findCompositeFieldKeyEdits rewrites OldLeaf keys in composite literals whose
 // type is one of ourReceivers (e.g. Box{Helper: 1} when renaming Box.Helper).
 func findCompositeFieldKeyEdits(file string, content []byte, oldLeaf, newLeaf string, ourReceivers map[string]bool) []ingest.Edit {
@@ -1569,6 +1898,127 @@ func findCompositeFieldKeyEdits(file string, content []byte, oldLeaf, newLeaf st
 	}
 	walk(pf.Root)
 	return edits
+}
+
+// findImportedCompositeFieldKeyEdits rewrites OldLeaf keys in composite
+// literals of the form importLocal.Type{OldLeaf: …} (and &importLocal.Type{…})
+// when importLocal is an import of our package and Type is a field receiver.
+// Bare Type{…} in another package is not ours (would need qualification).
+func findImportedCompositeFieldKeyEdits(file string, content []byte, oldLeaf, newLeaf string, fieldReceivers, importLocals map[string]bool) []ingest.Edit {
+	if oldLeaf == "" || len(fieldReceivers) == 0 || len(importLocals) == 0 {
+		return nil
+	}
+	pf, err := ingest.ParseSource(content, file, "go")
+	if err != nil {
+		return nil
+	}
+	defer pf.Close()
+
+	var edits []ingest.Edit
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		if n.Type() == "composite_literal" {
+			local, typ := compositeLiteralQualifiedType(n, content)
+			if local != "" && importLocals[local] && typ != "" && fieldReceivers[typ] {
+				var body *grammar.Node
+				for i := uint32(0); i < n.ChildCount(); i++ {
+					c := n.Child(i)
+					if c.Type() == "literal_value" {
+						body = c
+						break
+					}
+				}
+				if body != nil {
+					collectCompositeKeyEdits(body, content, file, oldLeaf, newLeaf, &edits)
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(pf.Root)
+	return edits
+}
+
+// compositeLiteralQualifiedType returns (packageLocal, typeName) for
+// importLocal.T / *importLocal.T composite types. Bare T{} yields ("", "").
+func compositeLiteralQualifiedType(n *grammar.Node, content []byte) (local, typ string) {
+	if n == nil {
+		return "", ""
+	}
+	switch n.Type() {
+	case "composite_literal":
+		t := ingest.ChildByField(n, "type")
+		if t == nil {
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				c := n.Child(i)
+				switch c.Type() {
+				case "type_identifier", "qualified_type", "generic_type", "pointer_type":
+					t = c
+				}
+				if t != nil {
+					break
+				}
+			}
+		}
+		return qualifiedTypeParts(t, content)
+	case "unary_expression":
+		// &pkg.T{}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			if l, ty := compositeLiteralQualifiedType(n.Child(i), content); l != "" || ty != "" {
+				return l, ty
+			}
+		}
+	case "parenthesized_expression":
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			ch := n.Child(i)
+			if ch.Type() == "(" || ch.Type() == ")" {
+				continue
+			}
+			return compositeLiteralQualifiedType(ch, content)
+		}
+	}
+	return "", ""
+}
+
+// qualifiedTypeParts extracts (packageLocal, typeName) from a type node.
+// pointer_type and generic_type unwrap to the underlying qualified_type.
+func qualifiedTypeParts(n *grammar.Node, content []byte) (local, typ string) {
+	if n == nil {
+		return "", ""
+	}
+	switch n.Type() {
+	case "qualified_type":
+		pkg := ingest.ChildByField(n, "package")
+		name := ingest.ChildByField(n, "name")
+		if pkg == nil || name == nil {
+			// Fall back to first package_identifier + type_identifier children.
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				c := n.Child(i)
+				switch c.Type() {
+				case "package_identifier", "identifier":
+					if local == "" {
+						local = ingest.NodeText(c, content)
+					}
+				case "type_identifier":
+					typ = ingest.NodeText(c, content)
+				}
+			}
+			return local, typ
+		}
+		return ingest.NodeText(pkg, content), ingest.NodeText(name, content)
+	case "pointer_type", "generic_type":
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			if l, t := qualifiedTypeParts(n.Child(i), content); l != "" || t != "" {
+				return l, t
+			}
+		}
+	}
+	return "", ""
 }
 
 func collectCompositeKeyEdits(n *grammar.Node, content []byte, file, oldLeaf, newLeaf string, edits *[]ingest.Edit) {
