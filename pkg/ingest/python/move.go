@@ -142,7 +142,7 @@ func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src
 	// 1. Source file still references the moved symbol → import it from dest.
 	if pythonFileUsesTargetOutside(result, srcRel, srcRef, decl.RemoveStart, decl.RemoveEnd) {
 		if srcContent, err := os.ReadFile(path.Join(rootDir, srcRel)); err == nil {
-			stmt := pythonFromImportStmt(srcRel, dstRel, leaf)
+			stmt := pythonFromImportStmt(rootDir, srcRel, dstRel, leaf)
 			edits = append(edits, pythonImportInsertEdits(srcRel, srcContent, []string{stmt})...)
 		}
 	}
@@ -152,7 +152,7 @@ func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src
 	if len(localDeps) > 0 {
 		var stmts []string
 		for _, dep := range localDeps {
-			stmts = append(stmts, pythonFromImportStmt(dstRel, srcRel, dep))
+			stmts = append(stmts, pythonFromImportStmt(rootDir, dstRel, srcRel, dep))
 		}
 		dstPath := path.Join(rootDir, dstRel)
 		if dstContent, err := os.ReadFile(dstPath); err == nil {
@@ -245,17 +245,43 @@ func pythonLocalDepsForDecl(result *ingest.Result, src ingest.Reference, decl in
 }
 
 // pythonFromImportStmt builds "from <module> import <symbol>" for a consumer
-// file importing a name defined in toFile.
-func pythonFromImportStmt(fromFile, toFile, symbol string) string {
+// file importing a name defined in toFile. rootDir is the project root used to
+// detect package directories (presence of __init__.py) so same-directory residual
+// imports under a package root become "from .mod import …" instead of a bare
+// top-level "from mod import …" that fails when the package is not on sys.path
+// as a flat module (boltons-style ingest_roots=package-dir).
+func pythonFromImportStmt(rootDir, fromFile, toFile, symbol string) string {
 	toMod := pythonModuleFromPath(toFile)
 	fromDir := pythonDirOf(fromFile)
+	toDir := pythonDirOf(toFile)
 	modSpec := toMod
 	if fromDir != "" {
 		if rel := makePythonRelativeSpec(fromDir, toMod); rel != "" {
 			modSpec = rel
 		}
+	} else if fromDir == toDir && toMod != "" && !strings.Contains(toMod, ".") {
+		// Sibling modules at the ingest/package root. Prefer a same-package
+		// relative import when that directory is a Python package.
+		pkgDir := rootDir
+		if pkgDir == "" {
+			pkgDir = "."
+		}
+		if pythonDirIsPackage(pkgDir) {
+			modSpec = "." + toMod
+		}
 	}
 	return fmt.Sprintf("from %s import %s", modSpec, symbol)
+}
+
+// pythonDirIsPackage reports whether dir looks like an importable package
+// (has __init__.py). Namespace packages without __init__.py are treated as
+// non-packages so non-package script fixtures keep absolute residual imports.
+func pythonDirIsPackage(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, "__init__.py"))
+	return err == nil
 }
 
 // pythonImportInsertEdits inserts missing "from … import …" lines after any
