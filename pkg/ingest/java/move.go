@@ -3634,8 +3634,6 @@ func javaGatherMapConcurrentElemType(gatherCall, gArgs *grammar.Node, content []
 	}
 }
 
-
-
 // javaGatherObjectResultElemType recovers R after Stream.gather under foreign
 // same-leaf when the gatherer clearly preserves or constructs a known element:
 //
