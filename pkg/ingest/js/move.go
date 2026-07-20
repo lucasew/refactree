@@ -2590,6 +2590,7 @@ func jsClassFieldAccessType(obj *grammar.Node, content []byte, typedLocals map[s
 //     body peels (`return new T()` / `return this.field` / `return this`).
 //  2. Body peels that need other methods' returns (`return new BoxA().get()` /
 //     `return ba.get()` with typed param ba: BoxA / `return x` after assign).
+//
 // Methods with parameters fail closed unless annotation or body peels to a
 // concrete leaf (A.fromBox(ba).run() under foreign same-leaf).
 // Enables new BoxA().get().helper() / A.create().helper() / A.fromBox(ba).run()
