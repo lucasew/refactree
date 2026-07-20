@@ -1,0 +1,4 @@
+{
+  "source": "path:./box.js::A.run",
+  "destination": "path:./box.js::A.execute"
+}
