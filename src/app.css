@@ -1,0 +1,79 @@
+@import "tailwindcss";
+@plugin "daisyui" {
+  themes: false;
+  logs: false;
+}
+@plugin "daisyui/theme" {
+  name: "refactree";
+  default: true;
+  prefersdark: true;
+  color-scheme: dark;
+
+  --color-base-100: oklch(0.16 0.012 65);
+  --color-base-200: oklch(0.20 0.014 65);
+  --color-base-300: oklch(0.24 0.016 65);
+  --color-base-content: oklch(0.93 0.012 80);
+  --color-primary: oklch(0.77 0.17 65);
+  --color-primary-content: oklch(0.22 0.04 65);
+  --color-secondary: oklch(0.68 0.08 70);
+  --color-secondary-content: oklch(0.18 0.02 65);
+  --color-accent: oklch(0.72 0.10 145);
+  --color-accent-content: oklch(0.18 0.04 145);
+  --color-neutral: oklch(0.32 0.02 65);
+  --color-neutral-content: oklch(0.93 0.012 80);
+  --color-info: oklch(0.72 0.12 230);
+  --color-info-content: oklch(0.18 0.04 230);
+  --color-success: oklch(0.72 0.10 145);
+  --color-success-content: oklch(0.18 0.04 145);
+  --color-warning: oklch(0.82 0.14 70);
+  --color-warning-content: oklch(0.22 0.04 65);
+  --color-error: oklch(0.68 0.18 25);
+  --color-error-content: oklch(0.98 0.01 25);
+
+  --radius-selector: 0.25rem;
+  --radius-field: 0.375rem;
+  --radius-box: 0.375rem;
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --border: 1px;
+  --depth: 0;
+  --noise: 0;
+}
+
+/* Force-graph canvas fills panel; canvas colors stay theme-independent (PRODUCT chart rule). */
+.graph-canvas-host {
+  min-height: 16rem;
+  height: 100%;
+  width: 100%;
+}
+.graph-canvas-host canvas {
+  display: block;
+}
+
+/* Annotated source: mono + link colors via daisy semantic tokens where possible */
+.code-view {
+  font-family: ui-monospace, "Cascadia Code", "IBM Plex Mono", monospace;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.code-view a {
+  color: var(--color-primary);
+  text-decoration: underline;
+  text-underline-offset: 0.12em;
+}
+.code-view a:hover {
+  color: color-mix(in oklch, var(--color-primary) 85%, white);
+}
+.code-view .is-def {
+  color: var(--color-accent);
+  font-weight: 600;
+}
+/* Graph / deep-link jump target */
+.code-view .is-focus {
+  background: color-mix(in oklch, var(--color-warning) 35%, transparent);
+  border-radius: 0.15em;
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--color-warning) 50%, transparent);
+  transition: background 0.3s ease, box-shadow 0.3s ease;
+}

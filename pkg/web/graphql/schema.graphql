@@ -1,0 +1,97 @@
+"""Canonical provider:path::symbol reference; also the Relay global id."""
+scalar Reference
+
+enum NodeKind {
+  ATOM
+  FILE
+  MODULE
+}
+
+enum EdgeKind {
+  USES
+  USED_BY
+  IMPORTS
+}
+
+"""Graph fact node (atom, file, or module). id is the canonical reference string."""
+type GraphNode {
+  id: ID!
+  kind: NodeKind!
+  label: String!
+  parentId: ID
+  """True when this is an external (non-path) dependency stub that can be expanded."""
+  external: Boolean!
+  """True when neighbors for this node have not been loaded yet (external expand)."""
+  expandable: Boolean!
+  """Inferred language (go, python, javascript, …); empty if unknown."""
+  language: String!
+}
+
+type GraphEdge {
+  from: ID!
+  to: ID!
+  kind: EdgeKind!
+}
+
+"""Focus-driven lazy neighborhood. May be incomplete (Seed-style)."""
+type Neighborhood {
+  focus: GraphNode!
+  nodes: [GraphNode!]!
+  edges: [GraphEdge!]!
+  incomplete: Boolean!
+}
+
+type FsEntry {
+  name: String!
+  reference: ID!
+  isDir: Boolean!
+}
+
+type CodeSegment {
+  text: String!
+  href: String
+  anchorId: String
+  isLink: Boolean!
+  isDef: Boolean!
+  reference: ID
+}
+
+type CodeDocument {
+  reference: ID!
+  language: String
+  segments: [CodeSegment!]!
+  nonText: Boolean!
+  error: String
+  warning: String
+  focusId: String
+  files: [FsEntry!]!
+  symbols: [FsEntry!]!
+  parentHref: String
+}
+
+type Doc {
+  name: String!
+  signature: String
+  docString: String
+}
+
+type Query {
+  rootDir: String!
+  """List filesystem entries under a path reference (default project root)."""
+  filesystem(ref: ID): [FsEntry!]!
+  """Lazy focus neighborhood (relations + node stubs)."""
+  neighborhood(ref: ID!): Neighborhood!
+  """
+  Project-local module/import graph (path: scopes + external stubs).
+  Incomplete: expand external (non-path) nodes via neighborhood(ref).
+  """
+  projectGraph: Neighborhood!
+  """Annotated source for a reference (on demand)."""
+  code(ref: ID!): CodeDocument!
+  """Docstring / signature for a reference (on demand)."""
+  doc(ref: ID!): Doc
+  """Fetch a single node by canonical reference id (cheap metadata, no graph walk)."""
+  node(id: ID!): GraphNode
+  """Batch node metadata for edge endpoints discovered via stream."""
+  nodes(ids: [ID!]!): [GraphNode!]!
+}

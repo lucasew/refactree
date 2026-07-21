@@ -41,3 +41,41 @@ func TestEncodeCodeURLInRoot_MatchesEncodeCodeURL(t *testing.T) {
 		t.Fatalf("EncodeCodeURLInRoot = %q, EncodeCodeURL = %q", got, want)
 	}
 }
+
+func TestDecodeCodePath_BareFolderSegments(t *testing.T) {
+	// Unencoded /code/cmd and /code/cmd/rft must gain path:./ (folder rail clicks).
+	cases := []struct {
+		path string
+		want string
+	}{
+		{"/code/cmd", "path:./cmd"},
+		{"/code/cmd/rft", "path:./cmd/rft"},
+		{"/code/path%3A.%2Fcmd", "path:./cmd"},
+		{"/code/path%3A.%2Fcmd%2Frft", "path:./cmd/rft"},
+		{"/code/path:.%2Fcmd", "path:./cmd"},
+	}
+	for _, tc := range cases {
+		got, ok := DecodeCodePath(tc.path)
+		if !ok {
+			t.Fatalf("DecodeCodePath(%q) failed", tc.path)
+		}
+		if got != tc.want {
+			t.Fatalf("DecodeCodePath(%q) = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestCanonicalFSRef_BareNames(t *testing.T) {
+	if got := canonicalFSRef("cmd"); got != "path:./cmd" {
+		t.Fatalf("got %q", got)
+	}
+	if got := canonicalFSRef("cmd/rft"); got != "path:./cmd/rft" {
+		t.Fatalf("got %q", got)
+	}
+	if got := canonicalFSRef("path:./cmd"); got != "path:./cmd" {
+		t.Fatalf("got %q", got)
+	}
+	if got := canonicalFSRef("go:fmt"); got != "go:fmt" {
+		t.Fatalf("got %q", got)
+	}
+}

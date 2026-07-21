@@ -1,0 +1,45 @@
+{
+  "name": "refactree-web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "relay": "relay-compiler",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-force-graph-2d": "^1.27.0",
+    "react-relay": "^18.2.0",
+    "relay-runtime": "^18.2.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@types/react-relay": "^16.0.6",
+    "@types/relay-runtime": "^18.2.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "babel-plugin-relay": "^18.2.0",
+    "daisyui": "^5.7.0",
+    "relay-compiler": "^18.2.0",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.0",
+    "vite-plugin-relay": "^2.1.0"
+  },
+  "relay": {
+    "src": "./src",
+    "schema": "./pkg/web/graphql/schema.graphql",
+    "language": "typescript",
+    "eagerEsModules": true,
+    "excludes": [
+      "**/node_modules/**",
+      "**/__mocks__/**",
+      "**/__generated__/**"
+    ]
+  }
+}

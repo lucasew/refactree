@@ -45,7 +45,8 @@ func encodeCodeURLRef(ref string) string {
 }
 
 // DecodeCodePath extracts the reference from a /code/... request path.
-// Accepts both encoded and plain path segments.
+// Accepts both encoded and plain path segments. Path results always include
+// the path:./ prefix (never bare "cmd" / "cmd/rft").
 func DecodeCodePath(requestPath string) (string, bool) {
 	if !strings.HasPrefix(requestPath, CodePathPrefix) {
 		return "", false
@@ -59,9 +60,9 @@ func DecodeCodePath(requestPath string) (string, bool) {
 	if !strings.Contains(rest, "/") {
 		decoded, err := url.PathUnescape(rest)
 		if err != nil {
-			return rest, true
+			decoded = rest
 		}
-		return decoded, true
+		return canonicalizeDecodedRef(decoded), true
 	}
 	// Multi-segment fallback: treat as path:./<joined>
 	decoded, err := url.PathUnescape(rest)
@@ -71,7 +72,34 @@ func DecodeCodePath(requestPath string) (string, bool) {
 	if !strings.Contains(decoded, ":") {
 		return "path:./" + strings.TrimPrefix(decoded, "./"), true
 	}
-	return decoded, true
+	return canonicalizeDecodedRef(decoded), true
+}
+
+// canonicalizeDecodedRef ensures path refs keep provider + ./ prefix.
+func canonicalizeDecodedRef(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return "path:./"
+	}
+	r := ingest.ParseReference(ref)
+	if r.Provider == "" {
+		// Bare cmd or cmd/rft from a non-encoded /code/cmd URL.
+		r.Provider = "path"
+		if r.Path == "" {
+			r.Path = "./"
+		} else if !strings.HasPrefix(r.Path, "./") && !strings.HasPrefix(r.Path, "../") && !strings.HasPrefix(r.Path, "/") {
+			r.Path = "./" + r.Path
+		}
+	}
+	if strings.EqualFold(r.Provider, "path") {
+		if r.Path == "" || r.Path == "." {
+			r.Path = "./"
+		} else if !strings.HasPrefix(r.Path, "./") && !strings.HasPrefix(r.Path, "../") && !strings.HasPrefix(r.Path, "/") {
+			r.Path = "./" + r.Path
+		}
+		r.Provider = "path"
+	}
+	return r.String()
 }
 
 // ScopeReferenceForView returns the scope-level reference (symbol stripped).

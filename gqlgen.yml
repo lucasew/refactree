@@ -1,0 +1,22 @@
+# gqlgen config — schema-first GraphQL for rft serve
+schema:
+  - pkg/web/graphql/schema.graphql
+exec:
+  filename: pkg/web/graphql/generated.go
+  package: graphql
+model:
+  filename: pkg/web/graphql/models_gen.go
+  package: graphql
+resolver:
+  layout: follow-schema
+  dir: pkg/web/graphql
+  package: graphql
+  filename_template: "{name}.resolvers.go"
+autobind: []
+models:
+  ID:
+    model:
+      - github.com/99designs/gqlgen/graphql.String
+  Reference:
+    model:
+      - github.com/99designs/gqlgen/graphql.String

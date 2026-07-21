@@ -5,3 +5,11 @@
 # fuzzy harness local state
 .rft-fuzzy/
 
+
+# frontend
+node_modules/
+
+
+# build output
+rft
+

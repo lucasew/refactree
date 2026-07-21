@@ -14,6 +14,10 @@ Primary task on any screen: read source with every resolved symbol clickable, an
 
 precise, terminal-native, amber-focused
 
+## UI stack (serve SPA)
+
+Tailwind CSS 4 + daisyUI 5. Prefer daisyUI components and semantic colors (`primary`, `base-*`, …). Custom theme name: `refactree` (dark amber). Force-graph canvas node colors may stay fixed for readability.
+
 ## Anti-references
 
 SaaS cream dashboards, glassmorphism, gradient text, hero metrics, card grids, tiny uppercase eyebrows on every section

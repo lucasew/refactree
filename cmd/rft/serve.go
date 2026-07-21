@@ -17,11 +17,12 @@ func newServeCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "serve",
-		Short: "HTTP code browser with symbol hyperlinks",
-		Long: `Serve a local web UI that renders source with clickable symbols.
+		Short: "HTTP code browser (SPA + GraphQL) with symbol hyperlinks",
+		Long: `Serve a local web UI: React/Relay SPA with GraphQL over the ingest graph.
 
-Each symbol usage links to /code/<reference>#anchor using the same
-provider:path::symbol path system as the CLI.
+Filesystem entry, annotated code, and a focus-driven relation graph
+(react-force-graph-2d). References use the same provider:path::symbol
+system as the CLI. Deep links: / and /code/<reference>.
 
 Listens on loopback by default (127.0.0.1:8080). Use --addr to bind
 elsewhere. Does not open a browser.`,
