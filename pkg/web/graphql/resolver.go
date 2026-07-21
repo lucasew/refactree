@@ -10,6 +10,7 @@ type Store interface {
 	Code(ref string) (*CodeDocument, error)
 	Doc(ref string) (*Doc, error)
 	Node(id string) (*GraphNode, error)
+	Nodes(ids []string) ([]*GraphNode, error)
 }
 
 // Resolver is the root GraphQL dependency injection root.

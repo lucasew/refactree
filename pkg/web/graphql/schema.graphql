@@ -88,6 +88,8 @@ type Query {
   code(ref: ID!): CodeDocument!
   """Docstring / signature for a reference (on demand)."""
   doc(ref: ID!): Doc
-  """Fetch a single node by canonical reference id."""
+  """Fetch a single node by canonical reference id (cheap metadata, no graph walk)."""
   node(id: ID!): GraphNode
+  """Batch node metadata for edge endpoints discovered via stream."""
+  nodes(ids: [ID!]!): [GraphNode!]!
 }

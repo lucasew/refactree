@@ -9,7 +9,7 @@ import (
 	_ "github.com/lucasew/refactree/pkg/ingest/go"
 )
 
-func TestStreamNeighborhood_EmitsFocusNodesEdgesDone(t *testing.T) {
+func TestStreamNeighborhood_EmitsFocusEdgesDone(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example\n\ngo 1.22\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -18,11 +18,14 @@ func TestStreamNeighborhood_EmitsFocusNodesEdgesDone(t *testing.T) {
 		t.Fatal(err)
 	}
 	var types []string
-	var edges int
+	var edges, nodes int
 	err := StreamNeighborhood(context.Background(), dir, "path:./a.go::A", func(ev StreamEvent) bool {
 		types = append(types, ev.Type)
-		if ev.Type == "edge" {
+		switch ev.Type {
+		case "edge":
 			edges++
+		case "node":
+			nodes++
 		}
 		return true
 	})
@@ -37,5 +40,20 @@ func TestStreamNeighborhood_EmitsFocusNodesEdgesDone(t *testing.T) {
 	}
 	if edges < 1 {
 		t.Fatalf("expected edges streamed, got %d events=%v", edges, types)
+	}
+	// nodes should not be bulk-streamed (only focus carries a node)
+	if nodes > 0 {
+		t.Fatalf("expected no standalone node events, got %d", nodes)
+	}
+}
+
+func TestLookupNode_Cheap(t *testing.T) {
+	n := LookupNode("/tmp", "path:./pkg/web/server.go::New")
+	if n == nil || n.Kind != NodeKindAtom || n.Label != "New" {
+		t.Fatalf("%+v", n)
+	}
+	ext := LookupNode("/tmp", "go:fmt")
+	if ext == nil || !ext.External {
+		t.Fatalf("%+v", ext)
 	}
 }

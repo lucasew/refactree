@@ -66,6 +66,14 @@ func (r *queryResolver) Node(ctx context.Context, id string) (*GraphNode, error)
 	return r.Store.Node(id)
 }
 
+// Nodes is the resolver for the nodes field.
+func (r *queryResolver) Nodes(ctx context.Context, ids []string) ([]*GraphNode, error) {
+	if r.Store == nil {
+		return nil, fmt.Errorf("store not configured")
+	}
+	return r.Store.Nodes(ids)
+}
+
 // Query returns QueryResolver implementation.
 func (r *Resolver) Query() QueryResolver { return &queryResolver{r} }
 

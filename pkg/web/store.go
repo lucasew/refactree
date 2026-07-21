@@ -175,11 +175,27 @@ func (s *GraphStore) Doc(ref string) (*gql.Doc, error) {
 }
 
 func (s *GraphStore) Node(id string) (*gql.GraphNode, error) {
-	n, err := s.Neighborhood(id)
-	if err != nil {
-		return nil, err
+	if s == nil || s.Loader == nil {
+		return nil, fmt.Errorf("loader not configured")
 	}
-	return n.Focus, nil
+	n := gql.LookupNode(s.Loader.RootDir, id)
+	if n == nil {
+		return nil, fmt.Errorf("empty node id")
+	}
+	return n, nil
+}
+
+func (s *GraphStore) Nodes(ids []string) ([]*gql.GraphNode, error) {
+	if s == nil || s.Loader == nil {
+		return nil, fmt.Errorf("loader not configured")
+	}
+	out := make([]*gql.GraphNode, 0, len(ids))
+	for _, id := range ids {
+		if n := gql.LookupNode(s.Loader.RootDir, id); n != nil {
+			out = append(out, n)
+		}
+	}
+	return out, nil
 }
 
 func stripCodeURL(href string) string {

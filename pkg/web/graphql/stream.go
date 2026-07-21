@@ -10,8 +10,9 @@ import (
 )
 
 // StreamEvent is one progressive graph update (SSE).
+// Primary payload is edges; nodes (except focus) are hydrated on demand via GraphQL.
 type StreamEvent struct {
-	Type string `json:"type"` // focus | node | edge | done | error
+	Type string `json:"type"` // focus | edge | done | error
 
 	Node *GraphNode `json:"node,omitempty"`
 	Edge *GraphEdge `json:"edge,omitempty"`
@@ -25,39 +26,155 @@ type StreamEmitter func(StreamEvent) bool
 
 func boolPtr(b bool) *bool { return &b }
 
-// StreamNeighborhood progressively emits focus, discovery nodes, then edges.
+func edgeKey(e *GraphEdge) string {
+	if e == nil {
+		return ""
+	}
+	return string(e.Kind) + "\x00" + e.From + "\x00" + e.To
+}
+
+// LookupNode returns cheap node metadata from a reference id (no Seed/Materialize).
+func LookupNode(root, id string) *GraphNode {
+	if strings.TrimSpace(id) == "" {
+		return nil
+	}
+	return decorateNode(root, graphNodeForRef(root, ingest.ParseReference(id)))
+}
+
+// StreamNeighborhood streams edges as Seed discovery grows.
+// Emits: focus (entry node only) → edge* → done.
 func StreamNeighborhood(ctx context.Context, root, ref string, emit StreamEmitter) error {
 	if emit == nil {
 		return nil
 	}
 	parsed := ingest.CanonicalizeReference(root, ingest.ParseReference(ref))
+	focusID := parsed.String()
 	focus := decorateNode(root, graphNodeForRef(root, parsed))
 	if !emit(StreamEvent{Type: "focus", Node: focus, Incomplete: boolPtr(true)}) {
 		return context.Canceled
 	}
 
-	// Prefer full BuildNeighborhood (correct edges), but emit nodes/edges incrementally after.
-	// For path seeds, also emit file atoms as Seed BFS discovers files (pre-edge preview).
+	seen := map[string]bool{}
+	emitEdge := func(e *GraphEdge) bool {
+		if e == nil || e.From == "" || e.To == "" || e.From == e.To {
+			return true
+		}
+		k := edgeKey(e)
+		if seen[k] {
+			return true
+		}
+		seen[k] = true
+		return emit(StreamEvent{Type: "edge", Edge: e, Incomplete: boolPtr(true)})
+	}
+
 	if parsed.Provider == "" || parsed.Provider == "path" {
-		if err := streamSeedPreview(ctx, root, parsed, emit); err != nil && ctx.Err() != nil {
-			return err
+		abs, isDir, err := resolvePath(root, parsed)
+		if err == nil && !isDir {
+			if err := streamPathSeedEdges(ctx, root, parsed, focusID, abs, emitEdge); err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				emit(StreamEvent{Type: "error", Message: err.Error()})
+				return err
+			}
+			inc := true
+			if !emit(StreamEvent{Type: "done", Incomplete: &inc}) {
+				return context.Canceled
+			}
+			return nil
 		}
 	}
 
+	// Provider / dir / module: build once, stream edges only.
 	nb, err := BuildNeighborhood(root, ref)
 	if err != nil {
 		emit(StreamEvent{Type: "error", Message: err.Error()})
 		return err
 	}
-	return streamNeighborhoodResult(ctx, nb, emit, true /* skip re-sending focus */)
+	for _, e := range nb.Edges {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if !emitEdge(e) {
+			return context.Canceled
+		}
+	}
+	inc := true
+	if nb != nil {
+		inc = nb.Incomplete
+	}
+	if !emit(StreamEvent{Type: "done", Incomplete: &inc}) {
+		return context.Canceled
+	}
+	return nil
 }
 
-// StreamProjectGraph progressively emits the project import map.
+func streamPathSeedEdges(
+	ctx context.Context,
+	root string,
+	focusRef ingest.Reference,
+	focusID string,
+	seedAbs string,
+	emitEdge func(*GraphEdge) bool,
+) error {
+	focusPath := normalizePath(focusRef.Path)
+	var extracts []*ingest.FileExtract
+
+	return ingest.WalkExtracts(ingest.ExtractSource{
+		Kind:  ingest.ExtractSeed,
+		Root:  root,
+		Paths: []string{seedAbs},
+	}, func(fe *ingest.FileExtract) bool {
+		if ctx.Err() != nil {
+			return false
+		}
+		if fe == nil {
+			return true
+		}
+		cp := *fe
+		extracts = append(extracts, &cp)
+
+		result := ingest.Materialize(root, extracts, ingest.MaterializeOptions{ExpandImports: false})
+		var edges []*GraphEdge
+		nodes := map[string]*GraphNode{} // unused except addRelationEdges API
+
+		if focusRef.Symbol != "" {
+			addRelationEdges(root, result, nodes, &edges, func(from, to string) bool {
+				if from == focusID || to == focusID {
+					return true
+				}
+				return sameScope(focusRef, ingest.ParseReference(from)) ||
+					sameScope(focusRef, ingest.ParseReference(to))
+			})
+			addImportEdges(root, result, nodes, &edges, focusRef)
+		} else {
+			local := map[string]bool{}
+			for _, ent := range result.Entities {
+				er := ingest.ParseReference(ent.Reference)
+				if normalizePath(er.Path) == focusPath || filepath.Base(normalizePath(er.Path)) == filepath.Base(focusPath) {
+					local[ingest.CanonicalizeReference(root, er).String()] = true
+				}
+			}
+			addRelationEdges(root, result, nodes, &edges, func(from, to string) bool {
+				return local[from] || sameScope(focusRef, ingest.ParseReference(from))
+			})
+		}
+
+		for _, e := range dedupeEdges(edges) {
+			if !emitEdge(e) {
+				return false
+			}
+		}
+		return true
+	})
+}
+
+// StreamProjectGraph streams IMPORT edges as the project dir is walked.
+// Emits: focus → edge* → done. Nodes are on-demand.
 func StreamProjectGraph(ctx context.Context, root string, emit StreamEmitter) error {
 	if emit == nil {
 		return nil
 	}
-	// Focus shell immediately.
 	focus := &GraphNode{
 		ID: "path:./", Kind: NodeKindModule, Label: filepath.Base(root),
 		External: false, Expandable: false,
@@ -69,24 +186,24 @@ func StreamProjectGraph(ctx context.Context, root string, emit StreamEmitter) er
 		return context.Canceled
 	}
 
-	nb, err := BuildProjectGraph(root)
-	if err != nil {
-		emit(StreamEvent{Type: "error", Message: err.Error()})
-		return err
+	seen := map[string]bool{}
+	emitEdge := func(e *GraphEdge) bool {
+		if e == nil || e.From == "" || e.To == "" || e.From == e.To {
+			return true
+		}
+		k := edgeKey(e)
+		if seen[k] {
+			return true
+		}
+		seen[k] = true
+		return emit(StreamEvent{Type: "edge", Edge: e, Incomplete: boolPtr(true)})
 	}
-	return streamNeighborhoodResult(ctx, nb, emit, true)
-}
 
-// streamSeedPreview walks Seed extracts and emits entity nodes as files parse.
-func streamSeedPreview(ctx context.Context, root string, parsed ingest.Reference, emit StreamEmitter) error {
-	abs, isDir, err := resolvePath(root, parsed)
-	if err != nil || isDir {
-		return nil
-	}
-	_ = ingest.WalkExtracts(ingest.ExtractSource{
-		Kind:  ingest.ExtractSeed,
-		Root:  root,
-		Paths: []string{abs},
+	var extracts []*ingest.FileExtract
+	err := ingest.WalkExtracts(ingest.ExtractSource{
+		Kind:      ingest.ExtractDir,
+		Root:      root,
+		Recursive: true,
 	}, func(fe *ingest.FileExtract) bool {
 		if ctx.Err() != nil {
 			return false
@@ -94,66 +211,28 @@ func streamSeedPreview(ctx context.Context, root string, parsed ingest.Reference
 		if fe == nil {
 			return true
 		}
-		fileRef := ingest.FileRef("./" + strings.TrimPrefix(filepath.ToSlash(fe.Path), "./"))
-		fn := decorateNode(root, graphNodeForRef(root, ingest.ParseReference(fileRef)))
-		if !emit(StreamEvent{Type: "node", Node: fn, Incomplete: boolPtr(true)}) {
-			return false
-		}
-		for _, ent := range fe.Entities {
-			er := ingest.ParseReference(ingest.SymbolRef("./"+strings.TrimPrefix(filepath.ToSlash(fe.Path), "./"), ent.Name))
-			n := decorateNode(root, graphNodeForRef(root, er))
-			if !emit(StreamEvent{Type: "node", Node: n, Incomplete: boolPtr(true)}) {
+		cp := *fe
+		extracts = append(extracts, &cp)
+
+		result := ingest.Materialize(root, extracts, ingest.MaterializeOptions{ExpandImports: false})
+		for _, a := range result.Aliases {
+			fromID := projectScopeID(root, ingest.ParseReference(a.Reference))
+			toID := projectScopeID(root, ingest.ParseReference(a.Target))
+			if fromID == "" || toID == "" || fromID == toID {
+				continue
+			}
+			if !emitEdge(&GraphEdge{From: fromID, To: toID, Kind: EdgeKindImports}) {
 				return false
 			}
 		}
 		return true
 	})
-	return ctx.Err()
-}
-
-func streamNeighborhoodResult(ctx context.Context, nb *Neighborhood, emit StreamEmitter, skipFocus bool) error {
-	if nb == nil {
-		inc := true
-		if !emit(StreamEvent{Type: "done", Incomplete: &inc}) {
-			return context.Canceled
-		}
-		return nil
+	if err != nil && ctx.Err() == nil {
+		emit(StreamEvent{Type: "error", Message: err.Error()})
+		return err
 	}
 
-	if !skipFocus && nb.Focus != nil {
-		if !emit(StreamEvent{Type: "focus", Node: nb.Focus, Incomplete: boolPtr(true)}) {
-			return context.Canceled
-		}
-	}
-
-	for _, n := range nb.Nodes {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if n == nil {
-			continue
-		}
-		if skipFocus && nb.Focus != nil && n.ID == nb.Focus.ID {
-			continue
-		}
-		if !emit(StreamEvent{Type: "node", Node: n, Incomplete: boolPtr(true)}) {
-			return context.Canceled
-		}
-	}
-
-	for _, e := range nb.Edges {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if e == nil {
-			continue
-		}
-		if !emit(StreamEvent{Type: "edge", Edge: e, Incomplete: boolPtr(true)}) {
-			return context.Canceled
-		}
-	}
-
-	inc := nb.Incomplete
+	inc := true
 	if !emit(StreamEvent{Type: "done", Incomplete: &inc}) {
 		return context.Canceled
 	}
