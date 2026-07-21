@@ -13,7 +13,7 @@ import {
   type IncomingNode,
 } from "./graphSession";
 import { inferLanguageFromId } from "./graphColors";
-import { normalizeRef } from "./routes";
+import { formatGraphLabel, normalizeRef } from "./routes";
 
 export type StreamHandlers = {
   onEvent?: () => void;
@@ -156,37 +156,23 @@ class GraphExploreClient {
 const client = new GraphExploreClient();
 
 function stubFromId(rawId: string): IncomingNode {
-  // Id must stay canonical (path:./…); only the label strips the prefix for display.
+  // Id + label keep path:./… so the canvas never shows bare cmd/rft.
   const id = normalizeRef(rawId);
   const external = isExternalId(id);
   let kind = "MODULE";
-  let modulePart = id;
-  let symbolPart = "";
-  if (id.includes("::")) {
-    kind = "ATOM";
-    const [left, ...rest] = id.split("::");
-    symbolPart = rest.join("::");
-    modulePart = left;
-  }
-  // Display module line without path:./
-  if (modulePart.startsWith("path:")) {
-    modulePart = modulePart.slice("path:".length).replace(/^\.\//, "") || ".";
-    if (/\.[a-zA-Z0-9]+$/.test(modulePart) && modulePart.includes("/")) {
-      modulePart = modulePart.replace(/\/[^/]+$/, "") || ".";
-    }
-  }
-  const label = symbolPart ? `${modulePart}
-${symbolPart}` : modulePart;
+  if (id.includes("::")) kind = "ATOM";
+  const label = formatGraphLabel(id, "reference");
   return { id, kind, label, external, expandable: external, language: inferLanguageFromId(id) };
 }
 
 function applyNode(n: IncomingNode, _markResolved = true) {
   const s = getGraphSession();
   const id = normalizeRef(n.id);
-  n = { ...n, id };
+  // Always label from id so server short labels (cmd/rft) cannot drop path:./.
+  const name = formatGraphLabel(id, "reference");
   const existing = s.nodes.get(id);
   if (existing) {
-    existing.name = n.label || existing.name || n.id;
+    existing.name = name;
     existing.kind = n.kind || existing.kind;
     if (n.external != null) existing.external = !!n.external;
     if (n.expandable != null) existing.expandable = !!n.expandable;
@@ -194,11 +180,11 @@ function applyNode(n: IncomingNode, _markResolved = true) {
   } else {
     s.nodes.set(id, {
       id,
-      name: n.label || id,
+      name,
       kind: n.kind,
       external: !!n.external,
       expandable: !!n.expandable,
-      language: n.language || inferLanguageFromId(n.id),
+      language: n.language || inferLanguageFromId(id),
     });
   }
 }

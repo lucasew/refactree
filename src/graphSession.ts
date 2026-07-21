@@ -99,9 +99,10 @@ export function mergeNeighborhood(
   for (const n of nb.nodes ?? []) {
     if (!n?.id) continue;
     const id = normalizeRef(n.id);
+    const name = formatGraphLabel(id, "reference");
     const existing = s.nodes.get(id);
     if (existing) {
-      existing.name = n.label || existing.name || id;
+      existing.name = name;
       existing.kind = n.kind;
       if (n.external != null) existing.external = n.external;
       if (n.expandable != null) existing.expandable = n.expandable;
@@ -110,7 +111,7 @@ export function mergeNeighborhood(
     } else {
       s.nodes.set(id, {
         id,
-        name: n.label || id,
+        name,
         kind: n.kind,
         external: !!n.external,
         expandable: !!n.expandable,

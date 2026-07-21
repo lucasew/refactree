@@ -95,7 +95,10 @@ export function isGraphRoute(pathname: string): boolean {
   return pathname === "/graph" || pathname.startsWith("/graph/");
 }
 
-/** Display-only: strip path:./ for module line; never use as an id. */
+/**
+ * Short path for dense UI (file rail names, etc.). Graph canvas keeps path:./.
+ * Never use as an id.
+ */
 export function displayModulePath(refOrLabel: string): string {
   const s = (refOrLabel ?? "").trim();
   if (s.startsWith("path:")) {
@@ -104,9 +107,9 @@ export function displayModulePath(refOrLabel: string): string {
   return s;
 }
 
-/** Split a ref id into module + optional symbol (display parts, not ids). */
+/** Split a ref id into module + optional symbol. Module line keeps path:./. */
 export function refDisplayParts(id: string): { module: string; symbol: string } {
-  const raw = (id ?? "").trim();
+  const raw = normalizeRef(id ?? "");
   let base = raw;
   let symbol = "";
   const symIdx = raw.indexOf("::");
@@ -114,7 +117,7 @@ export function refDisplayParts(id: string): { module: string; symbol: string } 
     symbol = raw.slice(symIdx + 2);
     base = raw.slice(0, symIdx);
   }
-  return { module: displayModulePath(base), symbol };
+  return { module: base || "path:./", symbol };
 }
 
 /**
@@ -132,12 +135,12 @@ export type GraphViewMode = "package" | "reference";
 export type GraphLabelMode = GraphViewMode;
 
 /**
- * Canvas / tooltip label for a node.
- * package: one line (module only)
- * reference: two lines when a symbol exists (module\\nname)
+ * Canvas / tooltip label for a node — always shows canonical path:./…
+ * package: one line (path:./cmd/rft)
+ * reference: two lines when a symbol exists (path:./cmd/rft\\nname)
  */
 export function formatGraphLabel(id: string, mode: GraphViewMode): string {
   const { module, symbol } = refDisplayParts(id);
-  if (mode === "package" || !symbol) return module || ".";
+  if (mode === "package" || !symbol) return module;
   return `${module}\n${symbol}`;
 }
