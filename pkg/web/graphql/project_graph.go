@@ -80,6 +80,10 @@ func decorateNode(root string, n *GraphNode) *GraphNode {
 	if n == nil {
 		return n
 	}
+	// Re-key through graph id so go:example.com/app/pkg → path:./pkg when local.
+	if n.ID != "" {
+		n.ID = graphRefIDString(root, n.ID)
+	}
 	r := ingest.ParseReference(n.ID)
 	n.External = isExternalRef(r)
 	// External stubs are expandable until the client has loaded neighborhood(ref).
@@ -92,8 +96,48 @@ func isExternalRef(ref ingest.Reference) bool {
 	return p != "" && p != "path"
 }
 
+// tryLocalizeProviderToPath rewrites provider refs (go:example.com/app/pkg/lib) that
+// resolve inside the project tree to path:./pkg/lib. Absolute package dir under root
+// is the stable identity; relative path:./ form is the graph id.
+func tryLocalizeProviderToPath(root string, ref ingest.Reference) (ingest.Reference, bool) {
+	p := strings.ToLower(ref.Provider)
+	if p == "" || p == "path" {
+		return ref, false
+	}
+	scope, ok, err := ingest.NewResolver(root).ResolveScopeTarget(ingest.Reference{
+		Provider: ref.Provider,
+		Path:     ref.Path,
+	})
+	if err != nil || !ok || strings.TrimSpace(scope.Dir) == "" {
+		return ref, false
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return ref, false
+	}
+	dirAbs, err := filepath.Abs(scope.Dir)
+	if err != nil {
+		return ref, false
+	}
+	rel, err := filepath.Rel(rootAbs, dirAbs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return ref, false
+	}
+	rel = filepath.ToSlash(rel)
+	path := "./"
+	if rel != "." {
+		path = "./" + rel
+	}
+	return ingest.Reference{Provider: "path", Path: path, Symbol: ref.Symbol}, true
+}
+
 // projectScopeID maps a ref to a stable graph id for the project map.
+// Local provider packages (same module / under root) become path:./… so they
+// share identity with filesystem packages (not external orange stubs).
 func projectScopeID(root string, ref ingest.Reference) string {
+	if loc, ok := tryLocalizeProviderToPath(root, ref); ok {
+		ref = loc
+	}
 	ref.Symbol = ""
 	if isExternalRef(ref) {
 		return ingest.Reference{Provider: ref.Provider, Path: ref.Path}.String()

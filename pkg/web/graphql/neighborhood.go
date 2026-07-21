@@ -290,7 +290,12 @@ func graphNodeForRef(root string, ref ingest.Reference) *GraphNode {
 }
 
 // graphRefID normalizes a reference for the graph: file → module; atoms keep symbol on module path.
+// Local go:/python: packages under the project root are rewritten to path:./… first
+// so in-repo packages share one idempotent id (not external stubs).
 func graphRefID(root string, ref ingest.Reference) string {
+	if loc, ok := tryLocalizeProviderToPath(root, ref); ok {
+		ref = loc
+	}
 	if ref.Symbol != "" {
 		modID := projectScopeID(root, scopeRef(ref))
 		mod := ingest.ParseReference(modID)

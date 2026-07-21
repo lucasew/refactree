@@ -96,8 +96,12 @@ func (c *SessionCorpus) StreamVisit(ctx context.Context, ref string, emit Stream
 	return emitVisitEdges(ctx, c.root, parsed, focusID, result, emit)
 }
 
-// StreamProject discovers the project tree once into the corpus (new paths only),
-// materializes the visit set (all paths discovered this op), streams IMPORT edges.
+// StreamProject discovers the project tree, materializes extracts (parse cache via
+// Touch), and streams package-level IMPORTS + USES edges. Local go: packages that
+// live under the project root are rewritten to path:./… (not external).
+//
+// DiscoverDir always fills the visit set (not onlyNew): a prior Touch without a
+// completed Materialize must not skip edge emission on the next crawl.
 func (c *SessionCorpus) StreamProject(ctx context.Context, emit StreamEmitter) error {
 	if c == nil || emit == nil {
 		return nil
@@ -113,40 +117,53 @@ func (c *SessionCorpus) StreamProject(ctx context.Context, emit StreamEmitter) e
 		return context.Canceled
 	}
 
-	// onlyNew: file-browser PrimeVisit already filled the corpus — re-crawl
-	// only materializes paths not yet seen (much faster after opening files).
 	visit := make(map[string]*ingest.FileExtract)
-	if err := c.DiscoverDirNew("", true, visit); err != nil {
+	// Full visit map; Touch reuses already-parsed extracts (file browser primes).
+	if err := c.DiscoverDir("", true, visit); err != nil {
 		emit(StreamEvent{Type: "error", Message: err.Error()})
 		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-
 	if len(visit) == 0 {
-		// Nothing new since last crawl / file opens (corpus already warm).
 		return nil
 	}
 
 	result := c.MaterializeVisit(visit)
 	seen := map[string]bool{}
+	emitEdge := func(from, to string, kind EdgeKind) bool {
+		from = graphRefIDString(c.root, from)
+		to = graphRefIDString(c.root, to)
+		// Collapse atoms to package scope for the project map.
+		from = projectScopeID(c.root, scopeRef(ingest.ParseReference(from)))
+		to = projectScopeID(c.root, scopeRef(ingest.ParseReference(to)))
+		if from == "" || to == "" || from == to {
+			return true
+		}
+		e := &GraphEdge{From: from, To: to, Kind: kind}
+		k := edgeKey(e)
+		if seen[k] {
+			return true
+		}
+		seen[k] = true
+		return emit(StreamEvent{Type: "edge", Edge: e, Incomplete: boolPtr(true)})
+	}
+
 	for _, a := range result.Aliases {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		fromID := projectScopeID(c.root, ingest.ParseReference(a.Reference))
-		toID := projectScopeID(c.root, ingest.ParseReference(a.Target))
-		if fromID == "" || toID == "" || fromID == toID {
-			continue
+		if !emitEdge(a.Reference, a.Target, EdgeKindImports) {
+			return context.Canceled
 		}
-		e := &GraphEdge{From: fromID, To: toID, Kind: EdgeKindImports}
-		k := edgeKey(e)
-		if seen[k] {
-			continue
+	}
+	// Package-level USES so crawl matches refs seen when opening files.
+	for _, rel := range result.Relations {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		seen[k] = true
-		if !emit(StreamEvent{Type: "edge", Edge: e, Incomplete: boolPtr(true)}) {
+		if !emitEdge(rel.Reference, rel.Target, EdgeKindUses) {
 			return context.Canceled
 		}
 	}
