@@ -96,12 +96,12 @@ func (c *SessionCorpus) StreamVisit(ctx context.Context, ref string, emit Stream
 	return emitVisitEdges(ctx, c.root, parsed, focusID, result, emit)
 }
 
-// StreamProject discovers the project tree, materializes extracts (parse cache via
-// Touch), and streams package-level IMPORTS + USES edges. Local go: packages that
-// live under the project root are rewritten to path:./… (not external).
+// StreamProject walks the project tree and streams package-level IMPORTS + USES
+// edges progressively (parse → materialize → emit per file / small batch).
+// Local go: packages under the project root are rewritten to path:./… .
 //
-// DiscoverDir always fills the visit set (not onlyNew): a prior Touch without a
-// completed Materialize must not skip edge emission on the next crawl.
+// Unlike a bulk DiscoverDir+Materialize of the whole tree, edges are pushed as
+// soon as each file is ready so the UI is not blocked for a minute on large repos.
 func (c *SessionCorpus) StreamProject(ctx context.Context, emit StreamEmitter) error {
 	if c == nil || emit == nil {
 		return nil
@@ -117,25 +117,10 @@ func (c *SessionCorpus) StreamProject(ctx context.Context, emit StreamEmitter) e
 		return context.Canceled
 	}
 
-	visit := make(map[string]*ingest.FileExtract)
-	// Full visit map; Touch reuses already-parsed extracts (file browser primes).
-	if err := c.DiscoverDir("", true, visit); err != nil {
-		emit(StreamEvent{Type: "error", Message: err.Error()})
-		return err
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if len(visit) == 0 {
-		return nil
-	}
-
-	result := c.MaterializeVisit(visit)
 	seen := map[string]bool{}
 	emitEdge := func(from, to string, kind EdgeKind) bool {
 		from = graphRefIDString(c.root, from)
 		to = graphRefIDString(c.root, to)
-		// Collapse atoms to package scope for the project map.
 		from = projectScopeID(c.root, scopeRef(ingest.ParseReference(from)))
 		to = projectScopeID(c.root, scopeRef(ingest.ParseReference(to)))
 		if from == "" || to == "" || from == to {
@@ -150,22 +135,61 @@ func (c *SessionCorpus) StreamProject(ctx context.Context, emit StreamEmitter) e
 		return emit(StreamEvent{Type: "edge", Edge: e, Incomplete: boolPtr(true)})
 	}
 
-	for _, a := range result.Aliases {
+	flush := func(batch map[string]*ingest.FileExtract) bool {
+		if len(batch) == 0 {
+			return true
+		}
 		if err := ctx.Err(); err != nil {
-			return err
+			return false
 		}
-		if !emitEdge(a.Reference, a.Target, EdgeKindImports) {
-			return context.Canceled
+		result := c.MaterializeVisit(batch)
+		for _, a := range result.Aliases {
+			if !emitEdge(a.Reference, a.Target, EdgeKindImports) {
+				return false
+			}
 		}
+		for _, rel := range result.Relations {
+			if !emitEdge(rel.Reference, rel.Target, EdgeKindUses) {
+				return false
+			}
+		}
+		return true
 	}
-	// Package-level USES so crawl matches refs seen when opening files.
-	for _, rel := range result.Relations {
+
+	// Small batches: enough to amortize Materialize, small enough to stream early.
+	const batchSize = 3
+	batch := make(map[string]*ingest.FileExtract, batchSize)
+
+	err := ingest.WalkExtracts(ingest.ExtractSource{
+		Kind:      ingest.ExtractDir,
+		Root:      c.root,
+		Recursive: true,
+	}, func(fe *ingest.FileExtract) bool {
+		if fe == nil {
+			return true
+		}
 		if err := ctx.Err(); err != nil {
-			return err
+			return false
 		}
-		if !emitEdge(rel.Reference, rel.Target, EdgeKindUses) {
-			return context.Canceled
+		stored := c.Touch(fe)
+		key := extractRelKey(stored)
+		if key == "" {
+			return true
 		}
+		batch[key] = stored
+		if len(batch) < batchSize {
+			return true
+		}
+		ok := flush(batch)
+		batch = make(map[string]*ingest.FileExtract, batchSize)
+		return ok
+	})
+	if err != nil {
+		emit(StreamEvent{Type: "error", Message: err.Error()})
+		return err
+	}
+	if !flush(batch) {
+		return context.Canceled
 	}
 
 	inc := true
