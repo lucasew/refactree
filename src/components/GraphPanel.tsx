@@ -419,16 +419,23 @@ export function GraphPanel({
             return `${pretty} [${lang} · ${scope} · used by ${u}]${tip}`;
           }}
           backgroundColor={BG}
-          linkWidth={1.25}
+          linkWidth={viewMode === "package" ? 1.5 : 1.25}
           linkColor={(l: any) => {
             const kind = l.kind as string;
             if (kind === "IMPORTS") return "#7a8aaa";
             if (kind === "USED_BY") return "#aa8a7a";
             return "#8aaa7a";
           }}
-          linkDirectionalArrowLength={4}
+          // Package view: clear directed imports (importer → importee).
+          linkDirectionalArrowLength={viewMode === "package" ? 7 : 4}
           linkDirectionalArrowRelPos={1}
-          linkCurvature={0.05}
+          linkDirectionalArrowColor={() =>
+            viewMode === "package" ? "#a8b8d8" : "#8aaa7a"
+          }
+          linkCurvature={viewMode === "package" ? 0.15 : 0.05}
+          linkDirectionalParticles={viewMode === "package" ? 1 : 0}
+          linkDirectionalParticleWidth={viewMode === "package" ? 2 : 0}
+          linkDirectionalParticleSpeed={0.004}
           nodeCanvasObjectMode={() => "replace"}
           nodeCanvasObject={(node: any, ctx, globalScale) => {
             const label = formatGraphLabel(node.id, viewMode);

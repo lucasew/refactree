@@ -218,14 +218,17 @@ export function upsertSessionLink(fromRaw: string, toRaw: string, kind: string):
     ensurePackageNode(session.nodes.get(to)!);
   }
 
-  // Package projection: rewire endpoints to package scope.
-  const pf = packageScopeId(from);
-  const pt = packageScopeId(to);
-  if (pf && pt && pf !== pt && isPackageId(pf) && isPackageId(pt)) {
-    const pk = linkKey(pf, pt, kind);
-    if (!session.packageLinks.has(pk)) {
-      session.packageLinks.set(pk, { source: pf, target: pt, kind });
-      added = true;
+  // Package projection: only directed IMPORTS between packages
+  // (A imports B → A→B). Do not rewire USES/USED_BY — those blur direction.
+  if (kind === "IMPORTS") {
+    const pf = packageScopeId(from);
+    const pt = packageScopeId(to);
+    if (pf && pt && pf !== pt && isPackageId(pf) && isPackageId(pt)) {
+      const pk = linkKey(pf, pt, kind);
+      if (!session.packageLinks.has(pk)) {
+        session.packageLinks.set(pk, { source: pf, target: pt, kind: "IMPORTS" });
+        added = true;
+      }
     }
   }
 
