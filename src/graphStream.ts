@@ -312,9 +312,9 @@ export function sessionProject(handlers: StreamHandlers = {}): Promise<void> {
 }
 
 /**
- * Enable/disable sticky repo crawl on the server worker.
- * When enabled, the worker runs StreamProject when free (after visits), using
- * the ingest skip list. Disabling preempts an in-flight project crawl.
+ * Enable/disable sticky repo crawl on the server.
+ * When enabled, crawl runs in parallel with visit/expand (shared corpus).
+ * Disabling stops the crawl pump; the current batch may still finish.
  */
 export function setSessionCrawl(
   enabled: boolean,

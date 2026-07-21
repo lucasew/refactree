@@ -46,7 +46,7 @@ const BG = "#1a1814";
 
 /** Tooltip: crawl uses ingest skip list (node_modules, .venv, …). */
 const CRAWL_TITLE =
-  "When on: worker crawls the repo when free (after visits). Skips node_modules, .venv, vendor, dist, .git, …";
+  "When on: crawls the repo in parallel with click-to-expand. Skips node_modules, .venv, vendor, dist, .git, …";
 
 export function GraphPanel({
   focusId,
