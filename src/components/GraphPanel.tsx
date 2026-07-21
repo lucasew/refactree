@@ -209,6 +209,7 @@ export function GraphPanel({
     bump();
   }, [focusId, bump]);
 
+  // Projections are incremental; snapshot is O(mode size), not a full session rescan.
   const graphData = useMemo(() => {
     void tick;
     return snapshotGraphData(viewMode);

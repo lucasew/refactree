@@ -7,11 +7,11 @@ import {
 } from "./routes";
 
 /**
- * Session-wide graph facts + stable node object identity for force-graph.
- * Facts are always reference-level (full path:./pkg::Sym ids).
- * Package view projects a collapsed universe (one node per packageScopeId).
- * Positions live on FGNode objects; force-graph mutates them in place so
- * switching files/pages does not reset layout when we reuse the same objects.
+ * Session-wide graph facts + dual projections for package / reference views.
+ *
+ * Facts (nodes/links) are always full graph ids. Projections are maintained
+ * incrementally on upsert so snapshotGraphData is O(mode size), not a full
+ * rescan of the session every paint.
  */
 
 export type FGNode = {
@@ -36,24 +36,33 @@ export type FGLinkFact = {
 };
 
 export type GraphSession = {
-  /** Full-reference nodes (reference view universe). */
+  /** Full fact store (packages + atoms). */
   nodes: Map<string, FGNode>;
   links: Map<FGLinkKey, FGLinkFact>;
-  /** Collapsed package nodes (stable objects for package view layout). */
+  /** Incremental package projection (stable node objects). */
   packageNodes: Map<string, FGNode>;
-  /** External nodes already expanded via neighborhood. */
+  packageLinks: Map<FGLinkKey, FGLinkFact>;
+  /** Incremental reference/atom projection (subset of nodes + atom↔atom links). */
+  referenceNodes: Map<string, FGNode>;
+  referenceLinks: Map<FGLinkKey, FGLinkFact>;
   expanded: Set<string>;
   focusId: string;
   incomplete: boolean;
+  /** Bumps when a projection changes (optional dirty signal). */
+  version: number;
 };
 
 const session: GraphSession = {
   nodes: new Map(),
   links: new Map(),
   packageNodes: new Map(),
+  packageLinks: new Map(),
+  referenceNodes: new Map(),
+  referenceLinks: new Map(),
   expanded: new Set(),
   focusId: "",
   incomplete: true,
+  version: 0,
 };
 
 export function getGraphSession(): GraphSession {
@@ -87,66 +96,6 @@ export type IncomingNeighborhood = {
   edges: ReadonlyArray<IncomingEdge | null | undefined>;
 } | null | undefined;
 
-/** Merge a neighborhood into the session, reusing node objects for stable positions. */
-export function mergeNeighborhood(
-  nb: IncomingNeighborhood,
-  focusFallback = ""
-): { addedNodes: number; addedLinks: number } {
-  if (!nb) return { addedNodes: 0, addedLinks: 0 };
-  let addedNodes = 0;
-  let addedLinks = 0;
-  const s = session;
-
-  for (const n of nb.nodes ?? []) {
-    if (!n?.id) continue;
-    const id = graphScopeId(n.id);
-    const name = formatGraphLabel(id, "reference");
-    const existing = s.nodes.get(id);
-    if (existing) {
-      existing.name = name;
-      existing.kind = id.includes("::") ? n.kind : "MODULE";
-      if (n.external != null) existing.external = n.external;
-      if (n.expandable != null) existing.expandable = n.expandable;
-      if (n.language != null) existing.language = n.language || existing.language;
-      // keep x,y,vx,vy
-    } else {
-      s.nodes.set(id, {
-        id,
-        name,
-        kind: id.includes("::") ? n.kind : "MODULE",
-        external: !!n.external,
-        expandable: !!n.expandable,
-        language: n.language || undefined,
-      });
-      addedNodes++;
-    }
-  }
-
-  for (const e of nb.edges ?? []) {
-    if (!e?.from || !e?.to) continue;
-    const from = graphScopeId(e.from);
-    const to = graphScopeId(e.to);
-    if (!from || !to || from === to) continue;
-    const k = linkKey(from, to, e.kind);
-    if (!s.links.has(k)) {
-      s.links.set(k, { source: from, target: to, kind: e.kind });
-      addedLinks++;
-    }
-  }
-
-  s.incomplete = nb.incomplete;
-  const focusRaw = nb.focus?.id ?? focusFallback;
-  s.focusId = focusRaw ? graphScopeId(focusRaw) : s.focusId;
-  return { addedNodes, addedLinks };
-}
-
-export function markExpanded(id: string) {
-  const nid = normalizeRef(id);
-  session.expanded.add(nid);
-  const n = session.nodes.get(nid);
-  if (n) n.expandable = false;
-}
-
 export function isExternalId(id: string): boolean {
   const i = id.indexOf(":");
   if (i <= 0) return false;
@@ -154,7 +103,6 @@ export function isExternalId(id: string): boolean {
   return prov !== "path";
 }
 
-/** Atom / symbol reference id (has ::). Packages have no ::. */
 export function isReferenceId(id: string): boolean {
   return (id ?? "").includes("::");
 }
@@ -164,110 +112,201 @@ export function isPackageId(id: string): boolean {
   return s !== "" && !s.includes("::");
 }
 
+function bumpVersion() {
+  session.version++;
+}
+
+/** Ensure package projection has a stable node for packageScopeId(id). */
+function ensurePackageNode(fromFact: FGNode): FGNode {
+  const pid = packageScopeId(fromFact.id);
+  let p = session.packageNodes.get(pid);
+  if (!p) {
+    const seed = session.nodes.get(pid);
+    if (seed && isPackageId(seed.id)) {
+      p = seed;
+    } else {
+      p = {
+        id: pid,
+        name: formatGraphLabel(pid, "package"),
+        kind: "MODULE",
+        external: !!fromFact.external,
+        expandable: !!fromFact.expandable && !!fromFact.external,
+        language: fromFact.language,
+      };
+    }
+    session.packageNodes.set(pid, p);
+  }
+  p.id = pid;
+  p.name = formatGraphLabel(pid, "package");
+  p.kind = "MODULE";
+  if (fromFact.external) p.external = true;
+  if (fromFact.expandable && fromFact.external) p.expandable = true;
+  if (fromFact.language && !p.language) p.language = fromFact.language;
+  return p;
+}
+
 /**
- * Project session facts for the canvas.
- * - package: only package/module nodes (no atoms); edges rewired to packages
- * - reference: only atom/symbol refs (path:./pkg::Sym); package-only nodes hidden
+ * Upsert a fact node and maintain package/reference projections incrementally.
+ */
+export function upsertSessionNode(partial: {
+  id: string;
+  kind?: string;
+  name?: string;
+  external?: boolean;
+  expandable?: boolean;
+  language?: string;
+}): FGNode {
+  const id = graphScopeId(partial.id);
+  const isAtom = isReferenceId(id);
+  const existing = session.nodes.get(id);
+  if (existing) {
+    if (partial.name) existing.name = partial.name;
+    else existing.name = formatGraphLabel(id, "reference");
+    if (partial.kind) existing.kind = isAtom ? partial.kind : "MODULE";
+    else if (!isAtom) existing.kind = "MODULE";
+    if (partial.external != null) existing.external = partial.external;
+    if (partial.expandable != null) existing.expandable = partial.expandable;
+    if (partial.language) existing.language = partial.language;
+    ensurePackageNode(existing);
+    if (isAtom) {
+      session.referenceNodes.set(id, existing);
+    }
+    bumpVersion();
+    return existing;
+  }
+  const node: FGNode = {
+    id,
+    name: partial.name || formatGraphLabel(id, "reference"),
+    kind: isAtom ? partial.kind || "ATOM" : "MODULE",
+    external: !!partial.external,
+    expandable: !!partial.expandable,
+    language: partial.language,
+  };
+  session.nodes.set(id, node);
+  ensurePackageNode(node);
+  if (isAtom) {
+    session.referenceNodes.set(id, node);
+  }
+  bumpVersion();
+  return node;
+}
+
+/**
+ * Upsert a fact edge and maintain package/reference link projections.
+ */
+export function upsertSessionLink(fromRaw: string, toRaw: string, kind: string): boolean {
+  const from = graphScopeId(fromRaw);
+  const to = graphScopeId(toRaw);
+  if (!from || !to || from === to) return false;
+
+  const k = linkKey(from, to, kind);
+  let added = false;
+  if (!session.links.has(k)) {
+    session.links.set(k, { source: from, target: to, kind });
+    added = true;
+  }
+
+  // Ensure endpoint facts exist (stubs).
+  if (!session.nodes.has(from)) {
+    upsertSessionNode({ id: from, kind: isReferenceId(from) ? "ATOM" : "MODULE" });
+  } else {
+    ensurePackageNode(session.nodes.get(from)!);
+  }
+  if (!session.nodes.has(to)) {
+    upsertSessionNode({ id: to, kind: isReferenceId(to) ? "ATOM" : "MODULE" });
+  } else {
+    ensurePackageNode(session.nodes.get(to)!);
+  }
+
+  // Package projection: rewire endpoints to package scope.
+  const pf = packageScopeId(from);
+  const pt = packageScopeId(to);
+  if (pf && pt && pf !== pt && isPackageId(pf) && isPackageId(pt)) {
+    const pk = linkKey(pf, pt, kind);
+    if (!session.packageLinks.has(pk)) {
+      session.packageLinks.set(pk, { source: pf, target: pt, kind });
+      added = true;
+    }
+  }
+
+  // Reference projection: only atom ↔ atom.
+  if (isReferenceId(from) && isReferenceId(to)) {
+    const rk = linkKey(from, to, kind);
+    if (!session.referenceLinks.has(rk)) {
+      session.referenceLinks.set(rk, { source: from, target: to, kind });
+      added = true;
+    }
+    const a = session.nodes.get(from);
+    const b = session.nodes.get(to);
+    if (a) session.referenceNodes.set(from, a);
+    if (b) session.referenceNodes.set(to, b);
+  }
+
+  if (added) bumpVersion();
+  return added;
+}
+
+/** Merge a neighborhood into the session, reusing node objects for stable positions. */
+export function mergeNeighborhood(
+  nb: IncomingNeighborhood,
+  focusFallback = ""
+): { addedNodes: number; addedLinks: number } {
+  if (!nb) return { addedNodes: 0, addedLinks: 0 };
+  let addedNodes = 0;
+  let addedLinks = 0;
+
+  for (const n of nb.nodes ?? []) {
+    if (!n?.id) continue;
+    const before = session.nodes.has(graphScopeId(n.id));
+    upsertSessionNode({
+      id: n.id,
+      kind: n.kind,
+      name: formatGraphLabel(graphScopeId(n.id), "reference"),
+      external: n.external ?? undefined,
+      expandable: n.expandable ?? undefined,
+      language: n.language ?? undefined,
+    });
+    if (!before) addedNodes++;
+  }
+
+  for (const e of nb.edges ?? []) {
+    if (!e?.from || !e?.to) continue;
+    if (upsertSessionLink(e.from, e.to, e.kind)) addedLinks++;
+  }
+
+  session.incomplete = nb.incomplete;
+  const focusRaw = nb.focus?.id ?? focusFallback;
+  session.focusId = focusRaw ? graphScopeId(focusRaw) : session.focusId;
+  return { addedNodes, addedLinks };
+}
+
+export function markExpanded(id: string) {
+  const nid = graphScopeId(id);
+  session.expanded.add(nid);
+  const n = session.nodes.get(nid);
+  if (n) n.expandable = false;
+  const p = session.packageNodes.get(packageScopeId(nid));
+  if (p) p.expandable = false;
+}
+
+/**
+ * O(projection size) snapshot — projections are maintained on upsert.
  */
 export function snapshotGraphData(
   mode: GraphViewMode = "reference"
 ): { nodes: FGNode[]; links: { source: string; target: string; kind: string }[] } {
   if (mode === "package") {
-    return snapshotPackageGraphData();
-  }
-  return snapshotReferenceGraphData();
-}
-
-/** Reference view: atoms only (ids with ::). */
-function snapshotReferenceGraphData(): {
-  nodes: FGNode[];
-  links: { source: string; target: string; kind: string }[];
-} {
-  const nodes = Array.from(session.nodes.values()).filter((n) => isReferenceId(n.id));
-  const ids = new Set(nodes.map((n) => n.id));
-  const links: { source: string; target: string; kind: string }[] = [];
-  const seenLink = new Set<string>();
-  for (const l of session.links.values()) {
-    const from = l.source;
-    const to = l.target;
-    if (!isReferenceId(from) || !isReferenceId(to)) continue;
-    if (!ids.has(from) || !ids.has(to)) continue;
-    if (from === to) continue;
-    const k = `${from}\0${to}\0${l.kind}`;
-    if (seenLink.has(k)) continue;
-    seenLink.add(k);
-    links.push({ source: from, target: to, kind: l.kind });
-  }
-  return { nodes, links };
-}
-
-/** Package view: packages only (no ::); collapse atoms into their package. */
-function snapshotPackageGraphData(): {
-  nodes: FGNode[];
-  links: { source: string; target: string; kind: string }[];
-} {
-  const seenPkg = new Set<string>();
-
-  for (const n of session.nodes.values()) {
-    const pid = packageScopeId(n.id);
-    if (!isPackageId(pid)) continue;
-    seenPkg.add(pid);
-    let p = session.packageNodes.get(pid);
-    if (!p) {
-      // Prefer reusing the module-level session node object for stable positions.
-      const seed = session.nodes.get(pid);
-      if (seed && isPackageId(seed.id)) {
-        p = seed;
-      } else {
-        p = {
-          id: pid,
-          name: formatGraphLabel(pid, "package"),
-          kind: "MODULE",
-          external: !!n.external,
-          expandable: !!n.expandable && !!n.external,
-          language: n.language,
-        };
-      }
-      session.packageNodes.set(pid, p);
+    const nodes = Array.from(session.packageNodes.values());
+    const links: { source: string; target: string; kind: string }[] = [];
+    for (const l of session.packageLinks.values()) {
+      links.push({ source: l.source, target: l.target, kind: l.kind });
     }
-    p.id = pid;
-    p.name = formatGraphLabel(pid, "package");
-    p.kind = "MODULE";
-    if (n.external) p.external = true;
-    if (n.expandable && n.external) p.expandable = true;
-    if (n.language && !p.language) p.language = n.language;
+    return { nodes, links };
   }
-
-  // Also include pure package nodes already in session (imports with no atoms yet).
-  for (const n of session.nodes.values()) {
-    if (!isPackageId(n.id)) continue;
-    seenPkg.add(n.id);
-    if (!session.packageNodes.has(n.id)) {
-      session.packageNodes.set(n.id, n);
-    }
-  }
-
-  for (const id of Array.from(session.packageNodes.keys())) {
-    if (!seenPkg.has(id)) session.packageNodes.delete(id);
-  }
-
-  const nodes = Array.from(session.packageNodes.values()).filter(
-    (n) => seenPkg.has(n.id) && isPackageId(n.id)
-  );
-  const ids = new Set(nodes.map((n) => n.id));
+  const nodes = Array.from(session.referenceNodes.values());
   const links: { source: string; target: string; kind: string }[] = [];
-  const seenLink = new Set<string>();
-  for (const l of session.links.values()) {
-    const from = packageScopeId(l.source);
-    const to = packageScopeId(l.target);
-    if (!from || !to || from === to) continue;
-    if (!isPackageId(from) || !isPackageId(to)) continue;
-    if (!ids.has(from) || !ids.has(to)) continue;
-    // Prefer IMPORTS for package map; still show USES rewired to packages.
-    const k = `${from}\0${to}\0${l.kind}`;
-    if (seenLink.has(k)) continue;
-    seenLink.add(k);
-    links.push({ source: from, target: to, kind: l.kind });
+  for (const l of session.referenceLinks.values()) {
+    links.push({ source: l.source, target: l.target, kind: l.kind });
   }
   return { nodes, links };
 }
@@ -277,6 +316,5 @@ export function viewFocusId(focusId: string, mode: GraphViewMode): string {
   const id = normalizeRef(focusId || "");
   if (!id) return id;
   if (mode === "package") return packageScopeId(id);
-  // Reference view: only highlight if focus is an atom; else no package highlight.
-  return isReferenceId(id) ? id : "";
+  return isReferenceId(id) ? graphScopeId(id) : "";
 }

@@ -7,8 +7,9 @@
 import {
   getGraphSession,
   isExternalId,
-  linkKey,
   markExpanded,
+  upsertSessionLink,
+  upsertSessionNode,
   type IncomingEdge,
   type IncomingNode,
 } from "./graphSession";
@@ -176,31 +177,15 @@ function stubFromId(rawId: string): IncomingNode {
 }
 
 function applyNode(n: IncomingNode, _markResolved = true) {
-  const s = getGraphSession();
   const id = graphScopeId(n.id);
-  // Always label from id so server short labels cannot drop path:./.
-  const name = formatGraphLabel(id, "reference");
-  const existing = s.nodes.get(id);
-  if (existing) {
-    existing.name = name;
-    existing.kind = n.kind || existing.kind;
-    // Prefer MODULE when we collapse file stubs into a package node.
-    if (n.kind === "MODULE" || !id.includes("::")) {
-      if (!id.includes("::")) existing.kind = "MODULE";
-    }
-    if (n.external != null) existing.external = !!n.external;
-    if (n.expandable != null) existing.expandable = !!n.expandable;
-    if (n.language) existing.language = n.language;
-  } else {
-    s.nodes.set(id, {
-      id,
-      name,
-      kind: id.includes("::") ? n.kind || "ATOM" : "MODULE",
-      external: !!n.external,
-      expandable: !!n.expandable,
-      language: n.language || inferLanguageFromId(id),
-    });
-  }
+  upsertSessionNode({
+    id,
+    kind: n.kind,
+    name: formatGraphLabel(id, "reference"),
+    external: n.external ?? undefined,
+    expandable: n.expandable ?? undefined,
+    language: n.language || inferLanguageFromId(id),
+  });
 }
 
 function ensureStub(rawId: string) {
@@ -215,16 +200,11 @@ function ensureStub(rawId: string) {
 
 function applyEdge(e: IncomingEdge) {
   if (!e.from || !e.to) return;
-  const from = graphScopeId(e.from);
-  const to = graphScopeId(e.to);
-  if (!from || !to || from === to) return;
-  const s = getGraphSession();
-  const k = linkKey(from, to, e.kind);
-  if (!s.links.has(k)) {
-    s.links.set(k, { source: from, target: to, kind: e.kind });
-  }
-  ensureStub(from);
-  ensureStub(to);
+  upsertSessionLink(e.from, e.to, e.kind);
+  // Hydrate endpoints on demand (upsertSessionLink already stubs facts).
+  pendingNodeIds.add(graphScopeId(e.from));
+  pendingNodeIds.add(graphScopeId(e.to));
+  scheduleHydrate();
 }
 
 function scheduleHydrate() {
