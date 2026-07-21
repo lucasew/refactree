@@ -248,7 +248,8 @@ export function GraphPanel({
       if (charge && typeof charge.strength === "function") {
         charge.strength((node: { id?: string }) => {
           const u = getUse(node.id ?? "");
-          return -24 - Math.max(0, 10 - u) * 5;
+          // Stronger global repulsion so pairs keep more distance.
+          return -40 - Math.max(0, 10 - u) * 6;
         });
       }
     } catch {
@@ -264,36 +265,37 @@ export function GraphPanel({
           const a = getUse(idOf(l.source));
           const b = getUse(idOf(l.target));
           const avg = (a + b) / 2;
-          return 42 + Math.max(0, 14 - avg) * 3;
+          return 58 + Math.max(0, 14 - avg) * 4;
         });
       }
     } catch {
       /* ignore */
     }
 
-    const densR = Math.max(40, Math.min(size.w, size.h) * 0.08 || 52);
+    // Wider neighborhood + stronger pairwise push = denser clusters open up.
+    const densR = Math.max(56, Math.min(size.w, size.h) * 0.12 || 72);
     fg.d3Force(
       "usageGravity",
       forceUsageGravity(getUse, {
         densityRadius: densR,
-        densityWeight: 0.65,
+        densityWeight: 0.85,
       })
     );
     fg.d3Force(
       "usageRadial",
       forceUsageRadial(getUse, {
-        outer: Math.min(size.w, size.h) * 0.4 || 200,
-        inner: 14,
+        outer: Math.min(size.w, size.h) * 0.42 || 220,
+        inner: 18,
         strength: 0.14,
         densityRadius: densR,
-        densitySpread: 32,
+        densitySpread: 56,
       })
     );
     fg.d3Force(
       "nodeDensity",
       forceNodeDensity({
         radius: densR,
-        strength: 0.42,
+        strength: 0.75,
       })
     );
     fg.d3Force(
