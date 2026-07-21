@@ -26,6 +26,8 @@ type ServerMsg = {
   type: string;
   node?: IncomingNode & { parentId?: string | null };
   edge?: { from: string; to: string; kind: string };
+  /** Batched edges (~1s flush from server). */
+  edges?: Array<{ from: string; to: string; kind: string } | null | undefined> | null;
   incomplete?: boolean;
   message?: string;
   visitRef?: string;
@@ -150,6 +152,14 @@ class GraphExploreClient {
             to: msg.edge.to,
             kind: msg.edge.kind,
           });
+        }
+        break;
+      case "edges":
+        if (msg.edges?.length) {
+          for (const e of msg.edges) {
+            if (!e?.from || !e?.to) continue;
+            applyEdge({ from: e.from, to: e.to, kind: e.kind });
+          }
         }
         break;
       case "error":

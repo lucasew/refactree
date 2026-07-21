@@ -31,12 +31,80 @@ type graphSessionIn struct {
 }
 
 type graphSessionOut struct {
-	Type       string             `json:"type"` // ready | focus | edge | done | error | pong
-	Node       *graphql.GraphNode `json:"node,omitempty"`
-	Edge       *graphql.GraphEdge `json:"edge,omitempty"`
-	Incomplete *bool              `json:"incomplete,omitempty"`
-	Message    string             `json:"message,omitempty"`
-	VisitRef   string             `json:"visitRef,omitempty"`
+	Type       string               `json:"type"` // ready | focus | edge | edges | done | error | pong
+	Node       *graphql.GraphNode   `json:"node,omitempty"`
+	Edge       *graphql.GraphEdge   `json:"edge,omitempty"`  // legacy single
+	Edges      []*graphql.GraphEdge `json:"edges,omitempty"` // batched (~1s flush)
+	Incomplete *bool                `json:"incomplete,omitempty"`
+	Message    string               `json:"message,omitempty"`
+	VisitRef   string               `json:"visitRef,omitempty"`
+}
+
+// edgeWireBatcher accumulates edges and flushes on a timer (or size cap / Flush).
+// Avoids one WebSocket frame per edge during crawl.
+type edgeWireBatcher struct {
+	ctx        context.Context
+	outbox     chan<- graphSessionOut
+	mu         sync.Mutex
+	buf        []*graphql.GraphEdge
+	timer      *time.Timer
+	flushEvery time.Duration
+	maxBuf     int
+}
+
+func newEdgeWireBatcher(ctx context.Context, outbox chan<- graphSessionOut) *edgeWireBatcher {
+	return &edgeWireBatcher{
+		ctx:        ctx,
+		outbox:     outbox,
+		flushEvery: time.Second,
+		maxBuf:     64,
+	}
+}
+
+func (b *edgeWireBatcher) Add(e *graphql.GraphEdge) bool {
+	if e == nil {
+		return true
+	}
+	if b.ctx.Err() != nil {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf = append(b.buf, e)
+	if len(b.buf) >= b.maxBuf {
+		return b.flushLocked()
+	}
+	if b.timer == nil {
+		b.timer = time.AfterFunc(b.flushEvery, func() { b.Flush() })
+	}
+	return true
+}
+
+// Flush sends any buffered edges immediately (call before done).
+func (b *edgeWireBatcher) Flush() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.flushLocked()
+}
+
+func (b *edgeWireBatcher) flushLocked() bool {
+	if b.timer != nil {
+		b.timer.Stop()
+		b.timer = nil
+	}
+	if len(b.buf) == 0 {
+		return true
+	}
+	edges := b.buf
+	b.buf = nil
+	inc := true
+	// Unlock not held across send — we already hold lock; sendOut may block.
+	// Copy done; release by sending under lock is OK (same as other sendOut paths).
+	return sendOut(b.ctx, b.outbox, graphSessionOut{
+		Type:       "edges",
+		Edges:      edges,
+		Incomplete: &inc,
+	})
 }
 
 // crawlBatch is one unit of project crawl work for the crawl worker.
@@ -155,6 +223,7 @@ func (s *Server) handleGraphSession(w http.ResponseWriter, r *http.Request) {
 	crawlKick := make(chan struct{}, 1)
 
 	sess := newGraphExploreSession(s.loader.RootDir, s.corpus)
+	edgeBatch := newEdgeWireBatcher(ctx, outbox)
 	kick := func() {
 		select {
 		case crawlKick <- struct{}{}:
@@ -288,8 +357,9 @@ func (s *Server) handleGraphSession(w http.ResponseWriter, r *http.Request) {
 			}
 			_ = pumpBatch()
 
-			// Full walk finished (or stopped). Signal done if still crawling.
+			// Full walk finished (or stopped). Flush edges then done.
 			if sess.crawlOn.Load() && !sess.crawlPause.Load() {
+				_ = edgeBatch.Flush()
 				inc := true
 				_ = sendOut(ctx, outbox, graphSessionOut{Type: "done", Incomplete: &inc, VisitRef: "project"})
 			}
@@ -310,7 +380,7 @@ func (s *Server) handleGraphSession(w http.ResponseWriter, r *http.Request) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		emit := sess.deltaEmitter(ctx, outbox)
+		emit := sess.deltaEmitter(ctx, outbox, edgeBatch)
 
 		drainCrawl := func() {
 			for {
@@ -327,30 +397,34 @@ func (s *Server) handleGraphSession(w http.ResponseWriter, r *http.Request) {
 			// Prefer pending visits without blocking on crawl.
 			select {
 			case <-ctx.Done():
+				_ = edgeBatch.Flush()
 				return
 			case ref := <-visitCh:
 				sess.crawlPause.Store(true)
 				drainCrawl() // unblock pump if it was sending into a full buffer
-				sess.handleVisitPriority(ctx, ref, outbox, kick)
+				sess.handleVisitPriority(ctx, ref, outbox, edgeBatch, kick)
 				continue
 			default:
 			}
 
 			select {
 			case <-ctx.Done():
+				_ = edgeBatch.Flush()
 				return
 			case ref := <-visitCh:
 				sess.crawlPause.Store(true)
 				drainCrawl()
-				sess.handleVisitPriority(ctx, ref, outbox, kick)
+				sess.handleVisitPriority(ctx, ref, outbox, edgeBatch, kick)
 			case batch, ok := <-crawlCh:
 				if !ok {
+					_ = edgeBatch.Flush()
 					return
 				}
 				// Finish this batch fully — preemption only stops the pump from
 				// enqueueing the next batch (no mid-Materialize cancel).
 				if !sess.corpus.EmitProjectBatch(ctx, batch, emit) {
 					if ctx.Err() != nil {
+						_ = edgeBatch.Flush()
 						return
 					}
 				}
@@ -424,10 +498,17 @@ func (s *Server) handleGraphSession(w http.ResponseWriter, r *http.Request) {
 	wg.Wait()
 }
 
-func (s *graphExploreSession) handleVisitPriority(ctx context.Context, ref string, outbox chan<- graphSessionOut, kick func()) {
+func (s *graphExploreSession) handleVisitPriority(
+	ctx context.Context,
+	ref string,
+	outbox chan<- graphSessionOut,
+	edgeBatch *edgeWireBatcher,
+	kick func(),
+) {
 	// crawlPause already set by worker before drain.
-	emit := s.deltaEmitter(ctx, outbox)
+	emit := s.deltaEmitter(ctx, outbox, edgeBatch)
 	_ = s.corpus.StreamVisit(ctx, ref, emit)
+	_ = edgeBatch.Flush()
 	inc := true
 	_ = sendOut(ctx, outbox, graphSessionOut{Type: "done", Incomplete: &inc, VisitRef: ref})
 	s.crawlPause.Store(false)
@@ -450,13 +531,21 @@ func (s *graphExploreSession) emitPackageFocus(ctx context.Context, ref string, 
 	})
 }
 
-func (s *graphExploreSession) deltaEmitter(ctx context.Context, outbox chan<- graphSessionOut) graphql.StreamEmitter {
+func (s *graphExploreSession) deltaEmitter(
+	ctx context.Context,
+	outbox chan<- graphSessionOut,
+	edgeBatch *edgeWireBatcher,
+) graphql.StreamEmitter {
 	return func(ev graphql.StreamEvent) bool {
 		if ctx.Err() != nil {
 			return false
 		}
 		switch ev.Type {
 		case "focus":
+			// Flush edges so ordering stays focus-then-related edges when possible.
+			if edgeBatch != nil {
+				_ = edgeBatch.Flush()
+			}
 			return sendOut(ctx, outbox, graphSessionOut{Type: "focus", Node: ev.Node, Incomplete: ev.Incomplete})
 		case "edge":
 			if ev.Edge == nil {
@@ -470,8 +559,14 @@ func (s *graphExploreSession) deltaEmitter(ctx context.Context, outbox chan<- gr
 			}
 			s.seen[k] = true
 			s.mu.Unlock()
+			if edgeBatch != nil {
+				return edgeBatch.Add(ev.Edge)
+			}
 			return sendOut(ctx, outbox, graphSessionOut{Type: "edge", Edge: ev.Edge, Incomplete: ev.Incomplete})
 		case "error":
+			if edgeBatch != nil {
+				_ = edgeBatch.Flush()
+			}
 			_ = sendOut(ctx, outbox, graphSessionOut{Type: "error", Message: ev.Message})
 			return true
 		case "done":

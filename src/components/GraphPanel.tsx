@@ -163,7 +163,9 @@ export function GraphPanel({
     });
     const unsub = getGraphSessionClient().subscribe((msg) => {
       if (cancelled) return;
-      if (msg.type === "edge" || msg.type === "focus") bump({ reheat: true });
+      if (msg.type === "edge" || msg.type === "edges" || msg.type === "focus") {
+        bump({ reheat: true });
+      }
       if (msg.type === "done") bump({ reheat: true });
     });
     return () => {
