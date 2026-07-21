@@ -34,14 +34,13 @@ export function normalizeRef(ref: string): string {
     }
   } else if (s.startsWith("./") || s.startsWith("../") || s.startsWith("/")) {
     base = "path:" + s;
-  } else if (symbol !== "" || s.includes("/") || s.startsWith(".")) {
-    // Bare path / shorthand (Go Parse treats these as path provider).
-    base = "path:./" + s.replace(/^\.\//, "");
   } else if (s === "" || s === ".") {
     base = "path:./";
   } else {
-    // Bare identifier without provider — leave as-is (not a path ref).
-    base = s;
+    // Bare token (cmd, cmd/rft, main.go, …) → project path ref.
+    // External providers always arrive as "go:…", "node:…", already handled above.
+    // Folder clicks and /code/cmd URLs must not stay as bare "cmd".
+    base = "path:./" + s.replace(/^\.\//, "");
   }
 
   return symbol !== "" ? base + "::" + symbol : base;
