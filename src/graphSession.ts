@@ -154,10 +154,20 @@ export function isExternalId(id: string): boolean {
   return prov !== "path";
 }
 
+/** Atom / symbol reference id (has ::). Packages have no ::. */
+export function isReferenceId(id: string): boolean {
+  return (id ?? "").includes("::");
+}
+
+export function isPackageId(id: string): boolean {
+  const s = id ?? "";
+  return s !== "" && !s.includes("::");
+}
+
 /**
  * Project session facts for the canvas.
- * - reference: one node per full ref id (path:./pkg::Sym kept distinct)
- * - package: collapse to packageScopeId (path:./cmd/rft once; edges rewired)
+ * - package: only package/module nodes (no atoms); edges rewired to packages
+ * - reference: only atom/symbol refs (path:./pkg::Sym); package-only nodes hidden
  */
 export function snapshotGraphData(
   mode: GraphViewMode = "reference"
@@ -165,18 +175,33 @@ export function snapshotGraphData(
   if (mode === "package") {
     return snapshotPackageGraphData();
   }
-  const nodes = Array.from(session.nodes.values());
+  return snapshotReferenceGraphData();
+}
+
+/** Reference view: atoms only (ids with ::). */
+function snapshotReferenceGraphData(): {
+  nodes: FGNode[];
+  links: { source: string; target: string; kind: string }[];
+} {
+  const nodes = Array.from(session.nodes.values()).filter((n) => isReferenceId(n.id));
   const ids = new Set(nodes.map((n) => n.id));
   const links: { source: string; target: string; kind: string }[] = [];
+  const seenLink = new Set<string>();
   for (const l of session.links.values()) {
-    if (ids.has(l.source) && ids.has(l.target)) {
-      // fresh link objects (string ends) so force-graph cannot corrupt the Map
-      links.push({ source: l.source, target: l.target, kind: l.kind });
-    }
+    const from = l.source;
+    const to = l.target;
+    if (!isReferenceId(from) || !isReferenceId(to)) continue;
+    if (!ids.has(from) || !ids.has(to)) continue;
+    if (from === to) continue;
+    const k = `${from}\0${to}\0${l.kind}`;
+    if (seenLink.has(k)) continue;
+    seenLink.add(k);
+    links.push({ source: from, target: to, kind: l.kind });
   }
   return { nodes, links };
 }
 
+/** Package view: packages only (no ::); collapse atoms into their package. */
 function snapshotPackageGraphData(): {
   nodes: FGNode[];
   links: { source: string; target: string; kind: string }[];
@@ -185,12 +210,13 @@ function snapshotPackageGraphData(): {
 
   for (const n of session.nodes.values()) {
     const pid = packageScopeId(n.id);
+    if (!isPackageId(pid)) continue;
     seenPkg.add(pid);
     let p = session.packageNodes.get(pid);
     if (!p) {
-      // Prefer reusing the module-level session node object so positions match reference view.
+      // Prefer reusing the module-level session node object for stable positions.
       const seed = session.nodes.get(pid);
-      if (seed) {
+      if (seed && isPackageId(seed.id)) {
         p = seed;
       } else {
         p = {
@@ -204,7 +230,6 @@ function snapshotPackageGraphData(): {
       }
       session.packageNodes.set(pid, p);
     }
-    // Keep package node id/name/kind coherent under collapse.
     p.id = pid;
     p.name = formatGraphLabel(pid, "package");
     p.kind = "MODULE";
@@ -213,12 +238,22 @@ function snapshotPackageGraphData(): {
     if (n.language && !p.language) p.language = n.language;
   }
 
-  // Drop package placeholders that no longer have members (session shrink rare).
+  // Also include pure package nodes already in session (imports with no atoms yet).
+  for (const n of session.nodes.values()) {
+    if (!isPackageId(n.id)) continue;
+    seenPkg.add(n.id);
+    if (!session.packageNodes.has(n.id)) {
+      session.packageNodes.set(n.id, n);
+    }
+  }
+
   for (const id of Array.from(session.packageNodes.keys())) {
     if (!seenPkg.has(id)) session.packageNodes.delete(id);
   }
 
-  const nodes = Array.from(session.packageNodes.values()).filter((n) => seenPkg.has(n.id));
+  const nodes = Array.from(session.packageNodes.values()).filter(
+    (n) => seenPkg.has(n.id) && isPackageId(n.id)
+  );
   const ids = new Set(nodes.map((n) => n.id));
   const links: { source: string; target: string; kind: string }[] = [];
   const seenLink = new Set<string>();
@@ -226,7 +261,9 @@ function snapshotPackageGraphData(): {
     const from = packageScopeId(l.source);
     const to = packageScopeId(l.target);
     if (!from || !to || from === to) continue;
+    if (!isPackageId(from) || !isPackageId(to)) continue;
     if (!ids.has(from) || !ids.has(to)) continue;
+    // Prefer IMPORTS for package map; still show USES rewired to packages.
     const k = `${from}\0${to}\0${l.kind}`;
     if (seenLink.has(k)) continue;
     seenLink.add(k);
@@ -235,9 +272,11 @@ function snapshotPackageGraphData(): {
   return { nodes, links };
 }
 
-/** Focus id for the current view (package view maps atoms → package). */
+/** Focus id for the current view. */
 export function viewFocusId(focusId: string, mode: GraphViewMode): string {
   const id = normalizeRef(focusId || "");
   if (!id) return id;
-  return mode === "package" ? packageScopeId(id) : id;
+  if (mode === "package") return packageScopeId(id);
+  // Reference view: only highlight if focus is an atom; else no package highlight.
+  return isReferenceId(id) ? id : "";
 }

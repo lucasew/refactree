@@ -374,7 +374,7 @@ export function GraphPanel({
           <button
             type="button"
             className={`btn btn-xs join-item ${viewMode === "package" ? "btn-active" : ""}`}
-            title="One node per package (path:./cmd/rft once)"
+            title="Packages only (no symbols)"
             onClick={() => setViewMode("package")}
           >
             package
@@ -382,7 +382,7 @@ export function GraphPanel({
           <button
             type="button"
             className={`btn btn-xs join-item ${viewMode === "reference" ? "btn-active" : ""}`}
-            title="One node per full ref (package/name)"
+            title="Symbol references only (no package nodes)"
             onClick={() => setViewMode("reference")}
           >
             reference
