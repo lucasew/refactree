@@ -113,13 +113,20 @@ func (c *SessionCorpus) StreamProject(ctx context.Context, emit StreamEmitter) e
 		return context.Canceled
 	}
 
+	// onlyNew: file-browser PrimeVisit already filled the corpus — re-crawl
+	// only materializes paths not yet seen (much faster after opening files).
 	visit := make(map[string]*ingest.FileExtract)
-	if err := c.DiscoverDir("", true, visit); err != nil {
+	if err := c.DiscoverDirNew("", true, visit); err != nil {
 		emit(StreamEvent{Type: "error", Message: err.Error()})
 		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+
+	if len(visit) == 0 {
+		// Nothing new since last crawl / file opens (corpus already warm).
+		return nil
 	}
 
 	result := c.MaterializeVisit(visit)

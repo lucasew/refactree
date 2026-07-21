@@ -171,7 +171,19 @@ func (c *SessionCorpus) DiscoverSeeds(seedAbs []string, visit map[string]*ingest
 }
 
 // DiscoverDir walks a directory into the corpus and visit set.
+// If onlyNew is true, paths already in the corpus are skipped (fast re-crawl after
+// file-browser primes); still walks the tree to find new files.
 func (c *SessionCorpus) DiscoverDir(dir string, recursive bool, visit map[string]*ingest.FileExtract) error {
+	return c.discoverDir(dir, recursive, visit, false)
+}
+
+// DiscoverDirNew is DiscoverDir but only records extracts not already in the corpus.
+// StreamProject uses this so crawl after opening files only materializes new paths.
+func (c *SessionCorpus) DiscoverDirNew(dir string, recursive bool, visit map[string]*ingest.FileExtract) error {
+	return c.discoverDir(dir, recursive, visit, true)
+}
+
+func (c *SessionCorpus) discoverDir(dir string, recursive bool, visit map[string]*ingest.FileExtract, onlyNew bool) error {
 	if c == nil {
 		return fmt.Errorf("nil corpus")
 	}
@@ -188,6 +200,10 @@ func (c *SessionCorpus) DiscoverDir(dir string, recursive bool, visit map[string
 	}
 	return ingest.WalkExtracts(src, func(fe *ingest.FileExtract) bool {
 		if fe == nil {
+			return true
+		}
+		key := extractRelKey(fe)
+		if onlyNew && c.Has(key) {
 			return true
 		}
 		stored := c.Touch(fe)

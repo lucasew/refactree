@@ -13,7 +13,7 @@ import {
   type IncomingNode,
 } from "./graphSession";
 import { inferLanguageFromId } from "./graphColors";
-import { formatGraphLabel, normalizeRef } from "./routes";
+import { formatGraphLabel, graphScopeId, normalizeRef } from "./routes";
 
 export type StreamHandlers = {
   onEvent?: () => void;
@@ -113,11 +113,11 @@ class GraphExploreClient {
   }
 
   visit(ref: string) {
-    const id = normalizeRef(ref || "path:./");
-    // Optimistic package/module node so file-browser navigation paints
-    // immediately even while the server worker is mid-Materialize on another package.
+    // Visit the package scope so the graph stays package-centric (not per-file).
+    const id = graphScopeId(ref || "path:./");
     applyNode(stubFromId(id), true);
     getGraphSession().focusId = id;
+    // Server still accepts file refs; send package id for dir-module langs.
     this.send({ op: "visit", ref: id });
   }
 
@@ -166,8 +166,8 @@ class GraphExploreClient {
 const client = new GraphExploreClient();
 
 function stubFromId(rawId: string): IncomingNode {
-  // Id + label keep path:./… so the canvas never shows bare cmd/rft.
-  const id = normalizeRef(rawId);
+  // Package-scope ids (path:./pkg/web not path:./pkg/web/file.go) for dir-module langs.
+  const id = graphScopeId(rawId);
   const external = isExternalId(id);
   let kind = "MODULE";
   if (id.includes("::")) kind = "ATOM";
@@ -177,13 +177,17 @@ function stubFromId(rawId: string): IncomingNode {
 
 function applyNode(n: IncomingNode, _markResolved = true) {
   const s = getGraphSession();
-  const id = normalizeRef(n.id);
-  // Always label from id so server short labels (cmd/rft) cannot drop path:./.
+  const id = graphScopeId(n.id);
+  // Always label from id so server short labels cannot drop path:./.
   const name = formatGraphLabel(id, "reference");
   const existing = s.nodes.get(id);
   if (existing) {
     existing.name = name;
     existing.kind = n.kind || existing.kind;
+    // Prefer MODULE when we collapse file stubs into a package node.
+    if (n.kind === "MODULE" || !id.includes("::")) {
+      if (!id.includes("::")) existing.kind = "MODULE";
+    }
     if (n.external != null) existing.external = !!n.external;
     if (n.expandable != null) existing.expandable = !!n.expandable;
     if (n.language) existing.language = n.language;
@@ -191,7 +195,7 @@ function applyNode(n: IncomingNode, _markResolved = true) {
     s.nodes.set(id, {
       id,
       name,
-      kind: n.kind,
+      kind: id.includes("::") ? n.kind || "ATOM" : "MODULE",
       external: !!n.external,
       expandable: !!n.expandable,
       language: n.language || inferLanguageFromId(id),
@@ -201,7 +205,7 @@ function applyNode(n: IncomingNode, _markResolved = true) {
 
 function ensureStub(rawId: string) {
   if (!rawId) return;
-  const id = normalizeRef(rawId);
+  const id = graphScopeId(rawId);
   if (!getGraphSession().nodes.has(id)) {
     applyNode(stubFromId(id), false);
   }
@@ -211,8 +215,9 @@ function ensureStub(rawId: string) {
 
 function applyEdge(e: IncomingEdge) {
   if (!e.from || !e.to) return;
-  const from = normalizeRef(e.from);
-  const to = normalizeRef(e.to);
+  const from = graphScopeId(e.from);
+  const to = graphScopeId(e.to);
+  if (!from || !to || from === to) return;
   const s = getGraphSession();
   const k = linkKey(from, to, e.kind);
   if (!s.links.has(k)) {
@@ -364,7 +369,8 @@ export function mergeCodeLinksIntoGraph(
   focusRef: string,
   links: ReadonlyArray<{ reference?: string | null; isLink?: boolean | null } | null | undefined>
 ) {
-  const from = normalizeRef(focusRef || "");
+  // Collapse file paths → packages (path:./pkg/web/server.go → path:./pkg/web).
+  const from = graphScopeId(focusRef || "");
   if (!from || from === "path:./" || from === "path:.") return;
   ensureGraphSession();
   applyNode(stubFromId(from), true);
@@ -372,7 +378,7 @@ export function mergeCodeLinksIntoGraph(
   for (const l of links) {
     if (!l?.reference) continue;
     if (l.isLink === false) continue;
-    const to = normalizeRef(l.reference);
+    const to = graphScopeId(l.reference);
     if (!to || to === from) continue;
     // Heuristic kinds until WS visit arrives: external / module-ish → IMPORTS, else USES.
     const kind =

@@ -1,5 +1,6 @@
 import {
   formatGraphLabel,
+  graphScopeId,
   normalizeRef,
   packageScopeId,
   type GraphViewMode,
@@ -98,12 +99,12 @@ export function mergeNeighborhood(
 
   for (const n of nb.nodes ?? []) {
     if (!n?.id) continue;
-    const id = normalizeRef(n.id);
+    const id = graphScopeId(n.id);
     const name = formatGraphLabel(id, "reference");
     const existing = s.nodes.get(id);
     if (existing) {
       existing.name = name;
-      existing.kind = n.kind;
+      existing.kind = id.includes("::") ? n.kind : "MODULE";
       if (n.external != null) existing.external = n.external;
       if (n.expandable != null) existing.expandable = n.expandable;
       if (n.language != null) existing.language = n.language || existing.language;
@@ -112,7 +113,7 @@ export function mergeNeighborhood(
       s.nodes.set(id, {
         id,
         name,
-        kind: n.kind,
+        kind: id.includes("::") ? n.kind : "MODULE",
         external: !!n.external,
         expandable: !!n.expandable,
         language: n.language || undefined,
@@ -123,8 +124,9 @@ export function mergeNeighborhood(
 
   for (const e of nb.edges ?? []) {
     if (!e?.from || !e?.to) continue;
-    const from = normalizeRef(e.from);
-    const to = normalizeRef(e.to);
+    const from = graphScopeId(e.from);
+    const to = graphScopeId(e.to);
+    if (!from || !to || from === to) continue;
     const k = linkKey(from, to, e.kind);
     if (!s.links.has(k)) {
       s.links.set(k, { source: from, target: to, kind: e.kind });
@@ -134,7 +136,7 @@ export function mergeNeighborhood(
 
   s.incomplete = nb.incomplete;
   const focusRaw = nb.focus?.id ?? focusFallback;
-  s.focusId = focusRaw ? normalizeRef(focusRaw) : s.focusId;
+  s.focusId = focusRaw ? graphScopeId(focusRaw) : s.focusId;
   return { addedNodes, addedLinks };
 }
 

@@ -164,6 +164,58 @@ export function packageScopeId(ref: string): string {
   return i >= 0 ? id.slice(0, i) : id;
 }
 
+/**
+ * Extensions whose languages use directory modules (go, java) — match
+ * ingest.LanguageUsesDirectoryModule. File path:./pkg/web/server.go → package path:./pkg/web.
+ */
+const DIRECTORY_MODULE_EXT = new Set([
+  ".go",
+  ".java",
+]);
+
+/**
+ * Graph node id: same idea as backend graphRefID / projectScopeID.
+ * Collapses file paths for directory-module languages so the canvas shows
+ * packages (path:./pkg/web) not files (path:./pkg/web/server.go).
+ */
+export function graphScopeId(ref: string): string {
+  const id = normalizeRef(ref);
+  let base = id;
+  let symbol = "";
+  const symIdx = id.indexOf("::");
+  if (symIdx >= 0) {
+    symbol = id.slice(symIdx + 2);
+    base = id.slice(0, symIdx);
+  }
+
+  const colon = base.indexOf(":");
+  if (colon <= 0) {
+    return symbol ? base + "::" + symbol : base;
+  }
+  const prov = base.slice(0, colon).toLowerCase();
+  let path = base.slice(colon + 1);
+
+  if (prov === "path") {
+    path = path.replace(/^\.\//, "");
+    if (path === "" || path === ".") {
+      base = "path:./";
+    } else {
+      const slash = path.lastIndexOf("/");
+      const file = slash >= 0 ? path.slice(slash + 1) : path;
+      const dot = file.lastIndexOf(".");
+      const ext = dot >= 0 ? file.slice(dot).toLowerCase() : "";
+      if (ext && DIRECTORY_MODULE_EXT.has(ext)) {
+        const dir = slash >= 0 ? path.slice(0, slash) : "";
+        base = dir ? "path:./" + dir : "path:./";
+      } else {
+        base = "path:./" + path;
+      }
+    }
+  }
+  // external go:fmt / go:fmt::Println — keep provider path as module
+  return symbol ? base + "::" + symbol : base;
+}
+
 export type GraphViewMode = "package" | "reference";
 /** @deprecated use GraphViewMode */
 export type GraphLabelMode = GraphViewMode;
