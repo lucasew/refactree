@@ -7,15 +7,19 @@ import {
   snapshotGraphData,
   type IncomingNeighborhood,
 } from "../graphSession";
-import { streamExpandExternal, streamGraph } from "../graphStream";
+import {
+  ensureGraphSession,
+  sessionProject,
+  sessionVisit,
+  streamExpandExternal,
+} from "../graphStream";
 
 type Props = {
   focusId: string;
-  /** When set, merges bulk neighborhood (fallback). Prefer streamKey for progressive load. */
   neighborhood?: IncomingNeighborhood;
-  /** When this changes, start SSE stream for focus (neighborhood mode). */
+  /** Visit this ref in the shared graph session (deltas). */
   streamRef?: string | null;
-  /** Stream project graph instead of a focus ref. */
+  /** Load project import map into the same session. */
   streamProject?: boolean;
   loading?: boolean;
   onFocus: (ref: string) => void;
@@ -39,18 +43,21 @@ export function GraphPanel({
   const fgRef = useRef<any>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [tick, setTick] = useState(0);
-  const [streaming, setStreaming] = useState(false);
-  const [streamError, setStreamError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const lastVisit = useRef<string>("");
 
   const bump = useCallback(() => {
     setTick((t) => t + 1);
-    const fg = fgRef.current;
     try {
-      // light reheat as graph grows
-      fg?.d3ReheatSimulation?.();
+      fgRef.current?.d3ReheatSimulation?.();
     } catch {
       /* ignore */
     }
+  }, []);
+
+  useEffect(() => {
+    ensureGraphSession();
   }, []);
 
   useEffect(() => {
@@ -68,28 +75,53 @@ export function GraphPanel({
     return () => ro.disconnect();
   }, []);
 
-  // Progressive SSE stream
+  // Project map once when requested (session accumulates).
   useEffect(() => {
-    if (!streamProject && (streamRef == null || streamRef === "")) return;
-    const ac = new AbortController();
-    setStreaming(true);
-    setStreamError(null);
-    const run = streamProject
-      ? streamGraph({ mode: "project" }, { onEvent: bump }, ac.signal)
-      : streamGraph({ ref: streamRef!, mode: "neighborhood" }, { onEvent: bump }, ac.signal);
-    run
-      .then(() => {
-        if (!ac.signal.aborted) setStreaming(false);
-      })
-      .catch((e: Error) => {
-        if (ac.signal.aborted) return;
-        setStreaming(false);
-        setStreamError(e.message);
-      });
-    return () => ac.abort();
+    if (!streamProject) return;
+    let cancelled = false;
+    setBusy(true);
+    setErr(null);
+    sessionProject({
+      onEvent: () => {
+        if (!cancelled) bump();
+      },
+      onError: (e) => {
+        if (!cancelled) setErr(e.message);
+      },
+    }).finally(() => {
+      if (!cancelled) setBusy(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [streamProject, bump]);
+
+  // Visit focus: same WS session, only new edges arrive.
+  useEffect(() => {
+    if (streamProject) return;
+    if (streamRef == null || streamRef === "") return;
+    if (lastVisit.current === streamRef && getGraphSession().nodes.size > 0) {
+      // still re-visit so server can push any new edges; always visit is ok (deltas)
+    }
+    lastVisit.current = streamRef;
+    let cancelled = false;
+    setBusy(true);
+    setErr(null);
+    sessionVisit(streamRef, {
+      onEvent: () => {
+        if (!cancelled) bump();
+      },
+      onError: (e) => {
+        if (!cancelled) setErr(e.message);
+      },
+    }).finally(() => {
+      if (!cancelled) setBusy(false);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [streamRef, streamProject, bump]);
 
-  // Optional bulk merge (compat)
   useEffect(() => {
     if (!neighborhood || streamRef != null || streamProject) return;
     mergeNeighborhood(neighborhood, focusId);
@@ -114,12 +146,10 @@ export function GraphPanel({
           onExpandExternal(node.id);
           return;
         }
-        // Default: stream expand in place
-        const ac = new AbortController();
-        setStreaming(true);
-        streamExpandExternal(node.id, { onEvent: bump }, ac.signal)
-          .then(() => setStreaming(false))
-          .catch(() => setStreaming(false));
+        setBusy(true);
+        streamExpandExternal(node.id, { onEvent: bump })
+          .catch((e) => setErr(String(e)))
+          .finally(() => setBusy(false));
         return;
       }
       onFocus(node.id);
@@ -127,7 +157,7 @@ export function GraphPanel({
     [onFocus, onExpandExternal, bump]
   );
 
-  const loading = loadingProp || streaming;
+  const loading = loadingProp || busy;
   const sess = getGraphSession();
 
   if (graphData.nodes.length === 0) {
@@ -135,12 +165,12 @@ export function GraphPanel({
       <div ref={hostRef} className="graph-canvas-host relative h-full min-h-64">
         <div className="p-4 text-sm text-base-content/60 flex items-center gap-2">
           {loading ? <span className="loading loading-spinner loading-xs" /> : null}
-          {streamError ? (
-            <span className="text-error">{streamError}</span>
+          {err ? (
+            <span className="text-error">{err}</span>
           ) : loading ? (
-            "Streaming graph…"
+            "Session: discovering edges…"
           ) : (
-            emptyHint ?? "Focus a file or symbol to expand the relation graph."
+            emptyHint ?? "Visit files and symbols — the graph session accumulates edges."
           )}
         </div>
       </div>
@@ -159,12 +189,12 @@ export function GraphPanel({
         {loading ? (
           <span className="badge badge-primary badge-outline badge-sm gap-1">
             <span className="loading loading-spinner loading-xs" />
-            streaming
+            session
           </span>
-        ) : null}
-        {streamError ? (
-          <span className="badge badge-error badge-sm">{streamError}</span>
-        ) : null}
+        ) : (
+          <span className="badge badge-ghost badge-sm opacity-70">session live</span>
+        )}
+        {err ? <span className="badge badge-error badge-sm">{err}</span> : null}
       </div>
       {size.w > 0 && size.h > 0 ? (
         <ForceGraph2D

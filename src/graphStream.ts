@@ -1,3 +1,9 @@
+/**
+ * Long-lived graph explore session (WebSocket).
+ * Client visits refs; server pushes only edges not yet seen in the session.
+ * Nodes (except focus) are stubbed from edges and hydrated via GraphQL nodes(ids).
+ */
+
 import {
   getGraphSession,
   isExternalId,
@@ -9,13 +15,143 @@ import {
 
 export type StreamHandlers = {
   onEvent?: () => void;
-  onDone?: () => void;
+  onDone?: (visitRef?: string) => void;
   onError?: (err: Error) => void;
+};
+
+type ServerMsg = {
+  type: string;
+  node?: IncomingNode & { parentId?: string | null };
+  edge?: { from: string; to: string; kind: string };
+  incomplete?: boolean;
+  message?: string;
+  visitRef?: string;
 };
 
 const pendingNodeIds = new Set<string>();
 let hydrateTimer: ReturnType<typeof setTimeout> | null = null;
 let hydrateInFlight = false;
+
+type Listener = (msg: ServerMsg) => void;
+
+class GraphExploreClient {
+  private ws: WebSocket | null = null;
+  private ready = false;
+  private readyWaiters: Array<() => void> = [];
+  private listeners = new Set<Listener>();
+  private queue: object[] = [];
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private closed = false;
+
+  connect() {
+    if (this.closed) return;
+    if (
+      this.ws &&
+      (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)
+    ) {
+      return;
+    }
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const url = `${proto}//${window.location.host}/api/graph/session`;
+    const ws = new WebSocket(url);
+    this.ws = ws;
+    this.ready = false;
+
+    ws.onmessage = (ev) => {
+      let msg: ServerMsg;
+      try {
+        msg = JSON.parse(String(ev.data));
+      } catch {
+        return;
+      }
+      if (msg.type === "ready") {
+        this.ready = true;
+        const waiters = this.readyWaiters.splice(0);
+        waiters.forEach((w) => w());
+        for (const m of this.queue.splice(0)) {
+          ws.send(JSON.stringify(m));
+        }
+      }
+      this.applyServerMsg(msg);
+      for (const l of this.listeners) l(msg);
+    };
+    ws.onclose = () => {
+      this.ready = false;
+      this.ws = null;
+      if (!this.closed) {
+        this.reconnectTimer = setTimeout(() => this.connect(), 800);
+      }
+    };
+    ws.onerror = () => {
+      /* onclose reconnects */
+    };
+  }
+
+  private send(msg: object) {
+    this.connect();
+    if (this.ws && this.ready && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(msg));
+    } else {
+      this.queue.push(msg);
+    }
+  }
+
+  whenReady(): Promise<void> {
+    this.connect();
+    if (this.ready) return Promise.resolve();
+    return new Promise((resolve) => {
+      this.readyWaiters.push(resolve);
+    });
+  }
+
+  subscribe(fn: Listener): () => void {
+    this.listeners.add(fn);
+    this.connect();
+    return () => this.listeners.delete(fn);
+  }
+
+  visit(ref: string) {
+    this.send({ op: "visit", ref: ref || "path:./" });
+  }
+
+  project() {
+    this.send({ op: "project" });
+  }
+
+  private applyServerMsg(msg: ServerMsg) {
+    const s = getGraphSession();
+    if (msg.incomplete != null) s.incomplete = !!msg.incomplete;
+
+    switch (msg.type) {
+      case "focus":
+        if (msg.node) {
+          applyNode(msg.node, true);
+          s.focusId = msg.node.id;
+          if (msg.node.parentId) ensureStub(msg.node.parentId);
+        }
+        break;
+      case "edge":
+        if (msg.edge) {
+          applyEdge({
+            from: msg.edge.from,
+            to: msg.edge.to,
+            kind: msg.edge.kind,
+          });
+        }
+        break;
+      case "error":
+        console.warn("graph session error:", msg.message);
+        break;
+      case "done":
+        scheduleHydrate();
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+const client = new GraphExploreClient();
 
 function stubFromId(id: string): IncomingNode {
   const external = isExternalId(id);
@@ -24,7 +160,7 @@ function stubFromId(id: string): IncomingNode {
   if (id.includes("::")) {
     kind = "ATOM";
     label = id.split("::").pop() || id;
-  } else if (id.startsWith("path:") && id.includes(".")) {
+  } else if (id.startsWith("path:") && /\.[a-zA-Z0-9]+$/.test(id)) {
     kind = "FILE";
     label = id.replace(/^path:(\.\/)?/, "").split("/").pop() || id;
   } else if (id.startsWith("path:")) {
@@ -33,16 +169,10 @@ function stubFromId(id: string): IncomingNode {
   } else if (id.includes(":")) {
     label = id.slice(id.indexOf(":") + 1) || id;
   }
-  return {
-    id,
-    kind,
-    label,
-    external,
-    expandable: external,
-  };
+  return { id, kind, label, external, expandable: external };
 }
 
-function applyNode(n: IncomingNode, markResolved = true) {
+function applyNode(n: IncomingNode, _markResolved = true) {
   const s = getGraphSession();
   const existing = s.nodes.get(n.id);
   if (existing) {
@@ -50,7 +180,6 @@ function applyNode(n: IncomingNode, markResolved = true) {
     existing.kind = n.kind || existing.kind;
     if (n.external != null) existing.external = !!n.external;
     if (n.expandable != null) existing.expandable = !!n.expandable;
-    if (markResolved) (existing as any).resolved = true;
   } else {
     s.nodes.set(n.id, {
       id: n.id,
@@ -58,14 +187,15 @@ function applyNode(n: IncomingNode, markResolved = true) {
       kind: n.kind,
       external: !!n.external,
       expandable: !!n.expandable,
-      ...(markResolved ? { resolved: true } : { resolved: false }),
-    } as any);
+    });
   }
 }
 
 function ensureStub(id: string) {
-  if (!id || getGraphSession().nodes.has(id)) return;
-  applyNode(stubFromId(id), false);
+  if (!id) return;
+  if (!getGraphSession().nodes.has(id)) {
+    applyNode(stubFromId(id), false);
+  }
   pendingNodeIds.add(id);
   scheduleHydrate();
 }
@@ -100,9 +230,7 @@ async function hydratePendingNodes() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         query: `query HydrateNodes($ids: [ID!]!) {
-          nodes(ids: $ids) {
-            id kind label parentId external expandable
-          }
+          nodes(ids: $ids) { id kind label parentId external expandable }
         }`,
         variables: { ids },
       }),
@@ -115,7 +243,6 @@ async function hydratePendingNodes() {
       }
     }
   } catch {
-    // leave stubs; may retry later if re-queued
     for (const id of ids) pendingNodeIds.add(id);
   } finally {
     hydrateInFlight = false;
@@ -123,108 +250,73 @@ async function hydratePendingNodes() {
   }
 }
 
-function applyEvent(ev: any, focusFallback: string) {
-  const s = getGraphSession();
-  if (ev.incomplete != null) s.incomplete = !!ev.incomplete;
-
-  switch (ev.type) {
-    case "focus":
-      if (ev.node) {
-        applyNode(ev.node, true);
-        s.focusId = ev.node.id;
-        // parent of focus may be useful; query on demand
-        if (ev.node.parentId) ensureStub(ev.node.parentId);
-      }
-      break;
-    case "node":
-      // legacy; treat as on-demand hydration
-      if (ev.node) applyNode(ev.node, true);
-      break;
-    case "edge":
-      if (ev.edge) {
-        applyEdge({
-          from: ev.edge.from,
-          to: ev.edge.to,
-          kind: ev.edge.kind,
+function runOp(
+  start: () => void,
+  isDone: (msg: ServerMsg) => boolean,
+  handlers: StreamHandlers,
+  timeoutMs: number
+): Promise<void> {
+  return client.whenReady().then(
+    () =>
+      new Promise((resolve) => {
+        const unsub = client.subscribe((msg) => {
+          handlers.onEvent?.();
+          if (msg.type === "error") {
+            handlers.onError?.(new Error(msg.message || "graph session error"));
+          }
+          if (isDone(msg)) {
+            unsub();
+            handlers.onDone?.(msg.visitRef);
+            resolve();
+          }
         });
-      }
-      break;
-    case "done":
-      if (ev.incomplete != null) s.incomplete = !!ev.incomplete;
-      if (!s.focusId && focusFallback) s.focusId = focusFallback;
-      // final hydrate pass
-      scheduleHydrate();
-      break;
-    case "error":
-      throw new Error(ev.message || "graph stream error");
-  }
+        start();
+        setTimeout(() => {
+          unsub();
+          resolve();
+        }, timeoutMs);
+      })
+  );
 }
 
-export async function streamGraph(
-  opts: { ref?: string; mode?: "project" | "neighborhood" },
-  handlers: StreamHandlers = {},
-  signal?: AbortSignal
-): Promise<void> {
-  const params = new URLSearchParams();
-  if (opts.mode === "project") {
-    params.set("mode", "project");
-  } else {
-    params.set("ref", opts.ref || "path:./");
-  }
-  const url = `/api/graph/stream?${params.toString()}`;
-  const res = await fetch(url, {
-    headers: { Accept: "text/event-stream" },
-    signal,
-  });
-  if (!res.ok || !res.body) {
-    throw new Error(`graph stream failed: HTTP ${res.status}`);
-  }
+/** Visit a ref in the shared session; only new edges are pushed. */
+export function sessionVisit(ref: string, handlers: StreamHandlers = {}): Promise<void> {
+  const want = ref || "path:./";
+  return runOp(
+    () => client.visit(want),
+    (msg) => msg.type === "done" && msg.visitRef === want,
+    handlers,
+    120_000
+  );
+}
 
-  const reader = res.body.getReader();
-  const dec = new TextDecoder();
-  let buf = "";
-  const focusFallback = opts.ref || "path:./";
-
-  const flushEvent = (type: string, data: string) => {
-    if (!data) return;
-    const ev = JSON.parse(data);
-    if (type && type !== "message") ev.type = type;
-    applyEvent(ev, focusFallback);
-    handlers.onEvent?.();
-    if (ev.type === "done") handlers.onDone?.();
-  };
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      for (;;) {
-        const sep = buf.indexOf("\n\n");
-        if (sep < 0) break;
-        const block = buf.slice(0, sep);
-        buf = buf.slice(sep + 2);
-        let et = "message";
-        const dataLines: string[] = [];
-        for (const line of block.split("\n")) {
-          if (line.startsWith("event:")) et = line.slice(6).trim();
-          else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
-        }
-        flushEvent(et, dataLines.join("\n"));
-      }
-    }
-  } catch (e) {
-    if ((e as Error).name === "AbortError") return;
-    handlers.onError?.(e as Error);
-    throw e;
-  }
+/** Grow project import map (session deltas). */
+export function sessionProject(handlers: StreamHandlers = {}): Promise<void> {
+  return runOp(
+    () => client.project(),
+    (msg) => msg.type === "done" && msg.visitRef === "project",
+    handlers,
+    300_000
+  );
 }
 
 export async function streamExpandExternal(
   ref: string,
-  handlers: StreamHandlers = {},
-  signal?: AbortSignal
+  handlers: StreamHandlers = {}
 ): Promise<void> {
-  await streamGraph({ ref, mode: "neighborhood" }, handlers, signal);
+  await sessionVisit(ref, handlers);
   markExpanded(ref);
+}
+
+/** @deprecated prefer sessionVisit / sessionProject */
+export async function streamGraph(
+  opts: { ref?: string; mode?: "project" | "neighborhood" },
+  handlers: StreamHandlers = {}
+): Promise<void> {
+  if (opts.mode === "project") return sessionProject(handlers);
+  return sessionVisit(opts.ref || "path:./", handlers);
+}
+
+export function ensureGraphSession() {
+  client.connect();
 }

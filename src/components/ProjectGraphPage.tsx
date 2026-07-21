@@ -74,7 +74,7 @@ export function ProjectGraphPage({ onPathChange }: Props) {
           emptyHint="Streaming project import graph…"
         />
         <p className="absolute bottom-2 left-2 text-xs text-base-content/50 max-w-lg">
-          Nodes and edges stream in as they are discovered. Orange-ring nodes are external
+          One live session: visiting path/project grows the same graph (only new edges). Orange-ring nodes are external
           (non-path) deps — click to stream-expand. Path nodes open the code browser.
         </p>
       </div>

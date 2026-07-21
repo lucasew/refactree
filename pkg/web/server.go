@@ -86,6 +86,7 @@ func (s *Server) routes() {
 
 	s.mux.Handle("/graphql", gqlSrv)
 	s.mux.HandleFunc("/api/graph/stream", s.handleGraphStream)
+	s.mux.HandleFunc("/api/graph/session", s.handleGraphSession)
 	s.mux.Handle("/playground", playground.Handler("refactree", "/graphql"))
 
 	// SPA shell for / and /code/...
