@@ -54,7 +54,7 @@ Structural spine for discovery and graphs. Goal: one walk/parse path, no duplica
 - **edit** open / navigation canonicalize: Hop → Materialize(ExpandImports=false) or equivalent minimal result → `CanonicalizeInResult`; not full Dir
 - **doc**: minimal file/hop extract; not full project Materialize
 - **mv**: eager on purpose — Dir WalkExtracts over project root (skip rules) → Materialize(**ExpandImports=true**) → plan from full `*Result`. Must not use list-only path
-- **serve** / browse file annotate: Seed → Materialize(ExpandImports=false)
+- **serve** / **desktop** / browse file annotate: Seed → Materialize(ExpandImports=false)
 - **lsp**: another surface on the same spine (see Language server); two-tier recompute over ProjectFS overlays
 - **fuzzy / full-graph tests**: same as mv-style full Dir Materialize when the check needs the whole picture
 
@@ -105,6 +105,25 @@ Structural spine for discovery and graphs. Goal: one walk/parse path, no duplica
 - Success is silent on stdout; propagate the editor process exit code
 - Hard errors (non-zero, clear stderr): unresolvable symbol after canonicalize, missing file, missing editor, missing `fzf` when a picker is required
 - Equivalent semantic of opening a target for editing in general; add flags on demand, don't invent useless flags
+
+### Subcommand: serve
+- Headless local HTTP code browser (same symbol hyperlinks as the CLI path system)
+- `-l` / `--addr`: listen address (default `127.0.0.1:8080`)
+- `-C` / `--dir`: project root (default `.`); no project-marker walk-up
+- Prints a one-line banner on stdout (root, addr, openable URL); does not open a browser
+- Extract path: Seed → Materialize(ExpandImports=false) per annotated file
+
+### Subcommand: desktop
+- Same UI as `serve`, shelled via **[eletrocromo](https://github.com/lewtec/eletrocromo)** (Helium `--app` window)
+- Wiring: `cmd/rft/desktop.go` only (no `internal/desktop` until it grows)
+- `App.ID` = `br.tec.lew.refactree` (Helium profile isolation)
+- `-C` / `--dir`: project root (default `.`), same semantics as `serve` — no walk-up
+- No `--addr`: loopback bind and one-shot token auth are owned by eletrocromo
+- Context: `cmd.Context()` (same pattern as `browse` / `lsp`)
+- No refactree startup banner on stdout; do not swallow library output
+- Hard fail if Helium/eletrocromo cannot start; **never** fall back to the system browser or to `serve --addr`
+- **Out of scope (this cut):** not-a-TTY auto-launch rewrite, tray/background lifetime, deep-link args, Helium in CI
+- Tests: no Helium window in refactree CI; exercise the UI via `serve` / package tests
 
 ## Concept: reference
 - References something
