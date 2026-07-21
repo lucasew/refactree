@@ -14,41 +14,39 @@ import (
 
 var graphUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		// Local code browser; loopback-first by default.
 		return true
 	},
 	ReadBufferSize:  1024,
 	WriteBufferSize: 4096,
 }
 
-// client → server
 type graphSessionIn struct {
 	Op  string `json:"op"`  // visit | project | ping
 	Ref string `json:"ref"` // for visit
 }
 
-// server → client reuses graphql.StreamEvent JSON shape (+ op-level ready)
 type graphSessionOut struct {
 	Type       string             `json:"type"` // ready | focus | edge | done | error | pong
 	Node       *graphql.GraphNode `json:"node,omitempty"`
 	Edge       *graphql.GraphEdge `json:"edge,omitempty"`
 	Incomplete *bool              `json:"incomplete,omitempty"`
 	Message    string             `json:"message,omitempty"`
-	// VisitRef is set on done so the client knows which visit finished.
-	VisitRef string `json:"visitRef,omitempty"`
+	VisitRef   string             `json:"visitRef,omitempty"`
 }
 
-// graphExploreSession accumulates edges already pushed to one browser tab.
+// graphExploreSession holds per-tab edge deltas + extract corpus (no re-read).
 type graphExploreSession struct {
-	root string
-	mu   sync.Mutex
-	seen map[string]bool // edge keys already sent
+	root    string
+	corpus  *graphql.SessionCorpus
+	mu      sync.Mutex
+	seen    map[string]bool // edge keys already sent
 }
 
 func newGraphExploreSession(root string) *graphExploreSession {
 	return &graphExploreSession{
-		root: root,
-		seen: make(map[string]bool),
+		root:   root,
+		corpus: graphql.NewSessionCorpus(root),
+		seen:   make(map[string]bool),
 	}
 }
 
@@ -59,13 +57,14 @@ func edgeSeenKey(e *graphql.GraphEdge) string {
 	return string(e.Kind) + "\x00" + e.From + "\x00" + e.To
 }
 
-// handleGraphSession is a long-lived WebSocket: client visits nodes; server
-// pushes only edges not yet seen in this session.
+// handleGraphSession is a long-lived WebSocket explore session.
 //
 //	WS /api/graph/session
-//	→ {"op":"visit","ref":"path:./foo.go::Bar"}
-//	→ {"op":"project"}
-//	← focus / edge* / done  (deltas only)
+//	→ {"op":"visit","ref":"…"}  /  {"op":"project"}
+//	← focus / edge* (deltas) / done
+//
+// FileExtracts are kept in SessionCorpus for the life of the socket so each
+// project file is parsed at most once per session (mtime cache still applies).
 func (s *Server) handleGraphSession(w http.ResponseWriter, r *http.Request) {
 	if s.loader == nil {
 		http.Error(w, "loader not configured", http.StatusInternalServerError)
@@ -96,7 +95,6 @@ func (s *Server) handleGraphSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Heartbeat
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	go func() {
@@ -151,25 +149,23 @@ func (s *Server) handleGraphSession(w http.ResponseWriter, r *http.Request) {
 
 func (s *graphExploreSession) handleVisit(ctx context.Context, ref string, write func(graphSessionOut) error) {
 	emit := s.deltaEmitter(write)
-	_ = graphql.StreamNeighborhood(ctx, s.root, ref, emit)
+	_ = s.corpus.StreamVisit(ctx, ref, emit)
 	inc := true
 	_ = write(graphSessionOut{Type: "done", Incomplete: &inc, VisitRef: ref})
 }
 
 func (s *graphExploreSession) handleProject(ctx context.Context, write func(graphSessionOut) error) {
 	emit := s.deltaEmitter(write)
-	_ = graphql.StreamProjectGraph(ctx, s.root, emit)
+	_ = s.corpus.StreamProject(ctx, emit)
 	inc := true
 	_ = write(graphSessionOut{Type: "done", Incomplete: &inc, VisitRef: "project"})
 }
 
-// deltaEmitter wraps StreamEmitter: forwards focus always; edges only if new to session.
 func (s *graphExploreSession) deltaEmitter(write func(graphSessionOut) error) graphql.StreamEmitter {
 	return func(ev graphql.StreamEvent) bool {
 		switch ev.Type {
 		case "focus":
-			out := graphSessionOut{Type: "focus", Node: ev.Node, Incomplete: ev.Incomplete}
-			return write(out) == nil
+			return write(graphSessionOut{Type: "focus", Node: ev.Node, Incomplete: ev.Incomplete}) == nil
 		case "edge":
 			if ev.Edge == nil {
 				return true
@@ -178,20 +174,15 @@ func (s *graphExploreSession) deltaEmitter(write func(graphSessionOut) error) gr
 			s.mu.Lock()
 			if s.seen[k] {
 				s.mu.Unlock()
-				return true // already pushed this session
+				return true
 			}
 			s.seen[k] = true
 			s.mu.Unlock()
-			out := graphSessionOut{Type: "edge", Edge: ev.Edge, Incomplete: ev.Incomplete}
-			return write(out) == nil
+			return write(graphSessionOut{Type: "edge", Edge: ev.Edge, Incomplete: ev.Incomplete}) == nil
 		case "error":
 			_ = write(graphSessionOut{Type: "error", Message: ev.Message})
 			return true
 		case "done":
-			// per-stream done suppressed; visit/project sends its own done after
-			return true
-		case "node":
-			// nodes on demand — ignore bulk nodes if any
 			return true
 		default:
 			return true
