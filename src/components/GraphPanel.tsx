@@ -153,18 +153,22 @@ export function GraphPanel({
     setErr(null);
     void setSessionCrawl(true, {
       onEvent: () => {
-        if (!cancelled) bump({ reheat: true });
+        if (!cancelled) bump();
       },
       onError: (e) => {
         if (!cancelled) setErr(e.message);
+      },
+      onDone: () => {
+        if (!cancelled) bump({ reheat: true });
       },
     }).finally(() => {
       if (!cancelled && gen === crawlGen.current) setBusy(false);
     });
     const unsub = getGraphSessionClient().subscribe((msg) => {
       if (cancelled) return;
+      // Paint on stream traffic; reheat only on batch/done so the sim can cool.
       if (msg.type === "edge" || msg.type === "edges" || msg.type === "focus") {
-        bump({ reheat: true });
+        bump(msg.type === "edges" ? { reheat: true } : undefined);
       }
       if (msg.type === "done") bump({ reheat: true });
     });
@@ -185,10 +189,14 @@ export function GraphPanel({
     setErr(null);
     sessionVisit(visitRef, {
       onEvent: () => {
-        if (!cancelled) bump({ reheat: true });
+        // Visit is hop-scoped (cheap); paint without continuous reheat spam.
+        if (!cancelled) bump();
       },
       onError: (e) => {
         if (!cancelled) setErr(e.message);
+      },
+      onDone: () => {
+        if (!cancelled) bump({ reheat: true });
       },
     }).finally(() => {
       if (!cancelled) setBusy(false);
@@ -490,8 +498,9 @@ export function GraphPanel({
             ctx.fill();
           }}
           onNodeClick={onNodeClick}
-          cooldownTicks={100}
-          autoPauseRedraw={false}
+          cooldownTicks={80}
+          // Pause canvas when the sim cools — continuous redraw pegs CPU after crawl.
+          autoPauseRedraw={true}
           enableNodeDrag={true}
         />
       ) : null}

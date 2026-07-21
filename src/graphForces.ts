@@ -112,12 +112,17 @@ export function forceUsageGravity(
   let nodes: SimNode[] = [];
 
   function force(alpha: number) {
-    const { dens, maxD } = localDensities(nodes, densityRadius);
-    for (let i = 0; i < nodes.length; i++) {
+    const n = nodes.length;
+    // O(n²) density sampling — skip on large graphs (usage pull still applies).
+    const useDens = n > 0 && n <= 280;
+    const { dens, maxD } = useDens
+      ? localDensities(nodes, densityRadius)
+      : { dens: new Float64Array(n), maxD: 1 };
+    for (let i = 0; i < n; i++) {
       const node = nodes[i];
       if (node.x == null || node.y == null) continue;
       const u = Math.min(getUsage(node.id ?? ""), maxUsage);
-      const densNorm = dens[i] / maxD; // 0 sparse → 1 densest this tick
+      const densNorm = useDens ? dens[i] / maxD : 0;
       // usage pulls in; density eases pull so crowded cores open up
       const atten = 1 - densityWeight * densNorm;
       const k = alpha * (base + u * perUse) * Math.max(0.15, atten);
@@ -160,13 +165,17 @@ export function forceUsageRadial(
   let nodes: SimNode[] = [];
 
   function force(alpha: number) {
-    const { dens, maxD } = localDensities(nodes, densityRadius);
-    for (let i = 0; i < nodes.length; i++) {
+    const n = nodes.length;
+    const useDens = n > 0 && n <= 280;
+    const { dens, maxD } = useDens
+      ? localDensities(nodes, densityRadius)
+      : { dens: new Float64Array(n), maxD: 1 };
+    for (let i = 0; i < n; i++) {
       const node = nodes[i];
       if (node.x == null || node.y == null) continue;
       const u = Math.min(getUsage(node.id ?? ""), maxUsage);
       const t = u / maxUsage; // 0 = unused → outer; 1 = hub → inner
-      const densNorm = dens[i] / maxD;
+      const densNorm = useDens ? dens[i] / maxD : 0;
       const targetR = outer + (inner - outer) * t + densitySpread * densNorm;
       const x = node.x;
       const y = node.y;
@@ -200,6 +209,8 @@ export function forceNodeDensity(opts?: {
 
   function force(alpha: number) {
     const n = nodes.length;
+    // Pairwise O(n²) — drop on large graphs; d3 charge still separates nodes.
+    if (n > 280 || alpha < 0.01) return;
     const gx = new Float64Array(n);
     const gy = new Float64Array(n);
     for (let i = 0; i < n; i++) {

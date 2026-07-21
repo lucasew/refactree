@@ -55,13 +55,14 @@ func StreamProjectGraph(ctx context.Context, root string, emit StreamEmitter) er
 // StreamVisit is the core explore path:
 //
 //  1. focus event
-//  2. discover visit closure (one multi-seed BFS or dir walk) → Touch into session corpus
+//  2. hop-discover direct package/file extracts only (no import BFS)
 //  3. MaterializeVisit(closure only) — not whole session history
 //  4. stream edges from that Result
 //  5. done
 //
-// Module visits seed all direct package files in one WalkExtracts call.
-// No per-file MaterializeOne; no N independent Seeds.
+// Module visits hop all direct package files. Import-graph expansion is the
+// crawl's job — Seed BFS here used to walk most of the repo on every click
+// and peg the CPU while crawl stayed paused.
 func (c *SessionCorpus) StreamVisit(ctx context.Context, ref string, emit StreamEmitter) error {
 	if c == nil || emit == nil {
 		return nil
@@ -230,7 +231,8 @@ func (c *SessionCorpus) StreamProject(ctx context.Context, emit StreamEmitter) e
 	return nil
 }
 
-// discoverVisit fills visit with the extract closure for this focus.
+// discoverVisit fills visit with direct package/file extracts for this focus.
+// No import/neighbor BFS — that was unbounded on large repos and blocked crawl.
 func (c *SessionCorpus) discoverVisit(parsed ingest.Reference, visit map[string]*ingest.FileExtract) error {
 	if parsed.Provider != "" && parsed.Provider != "path" {
 		scope, ok, err := ingest.NewResolver(c.root).ResolveScopeTarget(ingest.Reference{
@@ -247,7 +249,7 @@ func (c *SessionCorpus) discoverVisit(parsed ingest.Reference, visit map[string]
 		if err != nil {
 			return err
 		}
-		return c.DiscoverSeeds(files, visit)
+		return c.DiscoverHop(files, visit)
 	}
 
 	abs, isDir, err := resolvePath(c.root, scopeRef(parsed))
@@ -255,7 +257,7 @@ func (c *SessionCorpus) discoverVisit(parsed ingest.Reference, visit map[string]
 		return err
 	}
 
-	// Module (dir or file-as-module): one multi-seed from all direct source files.
+	// Module (dir or file-as-module): hop all direct source files in that package.
 	if parsed.Symbol == "" {
 		var seeds []string
 		if isDir {
@@ -266,18 +268,18 @@ func (c *SessionCorpus) discoverVisit(parsed ingest.Reference, visit map[string]
 		} else {
 			seeds = []string{abs}
 		}
-		return c.DiscoverSeeds(seeds, visit)
+		return c.DiscoverHop(seeds, visit)
 	}
 
-	// Atom: if path is package dir, multi-seed package files; else seed that file.
+	// Atom: hop package files if path is a dir; else that file only.
 	if isDir {
 		files, err := directSourceFilesAbs(abs)
 		if err != nil {
 			return err
 		}
-		return c.DiscoverSeeds(files, visit)
+		return c.DiscoverHop(files, visit)
 	}
-	return c.DiscoverSeeds([]string{abs}, visit)
+	return c.DiscoverHop([]string{abs}, visit)
 }
 
 func emitVisitEdges(
