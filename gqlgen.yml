@@ -1,6 +1,6 @@
 # gqlgen config — schema-first GraphQL for rft serve
 schema:
-  - pkg/web/graphql/schema.graphqls
+  - pkg/web/graphql/schema.graphql
 exec:
   filename: pkg/web/graphql/generated.go
   package: graphql

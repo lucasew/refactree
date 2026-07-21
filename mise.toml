@@ -15,16 +15,12 @@ depends = ["codegen:gql", "codegen:relay"]
 run = "echo 'codegen: ok'"
 
 [tasks."codegen:gql"]
-description = "Generate Go GraphQL from pkg/web/graphql/schema.graphqls"
-run = '''
-cp pkg/web/graphql/schema.graphqls schema.graphql
-go run github.com/99designs/gqlgen@v0.17.81 generate
-'''
+description = "Generate Go GraphQL from pkg/web/graphql/schema.graphql"
+run = "go run github.com/99designs/gqlgen@v0.17.81 generate"
 
 [tasks."codegen:relay"]
-description = "Relay compiler over src/ against schema.graphql"
+description = "Relay compiler against pkg/web/graphql/schema.graphql"
 run = '''
-cp pkg/web/graphql/schema.graphqls schema.graphql
 bun install --frozen-lockfile || bun install
 bun run relay
 '''
