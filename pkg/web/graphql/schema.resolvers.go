@@ -34,6 +34,14 @@ func (r *queryResolver) Neighborhood(ctx context.Context, ref string) (*Neighbor
 	return r.Store.Neighborhood(ref)
 }
 
+// ProjectGraph is the resolver for the projectGraph field.
+func (r *queryResolver) ProjectGraph(ctx context.Context) (*Neighborhood, error) {
+	if r.Store == nil {
+		return nil, fmt.Errorf("store not configured")
+	}
+	return r.Store.ProjectGraph()
+}
+
 // Code is the resolver for the code field.
 func (r *queryResolver) Code(ctx context.Context, ref string) (*CodeDocument, error) {
 	if r.Store == nil {

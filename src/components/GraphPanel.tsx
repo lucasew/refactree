@@ -1,55 +1,38 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ForceGraph2D from "react-force-graph-2d";
-
-type GNode = {
-  id: string;
-  kind: string;
-  label: string;
-  parentId?: string | null;
-};
-
-type GEdge = {
-  from: string;
-  to: string;
-  kind: string;
-};
-
-type Neighborhood = {
-  incomplete: boolean;
-  focus: GNode;
-  nodes: ReadonlyArray<GNode | null | undefined>;
-  edges: ReadonlyArray<GEdge | null | undefined>;
-} | null | undefined;
+import {
+  getGraphSession,
+  isExternalId,
+  markExpanded,
+  mergeNeighborhood,
+  snapshotGraphData,
+  type IncomingNeighborhood,
+} from "../graphSession";
 
 type Props = {
   focusId: string;
-  neighborhood: Neighborhood;
+  neighborhood: IncomingNeighborhood;
   loading?: boolean;
   onFocus: (ref: string) => void;
+  /** Called when user requests expand of an external (non-path) node. */
+  onExpandExternal?: (ref: string) => void;
+  emptyHint?: string;
 };
-
-type FGNode = { id: string; name: string; kind: string; x?: number; y?: number };
-type FGLink = { source: string; target: string; kind: string };
 
 const BG = "#1a1814";
 
-export function GraphPanel({ focusId, neighborhood, loading, onFocus }: Props) {
+export function GraphPanel({
+  focusId,
+  neighborhood,
+  loading,
+  onFocus,
+  onExpandExternal,
+  emptyHint,
+}: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const fgRef = useRef<any>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
-
-  // Immutable facts only (string endpoints). Force-graph mutates copies, not this store.
-  const [merged, setMerged] = useState<{
-    nodes: Map<string, FGNode>;
-    links: Map<string, { source: string; target: string; kind: string }>;
-    incomplete: boolean;
-    focusId: string;
-  }>(() => ({
-    nodes: new Map(),
-    links: new Map(),
-    incomplete: true,
-    focusId: "",
-  }));
+  const [tick, setTick] = useState(0);
 
   useEffect(() => {
     const el = hostRef.current;
@@ -68,73 +51,42 @@ export function GraphPanel({ focusId, neighborhood, loading, onFocus }: Props) {
 
   useEffect(() => {
     if (!neighborhood) return;
-    setMerged((prev) => {
-      const nodes = new Map(prev.nodes);
-      const links = new Map(prev.links);
-      for (const n of neighborhood.nodes ?? []) {
-        if (!n) continue;
-        const existing = nodes.get(n.id);
-        nodes.set(n.id, {
-          id: n.id,
-          name: n.label || n.id,
-          kind: n.kind,
-          x: existing?.x,
-          y: existing?.y,
-        });
+    const { addedNodes, addedLinks } = mergeNeighborhood(neighborhood, focusId);
+    setTick((t) => t + 1);
+    const fg = fgRef.current;
+    if (fg && (addedNodes > 0 || addedLinks > 0)) {
+      try {
+        fg.d3ReheatSimulation?.();
+      } catch {
+        /* ignore */
       }
-      for (const e of neighborhood.edges ?? []) {
-        if (!e?.from || !e?.to) continue;
-        const key = `${e.from}\0${e.to}\0${e.kind}`;
-        links.set(key, { source: e.from, target: e.to, kind: e.kind });
-      }
-      return {
-        nodes,
-        links,
-        incomplete: neighborhood.incomplete,
-        focusId: neighborhood.focus?.id ?? focusId,
-      };
-    });
+    }
   }, [neighborhood, focusId]);
 
+  // Keep focus highlight without rewriting node objects.
   useEffect(() => {
-    const fg = fgRef.current;
-    if (!fg) return;
-    try {
-      fg.d3ReheatSimulation?.();
-    } catch {
-      /* ignore */
-    }
-  }, [merged.focusId, merged.nodes.size, merged.links.size]);
+    getGraphSession().focusId = focusId;
+    setTick((t) => t + 1);
+  }, [focusId]);
 
-  // Fresh objects every time so force-graph cannot corrupt the Map via in-place mutation.
   const graphData = useMemo(() => {
-    const nodes = Array.from(merged.nodes.values()).map((n) => ({ ...n }));
-    const nodeIds = new Set(nodes.map((n) => n.id));
-    const links: FGLink[] = [];
-    for (const l of merged.links.values()) {
-      if (!nodeIds.has(l.source) || !nodeIds.has(l.target)) continue;
-      links.push({ source: l.source, target: l.target, kind: l.kind });
-    }
-    return { nodes, links };
-  }, [merged]);
+    void tick;
+    return snapshotGraphData();
+  }, [tick]);
 
   const onNodeClick = useCallback(
-    (node: FGNode) => {
+    (node: { id: string; expandable?: boolean; external?: boolean }) => {
+      const external = node.external || isExternalId(node.id);
+      if (external && node.expandable !== false && onExpandExternal) {
+        onExpandExternal(node.id);
+        markExpanded(node.id);
+        setTick((t) => t + 1);
+        return;
+      }
       onFocus(node.id);
     },
-    [onFocus]
+    [onFocus, onExpandExternal]
   );
-
-  const onNodeDragEnd = useCallback((node: FGNode) => {
-    setMerged((prev) => {
-      const nodes = new Map(prev.nodes);
-      const cur = nodes.get(node.id);
-      if (cur) {
-        nodes.set(node.id, { ...cur, x: node.x, y: node.y });
-      }
-      return { ...prev, nodes };
-    });
-  }, []);
 
   if (graphData.nodes.length === 0) {
     return (
@@ -143,11 +95,14 @@ export function GraphPanel({ focusId, neighborhood, loading, onFocus }: Props) {
           {loading ? <span className="loading loading-spinner loading-xs" /> : null}
           {loading
             ? "Discovering relations…"
-            : "Focus a file or symbol to expand the relation graph (lazy, incomplete)."}
+            : emptyHint ??
+              "Focus a file or symbol to expand the relation graph (lazy, incomplete)."}
         </div>
       </div>
     );
   }
+
+  const sess = getGraphSession();
 
   return (
     <div ref={hostRef} className="graph-canvas-host relative h-full min-h-64 overflow-hidden">
@@ -155,7 +110,7 @@ export function GraphPanel({ focusId, neighborhood, loading, onFocus }: Props) {
         <span className="badge badge-ghost badge-sm">
           {graphData.nodes.length}n · {graphData.links.length}e
         </span>
-        {merged.incomplete ? (
+        {sess.incomplete ? (
           <span className="badge badge-ghost badge-sm">incomplete</span>
         ) : null}
         {loading ? (
@@ -164,6 +119,9 @@ export function GraphPanel({ focusId, neighborhood, loading, onFocus }: Props) {
             expanding
           </span>
         ) : null}
+        <span className="badge badge-ghost badge-sm opacity-70">
+          click external to expand
+        </span>
       </div>
       {size.w > 0 && size.h > 0 ? (
         <ForceGraph2D
@@ -172,14 +130,18 @@ export function GraphPanel({ focusId, neighborhood, loading, onFocus }: Props) {
           height={size.h}
           graphData={graphData}
           nodeId="id"
-          nodeLabel="name"
+          nodeLabel={(n: any) =>
+            n.external
+              ? `${n.name || n.id} (external — click to expand)`
+              : n.name || n.id
+          }
           backgroundColor={BG}
           linkWidth={1.25}
           linkColor={(l: any) => {
             const kind = l.kind as string;
             if (kind === "IMPORTS") return "#7a8aaa";
             if (kind === "USED_BY") return "#aa8a7a";
-            return "#8aaa7a"; // USES
+            return "#8aaa7a";
           }}
           linkDirectionalArrowLength={4}
           linkDirectionalArrowRelPos={1}
@@ -193,15 +155,24 @@ export function GraphPanel({ focusId, neighborhood, loading, onFocus }: Props) {
             const y = node.y ?? 0;
             ctx.beginPath();
             ctx.arc(x, y, r, 0, 2 * Math.PI, false);
-            ctx.fillStyle =
-              node.id === merged.focusId
-                ? "#e8a838"
-                : node.kind === "ATOM"
-                  ? "#6bcf8e"
-                  : node.kind === "MODULE"
-                    ? "#7aa2f7"
-                    : "#a0a0a0";
+            if (node.external) {
+              ctx.fillStyle = node.id === sess.focusId ? "#e8a838" : "#c45c26";
+            } else {
+              ctx.fillStyle =
+                node.id === sess.focusId
+                  ? "#e8a838"
+                  : node.kind === "ATOM"
+                    ? "#6bcf8e"
+                    : node.kind === "MODULE"
+                      ? "#7aa2f7"
+                      : "#a0a0a0";
+            }
             ctx.fill();
+            if (node.external && node.expandable !== false) {
+              ctx.strokeStyle = "#e8a838";
+              ctx.lineWidth = 1.5 / globalScale;
+              ctx.stroke();
+            }
             if (globalScale > 0.6) {
               ctx.font = `${fontSize}px sans-serif`;
               ctx.textAlign = "center";
@@ -217,8 +188,7 @@ export function GraphPanel({ focusId, neighborhood, loading, onFocus }: Props) {
             ctx.fill();
           }}
           onNodeClick={onNodeClick}
-          onNodeDragEnd={onNodeDragEnd}
-          cooldownTicks={100}
+          cooldownTicks={80}
           autoPauseRedraw={false}
           enableNodeDrag={true}
         />

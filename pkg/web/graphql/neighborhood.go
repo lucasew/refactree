@@ -254,7 +254,8 @@ func graphNodeForRef(root string, ref ingest.Reference) *GraphNode {
 			label = ref.String()
 		}
 	}
-	return &GraphNode{ID: id, Kind: kind, Label: label, ParentID: parent}
+	n := &GraphNode{ID: id, Kind: kind, Label: label, ParentID: parent}
+	return decorateNode(root, n)
 }
 
 func isModuleRef(root string, ref ingest.Reference) bool {

@@ -1,13 +1,18 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { graphql } from "react-relay";
+import { fetchQuery } from "relay-runtime";
 import type { AppFilesystemQuery as FsQ } from "./__generated__/AppFilesystemQuery.graphql";
 import type { AppCodeQuery as CodeQ } from "./__generated__/AppCodeQuery.graphql";
 import type { AppNeighborhoodQuery as NbQ } from "./__generated__/AppNeighborhoodQuery.graphql";
 import type { AppRootDirQuery as RootQ } from "./__generated__/AppRootDirQuery.graphql";
+import type { AppExpandExternalQuery as EXQ } from "./__generated__/AppExpandExternalQuery.graphql";
 import { FileRail } from "./components/FileRail";
 import { CodePanel } from "./components/CodePanel";
 import { GraphPanel } from "./components/GraphPanel";
-import { navigateToRef, refFromPath } from "./routes";
+import { ProjectGraphPage } from "./components/ProjectGraphPage";
+import { environment } from "./RelayEnvironment";
+import { isGraphRoute, navigateToGraph, navigateToRef, refFromPath } from "./routes";
+import { markExpanded, mergeNeighborhood } from "./graphSession";
 import { useRelayQuery } from "./useRelayQuery";
 
 const RootDirQuery = graphql`
@@ -67,12 +72,45 @@ const NeighborhoodQuery = graphql`
         kind
         label
         parentId
+        external
+        expandable
       }
       nodes {
         id
         kind
         label
         parentId
+        external
+        expandable
+      }
+      edges {
+        from
+        to
+        kind
+      }
+    }
+  }
+`;
+
+const ExpandExternalQuery = graphql`
+  query AppExpandExternalQuery($focus: ID!) {
+    neighborhood(ref: $focus) {
+      incomplete
+      focus {
+        id
+        kind
+        label
+        parentId
+        external
+        expandable
+      }
+      nodes {
+        id
+        kind
+        label
+        parentId
+        external
+        expandable
       }
       edges {
         from
@@ -92,15 +130,7 @@ function PanelPending({ label }: { label: string }) {
   );
 }
 
-export function App() {
-  const [path, setPath] = useState(() => window.location.pathname);
-
-  useEffect(() => {
-    const onPop = () => setPath(window.location.pathname);
-    window.addEventListener("popstate", onPop);
-    return () => window.removeEventListener("popstate", onPop);
-  }, []);
-
+function CodeBrowser({ path, onPathChange }: { path: string; onPathChange: () => void }) {
   const focus = refFromPath(path);
   const isRoot = focus === "path:./" || focus === "path:.";
   const codeFocus = isRoot ? "path:./" : focus;
@@ -123,8 +153,43 @@ export function App() {
     `nb:${codeFocus}`
   );
 
-  const onSelect = useCallback((ref: string) => {
-    navigateToRef(ref);
+  const [expanding, setExpanding] = useState<string | null>(null);
+  const [nbOverride, setNbOverride] = useState(nb.data?.neighborhood ?? null);
+  useEffect(() => {
+    if (nb.data?.neighborhood) setNbOverride(nb.data.neighborhood);
+  }, [nb.data?.neighborhood]);
+
+  const onSelect = useCallback(
+    (ref: string) => {
+      navigateToRef(ref);
+      onPathChange();
+    },
+    [onPathChange]
+  );
+
+  const onExpandExternal = useCallback(async (ref: string) => {
+    setExpanding(ref);
+    try {
+      const data = await fetchQuery<EXQ>(environment, ExpandExternalQuery, {
+        focus: ref,
+      }).toPromise();
+      if (data?.neighborhood) {
+        mergeNeighborhood(data.neighborhood, ref);
+        markExpanded(ref);
+        setNbOverride((prev) =>
+          prev
+            ? {
+                ...prev,
+                incomplete: true,
+                nodes: [...(prev.nodes ?? [])],
+                edges: [...(prev.edges ?? [])],
+              }
+            : (data.neighborhood as any)
+        );
+      }
+    } finally {
+      setExpanding(null);
+    }
   }, []);
 
   const codeData = code.data?.code;
@@ -150,15 +215,26 @@ export function App() {
             refactree
           </a>
         </div>
-        <div className="navbar-center max-w-[70vw] truncate">
+        <div className="navbar-center max-w-[50vw] truncate">
           <code className="text-xs text-base-content/70 font-mono">
             {isRoot ? root.data?.rootDir ?? "…" : focus}
           </code>
         </div>
-        <div className="navbar-end gap-1">
-          {(fs.loading || code.loading || nb.loading) && (
+        <div className="navbar-end gap-2">
+          {(fs.loading || code.loading || nb.loading || expanding) && (
             <span className="loading loading-spinner loading-xs opacity-60" title="Loading…" />
           )}
+          <a
+            href="/graph"
+            className="btn btn-ghost btn-xs"
+            onClick={(e) => {
+              e.preventDefault();
+              navigateToGraph();
+              onPathChange();
+            }}
+          >
+            project graph
+          </a>
         </div>
       </div>
 
@@ -206,8 +282,15 @@ export function App() {
           ) : isRoot && !codeData?.segments?.length ? (
             <div className="p-4 text-sm text-base-content/70">
               <p>
-                Local code browser. Pick a file from the rail, or open a reference under{" "}
-                <code className="kbd kbd-sm">/code/…</code>. Graph expands from the current focus.
+                Local code browser. Pick a file, open{" "}
+                <a href="/graph" className="link" onClick={(e) => {
+                  e.preventDefault();
+                  navigateToGraph();
+                  onPathChange();
+                }}>
+                  project graph
+                </a>
+                , or a <code className="kbd kbd-sm">/code/…</code> reference.
               </p>
             </div>
           ) : (
@@ -232,12 +315,29 @@ export function App() {
           ) : null}
           <GraphPanel
             focusId={codeFocus}
-            neighborhood={nb.data?.neighborhood ?? null}
-            loading={nb.loading}
+            neighborhood={(nbOverride ?? nb.data?.neighborhood) as any}
+            loading={nb.loading || !!expanding}
             onFocus={onSelect}
+            onExpandExternal={onExpandExternal}
           />
         </section>
       </div>
     </div>
   );
+}
+
+export function App() {
+  const [path, setPath] = useState(() => window.location.pathname);
+  const bump = useCallback(() => setPath(window.location.pathname), []);
+
+  useEffect(() => {
+    const onPop = () => setPath(window.location.pathname);
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  if (isGraphRoute(path)) {
+    return <ProjectGraphPage onPathChange={bump} />;
+  }
+  return <CodeBrowser path={path} onPathChange={bump} />;
 }

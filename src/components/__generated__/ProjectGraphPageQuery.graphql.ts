@@ -1,5 +1,5 @@
 /**
- * @generated SignedSource<<52f88b8fde011dd567ecb421aaa19a14>>
+ * @generated SignedSource<<8365b4af3ea9802ef3ad2e2fb770729e>>
  * @lightSyntaxTransform
  * @nogrep
  */
@@ -11,11 +11,9 @@
 import { ConcreteRequest } from 'relay-runtime';
 export type EdgeKind = "IMPORTS" | "USED_BY" | "USES" | "%future added value";
 export type NodeKind = "ATOM" | "FILE" | "MODULE" | "%future added value";
-export type AppNeighborhoodQuery$variables = {
-  focus: string;
-};
-export type AppNeighborhoodQuery$data = {
-  readonly neighborhood: {
+export type ProjectGraphPageQuery$variables = Record<PropertyKey, never>;
+export type ProjectGraphPageQuery$data = {
+  readonly projectGraph: {
     readonly edges: ReadonlyArray<{
       readonly from: string;
       readonly kind: EdgeKind;
@@ -39,28 +37,22 @@ export type AppNeighborhoodQuery$data = {
       readonly parentId: string | null | undefined;
     }>;
   };
+  readonly rootDir: string;
 };
-export type AppNeighborhoodQuery = {
-  response: AppNeighborhoodQuery$data;
-  variables: AppNeighborhoodQuery$variables;
+export type ProjectGraphPageQuery = {
+  response: ProjectGraphPageQuery$data;
+  variables: ProjectGraphPageQuery$variables;
 };
 
 const node: ConcreteRequest = (function(){
-var v0 = [
-  {
-    "defaultValue": null,
-    "kind": "LocalArgument",
-    "name": "focus"
-  }
-],
-v1 = {
+var v0 = {
   "alias": null,
   "args": null,
   "kind": "ScalarField",
   "name": "kind",
   "storageKey": null
 },
-v2 = [
+v1 = [
   {
     "alias": null,
     "args": null,
@@ -68,7 +60,7 @@ v2 = [
     "name": "id",
     "storageKey": null
   },
-  (v1/*: any*/),
+  (v0/*: any*/),
   {
     "alias": null,
     "args": null,
@@ -98,19 +90,20 @@ v2 = [
     "storageKey": null
   }
 ],
-v3 = [
+v2 = [
   {
     "alias": null,
-    "args": [
-      {
-        "kind": "Variable",
-        "name": "ref",
-        "variableName": "focus"
-      }
-    ],
+    "args": null,
+    "kind": "ScalarField",
+    "name": "rootDir",
+    "storageKey": null
+  },
+  {
+    "alias": null,
+    "args": null,
     "concreteType": "Neighborhood",
     "kind": "LinkedField",
-    "name": "neighborhood",
+    "name": "projectGraph",
     "plural": false,
     "selections": [
       {
@@ -127,7 +120,7 @@ v3 = [
         "kind": "LinkedField",
         "name": "focus",
         "plural": false,
-        "selections": (v2/*: any*/),
+        "selections": (v1/*: any*/),
         "storageKey": null
       },
       {
@@ -137,7 +130,7 @@ v3 = [
         "kind": "LinkedField",
         "name": "nodes",
         "plural": true,
-        "selections": (v2/*: any*/),
+        "selections": (v1/*: any*/),
         "storageKey": null
       },
       {
@@ -162,7 +155,7 @@ v3 = [
             "name": "to",
             "storageKey": null
           },
-          (v1/*: any*/)
+          (v0/*: any*/)
         ],
         "storageKey": null
       }
@@ -172,32 +165,32 @@ v3 = [
 ];
 return {
   "fragment": {
-    "argumentDefinitions": (v0/*: any*/),
+    "argumentDefinitions": [],
     "kind": "Fragment",
     "metadata": null,
-    "name": "AppNeighborhoodQuery",
-    "selections": (v3/*: any*/),
+    "name": "ProjectGraphPageQuery",
+    "selections": (v2/*: any*/),
     "type": "Query",
     "abstractKey": null
   },
   "kind": "Request",
   "operation": {
-    "argumentDefinitions": (v0/*: any*/),
+    "argumentDefinitions": [],
     "kind": "Operation",
-    "name": "AppNeighborhoodQuery",
-    "selections": (v3/*: any*/)
+    "name": "ProjectGraphPageQuery",
+    "selections": (v2/*: any*/)
   },
   "params": {
-    "cacheID": "71c67b6665d2cbbeb591636c4dc3e954",
+    "cacheID": "deebf0dd416c1e334f41b944ffb8d60e",
     "id": null,
     "metadata": {},
-    "name": "AppNeighborhoodQuery",
+    "name": "ProjectGraphPageQuery",
     "operationKind": "query",
-    "text": "query AppNeighborhoodQuery(\n  $focus: ID!\n) {\n  neighborhood(ref: $focus) {\n    incomplete\n    focus {\n      id\n      kind\n      label\n      parentId\n      external\n      expandable\n    }\n    nodes {\n      id\n      kind\n      label\n      parentId\n      external\n      expandable\n    }\n    edges {\n      from\n      to\n      kind\n    }\n  }\n}\n"
+    "text": "query ProjectGraphPageQuery {\n  rootDir\n  projectGraph {\n    incomplete\n    focus {\n      id\n      kind\n      label\n      parentId\n      external\n      expandable\n    }\n    nodes {\n      id\n      kind\n      label\n      parentId\n      external\n      expandable\n    }\n    edges {\n      from\n      to\n      kind\n    }\n  }\n}\n"
   }
 };
 })();
 
-(node as any).hash = "962c9ba4fb533aa5049634d6d3421521";
+(node as any).hash = "3090f1f628f211b6b25a26e25078c6e8";
 
 export default node;

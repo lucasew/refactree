@@ -6,6 +6,7 @@ type Store interface {
 	RootDir() string
 	Filesystem(ref *string) ([]*FsEntry, error)
 	Neighborhood(ref string) (*Neighborhood, error)
+	ProjectGraph() (*Neighborhood, error)
 	Code(ref string) (*CodeDocument, error)
 	Doc(ref string) (*Doc, error)
 	Node(id string) (*GraphNode, error)

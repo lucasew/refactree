@@ -94,6 +94,13 @@ func (s *GraphStore) Neighborhood(ref string) (*gql.Neighborhood, error) {
 	return gql.BuildNeighborhood(s.Loader.RootDir, ref)
 }
 
+func (s *GraphStore) ProjectGraph() (*gql.Neighborhood, error) {
+	if s == nil || s.Loader == nil {
+		return nil, fmt.Errorf("loader not configured")
+	}
+	return gql.BuildProjectGraph(s.Loader.RootDir)
+}
+
 func (s *GraphStore) Code(ref string) (*gql.CodeDocument, error) {
 	if s == nil || s.Loader == nil {
 		return nil, fmt.Errorf("loader not configured")

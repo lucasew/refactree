@@ -1,5 +1,5 @@
 /**
- * @generated SignedSource<<52f88b8fde011dd567ecb421aaa19a14>>
+ * @generated SignedSource<<2807f530d01d794ba83300d685e45efa>>
  * @lightSyntaxTransform
  * @nogrep
  */
@@ -11,10 +11,10 @@
 import { ConcreteRequest } from 'relay-runtime';
 export type EdgeKind = "IMPORTS" | "USED_BY" | "USES" | "%future added value";
 export type NodeKind = "ATOM" | "FILE" | "MODULE" | "%future added value";
-export type AppNeighborhoodQuery$variables = {
+export type ProjectGraphPageExpandQuery$variables = {
   focus: string;
 };
-export type AppNeighborhoodQuery$data = {
+export type ProjectGraphPageExpandQuery$data = {
   readonly neighborhood: {
     readonly edges: ReadonlyArray<{
       readonly from: string;
@@ -40,9 +40,9 @@ export type AppNeighborhoodQuery$data = {
     }>;
   };
 };
-export type AppNeighborhoodQuery = {
-  response: AppNeighborhoodQuery$data;
-  variables: AppNeighborhoodQuery$variables;
+export type ProjectGraphPageExpandQuery = {
+  response: ProjectGraphPageExpandQuery$data;
+  variables: ProjectGraphPageExpandQuery$variables;
 };
 
 const node: ConcreteRequest = (function(){
@@ -175,7 +175,7 @@ return {
     "argumentDefinitions": (v0/*: any*/),
     "kind": "Fragment",
     "metadata": null,
-    "name": "AppNeighborhoodQuery",
+    "name": "ProjectGraphPageExpandQuery",
     "selections": (v3/*: any*/),
     "type": "Query",
     "abstractKey": null
@@ -184,20 +184,20 @@ return {
   "operation": {
     "argumentDefinitions": (v0/*: any*/),
     "kind": "Operation",
-    "name": "AppNeighborhoodQuery",
+    "name": "ProjectGraphPageExpandQuery",
     "selections": (v3/*: any*/)
   },
   "params": {
-    "cacheID": "71c67b6665d2cbbeb591636c4dc3e954",
+    "cacheID": "4446c7c51c25392d74133930d8f903fc",
     "id": null,
     "metadata": {},
-    "name": "AppNeighborhoodQuery",
+    "name": "ProjectGraphPageExpandQuery",
     "operationKind": "query",
-    "text": "query AppNeighborhoodQuery(\n  $focus: ID!\n) {\n  neighborhood(ref: $focus) {\n    incomplete\n    focus {\n      id\n      kind\n      label\n      parentId\n      external\n      expandable\n    }\n    nodes {\n      id\n      kind\n      label\n      parentId\n      external\n      expandable\n    }\n    edges {\n      from\n      to\n      kind\n    }\n  }\n}\n"
+    "text": "query ProjectGraphPageExpandQuery(\n  $focus: ID!\n) {\n  neighborhood(ref: $focus) {\n    incomplete\n    focus {\n      id\n      kind\n      label\n      parentId\n      external\n      expandable\n    }\n    nodes {\n      id\n      kind\n      label\n      parentId\n      external\n      expandable\n    }\n    edges {\n      from\n      to\n      kind\n    }\n  }\n}\n"
   }
 };
 })();
 
-(node as any).hash = "962c9ba4fb533aa5049634d6d3421521";
+(node as any).hash = "ae67d489951027bb47822d7e01df1f5d";
 
 export default node;

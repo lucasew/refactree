@@ -86,10 +86,12 @@ type ComplexityRoot struct {
 	}
 
 	GraphNode struct {
-		ID       func(childComplexity int) int
-		Kind     func(childComplexity int) int
-		Label    func(childComplexity int) int
-		ParentID func(childComplexity int) int
+		Expandable func(childComplexity int) int
+		External   func(childComplexity int) int
+		ID         func(childComplexity int) int
+		Kind       func(childComplexity int) int
+		Label      func(childComplexity int) int
+		ParentID   func(childComplexity int) int
 	}
 
 	Neighborhood struct {
@@ -105,6 +107,7 @@ type ComplexityRoot struct {
 		Filesystem   func(childComplexity int, ref *string) int
 		Neighborhood func(childComplexity int, ref string) int
 		Node         func(childComplexity int, id string) int
+		ProjectGraph func(childComplexity int) int
 		RootDir      func(childComplexity int) int
 	}
 }
@@ -113,6 +116,7 @@ type QueryResolver interface {
 	RootDir(ctx context.Context) (string, error)
 	Filesystem(ctx context.Context, ref *string) ([]*FsEntry, error)
 	Neighborhood(ctx context.Context, ref string) (*Neighborhood, error)
+	ProjectGraph(ctx context.Context) (*Neighborhood, error)
 	Code(ctx context.Context, ref string) (*CodeDocument, error)
 	Doc(ctx context.Context, ref string) (*Doc, error)
 	Node(ctx context.Context, id string) (*GraphNode, error)
@@ -292,6 +296,18 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 
 		return e.complexity.GraphEdge.To(childComplexity), true
 
+	case "GraphNode.expandable":
+		if e.complexity.GraphNode.Expandable == nil {
+			break
+		}
+
+		return e.complexity.GraphNode.Expandable(childComplexity), true
+	case "GraphNode.external":
+		if e.complexity.GraphNode.External == nil {
+			break
+		}
+
+		return e.complexity.GraphNode.External(childComplexity), true
 	case "GraphNode.id":
 		if e.complexity.GraphNode.ID == nil {
 			break
@@ -397,6 +413,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.Query.Node(childComplexity, args["id"].(string)), true
+	case "Query.projectGraph":
+		if e.complexity.Query.ProjectGraph == nil {
+			break
+		}
+
+		return e.complexity.Query.ProjectGraph(childComplexity), true
 	case "Query.rootDir":
 		if e.complexity.Query.RootDir == nil {
 			break
@@ -1501,6 +1523,64 @@ func (ec *executionContext) fieldContext_GraphNode_parentId(_ context.Context, f
 	return fc, nil
 }
 
+func (ec *executionContext) _GraphNode_external(ctx context.Context, field graphql.CollectedField, obj *GraphNode) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_GraphNode_external,
+		func(ctx context.Context) (any, error) {
+			return obj.External, nil
+		},
+		nil,
+		ec.marshalNBoolean2bool,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_GraphNode_external(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "GraphNode",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _GraphNode_expandable(ctx context.Context, field graphql.CollectedField, obj *GraphNode) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_GraphNode_expandable,
+		func(ctx context.Context) (any, error) {
+			return obj.Expandable, nil
+		},
+		nil,
+		ec.marshalNBoolean2bool,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_GraphNode_expandable(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "GraphNode",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _Neighborhood_focus(ctx context.Context, field graphql.CollectedField, obj *Neighborhood) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -1533,6 +1613,10 @@ func (ec *executionContext) fieldContext_Neighborhood_focus(_ context.Context, f
 				return ec.fieldContext_GraphNode_label(ctx, field)
 			case "parentId":
 				return ec.fieldContext_GraphNode_parentId(ctx, field)
+			case "external":
+				return ec.fieldContext_GraphNode_external(ctx, field)
+			case "expandable":
+				return ec.fieldContext_GraphNode_expandable(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type GraphNode", field.Name)
 		},
@@ -1572,6 +1656,10 @@ func (ec *executionContext) fieldContext_Neighborhood_nodes(_ context.Context, f
 				return ec.fieldContext_GraphNode_label(ctx, field)
 			case "parentId":
 				return ec.fieldContext_GraphNode_parentId(ctx, field)
+			case "external":
+				return ec.fieldContext_GraphNode_external(ctx, field)
+			case "expandable":
+				return ec.fieldContext_GraphNode_expandable(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type GraphNode", field.Name)
 		},
@@ -1774,6 +1862,45 @@ func (ec *executionContext) fieldContext_Query_neighborhood(ctx context.Context,
 	return fc, nil
 }
 
+func (ec *executionContext) _Query_projectGraph(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Query_projectGraph,
+		func(ctx context.Context) (any, error) {
+			return ec.resolvers.Query().ProjectGraph(ctx)
+		},
+		nil,
+		ec.marshalNNeighborhood2ᚖgithubᚗcomᚋlucasewᚋrefactreeᚋpkgᚋwebᚋgraphqlᚐNeighborhood,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Query_projectGraph(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "focus":
+				return ec.fieldContext_Neighborhood_focus(ctx, field)
+			case "nodes":
+				return ec.fieldContext_Neighborhood_nodes(ctx, field)
+			case "edges":
+				return ec.fieldContext_Neighborhood_edges(ctx, field)
+			case "incomplete":
+				return ec.fieldContext_Neighborhood_incomplete(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type Neighborhood", field.Name)
+		},
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _Query_code(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -1919,6 +2046,10 @@ func (ec *executionContext) fieldContext_Query_node(ctx context.Context, field g
 				return ec.fieldContext_GraphNode_label(ctx, field)
 			case "parentId":
 				return ec.fieldContext_GraphNode_parentId(ctx, field)
+			case "external":
+				return ec.fieldContext_GraphNode_external(ctx, field)
+			case "expandable":
+				return ec.fieldContext_GraphNode_expandable(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type GraphNode", field.Name)
 		},
@@ -3792,6 +3923,16 @@ func (ec *executionContext) _GraphNode(ctx context.Context, sel ast.SelectionSet
 			}
 		case "parentId":
 			out.Values[i] = ec._GraphNode_parentId(ctx, field, obj)
+		case "external":
+			out.Values[i] = ec._GraphNode_external(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "expandable":
+			out.Values[i] = ec._GraphNode_expandable(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -3942,6 +4083,28 @@ func (ec *executionContext) _Query(ctx context.Context, sel ast.SelectionSet) gr
 					}
 				}()
 				res = ec._Query_neighborhood(ctx, field)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx,
+					func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
+		case "projectGraph":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_projectGraph(ctx, field)
 				if res == graphql.Null {
 					atomic.AddUint32(&fs.Invalids, 1)
 				}

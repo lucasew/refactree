@@ -19,6 +19,10 @@ type GraphNode {
   kind: NodeKind!
   label: String!
   parentId: ID
+  """True when this is an external (non-path) dependency stub that can be expanded."""
+  external: Boolean!
+  """True when neighbors for this node have not been loaded yet (external expand)."""
+  expandable: Boolean!
 }
 
 type GraphEdge {
@@ -75,6 +79,11 @@ type Query {
   filesystem(ref: ID): [FsEntry!]!
   """Lazy focus neighborhood (relations + node stubs)."""
   neighborhood(ref: ID!): Neighborhood!
+  """
+  Project-local module/import graph (path: scopes + external stubs).
+  Incomplete: expand external (non-path) nodes via neighborhood(ref).
+  """
+  projectGraph: Neighborhood!
   """Annotated source for a reference (on demand)."""
   code(ref: ID!): CodeDocument!
   """Docstring / signature for a reference (on demand)."""

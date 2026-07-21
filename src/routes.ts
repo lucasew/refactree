@@ -1,6 +1,6 @@
 /** Parse browser path into a focus reference (canonical id). */
 export function refFromPath(pathname: string): string {
-  if (pathname === "/" || pathname === "") {
+  if (pathname === "/" || pathname === "" || pathname === "/graph") {
     return "path:./";
   }
   const prefix = "/code/";
@@ -33,4 +33,15 @@ export function navigateToRef(ref: string) {
     window.history.pushState({}, "", path);
   }
   window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
+export function navigateToGraph() {
+  if (window.location.pathname !== "/graph") {
+    window.history.pushState({}, "", "/graph");
+  }
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
+export function isGraphRoute(pathname: string): boolean {
+  return pathname === "/graph" || pathname.startsWith("/graph/");
 }

@@ -55,6 +55,10 @@ type GraphNode struct {
 	Kind     NodeKind `json:"kind"`
 	Label    string   `json:"label"`
 	ParentID *string  `json:"parentId,omitempty"`
+	// True when this is an external (non-path) dependency stub that can be expanded.
+	External bool `json:"external"`
+	// True when neighbors for this node have not been loaded yet (external expand).
+	Expandable bool `json:"expandable"`
 }
 
 // Focus-driven lazy neighborhood. May be incomplete (Seed-style).

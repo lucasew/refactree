@@ -1,5 +1,5 @@
 /**
- * @generated SignedSource<<52f88b8fde011dd567ecb421aaa19a14>>
+ * @generated SignedSource<<d7ba5f1114aaf7cbd041981c7efe6448>>
  * @lightSyntaxTransform
  * @nogrep
  */
@@ -11,10 +11,10 @@
 import { ConcreteRequest } from 'relay-runtime';
 export type EdgeKind = "IMPORTS" | "USED_BY" | "USES" | "%future added value";
 export type NodeKind = "ATOM" | "FILE" | "MODULE" | "%future added value";
-export type AppNeighborhoodQuery$variables = {
+export type AppExpandExternalQuery$variables = {
   focus: string;
 };
-export type AppNeighborhoodQuery$data = {
+export type AppExpandExternalQuery$data = {
   readonly neighborhood: {
     readonly edges: ReadonlyArray<{
       readonly from: string;
@@ -40,9 +40,9 @@ export type AppNeighborhoodQuery$data = {
     }>;
   };
 };
-export type AppNeighborhoodQuery = {
-  response: AppNeighborhoodQuery$data;
-  variables: AppNeighborhoodQuery$variables;
+export type AppExpandExternalQuery = {
+  response: AppExpandExternalQuery$data;
+  variables: AppExpandExternalQuery$variables;
 };
 
 const node: ConcreteRequest = (function(){
@@ -175,7 +175,7 @@ return {
     "argumentDefinitions": (v0/*: any*/),
     "kind": "Fragment",
     "metadata": null,
-    "name": "AppNeighborhoodQuery",
+    "name": "AppExpandExternalQuery",
     "selections": (v3/*: any*/),
     "type": "Query",
     "abstractKey": null
@@ -184,20 +184,20 @@ return {
   "operation": {
     "argumentDefinitions": (v0/*: any*/),
     "kind": "Operation",
-    "name": "AppNeighborhoodQuery",
+    "name": "AppExpandExternalQuery",
     "selections": (v3/*: any*/)
   },
   "params": {
-    "cacheID": "71c67b6665d2cbbeb591636c4dc3e954",
+    "cacheID": "2baae248b415e9736cfdfafcc5380110",
     "id": null,
     "metadata": {},
-    "name": "AppNeighborhoodQuery",
+    "name": "AppExpandExternalQuery",
     "operationKind": "query",
-    "text": "query AppNeighborhoodQuery(\n  $focus: ID!\n) {\n  neighborhood(ref: $focus) {\n    incomplete\n    focus {\n      id\n      kind\n      label\n      parentId\n      external\n      expandable\n    }\n    nodes {\n      id\n      kind\n      label\n      parentId\n      external\n      expandable\n    }\n    edges {\n      from\n      to\n      kind\n    }\n  }\n}\n"
+    "text": "query AppExpandExternalQuery(\n  $focus: ID!\n) {\n  neighborhood(ref: $focus) {\n    incomplete\n    focus {\n      id\n      kind\n      label\n      parentId\n      external\n      expandable\n    }\n    nodes {\n      id\n      kind\n      label\n      parentId\n      external\n      expandable\n    }\n    edges {\n      from\n      to\n      kind\n    }\n  }\n}\n"
   }
 };
 })();
 
-(node as any).hash = "962c9ba4fb533aa5049634d6d3421521";
+(node as any).hash = "ea4a1b1fa0b79f3298d971c032e388f5";
 
 export default node;
