@@ -6,46 +6,80 @@ go = "1.26.5"
 goreleaser = "2.17.0"
 svu = "3.3.0"
 
-[tasks.install]
+# --- install (tools / deps only; no codegen or embed) ---
+
+[tasks."install:bun"]
+description = "bun install (lockfile preferred)"
+run = "bun install --frozen-lockfile || bun install"
+
+[tasks."install:go"]
+description = "Go module download"
 run = "go mod tidy && go get -v ./..."
 
-[tasks.codegen]
-description = "GraphQL (gqlgen) + Relay compiler artifacts"
-depends = ["codegen:gql", "codegen:relay"]
-run = "echo 'codegen: ok'"
+[tasks.install]
+description = "Install JS + Go dependencies"
+depends = ["install:*"]
+
+# --- codegen (schema → Go GraphQL + Relay artifacts) ---
 
 [tasks."codegen:gql"]
 description = "gqlgen (mise tool go:github.com/99designs/gqlgen) — same pattern as ciborg"
+depends = ["install:go"]
+wait_for = ["install:go"]
 run = "gqlgen"
 
 [tasks."codegen:relay"]
 description = "Relay compiler against pkg/web/graphql/schema.graphql"
-run = '''
-bun install --frozen-lockfile || bun install
-bun run relay
-'''
+depends = ["install:bun"]
+wait_for = ["install:bun"]
+run = "bun run relay"
+
+[tasks.codegen]
+description = "GraphQL (gqlgen) + Relay compiler artifacts"
+depends = ["codegen:gql", "codegen:relay"]
+
+# --- frontend (SPA → pkg/web/dist for go:embed) ---
 
 [tasks."frontend:build"]
 description = "Build SPA into pkg/web/dist for go:embed"
 depends = ["codegen:relay"]
-run = "bunx vite build"
+# Relay must finish before vite (and before any go:embed consumer).
+wait_for = ["codegen:relay"]
+run = "bun run build"
 
 [tasks."frontend:dev"]
 description = "Vite dev server (proxy /graphql to rft serve :8080)"
+depends = ["codegen:relay"]
+wait_for = ["codegen:relay"]
 run = "bunx vite"
+
+# --- build (binary with embedded SPA; flake-free dependency order) ---
+
+[tasks."build:go"]
+description = "Build rft with embedded SPA (pkg/web/dist)"
+depends = ["codegen:gql", "frontend:build"]
+# Embed path must exist and be complete before go build; gqlgen finished via depends.
+wait_for = ["frontend:build", "codegen:gql"]
+run = "go build -o rft ./cmd/rft"
+
+[tasks.build]
+description = "Full build: install deps, codegen, SPA, then rft binary"
+depends = ["build:go"]
 
 [tasks.format]
 description = "Format source packages (skips testdata/ and other non-package trees)"
 run = "go fmt ./..."
 
 [tasks.ci]
-description = "CI checks and tests"
-depends = ["frontend:build"]
+description = "CI checks and tests (SPA embedded before go test)"
+depends = ["codegen", "frontend:build"]
+wait_for = ["frontend:build"]
 run = "go test ./..."
 
 [tasks.release]
 description = "Run a release"
-depends = ["ci"]
+depends = ["build", "ci"]
+wait_for = ["build", "ci"]
 usage = '''
 arg "<version>" help="New version" {
   choices "next" "major" "minor" "patch"

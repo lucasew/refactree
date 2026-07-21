@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "relay-compiler && vite build",
+    "build": "vite build",
     "relay": "relay-compiler",
     "preview": "vite preview"
   },
