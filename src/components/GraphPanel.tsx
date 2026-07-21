@@ -74,14 +74,52 @@ export function GraphPanel({
   const [crawlRepo, setCrawlRepo] = useState(!!streamProject);
   const lastVisit = useRef<string>("");
   const crawlGen = useRef(0);
+  const bumpRaf = useRef(0);
+  const lastPaintAt = useRef(0);
+  const lastReheatAt = useRef(0);
+  const trailingBump = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const graphDataRef = useRef({ nodes: [] as ReturnType<typeof snapshotGraphData>["nodes"], links: [] as ReturnType<typeof snapshotGraphData>["links"] });
+  const usageRef = useRef(new Map<string, number>());
 
-  const bump = useCallback(() => {
-    setTick((t) => t + 1);
-    try {
-      fgRef.current?.d3ReheatSimulation?.();
-    } catch {
-      /* ignore */
+  // Coalesce stream floods: ~10 paints/s, rare simulation reheats (was every edge → flicker).
+  const bump = useCallback((opts?: { reheat?: boolean }) => {
+    const paint = () => {
+      lastPaintAt.current = performance.now();
+      setTick((t) => t + 1);
+      if (opts?.reheat) {
+        const now = performance.now();
+        if (now - lastReheatAt.current > 450) {
+          lastReheatAt.current = now;
+          try {
+            fgRef.current?.d3ReheatSimulation?.();
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    };
+    const now = performance.now();
+    const minGap = 100; // ms between React graphData snapshots
+    if (now - lastPaintAt.current >= minGap) {
+      if (bumpRaf.current) cancelAnimationFrame(bumpRaf.current);
+      bumpRaf.current = requestAnimationFrame(() => {
+        bumpRaf.current = 0;
+        paint();
+      });
+      return;
     }
+    if (trailingBump.current) return;
+    trailingBump.current = setTimeout(() => {
+      trailingBump.current = null;
+      paint();
+    }, minGap - (now - lastPaintAt.current));
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (bumpRaf.current) cancelAnimationFrame(bumpRaf.current);
+      if (trailingBump.current) clearTimeout(trailingBump.current);
+    };
   }, []);
 
   useEffect(() => {
@@ -115,10 +153,9 @@ export function GraphPanel({
     }
     setBusy(true);
     setErr(null);
-    // First project kick + wait for its done; later auto-crawls after visits still bump via subscribe.
     void setSessionCrawl(true, {
       onEvent: () => {
-        if (!cancelled) bump();
+        if (!cancelled) bump({ reheat: true });
       },
       onError: (e) => {
         if (!cancelled) setErr(e.message);
@@ -128,7 +165,8 @@ export function GraphPanel({
     });
     const unsub = getGraphSessionClient().subscribe((msg) => {
       if (cancelled) return;
-      if (msg.type === "edge" || msg.type === "focus" || msg.type === "done") bump();
+      if (msg.type === "edge" || msg.type === "focus") bump({ reheat: true });
+      if (msg.type === "done") bump({ reheat: true });
     });
     return () => {
       cancelled = true;
@@ -141,16 +179,13 @@ export function GraphPanel({
   useEffect(() => {
     if (streamRef == null || streamRef === "") return;
     const visitRef = normalizeRef(streamRef);
-    if (lastVisit.current === visitRef && getGraphSession().nodes.size > 0) {
-      // re-visit is ok (deltas); still send so new edges can arrive
-    }
     lastVisit.current = visitRef;
     let cancelled = false;
     setBusy(true);
     setErr(null);
     sessionVisit(visitRef, {
       onEvent: () => {
-        if (!cancelled) bump();
+        if (!cancelled) bump({ reheat: true });
       },
       onError: (e) => {
         if (!cancelled) setErr(e.message);
@@ -166,7 +201,7 @@ export function GraphPanel({
   useEffect(() => {
     if (!neighborhood || streamRef != null || crawlRepo) return;
     mergeNeighborhood(neighborhood, focusId);
-    bump();
+    bump({ reheat: true });
   }, [neighborhood, focusId, streamRef, crawlRepo, bump]);
 
   useEffect(() => {
@@ -179,6 +214,8 @@ export function GraphPanel({
     return snapshotGraphData(viewMode);
   }, [tick, viewMode]);
 
+  graphDataRef.current = graphData;
+
   const focusInView = useMemo(
     () => viewFocusId(getGraphSession().focusId || focusId, viewMode),
     [tick, focusId, viewMode]
@@ -186,14 +223,16 @@ export function GraphPanel({
 
   // Indegree usage: imported/used-by-many → center; unused → rim.
   const usage = useMemo(() => computeUsage(graphData.links), [graphData.links]);
+  usageRef.current = usage;
 
+  // Install forces when size / emptiness changes — NOT on every stream tick (that was flickery).
+  const hasNodes = graphData.nodes.length > 0;
   useEffect(() => {
     const fg = fgRef.current;
-    if (!fg || graphData.nodes.length === 0) return;
+    if (!fg || !hasNodes) return;
 
-    const getUse = (id: string) => usage.get(id) ?? 0;
+    const getUse = (id: string) => usageRef.current.get(id) ?? 0;
 
-    // Soften default center so usage forces dominate placement.
     try {
       const center = fg.d3Force("center");
       if (center && typeof center.strength === "function") {
@@ -203,7 +242,6 @@ export function GraphPanel({
       /* ignore */
     }
 
-    // Unused nodes repel harder (spread on rim); hubs cluster.
     try {
       const charge = fg.d3Force("charge");
       if (charge && typeof charge.strength === "function") {
@@ -216,7 +254,6 @@ export function GraphPanel({
       /* ignore */
     }
 
-    // Links between highly used nodes slightly shorter.
     try {
       const link = fg.d3Force("link");
       if (link && typeof link.distance === "function") {
@@ -258,10 +295,9 @@ export function GraphPanel({
         strength: 0.42,
       })
     );
-    // Uncross links: O(E²) capped (~96 edges ⇒ ~5k pair checks / tick).
     fg.d3Force(
       "edgeCrossing",
-      forceEdgeCrossing(() => graphData.links, {
+      forceEdgeCrossing(() => graphDataRef.current.links, {
         strength: 0.14,
         maxLinks: 96,
       })
@@ -269,10 +305,11 @@ export function GraphPanel({
 
     try {
       fg.d3ReheatSimulation?.();
+      lastReheatAt.current = performance.now();
     } catch {
       /* ignore */
     }
-  }, [usage, graphData.nodes.length, graphData.links, size.w, size.h, tick]);
+  }, [hasNodes, size.w, size.h, viewMode]);
 
   const onNodeClick = useCallback(
     (node: { id: string; expandable?: boolean; external?: boolean }) => {
