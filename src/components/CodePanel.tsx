@@ -24,14 +24,14 @@ export function CodePanel({ segments, nonText, focusId, onNavigate }: Props) {
   }, [focusId, segments]);
 
   if (nonText) {
-    return <p className="muted">Binary or non-text file — not rendered.</p>;
+    return <p className="p-4 text-sm text-base-content/50">Binary or non-text file — not rendered.</p>;
   }
   if (!segments.length) {
-    return <p className="muted">No source.</p>;
+    return <p className="p-4 text-sm text-base-content/50">No source.</p>;
   }
 
   return (
-    <pre className="code-pre">
+    <pre className="code-view p-3 m-0">
       {segments.filter(Boolean).map((s, i) => {
         const key = i;
         if (s!.isLink && s!.reference) {
@@ -40,7 +40,7 @@ export function CodePanel({ segments, nonText, focusId, onNavigate }: Props) {
               key={key}
               href={"/code/" + encodeURIComponent(s!.reference)}
               id={s!.anchorId ?? undefined}
-              className={s!.isDef ? "def" : undefined}
+              className={s!.isDef ? "is-def" : undefined}
               onClick={(e) => {
                 e.preventDefault();
                 onNavigate(s!.reference!);
@@ -52,7 +52,7 @@ export function CodePanel({ segments, nonText, focusId, onNavigate }: Props) {
         }
         if (s!.isDef && s!.anchorId) {
           return (
-            <span key={key} id={s!.anchorId} className="def">
+            <span key={key} id={s!.anchorId} className="is-def">
               {s!.text}
             </span>
           );

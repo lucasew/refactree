@@ -316,13 +316,14 @@ Same spine rules as the rest of the product: lazy by default; eager only when a 
 | Piece | Choice |
 |-------|--------|
 | UI | **React + Relay** from day one |
+| Styling | **Tailwind CSS 4** + **daisyUI 5** (semantic components/colors; custom `refactree` dark amber theme) |
 | API | **GraphQL**, **gqlgen** (schema-first) |
 | Global id | **Canonical reference string** is the Relay/Node id (run canonicalize before minting ids); expose the same string for CLI/URL parity |
 | JS toolchain | **Bun**; `package.json` at **repo root** |
-| Build output | Bun → **`dist/`**; Go **`//go:embed`s `dist`** into the serve binary |
-| Tooling | **`mise` `codegen:*`** (gqlgen + Relay compiler / related); replace today’s no-op `codegen` task |
+| Build output | Bun → **`pkg/web/dist/`**; Go **`//go:embed`s `dist`** into the serve binary |
+| Tooling | **`mise` `codegen:*`** (gqlgen + Relay compiler / related); `frontend:build` / `frontend:dev` |
 | Dev | Bun/Vite-style dev server may proxy GraphQL to `rft serve`; prod is embed-only |
-| Graph viz | **`react-force-graph-2d`** |
+| Graph viz | **`react-force-graph-2d`** (canvas paints may stay theme-fixed; chrome uses daisyUI) |
 
 ### GraphQL surface (intent)
 

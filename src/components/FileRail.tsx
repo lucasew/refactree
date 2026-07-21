@@ -17,12 +17,12 @@ export function FileRail({ files, symbols, activeRef, onSelect }: Props) {
   const [tab, setTab] = useState<"files" | "symbols">("files");
 
   return (
-    <div className="rail-tabs">
-      <div className="rail-tab-labels" role="tablist">
+    <div className="p-2 flex flex-col gap-2">
+      <div role="tablist" className="tabs tabs-box tabs-sm w-full">
         <button
           type="button"
           role="tab"
-          className={tab === "files" ? "is-active" : ""}
+          className={`tab flex-1 ${tab === "files" ? "tab-active" : ""}`}
           onClick={() => setTab("files")}
         >
           Files
@@ -30,44 +30,56 @@ export function FileRail({ files, symbols, activeRef, onSelect }: Props) {
         <button
           type="button"
           role="tab"
-          className={tab === "symbols" ? "is-active" : ""}
+          className={`tab flex-1 ${tab === "symbols" ? "tab-active" : ""}`}
           onClick={() => setTab("symbols")}
         >
           Symbols
         </button>
       </div>
+
       {tab === "files" ? (
-        <ul className="fs-list">
+        <ul className="menu menu-sm bg-base-200 rounded-box w-full p-0">
           {files.filter(Boolean).map((f) => (
             <li key={f!.reference + f!.name}>
               <a
                 href={"/code/" + encodeURIComponent(f!.reference)}
-                className={f!.reference === activeRef ? "is-active" : ""}
+                className={f!.reference === activeRef ? "menu-active" : ""}
                 onClick={(e) => {
                   e.preventDefault();
                   onSelect(f!.reference);
                 }}
               >
-                {f!.name}
+                {f!.isDir ? (
+                  <span className="badge badge-ghost badge-xs">dir</span>
+                ) : null}
+                <span className="truncate">{f!.name}</span>
               </a>
             </li>
           ))}
-          {!files.length ? <li className="muted">—</li> : null}
+          {!files.length ? (
+            <li className="menu-disabled">
+              <span className="text-base-content/50">—</span>
+            </li>
+          ) : null}
         </ul>
       ) : (
-        <ul className="sym-list">
+        <ul className="menu menu-sm bg-base-200 rounded-box w-full p-0">
           {symbols.filter(Boolean).map((s) => (
             <li key={s!.reference + s!.name}>
               <button
                 type="button"
-                className={s!.reference === activeRef ? "is-active" : ""}
+                className={s!.reference === activeRef ? "menu-active" : ""}
                 onClick={() => onSelect(s!.reference)}
               >
-                {s!.name}
+                <span className="truncate">{s!.name}</span>
               </button>
             </li>
           ))}
-          {!symbols.length ? <li className="muted">Open a file to list symbols.</li> : null}
+          {!symbols.length ? (
+            <li className="menu-disabled">
+              <span className="text-base-content/50">Open a file to list symbols.</span>
+            </li>
+          ) : null}
         </ul>
       )}
     </div>

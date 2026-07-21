@@ -61,30 +61,33 @@ export function GraphPanel({ neighborhood, onFocus }: Props) {
 
   if (!neighborhood || data.nodes.length === 0) {
     return (
-      <p className="graph-empty">
+      <div className="p-4 text-sm text-base-content/60">
         Focus a file or symbol to expand the relation graph (lazy, incomplete).
-      </p>
+      </div>
     );
   }
 
   return (
-    <>
+    <div className="graph-canvas-host relative h-full min-h-64">
       {neighborhood.incomplete ? (
-        <p className="muted" style={{ position: "absolute", zIndex: 1, margin: "0.5rem", fontSize: 12 }}>
-          incomplete neighborhood
-        </p>
+        <span className="badge badge-ghost badge-sm absolute z-10 m-2">
+          incomplete
+        </span>
       ) : null}
       <ForceGraph2D
         ref={fgRef}
         graphData={data}
         nodeId="id"
         nodeLabel="name"
+        width={undefined}
+        height={undefined}
         nodeCanvasObject={(node: any, ctx, globalScale) => {
           const label = node.name || node.id;
           const fontSize = 12 / globalScale;
           const r = node.kind === "ATOM" ? 4 : node.kind === "MODULE" ? 7 : 5;
           ctx.beginPath();
           ctx.arc(node.x, node.y, r, 0, 2 * Math.PI, false);
+          // Canvas paints stay fixed (theme-independent chart colors).
           ctx.fillStyle =
             node.id === neighborhood.focus.id
               ? "#e8a838"
@@ -115,6 +118,6 @@ export function GraphPanel({ neighborhood, onFocus }: Props) {
         linkDirectionalArrowRelPos={1}
         backgroundColor="#1a1814"
       />
-    </>
+    </div>
   );
 }
