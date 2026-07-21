@@ -259,7 +259,7 @@ Helix: define `[language-server.rft]` with `command = "rft"` / `args = ["lsp"]`,
 
 ## Web browser (serve SPA)
 
-Status: **specified; not implemented.** Replaces template-centric `rft serve` with a graph-model-centric SPA. First cut is **lazy-only**; eager analyses are backlog. `desktop` uses the same UI once serve ships it.
+Status: **specified; first cut in progress** (see serve SPA implementation). Replaces template-centric `rft serve` with a graph-model-centric SPA. First cut is **lazy-only**; eager analyses are backlog. `desktop` uses the same UI once serve ships it.
 
 ### Split of responsibility
 

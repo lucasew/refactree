@@ -1,6 +1,8 @@
 # Warning: Do not unify this file with others. Keep tool definitions localized.
 [tools]
+bun = "1.3.14"
 go = "1.26.5"
+"go:github.com/99designs/gqlgen" = "0.17.86"
 goreleaser = "2.17.0"
 svu = "3.3.0"
 
@@ -8,8 +10,33 @@ svu = "3.3.0"
 run = "go mod tidy && go get -v ./..."
 
 [tasks.codegen]
-description = "No-op (refactree has no codegen step)"
-run = "echo 'codegen: nothing to do'"
+description = "GraphQL (gqlgen) + Relay compiler artifacts"
+depends = ["codegen:gql", "codegen:relay"]
+run = "echo 'codegen: ok'"
+
+[tasks."codegen:gql"]
+description = "Generate Go GraphQL from pkg/web/graphql/schema.graphqls"
+run = '''
+cp pkg/web/graphql/schema.graphqls schema.graphql
+go run github.com/99designs/gqlgen@v0.17.81 generate
+'''
+
+[tasks."codegen:relay"]
+description = "Relay compiler over src/ against schema.graphql"
+run = '''
+cp pkg/web/graphql/schema.graphqls schema.graphql
+bun install --frozen-lockfile || bun install
+bun run relay
+'''
+
+[tasks."frontend:build"]
+description = "Build SPA into pkg/web/dist for go:embed"
+depends = ["codegen:relay"]
+run = "bunx vite build"
+
+[tasks."frontend:dev"]
+description = "Vite dev server (proxy /graphql to rft serve :8080)"
+run = "bunx vite"
 
 [tasks.format]
 description = "Format source packages (skips testdata/ and other non-package trees)"
@@ -17,6 +44,7 @@ run = "go fmt ./..."
 
 [tasks.ci]
 description = "CI checks and tests"
+depends = ["frontend:build"]
 run = "go test ./..."
 
 [tasks.release]

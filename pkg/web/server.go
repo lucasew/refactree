@@ -2,23 +2,30 @@ package web
 
 import (
 	"embed"
-	"html/template"
 	"io/fs"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/lucasew/refactree/pkg/ingest"
+	"github.com/99designs/gqlgen/graphql/handler"
+	"github.com/99designs/gqlgen/graphql/handler/extension"
+	"github.com/99designs/gqlgen/graphql/handler/lru"
+	"github.com/99designs/gqlgen/graphql/handler/transport"
+	"github.com/99designs/gqlgen/graphql/playground"
+	"github.com/lucasew/refactree/pkg/web/graphql"
+	"github.com/vektah/gqlparser/v2/ast"
 )
 
 //go:embed templates/*.html static/*
 var embedded embed.FS
 
-// Server serves the code browser.
+// distFS is the Bun SPA build. Populated via //go:embed dist/* in spa_embed.go
+// when dist assets exist.
+
+// Server serves the code browser (SPA + GraphQL).
 type Server struct {
 	loader *Loader
-	tmpl   *template.Template
 	mux    *http.ServeMux
 }
 
@@ -34,14 +41,7 @@ func New(opts Options) (*Server, error) {
 		return nil, err
 	}
 
-	tmpl, err := template.New("").Funcs(template.FuncMap{
-		"safeURL": func(s string) template.URL { return template.URL(s) },
-	}).ParseFS(embedded, "templates/*.html")
-	if err != nil {
-		return nil, err
-	}
-
-	s := &Server{loader: loader, tmpl: tmpl, mux: http.NewServeMux()}
+	s := &Server{loader: loader, mux: http.NewServeMux()}
 	s.routes()
 	return s, nil
 }
@@ -51,8 +51,6 @@ func (s *Server) Handler() http.Handler {
 	return recoverHandler(s.mux)
 }
 
-// recoverHandler keeps the process alive if a request panics (e.g. third-party
-// parse faults). Concurrent tree-sitter use is serialized separately in ingest.
 func recoverHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
@@ -66,67 +64,61 @@ func recoverHandler(next http.Handler) http.Handler {
 }
 
 func (s *Server) routes() {
-	staticFS, err := fs.Sub(embedded, "static")
-	if err == nil {
+	// Legacy static (CSS shared tokens) + SPA assets.
+	if staticFS, err := fs.Sub(embedded, "static"); err == nil {
 		s.mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
 	}
+	if spa, err := spaFileSystem(); err == nil {
+		s.mux.Handle("/assets/", http.FileServer(http.FS(spa)))
+	}
 
-	s.mux.HandleFunc("/", s.handleIndex)
-	s.mux.HandleFunc(CodePathPrefix, s.handleCode)
+	gqlSrv := handler.New(graphql.NewExecutableSchema(graphql.Config{
+		Resolvers: &graphql.Resolver{Store: &GraphStore{Loader: s.loader}},
+	}))
+	gqlSrv.AddTransport(transport.Options{})
+	gqlSrv.AddTransport(transport.GET{})
+	gqlSrv.AddTransport(transport.POST{})
+	gqlSrv.SetQueryCache(lru.New[*ast.QueryDocument](1000))
+	gqlSrv.Use(extension.Introspection{})
+	gqlSrv.Use(extension.AutomaticPersistedQuery{
+		Cache: lru.New[string](100),
+	})
+
+	s.mux.Handle("/graphql", gqlSrv)
+	s.mux.Handle("/playground", playground.Handler("refactree", "/graphql"))
+
+	// SPA shell for / and /code/...
+	s.mux.HandleFunc("/", s.handleSPA)
 }
 
-func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
+func (s *Server) handleSPA(w http.ResponseWriter, r *http.Request) {
+	// Asset files under embed root (vite may emit at /assets/ already handled).
+	if strings.HasPrefix(r.URL.Path, "/assets/") {
 		http.NotFound(w, r)
 		return
 	}
-	v := s.loader.LoadIndex()
-	s.render(w, "index.html", v)
-}
-
-func (s *Server) handleCode(w http.ResponseWriter, r *http.Request) {
-	ref, ok := DecodeCodePath(r.URL.Path)
-	if !ok || ref == "" {
-		http.Redirect(w, r, "/", http.StatusFound)
+	data, err := spaIndexHTML()
+	if err != nil {
+		// Fallback message when dist not built.
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`<!DOCTYPE html><html><body>
+<p>refactree SPA not built. Run <code>mise run frontend:build</code> (or <code>bun run build</code>) then rebuild rft.</p>
+</body></html>`))
 		return
 	}
-
-	// Honour ?ref= as an alternate entry (useful for debugging).
-	if q := r.URL.Query().Get("ref"); q != "" {
-		ref = q
-	}
-
-	// Core canonicalization over the ingest graph (any provider); redirect if changed.
-	if s.loader != nil {
-		parsed := ingest.ParseReference(ref)
-		canon := ingest.CanonicalizeReference(s.loader.RootDir, parsed).String()
-		if canon != "" && canon != ref {
-			http.Redirect(w, r, EncodeCodeURL(canon), http.StatusFound)
-			return
-		}
-	}
-
-	v := s.loader.LoadFile(ref)
-	s.render(w, "code.html", v)
-}
-
-func (s *Server) render(w http.ResponseWriter, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := s.tmpl.ExecuteTemplate(w, name, data); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
+	_, _ = w.Write(data)
 }
 
 // ListenAndServe starts HTTP on addr (e.g. "127.0.0.1:8080").
-// Timeouts bound slowloris and hung connections; WriteTimeout is generous so
-// large annotated pages still finish.
 func (s *Server) ListenAndServe(addr string) error {
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      60 * time.Second,
+		WriteTimeout:      120 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
 	return srv.ListenAndServe()
