@@ -14,9 +14,10 @@ type Props = {
   nonText: boolean;
   focusId: string | null | undefined;
   onNavigate: (ref: string) => void;
+  loading?: boolean;
 };
 
-export function CodePanel({ segments, nonText, focusId, onNavigate }: Props) {
+export function CodePanel({ segments, nonText, focusId, onNavigate, loading }: Props) {
   useEffect(() => {
     if (!focusId) return;
     const el = document.getElementById(focusId);
@@ -31,34 +32,41 @@ export function CodePanel({ segments, nonText, focusId, onNavigate }: Props) {
   }
 
   return (
-    <pre className="code-view p-3 m-0">
-      {segments.filter(Boolean).map((s, i) => {
-        const key = i;
-        if (s!.isLink && s!.reference) {
-          return (
-            <a
-              key={key}
-              href={"/code/" + encodeURIComponent(s!.reference)}
-              id={s!.anchorId ?? undefined}
-              className={s!.isDef ? "is-def" : undefined}
-              onClick={(e) => {
-                e.preventDefault();
-                onNavigate(s!.reference!);
-              }}
-            >
-              {s!.text}
-            </a>
-          );
-        }
-        if (s!.isDef && s!.anchorId) {
-          return (
-            <span key={key} id={s!.anchorId} className="is-def">
-              {s!.text}
-            </span>
-          );
-        }
-        return <span key={key}>{s!.text}</span>;
-      })}
-    </pre>
+    <div className="relative">
+      {loading ? (
+        <span className="badge badge-ghost badge-sm absolute right-2 top-2 z-10">
+          refreshing…
+        </span>
+      ) : null}
+      <pre className="code-view p-3 m-0">
+        {segments.filter(Boolean).map((s, i) => {
+          const key = i;
+          if (s!.isLink && s!.reference) {
+            return (
+              <a
+                key={key}
+                href={"/code/" + encodeURIComponent(s!.reference)}
+                id={s!.anchorId ?? undefined}
+                className={s!.isDef ? "is-def" : undefined}
+                onClick={(e) => {
+                  e.preventDefault();
+                  onNavigate(s!.reference!);
+                }}
+              >
+                {s!.text}
+              </a>
+            );
+          }
+          if (s!.isDef && s!.anchorId) {
+            return (
+              <span key={key} id={s!.anchorId} className="is-def">
+                {s!.text}
+              </span>
+            );
+          }
+          return <span key={key}>{s!.text}</span>;
+        })}
+      </pre>
+    </div>
   );
 }

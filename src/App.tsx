@@ -1,40 +1,34 @@
-import React, { useCallback, useEffect, useState } from "react";
-import { graphql, useLazyLoadQuery } from "react-relay";
-import type { AppRootQuery } from "./__generated__/AppRootQuery.graphql";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { graphql } from "react-relay";
+import type { AppFilesystemQuery as FsQ } from "./__generated__/AppFilesystemQuery.graphql";
+import type { AppCodeQuery as CodeQ } from "./__generated__/AppCodeQuery.graphql";
+import type { AppNeighborhoodQuery as NbQ } from "./__generated__/AppNeighborhoodQuery.graphql";
+import type { AppRootDirQuery as RootQ } from "./__generated__/AppRootDirQuery.graphql";
 import { FileRail } from "./components/FileRail";
 import { CodePanel } from "./components/CodePanel";
 import { GraphPanel } from "./components/GraphPanel";
 import { navigateToRef, refFromPath } from "./routes";
+import { useRelayQuery } from "./useRelayQuery";
 
-const RootQuery = graphql`
-  query AppRootQuery($fsRef: ID, $focus: ID!, $hasFocus: Boolean!) {
+const RootDirQuery = graphql`
+  query AppRootDirQuery {
     rootDir
+  }
+`;
+
+const FilesystemQuery = graphql`
+  query AppFilesystemQuery($fsRef: ID) {
     filesystem(ref: $fsRef) {
       name
       reference
       isDir
     }
-    neighborhood(ref: $focus) @include(if: $hasFocus) {
-      incomplete
-      focus {
-        id
-        kind
-        label
-        parentId
-      }
-      nodes {
-        id
-        kind
-        label
-        parentId
-      }
-      edges {
-        from
-        to
-        kind
-      }
-    }
-    code(ref: $focus) @include(if: $hasFocus) {
+  }
+`;
+
+const CodeQuery = graphql`
+  query AppCodeQuery($focus: ID!) {
+    code(ref: $focus) {
       reference
       language
       nonText
@@ -64,7 +58,41 @@ const RootQuery = graphql`
   }
 `;
 
-function Shell() {
+const NeighborhoodQuery = graphql`
+  query AppNeighborhoodQuery($focus: ID!) {
+    neighborhood(ref: $focus) {
+      incomplete
+      focus {
+        id
+        kind
+        label
+        parentId
+      }
+      nodes {
+        id
+        kind
+        label
+        parentId
+      }
+      edges {
+        from
+        to
+        kind
+      }
+    }
+  }
+`;
+
+function PanelPending({ label }: { label: string }) {
+  return (
+    <div className="flex items-center gap-2 p-3 text-sm text-base-content/50">
+      <span className="loading loading-spinner loading-xs" />
+      {label}
+    </div>
+  );
+}
+
+export function App() {
   const [path, setPath] = useState(() => window.location.pathname);
 
   useEffect(() => {
@@ -75,25 +103,37 @@ function Shell() {
 
   const focus = refFromPath(path);
   const isRoot = focus === "path:./" || focus === "path:.";
+  const codeFocus = isRoot ? "path:./" : focus;
   const fsRef = isRoot ? null : focus;
 
-  const data = useLazyLoadQuery<AppRootQuery>(
-    RootQuery,
-    {
-      fsRef: isRoot ? null : fsRef,
-      focus: isRoot ? "path:./" : focus,
-      hasFocus: true,
-    },
-    { fetchPolicy: "store-and-network" }
+  const root = useRelayQuery<RootQ>(RootDirQuery, {}, "root");
+  const fs = useRelayQuery<FsQ>(
+    FilesystemQuery,
+    { fsRef },
+    `fs:${fsRef ?? ""}`
+  );
+  const code = useRelayQuery<CodeQ>(
+    CodeQuery,
+    { focus: codeFocus },
+    `code:${codeFocus}`
+  );
+  const nb = useRelayQuery<NbQ>(
+    NeighborhoodQuery,
+    { focus: codeFocus },
+    `nb:${codeFocus}`
   );
 
   const onSelect = useCallback((ref: string) => {
     navigateToRef(ref);
   }, []);
 
-  const nb = data.neighborhood;
-  const code = data.code;
-  const files = code?.files?.length ? code.files : data.filesystem ?? [];
+  const codeData = code.data?.code;
+  const files = useMemo(() => {
+    if (codeData?.files?.length) return codeData.files;
+    return fs.data?.filesystem ?? [];
+  }, [codeData?.files, fs.data?.filesystem]);
+
+  const symbols = codeData?.symbols ?? [];
 
   return (
     <div className="flex min-h-dvh flex-col">
@@ -112,10 +152,14 @@ function Shell() {
         </div>
         <div className="navbar-center max-w-[70vw] truncate">
           <code className="text-xs text-base-content/70 font-mono">
-            {isRoot ? data.rootDir : focus}
+            {isRoot ? root.data?.rootDir ?? "…" : focus}
           </code>
         </div>
-        <div className="navbar-end" />
+        <div className="navbar-end gap-1">
+          {(fs.loading || code.loading || nb.loading) && (
+            <span className="loading loading-spinner loading-xs opacity-60" title="Loading…" />
+          )}
+        </div>
       </div>
 
       <div className="grid flex-1 grid-cols-1 lg:grid-cols-[16rem_1fr_1fr] min-h-0">
@@ -123,26 +167,43 @@ function Shell() {
           className="border-b lg:border-b-0 lg:border-r border-base-300 bg-base-200 overflow-auto max-h-[40vh] lg:max-h-[calc(100dvh-3rem)]"
           aria-label="Navigation"
         >
-          <FileRail
-            files={files}
-            symbols={code?.symbols ?? []}
-            activeRef={focus}
-            onSelect={onSelect}
-          />
+          {fs.error ? (
+            <div role="alert" className="alert alert-error alert-soft m-2 text-xs">
+              {fs.error.message}
+            </div>
+          ) : null}
+          {fs.loading && !fs.data ? (
+            <PanelPending label="Listing…" />
+          ) : (
+            <FileRail
+              files={files}
+              symbols={symbols}
+              activeRef={focus}
+              onSelect={onSelect}
+              symbolsLoading={code.loading && !codeData}
+            />
+          )}
         </aside>
 
         <section className="overflow-auto max-h-[50vh] lg:max-h-[calc(100dvh-3rem)] border-b lg:border-b-0 lg:border-r border-base-300 bg-base-100">
-          {code?.error ? (
+          {code.error ? (
             <div role="alert" className="alert alert-error alert-soft m-2 text-sm">
-              <span>{code.error}</span>
+              <span>{code.error.message}</span>
             </div>
           ) : null}
-          {code?.warning ? (
+          {codeData?.error ? (
+            <div role="alert" className="alert alert-error alert-soft m-2 text-sm">
+              <span>{codeData.error}</span>
+            </div>
+          ) : null}
+          {codeData?.warning ? (
             <div role="alert" className="alert alert-warning alert-soft m-2 text-sm">
-              <span>{code.warning}</span>
+              <span>{codeData.warning}</span>
             </div>
           ) : null}
-          {isRoot && !code?.segments?.length ? (
+          {code.loading && !codeData ? (
+            <PanelPending label="Loading source…" />
+          ) : isRoot && !codeData?.segments?.length ? (
             <div className="p-4 text-sm text-base-content/70">
               <p>
                 Local code browser. Pick a file from the rail, or open a reference under{" "}
@@ -151,10 +212,11 @@ function Shell() {
             </div>
           ) : (
             <CodePanel
-              segments={code?.segments ?? []}
-              nonText={code?.nonText ?? false}
-              focusId={code?.focusId ?? null}
+              segments={codeData?.segments ?? []}
+              nonText={codeData?.nonText ?? false}
+              focusId={codeData?.focusId ?? null}
               onNavigate={onSelect}
+              loading={code.loading}
             />
           )}
         </section>
@@ -163,24 +225,19 @@ function Shell() {
           className="relative min-h-64 lg:min-h-0 max-h-[50vh] lg:max-h-[calc(100dvh-3rem)] bg-base-100"
           aria-label="Relation graph"
         >
-          <GraphPanel neighborhood={nb} onFocus={onSelect} />
+          {nb.error ? (
+            <div role="alert" className="alert alert-error alert-soft m-2 text-xs">
+              {nb.error.message}
+            </div>
+          ) : null}
+          <GraphPanel
+            focusId={codeFocus}
+            neighborhood={nb.data?.neighborhood ?? null}
+            loading={nb.loading}
+            onFocus={onSelect}
+          />
         </section>
       </div>
     </div>
-  );
-}
-
-export function App() {
-  return (
-    <React.Suspense
-      fallback={
-        <div className="flex min-h-dvh items-center justify-center gap-2 text-base-content/70">
-          <span className="loading loading-spinner loading-sm" />
-          Loading…
-        </div>
-      }
-    >
-      <Shell />
-    </React.Suspense>
   );
 }

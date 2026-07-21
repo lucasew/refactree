@@ -11,9 +11,16 @@ type Props = {
   symbols: ReadonlyArray<Entry | null | undefined>;
   activeRef: string;
   onSelect: (ref: string) => void;
+  symbolsLoading?: boolean;
 };
 
-export function FileRail({ files, symbols, activeRef, onSelect }: Props) {
+export function FileRail({
+  files,
+  symbols,
+  activeRef,
+  onSelect,
+  symbolsLoading,
+}: Props) {
   const [tab, setTab] = useState<"files" | "symbols">("files");
 
   return (
@@ -34,6 +41,9 @@ export function FileRail({ files, symbols, activeRef, onSelect }: Props) {
           onClick={() => setTab("symbols")}
         >
           Symbols
+          {symbolsLoading ? (
+            <span className="loading loading-spinner loading-xs ml-1" />
+          ) : null}
         </button>
       </div>
 
@@ -77,7 +87,9 @@ export function FileRail({ files, symbols, activeRef, onSelect }: Props) {
           ))}
           {!symbols.length ? (
             <li className="menu-disabled">
-              <span className="text-base-content/50">Open a file to list symbols.</span>
+              <span className="text-base-content/50">
+                {symbolsLoading ? "Loading symbols…" : "Open a file to list symbols."}
+              </span>
             </li>
           ) : null}
         </ul>
