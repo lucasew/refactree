@@ -34,25 +34,64 @@ type graphSessionOut struct {
 	VisitRef   string             `json:"visitRef,omitempty"`
 }
 
-// sessionJob is work for the explore worker (inbox).
+// sessionJob is work for the explore worker.
 type sessionJob struct {
 	op  string // visit | project
 	ref string // visit ref; empty for project
 }
 
+// jobSlot tracks the in-flight explore so a new file-browser click can preempt it.
+type jobSlot struct {
+	mu     sync.Mutex
+	cancel context.CancelFunc
+}
+
+func (j *jobSlot) preempt() {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.cancel != nil {
+		j.cancel()
+		j.cancel = nil
+	}
+}
+
+func (j *jobSlot) bind(parent context.Context) (context.Context, context.CancelFunc) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.cancel != nil {
+		j.cancel()
+	}
+	ctx, cancel := context.WithCancel(parent)
+	j.cancel = cancel
+	return ctx, cancel
+}
+
+func (j *jobSlot) clear(cancel context.CancelFunc) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.cancel != nil {
+		// only clear if still this job
+		j.cancel = nil
+	}
+	cancel()
+}
+
 // graphExploreSession holds per-tab edge deltas + extract corpus (no re-read).
 //
-// Pipeline (non-blocking for the WebSocket read loop):
+// Pipeline:
 //
-//	read loop  → inbox  → explore worker (StreamVisit / StreamProject)
-//	                     → outbox → write loop → WebSocket
+//	read → emit package focus (LookupNode, cheap) → inbox (latest wins) → worker
+//	                                                         ↓
+//	                                                      outbox → write → WS
 //
-// Heavy package/file work never runs on the socket read or write goroutines.
+// Package nodes from the file browser appear immediately even while the worker
+// is still materializing another package. New visits preempt the job context so
+// edge emission for the abandoned package stops after the current Materialize.
 type graphExploreSession struct {
 	root   string
 	corpus *graphql.SessionCorpus
 	mu     sync.Mutex
-	seen   map[string]bool // edge keys already sent
+	seen   map[string]bool
 }
 
 func newGraphExploreSession(root string) *graphExploreSession {
@@ -70,8 +109,6 @@ func edgeSeenKey(e *graphql.GraphEdge) string {
 	return string(e.Kind) + "\x00" + e.From + "\x00" + e.To
 }
 
-// sendOut pushes a client message. Returns false if the session is shutting down
-// (caller should stop emitting / exploring).
 func sendOut(ctx context.Context, outbox chan<- graphSessionOut, msg graphSessionOut) bool {
 	select {
 	case <-ctx.Done():
@@ -81,19 +118,43 @@ func sendOut(ctx context.Context, outbox chan<- graphSessionOut, msg graphSessio
 	}
 }
 
+// trySendOut avoids stalling the read loop when the writer is mid-frame.
+func trySendOut(ctx context.Context, outbox chan<- graphSessionOut, msg graphSessionOut) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case outbox <- msg:
+		return true
+	default:
+		t := time.NewTimer(100 * time.Millisecond)
+		defer t.Stop()
+		select {
+		case <-ctx.Done():
+			return false
+		case outbox <- msg:
+			return true
+		case <-t.C:
+			return false
+		}
+	}
+}
+
+// enqueueLatest keeps only the newest job (file-browser spam coalesces).
+func enqueueLatest(ch chan sessionJob, job sessionJob) {
+	for {
+		select {
+		case ch <- job:
+			return
+		case <-ch:
+		}
+	}
+}
+
 // handleGraphSession is a long-lived WebSocket explore session.
 //
 //	WS /api/graph/session
 //	→ {"op":"visit","ref":"…"}  /  {"op":"project"}
-//	← focus / edge* (deltas) / done
-//
-// Architecture:
-//
-//	• read loop: parse JSON, enqueue visit/project on inbox (never explores)
-//	• worker: one explore at a time from inbox; emits to outbox
-//	• write loop: sole owner of conn writes (JSON + pings)
-//
-// FileExtracts stay in SessionCorpus for the life of the socket.
+//	← focus (immediate on visit) / edge* / done
 func (s *Server) handleGraphSession(w http.ResponseWriter, r *http.Request) {
 	if s.loader == nil {
 		http.Error(w, "loader not configured", http.StatusInternalServerError)
@@ -114,17 +175,14 @@ func (s *Server) handleGraphSession(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	// inbox: pending package/ref explore jobs (buffered so read loop never blocks on work)
-	// size 16: client may click several nodes while one MaterializeVisit runs
-	inbox := make(chan sessionJob, 16)
-	// outbox: unbuffered — backpressure if the socket is slow (worker waits for writer)
+	inbox := make(chan sessionJob, 1)
 	outbox := make(chan graphSessionOut)
-
 	sess := newGraphExploreSession(s.loader.RootDir)
+	var jobs jobSlot
 
 	var wg sync.WaitGroup
 
-	// --- write loop: only goroutine that writes to conn ---
+	// --- write loop ---
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -152,7 +210,7 @@ func (s *Server) handleGraphSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// --- explore worker: packages/refs from inbox → events on outbox ---
+	// --- explore worker ---
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -164,28 +222,30 @@ func (s *Server) handleGraphSession(w http.ResponseWriter, r *http.Request) {
 				if !ok {
 					return
 				}
+				jobCtx, jcancel := jobs.bind(ctx)
 				switch job.op {
 				case "visit":
 					ref := job.ref
 					if ref == "" {
 						ref = "path:./"
 					}
-					sess.runVisit(ctx, ref, outbox)
+					// jobCtx cancels mid-explore; session ctx carries "done" so the client unblocks.
+					sess.runVisit(ctx, jobCtx, ref, outbox)
 				case "project":
-					sess.runProject(ctx, outbox)
+					sess.runProject(ctx, jobCtx, outbox)
 				}
+				jobs.clear(jcancel)
 			}
 		}
 	}()
 
-	// ready (after pipelines exist)
 	if !sendOut(ctx, outbox, graphSessionOut{Type: "ready"}) {
 		cancel()
 		wg.Wait()
 		return
 	}
 
-	// --- read loop: enqueue only (never Materialize / discover) ---
+	// --- read loop ---
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
@@ -195,65 +255,66 @@ func (s *Server) handleGraphSession(w http.ResponseWriter, r *http.Request) {
 
 		var in graphSessionIn
 		if err := json.Unmarshal(data, &in); err != nil {
-			_ = sendOut(ctx, outbox, graphSessionOut{Type: "error", Message: "invalid json"})
+			_ = trySendOut(ctx, outbox, graphSessionOut{Type: "error", Message: "invalid json"})
 			continue
 		}
 
 		switch in.Op {
 		case "ping":
-			_ = sendOut(ctx, outbox, graphSessionOut{Type: "pong"})
+			_ = trySendOut(ctx, outbox, graphSessionOut{Type: "pong"})
 		case "visit":
 			ref := in.Ref
 			if ref == "" {
 				ref = "path:./"
 			}
-			job := sessionJob{op: "visit", ref: ref}
-			select {
-			case <-ctx.Done():
-				// writer/worker already exiting
-			case inbox <- job:
-				// queued for explore worker
-			default:
-				// inbox full: never block the read loop
-				_ = sendOut(ctx, outbox, graphSessionOut{
-					Type:     "error",
-					Message:  "explore inbox full; try again",
-					VisitRef: ref,
-				})
-			}
+			// Immediate package/module node for file-browser navigation.
+			sess.emitPackageFocus(ctx, ref, outbox)
+			// Stop emitting edges for the package currently materializing.
+			jobs.preempt()
+			// Explore this package next (coalesce older pending visits).
+			enqueueLatest(inbox, sessionJob{op: "visit", ref: ref})
 		case "project":
-			job := sessionJob{op: "project"}
-			select {
-			case <-ctx.Done():
-			case inbox <- job:
-			default:
-				_ = sendOut(ctx, outbox, graphSessionOut{
-					Type:     "error",
-					Message:  "explore inbox full; try again",
-					VisitRef: "project",
-				})
-			}
+			jobs.preempt()
+			enqueueLatest(inbox, sessionJob{op: "project"})
 		default:
-			_ = sendOut(ctx, outbox, graphSessionOut{Type: "error", Message: "unknown op: " + in.Op})
+			_ = trySendOut(ctx, outbox, graphSessionOut{Type: "error", Message: "unknown op: " + in.Op})
 		}
 	}
 
+	jobs.preempt()
 	cancel()
 	wg.Wait()
 }
 
-func (s *graphExploreSession) runVisit(ctx context.Context, ref string, outbox chan<- graphSessionOut) {
-	emit := s.deltaEmitter(ctx, outbox)
-	_ = s.corpus.StreamVisit(ctx, ref, emit)
+// emitPackageFocus is cheap (no WalkExtracts / Materialize): paints the package
+// on the client as soon as the file browser navigates there.
+func (s *graphExploreSession) emitPackageFocus(ctx context.Context, ref string, outbox chan<- graphSessionOut) {
+	n := graphql.LookupNode(s.root, ref)
+	if n == nil {
+		return
+	}
 	inc := true
-	_ = sendOut(ctx, outbox, graphSessionOut{Type: "done", Incomplete: &inc, VisitRef: ref})
+	_ = trySendOut(ctx, outbox, graphSessionOut{
+		Type:       "focus",
+		Node:       n,
+		Incomplete: &inc,
+		VisitRef:   ref,
+	})
 }
 
-func (s *graphExploreSession) runProject(ctx context.Context, outbox chan<- graphSessionOut) {
-	emit := s.deltaEmitter(ctx, outbox)
-	_ = s.corpus.StreamProject(ctx, emit)
+// runVisit explores ref under jobCtx; done is always sent on sessCtx.
+func (s *graphExploreSession) runVisit(sessCtx, jobCtx context.Context, ref string, outbox chan<- graphSessionOut) {
+	emit := s.deltaEmitter(jobCtx, outbox)
+	_ = s.corpus.StreamVisit(jobCtx, ref, emit)
 	inc := true
-	_ = sendOut(ctx, outbox, graphSessionOut{Type: "done", Incomplete: &inc, VisitRef: "project"})
+	_ = sendOut(sessCtx, outbox, graphSessionOut{Type: "done", Incomplete: &inc, VisitRef: ref})
+}
+
+func (s *graphExploreSession) runProject(sessCtx, jobCtx context.Context, outbox chan<- graphSessionOut) {
+	emit := s.deltaEmitter(jobCtx, outbox)
+	_ = s.corpus.StreamProject(jobCtx, emit)
+	inc := true
+	_ = sendOut(sessCtx, outbox, graphSessionOut{Type: "done", Incomplete: &inc, VisitRef: "project"})
 }
 
 func (s *graphExploreSession) deltaEmitter(ctx context.Context, outbox chan<- graphSessionOut) graphql.StreamEmitter {

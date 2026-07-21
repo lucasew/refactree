@@ -84,10 +84,15 @@ func (c *SessionCorpus) StreamVisit(ctx context.Context, ref string, emit Stream
 		return err
 	}
 	if err := ctx.Err(); err != nil {
+		// Preempted after discover (e.g. user clicked another package) — skip Materialize.
 		return err
 	}
 
 	result := c.MaterializeVisit(visit)
+	if err := ctx.Err(); err != nil {
+		// Preempted during Materialize — do not stream stale edges for this package.
+		return err
+	}
 	return emitVisitEdges(ctx, c.root, parsed, focusID, result, emit)
 }
 

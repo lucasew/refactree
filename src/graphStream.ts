@@ -113,7 +113,12 @@ class GraphExploreClient {
   }
 
   visit(ref: string) {
-    this.send({ op: "visit", ref: normalizeRef(ref || "path:./") });
+    const id = normalizeRef(ref || "path:./");
+    // Optimistic package/module node so file-browser navigation paints
+    // immediately even while the server worker is mid-Materialize on another package.
+    applyNode(stubFromId(id), true);
+    getGraphSession().focusId = id;
+    this.send({ op: "visit", ref: id });
   }
 
   project() {
