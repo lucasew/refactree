@@ -297,14 +297,15 @@ function runOp(
 
 /** Visit a ref in the shared session; only new edges are pushed. */
 export function sessionVisit(ref: string, handlers: StreamHandlers = {}): Promise<void> {
-  const want = normalizeRef(ref || "path:./");
+  // Match package-scoped id the client actually sends (graphScopeId).
+  const want = graphScopeId(ref || "path:./");
   return runOp(
     () => client.visit(want),
     (msg) =>
       msg.type === "done" &&
       !!msg.visitRef &&
       msg.visitRef !== "project" &&
-      normalizeRef(msg.visitRef) === want,
+      graphScopeId(msg.visitRef) === want,
     handlers,
     120_000
   );

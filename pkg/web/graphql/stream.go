@@ -96,92 +96,97 @@ func (c *SessionCorpus) StreamVisit(ctx context.Context, ref string, emit Stream
 	return emitVisitEdges(ctx, c.root, parsed, focusID, result, emit)
 }
 
-// StreamProject walks the project tree and streams edges progressively
-// (parse → materialize → emit per small batch):
-//   - IMPORTS between packages (module scope)
-//   - USES between atoms (graphRefID keeps ::symbol)
-//
-// Local go: packages under the project root are rewritten to path:./… .
-func (c *SessionCorpus) StreamProject(ctx context.Context, emit StreamEmitter) error {
-	if c == nil || emit == nil {
-		return nil
-	}
+// ProjectBatchSize is how many files are materialized before edges are emitted.
+const ProjectBatchSize = 3
+
+// ProjectFocusNode is the root focus event for a project crawl.
+func ProjectFocusNode(root string) *GraphNode {
 	focus := &GraphNode{
-		ID: "path:./", Kind: NodeKindModule, Label: filepath.Base(c.root),
+		ID: "path:./", Kind: NodeKindModule, Label: filepath.Base(root),
 		External: false, Expandable: false, Language: "",
 	}
 	if focus.Label == "" || focus.Label == "." {
 		focus.Label = "project"
 	}
-	if !emit(StreamEvent{Type: "focus", Node: focus, Incomplete: boolPtr(true)}) {
-		return context.Canceled
-	}
+	return focus
+}
 
-	seen := map[string]bool{}
+// EmitProjectBatch materializes a small set of extracts and emits package IMPORTS,
+// atom USES, and atom→package USED_BY edges. Wire-level dedupe is the emitter's job
+// (session seen map). Returns false if emit cancels.
+func (c *SessionCorpus) EmitProjectBatch(
+	ctx context.Context,
+	batch map[string]*ingest.FileExtract,
+	emit StreamEmitter,
+) bool {
+	if c == nil || emit == nil || len(batch) == 0 {
+		return true
+	}
+	if err := ctx.Err(); err != nil {
+		return false
+	}
 	emitEdge := func(from, to string, kind EdgeKind) bool {
 		from = graphRefIDString(c.root, from)
 		to = graphRefIDString(c.root, to)
 		if kind == EdgeKindImports {
-			// Package-level import map (no atoms).
 			from = projectScopeID(c.root, scopeRef(ingest.ParseReference(from)))
 			to = projectScopeID(c.root, scopeRef(ingest.ParseReference(to)))
 		}
-		// USES keep full atom ids (path:./pkg::Sym) so crawl populates symbols.
 		if from == "" || to == "" || from == to {
 			return true
 		}
 		e := &GraphEdge{From: from, To: to, Kind: kind}
-		k := edgeKey(e)
-		if seen[k] {
-			return true
-		}
-		seen[k] = true
 		return emit(StreamEvent{Type: "edge", Edge: e, Incomplete: boolPtr(true)})
 	}
 
-	flush := func(batch map[string]*ingest.FileExtract) bool {
-		if len(batch) == 0 {
-			return true
+	result := c.MaterializeVisit(batch)
+	for _, a := range result.Aliases {
+		if !emitEdge(a.Reference, a.Target, EdgeKindImports) {
+			return false
 		}
+	}
+	for _, rel := range result.Relations {
+		if !emitEdge(rel.Reference, rel.Target, EdgeKindUses) {
+			return false
+		}
+	}
+	for _, ent := range result.Entities {
 		if err := ctx.Err(); err != nil {
 			return false
 		}
-		result := c.MaterializeVisit(batch)
-		for _, a := range result.Aliases {
-			if !emitEdge(a.Reference, a.Target, EdgeKindImports) {
-				return false
-			}
+		atom := graphRefIDString(c.root, ent.Reference)
+		if atom == "" || !strings.Contains(atom, "::") {
+			continue
 		}
-		for _, rel := range result.Relations {
-			if !emitEdge(rel.Reference, rel.Target, EdgeKindUses) {
-				return false
-			}
+		pkg := projectScopeID(c.root, scopeRef(ingest.ParseReference(atom)))
+		if pkg == "" || pkg == atom {
+			continue
 		}
-		// Defs with no relations yet: still surface atoms under their package
-		// (package → atom) so crawl is not packages-only.
-		for _, ent := range result.Entities {
-			if err := ctx.Err(); err != nil {
-				return false
-			}
-			atom := graphRefIDString(c.root, ent.Reference)
-			if atom == "" || !strings.Contains(atom, "::") {
-				continue
-			}
-			pkg := projectScopeID(c.root, scopeRef(ingest.ParseReference(atom)))
-			if pkg == "" || pkg == atom {
-				continue
-			}
-			// USED_BY: atom is "used by" its package as container (shows atom node).
-			if !emitEdge(atom, pkg, EdgeKindUsedBy) {
-				return false
-			}
+		if !emitEdge(atom, pkg, EdgeKindUsedBy) {
+			return false
 		}
-		return true
+	}
+	return true
+}
+
+// StreamProject walks the project tree and streams edges progressively.
+// Prefer the pump+worker path in graph_session for cooperative preemption;
+// this remains for tests and one-shot callers.
+func (c *SessionCorpus) StreamProject(ctx context.Context, emit StreamEmitter) error {
+	if c == nil || emit == nil {
+		return nil
+	}
+	if !emit(StreamEvent{Type: "focus", Node: ProjectFocusNode(c.root), Incomplete: boolPtr(true)}) {
+		return context.Canceled
 	}
 
-	// Small batches: enough to amortize Materialize, small enough to stream early.
-	const batchSize = 3
-	batch := make(map[string]*ingest.FileExtract, batchSize)
+	batch := make(map[string]*ingest.FileExtract, ProjectBatchSize)
+
+	flush := func() bool {
+		ok := c.EmitProjectBatch(ctx, batch, emit)
+		batch = make(map[string]*ingest.FileExtract, ProjectBatchSize)
+		return ok
+	}
 
 	err := ingest.WalkExtracts(ingest.ExtractSource{
 		Kind:      ingest.ExtractDir,
@@ -200,18 +205,16 @@ func (c *SessionCorpus) StreamProject(ctx context.Context, emit StreamEmitter) e
 			return true
 		}
 		batch[key] = stored
-		if len(batch) < batchSize {
+		if len(batch) < ProjectBatchSize {
 			return true
 		}
-		ok := flush(batch)
-		batch = make(map[string]*ingest.FileExtract, batchSize)
-		return ok
+		return flush()
 	})
 	if err != nil {
 		emit(StreamEvent{Type: "error", Message: err.Error()})
 		return err
 	}
-	if !flush(batch) {
+	if !flush() {
 		return context.Canceled
 	}
 
