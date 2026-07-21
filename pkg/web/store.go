@@ -12,8 +12,10 @@ import (
 )
 
 // GraphStore adapts Loader to the GraphQL Store interface.
+// Corpus is optional shared session extract cache (same as graph WS explore).
 type GraphStore struct {
 	Loader *Loader
+	Corpus *gql.SessionCorpus
 }
 
 func (s *GraphStore) RootDir() string {
@@ -104,6 +106,11 @@ func (s *GraphStore) Code(ref string) (*gql.CodeDocument, error) {
 		return nil, fmt.Errorf("loader not configured")
 	}
 	v := s.Loader.LoadFile(ref)
+	// Feed the shared explore corpus so graph visit/crawl reuse the same extracts
+	// the code pane just paid to parse (file browser ↔ graph cache).
+	if s.Corpus != nil && strings.TrimSpace(ref) != "" {
+		_ = s.Corpus.PrimeVisit(ref)
+	}
 	doc := &gql.CodeDocument{
 		Reference: v.Reference,
 		NonText:   v.NonText,

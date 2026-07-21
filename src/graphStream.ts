@@ -353,3 +353,31 @@ export function ensureGraphSession() {
 export function getGraphSessionClient() {
   return client;
 }
+
+/**
+ * Immediately mirror code-pane hyperlinks into the graph session.
+ * File browser LoadFile and graph StreamVisit used to be separate caches; this
+ * makes the links you already see in source appear on the canvas without waiting
+ * for the WS visit (which still runs for authoritative edge kinds + corpus).
+ */
+export function mergeCodeLinksIntoGraph(
+  focusRef: string,
+  links: ReadonlyArray<{ reference?: string | null; isLink?: boolean | null } | null | undefined>
+) {
+  const from = normalizeRef(focusRef || "");
+  if (!from || from === "path:./" || from === "path:.") return;
+  ensureGraphSession();
+  applyNode(stubFromId(from), true);
+  getGraphSession().focusId = from;
+  for (const l of links) {
+    if (!l?.reference) continue;
+    if (l.isLink === false) continue;
+    const to = normalizeRef(l.reference);
+    if (!to || to === from) continue;
+    // Heuristic kinds until WS visit arrives: external / module-ish → IMPORTS, else USES.
+    const kind =
+      isExternalId(to) || !to.includes("::") ? "IMPORTS" : "USES";
+    applyEdge({ from, to, kind });
+  }
+  scheduleHydrate();
+}

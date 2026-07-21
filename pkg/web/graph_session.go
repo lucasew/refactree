@@ -94,10 +94,13 @@ type graphExploreSession struct {
 	crawlEnabled atomic.Bool
 }
 
-func newGraphExploreSession(root string) *graphExploreSession {
+func newGraphExploreSession(root string, corpus *graphql.SessionCorpus) *graphExploreSession {
+	if corpus == nil {
+		corpus = graphql.NewSessionCorpus(root)
+	}
 	return &graphExploreSession{
 		root:   root,
-		corpus: graphql.NewSessionCorpus(root),
+		corpus: corpus,
 		seen:   make(map[string]bool),
 	}
 }
@@ -176,7 +179,8 @@ func (s *Server) handleGraphSession(w http.ResponseWriter, r *http.Request) {
 
 	inbox := make(chan sessionJob, 1)
 	outbox := make(chan graphSessionOut)
-	sess := newGraphExploreSession(s.loader.RootDir)
+	// Share extract corpus with GraphQL Code loads (file browser primes the same cache).
+	sess := newGraphExploreSession(s.loader.RootDir, s.corpus)
 	var jobs jobSlot
 
 	var wg sync.WaitGroup

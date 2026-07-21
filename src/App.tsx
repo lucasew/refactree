@@ -8,6 +8,7 @@ import { CodePanel } from "./components/CodePanel";
 import { GraphPanel } from "./components/GraphPanel";
 import { ProjectGraphPage } from "./components/ProjectGraphPage";
 import { isGraphRoute, navigateToGraph, navigateToRef, refFromPath } from "./routes";
+import { mergeCodeLinksIntoGraph } from "./graphStream";
 import { useRelayQuery } from "./useRelayQuery";
 
 const RootDirQuery = graphql`
@@ -100,6 +101,20 @@ function CodeBrowser({ path, onPathChange }: { path: string; onPathChange: () =>
   }, [codeData?.files, fs.data?.filesystem]);
 
   const symbols = codeData?.symbols ?? [];
+
+  // File browser → graph: paint the same hyperlinks the code pane just resolved
+  // without waiting for the WS visit worker (shared server corpus still primes cache).
+  useEffect(() => {
+    if (!codeData || isRoot) return;
+    const links: Array<{ reference?: string | null; isLink?: boolean | null }> = [];
+    for (const s of codeData.segments ?? []) {
+      if (s?.isLink && s.reference) links.push({ reference: s.reference, isLink: true });
+    }
+    for (const s of codeData.symbols ?? []) {
+      if (s?.reference) links.push({ reference: s.reference, isLink: true });
+    }
+    if (links.length) mergeCodeLinksIntoGraph(codeFocus, links);
+  }, [codeData, codeFocus, isRoot]);
 
   return (
     <div className="flex min-h-dvh flex-col">

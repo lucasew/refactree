@@ -26,6 +26,9 @@ var embedded embed.FS
 // Server serves the code browser (SPA + GraphQL).
 type Server struct {
 	loader *Loader
+	// corpus is shared across GraphQL code loads and all graph WS sessions so
+	// file-browser opens and crawler visits hit the same extract cache.
+	corpus *graphql.SessionCorpus
 	mux    *http.ServeMux
 }
 
@@ -41,7 +44,11 @@ func New(opts Options) (*Server, error) {
 		return nil, err
 	}
 
-	s := &Server{loader: loader, mux: http.NewServeMux()}
+	s := &Server{
+		loader: loader,
+		corpus: graphql.NewSessionCorpus(opts.RootDir),
+		mux:    http.NewServeMux(),
+	}
 	s.routes()
 	return s, nil
 }
@@ -73,7 +80,7 @@ func (s *Server) routes() {
 	}
 
 	gqlSrv := handler.New(graphql.NewExecutableSchema(graphql.Config{
-		Resolvers: &graphql.Resolver{Store: &GraphStore{Loader: s.loader}},
+		Resolvers: &graphql.Resolver{Store: &GraphStore{Loader: s.loader, Corpus: s.corpus}},
 	}))
 	gqlSrv.AddTransport(transport.Options{})
 	gqlSrv.AddTransport(transport.GET{})

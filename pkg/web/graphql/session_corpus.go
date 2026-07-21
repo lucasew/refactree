@@ -128,6 +128,21 @@ func (c *SessionCorpus) Len() int {
 	return len(c.byPath)
 }
 
+// PrimeVisit discovers the same extract closure StreamVisit would use and
+// stores it in the corpus without streaming edges. Used when the code browser
+// opens a file so the graph session reuses the same parse cache.
+func (c *SessionCorpus) PrimeVisit(ref string) error {
+	if c == nil {
+		return nil
+	}
+	parsed := ingest.CanonicalizeReference(c.root, ingest.ParseReference(ref))
+	// Align with StreamVisit: normalize to graph module id first.
+	focus := graphNodeForRef(c.root, parsed)
+	parsed = ingest.ParseReference(focus.ID)
+	visit := make(map[string]*ingest.FileExtract)
+	return c.discoverVisit(parsed, visit)
+}
+
 // DiscoverSeeds runs one Seed BFS from all seed paths at once.
 // Every yielded extract is Touched into the corpus and recorded in visit
 // (visit is the resolve universe for this operation).
