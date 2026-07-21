@@ -8,7 +8,6 @@ import (
 
 func TestBuildNeighborhood_AtomEgo(t *testing.T) {
 	dir := t.TempDir()
-	// a.go defines A and calls B in b.go
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example\n\ngo 1.22\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -35,25 +34,27 @@ func TestBuildNeighborhood_AtomEgo(t *testing.T) {
 	if len(nb.Nodes) < 1 {
 		t.Fatal("expected nodes")
 	}
+	if len(nb.Edges) < 1 {
+		t.Fatalf("expected use edges from A, got %d nodes=%d", len(nb.Edges), len(nb.Nodes))
+	}
 }
 
-func TestBuildNeighborhood_FileAtomsNoEdges(t *testing.T) {
+func TestBuildNeighborhood_FileHasAtomUseEdges(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example\n\ngo 1.22\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package example\n\nfunc A() {}\nfunc C() {}\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package example\n\nfunc A() { B() }\nfunc B() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	nb, err := BuildNeighborhood(dir, "path:./a.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(nb.Edges) != 0 {
-		t.Fatalf("file zoom must not have force edges, got %d", len(nb.Edges))
-	}
-	// focus + atoms
 	if len(nb.Nodes) < 2 {
 		t.Fatalf("expected file + atoms, got %d", len(nb.Nodes))
+	}
+	if len(nb.Edges) < 1 {
+		t.Fatalf("expected use edges among file atoms, got %d", len(nb.Edges))
 	}
 }

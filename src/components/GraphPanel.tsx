@@ -38,10 +38,10 @@ export function GraphPanel({ focusId, neighborhood, loading, onFocus }: Props) {
   const fgRef = useRef<any>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
 
-  // Client-side accumulation: new focus neighborhoods merge in (streamy).
+  // Immutable facts only (string endpoints). Force-graph mutates copies, not this store.
   const [merged, setMerged] = useState<{
     nodes: Map<string, FGNode>;
-    links: Map<string, FGLink>;
+    links: Map<string, { source: string; target: string; kind: string }>;
     incomplete: boolean;
     focusId: string;
   }>(() => ({
@@ -78,17 +78,15 @@ export function GraphPanel({ focusId, neighborhood, loading, onFocus }: Props) {
           id: n.id,
           name: n.label || n.id,
           kind: n.kind,
-          // keep prior sim positions when re-merging
           x: existing?.x,
           y: existing?.y,
         });
       }
       for (const e of neighborhood.edges ?? []) {
-        if (!e) continue;
+        if (!e?.from || !e?.to) continue;
         const key = `${e.from}\0${e.to}\0${e.kind}`;
         links.set(key, { source: e.from, target: e.to, kind: e.kind });
       }
-      // Drop links whose endpoints vanished? keep for streamy graph.
       return {
         nodes,
         links,
@@ -98,7 +96,6 @@ export function GraphPanel({ focusId, neighborhood, loading, onFocus }: Props) {
     });
   }, [neighborhood, focusId]);
 
-  // Soft reheat when focus changes so layout rebalances without remounting canvas wrongly.
   useEffect(() => {
     const fg = fgRef.current;
     if (!fg) return;
@@ -109,11 +106,15 @@ export function GraphPanel({ focusId, neighborhood, loading, onFocus }: Props) {
     }
   }, [merged.focusId, merged.nodes.size, merged.links.size]);
 
+  // Fresh objects every time so force-graph cannot corrupt the Map via in-place mutation.
   const graphData = useMemo(() => {
-    const nodes = Array.from(merged.nodes.values());
-    const links = Array.from(merged.links.values()).filter(
-      (l) => merged.nodes.has(String(l.source)) && merged.nodes.has(String(l.target))
-    );
+    const nodes = Array.from(merged.nodes.values()).map((n) => ({ ...n }));
+    const nodeIds = new Set(nodes.map((n) => n.id));
+    const links: FGLink[] = [];
+    for (const l of merged.links.values()) {
+      if (!nodeIds.has(l.source) || !nodeIds.has(l.target)) continue;
+      links.push({ source: l.source, target: l.target, kind: l.kind });
+    }
     return { nodes, links };
   }, [merged]);
 
@@ -124,7 +125,6 @@ export function GraphPanel({ focusId, neighborhood, loading, onFocus }: Props) {
     [onFocus]
   );
 
-  // Persist positions from the sim into our merge map so remounts keep layout.
   const onNodeDragEnd = useCallback((node: FGNode) => {
     setMerged((prev) => {
       const nodes = new Map(prev.nodes);
@@ -151,7 +151,10 @@ export function GraphPanel({ focusId, neighborhood, loading, onFocus }: Props) {
 
   return (
     <div ref={hostRef} className="graph-canvas-host relative h-full min-h-64 overflow-hidden">
-      <div className="absolute z-10 m-2 flex gap-1">
+      <div className="absolute z-10 m-2 flex flex-wrap gap-1">
+        <span className="badge badge-ghost badge-sm">
+          {graphData.nodes.length}n · {graphData.links.length}e
+        </span>
         {merged.incomplete ? (
           <span className="badge badge-ghost badge-sm">incomplete</span>
         ) : null}
@@ -171,7 +174,16 @@ export function GraphPanel({ focusId, neighborhood, loading, onFocus }: Props) {
           nodeId="id"
           nodeLabel="name"
           backgroundColor={BG}
-          // Critical: replace default node paint so zoom frames don't stack glyphs.
+          linkWidth={1.25}
+          linkColor={(l: any) => {
+            const kind = l.kind as string;
+            if (kind === "IMPORTS") return "#7a8aaa";
+            if (kind === "USED_BY") return "#aa8a7a";
+            return "#8aaa7a"; // USES
+          }}
+          linkDirectionalArrowLength={4}
+          linkDirectionalArrowRelPos={1}
+          linkCurvature={0.05}
           nodeCanvasObjectMode={() => "replace"}
           nodeCanvasObject={(node: any, ctx, globalScale) => {
             const label = node.name || node.id;
@@ -204,17 +216,11 @@ export function GraphPanel({ focusId, neighborhood, loading, onFocus }: Props) {
             ctx.fillStyle = color;
             ctx.fill();
           }}
-          linkColor={(l: any) =>
-            l.kind === "IMPORTS" ? "#5a6a8a" : l.kind === "USED_BY" ? "#8a6a5a" : "#6a8a5a"
-          }
           onNodeClick={onNodeClick}
           onNodeDragEnd={onNodeDragEnd}
           cooldownTicks={100}
-          // Keep redrawing during zoom/pan so frames clear cleanly.
           autoPauseRedraw={false}
           enableNodeDrag={true}
-          linkDirectionalArrowLength={3}
-          linkDirectionalArrowRelPos={1}
         />
       ) : null}
     </div>

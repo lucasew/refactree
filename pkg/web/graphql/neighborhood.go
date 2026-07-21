@@ -9,7 +9,7 @@ import (
 	"github.com/lucasew/refactree/pkg/ingest"
 )
 
-// buildNeighborhood returns a lazy Seed-style neighborhood for ref.
+// BuildNeighborhood returns a lazy Seed-style neighborhood for ref.
 func BuildNeighborhood(root, refStr string) (*Neighborhood, error) {
 	parsed := ingest.CanonicalizeReference(root, ingest.ParseReference(refStr))
 	focusID := parsed.String()
@@ -32,48 +32,19 @@ func BuildNeighborhood(root, refStr string) (*Neighborhood, error) {
 		}
 		focus.ParentID = &parentID
 
-		for _, rel := range result.Relations {
-			from := ingest.CanonicalizeReference(root, ingest.ParseReference(rel.Reference)).String()
-			to := ingest.CanonicalizeReference(root, ingest.ParseReference(rel.Target)).String()
-			if from == "" || to == "" {
-				continue
+		addRelationEdges(root, result, nodes, &edges, func(from, to string) bool {
+			// Ego: incident on focus, or both ends in the focus file (local structure).
+			if from == focusID || to == focusID {
+				return true
 			}
-			// Ego: edges incident on focus (either endpoint).
-			if from != focusID && to != focusID {
-				// Also include relations whose usage is in the same file as focus (local fan-out).
-				fr := ingest.ParseReference(from)
-				if !(sameScope(parsed, fr) || sameScope(parsed, ingest.ParseReference(to))) {
-					continue
-				}
-			}
-			ensureNode(nodes, root, from)
-			ensureNode(nodes, root, to)
-			if from == focusID {
-				edges = append(edges, &GraphEdge{From: from, To: to, Kind: EdgeKindUses})
-			} else if to == focusID {
-				edges = append(edges, &GraphEdge{From: from, To: to, Kind: EdgeKindUsedBy})
-			} else {
-				edges = append(edges, &GraphEdge{From: from, To: to, Kind: EdgeKindUses})
-			}
-		}
-		// Import aliases involving focus file as IMPORTS at file/module level stubs.
-		for _, a := range result.Aliases {
-			from := ingest.CanonicalizeReference(root, ingest.ParseReference(a.Reference)).String()
-			to := ingest.CanonicalizeReference(root, ingest.ParseReference(a.Target)).String()
-			if from == "" || to == "" {
-				continue
-			}
-			if !sameScope(parsed, ingest.ParseReference(from)) && !sameScope(parsed, ingest.ParseReference(to)) {
-				continue
-			}
-			ensureNode(nodes, root, from)
-			ensureNode(nodes, root, to)
-			edges = append(edges, &GraphEdge{From: from, To: to, Kind: EdgeKindImports})
-		}
+			return sameScope(parsed, ingest.ParseReference(from)) || sameScope(parsed, ingest.ParseReference(to))
+		})
+		addImportEdges(root, result, nodes, &edges, parsed)
+
 		return &Neighborhood{
 			Focus:      focus,
 			Nodes:      nodeList(nodes),
-			Edges:      edges,
+			Edges:      dedupeEdges(edges),
 			Incomplete: true,
 		}, nil
 	}
@@ -81,15 +52,15 @@ func BuildNeighborhood(root, refStr string) (*Neighborhood, error) {
 	// No symbol: file or module.
 	abs, isDir, err := resolvePath(root, parsed)
 	if err == nil && !isDir && (parsed.Provider == "" || parsed.Provider == "path") {
-		// File focus: atoms in file as nodes, no force edges (SPEC).
+		// File focus: atoms in file + their use edges (relations), not an import map.
 		result, err := ingest.SeedResult(root, abs)
 		if err != nil {
 			return &Neighborhood{Focus: focus, Nodes: []*GraphNode{focus}, Incomplete: true}, nil
 		}
 		rel := strings.TrimPrefix(filepath.ToSlash(mustRel(root, abs)), "./")
+		localAtoms := map[string]bool{}
 		for _, ent := range result.Entities {
 			er := ingest.ParseReference(ent.Reference)
-			// Match by path; also accept empty path mismatches via basename.
 			if normalizePath(er.Path) != normalizePath(rel) && filepath.Base(normalizePath(er.Path)) != filepath.Base(normalizePath(rel)) {
 				continue
 			}
@@ -97,11 +68,16 @@ func BuildNeighborhood(root, refStr string) (*Neighborhood, error) {
 			ensureNode(nodes, root, id)
 			pid := focusID
 			nodes[id].ParentID = &pid
+			localAtoms[id] = true
 		}
+		// USES edges: from local atoms (and file-scoped relations) to their targets.
+		addRelationEdges(root, result, nodes, &edges, func(from, to string) bool {
+			return localAtoms[from] || sameScope(parsed, ingest.ParseReference(from))
+		})
 		return &Neighborhood{
 			Focus:      focus,
 			Nodes:      nodeList(nodes),
-			Edges:      nil,
+			Edges:      dedupeEdges(edges),
 			Incomplete: true,
 		}, nil
 	}
@@ -128,9 +104,70 @@ func BuildNeighborhood(root, refStr string) (*Neighborhood, error) {
 	return &Neighborhood{
 		Focus:      focus,
 		Nodes:      nodeList(nodes),
-		Edges:      edges,
+		Edges:      dedupeEdges(edges),
 		Incomplete: true,
 	}, nil
+}
+
+func addRelationEdges(
+	root string,
+	result *ingest.Result,
+	nodes map[string]*GraphNode,
+	edges *[]*GraphEdge,
+	keep func(from, to string) bool,
+) {
+	if result == nil {
+		return
+	}
+	for _, rel := range result.Relations {
+		from := ingest.CanonicalizeReference(root, ingest.ParseReference(rel.Reference)).String()
+		to := ingest.CanonicalizeReference(root, ingest.ParseReference(rel.Target)).String()
+		if from == "" || to == "" || from == to {
+			continue
+		}
+		if !keep(from, to) {
+			continue
+		}
+		ensureNode(nodes, root, from)
+		ensureNode(nodes, root, to)
+		*edges = append(*edges, &GraphEdge{From: from, To: to, Kind: EdgeKindUses})
+	}
+}
+
+func addImportEdges(root string, result *ingest.Result, nodes map[string]*GraphNode, edges *[]*GraphEdge, focus ingest.Reference) {
+	if result == nil {
+		return
+	}
+	for _, a := range result.Aliases {
+		from := ingest.CanonicalizeReference(root, ingest.ParseReference(a.Reference)).String()
+		to := ingest.CanonicalizeReference(root, ingest.ParseReference(a.Target)).String()
+		if from == "" || to == "" || from == to {
+			continue
+		}
+		if !sameScope(focus, ingest.ParseReference(from)) && !sameScope(focus, ingest.ParseReference(to)) {
+			continue
+		}
+		ensureNode(nodes, root, from)
+		ensureNode(nodes, root, to)
+		*edges = append(*edges, &GraphEdge{From: from, To: to, Kind: EdgeKindImports})
+	}
+}
+
+func dedupeEdges(in []*GraphEdge) []*GraphEdge {
+	seen := map[string]bool{}
+	out := make([]*GraphEdge, 0, len(in))
+	for _, e := range in {
+		if e == nil {
+			continue
+		}
+		k := string(e.Kind) + "\x00" + e.From + "\x00" + e.To
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, e)
+	}
+	return out
 }
 
 func materializeModule(root string, parsed ingest.Reference, abs string, isDir bool) (*ingest.Result, error) {
@@ -160,7 +197,6 @@ func materializeModule(root string, parsed ingest.Reference, abs string, isDir b
 
 func seedForRef(root string, parsed ingest.Reference) (*ingest.Result, error) {
 	if parsed.Provider != "" && parsed.Provider != "path" {
-		// Resolve symbol to file via scope DirResult then seed.
 		scope, ok, err := ingest.NewResolver(root).ResolveScopeTarget(ingest.Reference{
 			Provider: parsed.Provider,
 			Path:     parsed.Path,
@@ -175,7 +211,6 @@ func seedForRef(root string, parsed ingest.Reference) (*ingest.Result, error) {
 		if err != nil {
 			return nil, err
 		}
-		// Prefer Seed from defining file if found.
 		for _, ent := range result.Entities {
 			er := ingest.ParseReference(ent.Reference)
 			if er.Symbol == parsed.Symbol {
@@ -236,11 +271,9 @@ func isModuleRef(root string, ref ingest.Reference) bool {
 	if isDir {
 		return true
 	}
-	// DirectoryModule languages: file is not the module unit.
 	if lang, ok := ingest.LanguageForFile(abs); ok && ingest.LanguageUsesDirectoryModule(lang) {
 		return false
 	}
-	// JS/Python file-as-module.
 	if lang, ok := ingest.LanguageForFile(abs); ok && !ingest.LanguageUsesDirectoryModule(lang) {
 		return true
 	}
