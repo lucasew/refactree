@@ -33,7 +33,7 @@ type Props = {
   neighborhood?: IncomingNeighborhood;
   /** Visit this ref in the shared graph session (deltas). */
   streamRef?: string | null;
-  /** Load project import map into the same session. */
+  /** Start with "crawl repo" on (project graph page). */
   streamProject?: boolean;
   loading?: boolean;
   onFocus: (ref: string) => void;
@@ -42,6 +42,10 @@ type Props = {
 };
 
 const BG = "#1a1814";
+
+/** Tooltip: crawl uses ingest skip list (node_modules, .venv, …). */
+const CRAWL_TITLE =
+  "Walk the current repo for import edges (skips node_modules, .venv, vendor, dist, .git, …)";
 
 export function GraphPanel({
   focusId,
@@ -64,7 +68,10 @@ export function GraphPanel({
    * reference = full refs (path:./cmd/rft::Main distinct)
    */
   const [viewMode, setViewMode] = useState<GraphViewMode>("reference");
+  /** Full-tree crawl of the project (DiscoverDir recursive; skip list in ingest). */
+  const [crawlRepo, setCrawlRepo] = useState(!!streamProject);
   const lastVisit = useRef<string>("");
+  const crawlGen = useRef(0);
 
   const bump = useCallback(() => {
     setTick((t) => t + 1);
@@ -94,9 +101,10 @@ export function GraphPanel({
     return () => ro.disconnect();
   }, []);
 
-  // Project map once when requested (session accumulates).
+  // Project crawl when toggle is on (session deltas; skips vendored dirs).
   useEffect(() => {
-    if (!streamProject) return;
+    if (!crawlRepo) return;
+    const gen = ++crawlGen.current;
     let cancelled = false;
     setBusy(true);
     setErr(null);
@@ -108,20 +116,19 @@ export function GraphPanel({
         if (!cancelled) setErr(e.message);
       },
     }).finally(() => {
-      if (!cancelled) setBusy(false);
+      if (!cancelled && gen === crawlGen.current) setBusy(false);
     });
     return () => {
       cancelled = true;
     };
-  }, [streamProject, bump]);
+  }, [crawlRepo, bump]);
 
-  // Visit focus: same WS session, only new edges arrive.
+  // Visit focus: same WS session, only new edges arrive (works with crawl on).
   useEffect(() => {
-    if (streamProject) return;
     if (streamRef == null || streamRef === "") return;
     const visitRef = normalizeRef(streamRef);
     if (lastVisit.current === visitRef && getGraphSession().nodes.size > 0) {
-      // still re-visit so server can push any new edges; always visit is ok (deltas)
+      // re-visit is ok (deltas); still send so new edges can arrive
     }
     lastVisit.current = visitRef;
     let cancelled = false;
@@ -140,13 +147,13 @@ export function GraphPanel({
     return () => {
       cancelled = true;
     };
-  }, [streamRef, streamProject, bump]);
+  }, [streamRef, bump]);
 
   useEffect(() => {
-    if (!neighborhood || streamRef != null || streamProject) return;
+    if (!neighborhood || streamRef != null || crawlRepo) return;
     mergeNeighborhood(neighborhood, focusId);
     bump();
-  }, [neighborhood, focusId, streamRef, streamProject, bump]);
+  }, [neighborhood, focusId, streamRef, crawlRepo, bump]);
 
   useEffect(() => {
     getGraphSession().focusId = normalizeRef(focusId);
@@ -322,12 +329,19 @@ export function GraphPanel({
             reference
           </button>
         </div>
-        <span
-          className="badge badge-ghost badge-sm opacity-60"
-          title="Used-by many → center; unused → rim. Local density eases center pull and spreads crowded regions."
+        <label
+          className="label cursor-pointer gap-1.5 py-0 px-1"
+          title={CRAWL_TITLE}
         >
-          gravity: used + density
-        </span>
+          <span className="label-text text-xs text-base-content/80">crawl repo</span>
+          <input
+            type="checkbox"
+            className="toggle toggle-xs"
+            checked={crawlRepo}
+            onChange={(e) => setCrawlRepo(e.target.checked)}
+            aria-label="Crawl current repository"
+          />
+        </label>
       </div>
       {size.w > 0 && size.h > 0 ? (
         <ForceGraph2D

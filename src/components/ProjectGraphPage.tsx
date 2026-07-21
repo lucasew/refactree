@@ -69,11 +69,11 @@ export function ProjectGraphPage({ onPathChange }: Props) {
           focusId="path:./"
           streamProject
           onFocus={onFocus}
-          emptyHint="Streaming project import graph…"
+          emptyHint="Turn on “crawl repo” (or wait) to stream the project import graph…"
         />
         <p className="absolute bottom-2 left-2 text-xs text-base-content/50 max-w-lg">
-          One live session: visiting path/project grows the same graph (only new edges). Orange-ring nodes are external
-          (non-path) deps — click to stream-expand. Path nodes open the code browser.
+          Crawl repo walks the tree with the usual skip list (node_modules, .venv, vendor, …). Orange-ring nodes are
+          external — click to open source and expand. Path nodes open the code browser.
         </p>
       </div>
     </div>
