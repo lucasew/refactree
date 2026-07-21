@@ -117,14 +117,26 @@ export function refDisplayParts(id: string): { module: string; symbol: string } 
   return { module: displayModulePath(base), symbol };
 }
 
-export type GraphLabelMode = "package" | "reference";
+/**
+ * Package/module scope id: strip ::symbol so path:./cmd/rft::Main → path:./cmd/rft.
+ * Used by package graph view (one node per package).
+ */
+export function packageScopeId(ref: string): string {
+  const id = normalizeRef(ref);
+  const i = id.indexOf("::");
+  return i >= 0 ? id.slice(0, i) : id;
+}
+
+export type GraphViewMode = "package" | "reference";
+/** @deprecated use GraphViewMode */
+export type GraphLabelMode = GraphViewMode;
 
 /**
  * Canvas / tooltip label for a node.
  * package: one line (module only)
  * reference: two lines when a symbol exists (module\\nname)
  */
-export function formatGraphLabel(id: string, mode: GraphLabelMode): string {
+export function formatGraphLabel(id: string, mode: GraphViewMode): string {
   const { module, symbol } = refDisplayParts(id);
   if (mode === "package" || !symbol) return module || ".";
   return `${module}\n${symbol}`;

@@ -5,6 +5,7 @@ import {
   isExternalId,
   mergeNeighborhood,
   snapshotGraphData,
+  viewFocusId,
   type IncomingNeighborhood,
 } from "../graphSession";
 import {
@@ -17,7 +18,7 @@ import { nodeFill, nodeStroke, inferLanguageFromId } from "../graphColors";
 import {
   formatGraphLabel,
   normalizeRef,
-  type GraphLabelMode,
+  type GraphViewMode,
 } from "../routes";
 import {
   computeUsage,
@@ -57,8 +58,11 @@ export function GraphPanel({
   const [tick, setTick] = useState(0);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  /** package = one-line module; reference = module + symbol when present */
-  const [labelMode, setLabelMode] = useState<GraphLabelMode>("reference");
+  /**
+   * package = collapse to one node per package (path:./cmd/rft once)
+   * reference = full refs (path:./cmd/rft::Main distinct)
+   */
+  const [viewMode, setViewMode] = useState<GraphViewMode>("reference");
   const lastVisit = useRef<string>("");
 
   const bump = useCallback(() => {
@@ -150,8 +154,13 @@ export function GraphPanel({
 
   const graphData = useMemo(() => {
     void tick;
-    return snapshotGraphData();
-  }, [tick]);
+    return snapshotGraphData(viewMode);
+  }, [tick, viewMode]);
+
+  const focusInView = useMemo(
+    () => viewFocusId(getGraphSession().focusId || focusId, viewMode),
+    [tick, focusId, viewMode]
+  );
 
   // Indegree usage: imported/used-by-many → center; unused → rim.
   const usage = useMemo(() => computeUsage(graphData.links), [graphData.links]);
@@ -276,20 +285,20 @@ export function GraphPanel({
           <span className="badge badge-ghost badge-sm opacity-70">session live</span>
         )}
         {err ? <span className="badge badge-error badge-sm">{err}</span> : null}
-        <div className="join" role="group" aria-label="Label mode">
+        <div className="join" role="group" aria-label="Graph view mode">
           <button
             type="button"
-            className={`btn btn-xs join-item ${labelMode === "package" ? "btn-active" : ""}`}
-            title="One-line package path"
-            onClick={() => setLabelMode("package")}
+            className={`btn btn-xs join-item ${viewMode === "package" ? "btn-active" : ""}`}
+            title="One node per package (path:./cmd/rft once)"
+            onClick={() => setViewMode("package")}
           >
             package
           </button>
           <button
             type="button"
-            className={`btn btn-xs join-item ${labelMode === "reference" ? "btn-active" : ""}`}
-            title="Two-line package / name"
-            onClick={() => setLabelMode("reference")}
+            className={`btn btn-xs join-item ${viewMode === "reference" ? "btn-active" : ""}`}
+            title="One node per full ref (package/name)"
+            onClick={() => setViewMode("reference")}
           >
             reference
           </button>
@@ -312,7 +321,7 @@ export function GraphPanel({
             const lang = n.language || inferLanguageFromId(n.id) || "?";
             const scope = n.external ? "external" : "path";
             const tip = n.external ? " — click to expand" : "";
-            const pretty = formatGraphLabel(n.id, labelMode).replace(/\n/g, " · ");
+            const pretty = formatGraphLabel(n.id, viewMode).replace(/\n/g, " · ");
             const u = usage.get(n.id) ?? 0;
             return `${pretty} [${lang} · ${scope} · used by ${u}]${tip}`;
           }}
@@ -329,14 +338,21 @@ export function GraphPanel({
           linkCurvature={0.05}
           nodeCanvasObjectMode={() => "replace"}
           nodeCanvasObject={(node: any, ctx, globalScale) => {
-            const label = formatGraphLabel(node.id, labelMode);
+            const label = formatGraphLabel(node.id, viewMode);
             const fontSize = Math.max(10 / globalScale, 2);
-            const baseR = node.kind === "ATOM" ? 4 : node.kind === "MODULE" ? 7 : 5;
+            const baseR =
+              viewMode === "package"
+                ? 7
+                : node.kind === "ATOM"
+                  ? 4
+                  : node.kind === "MODULE"
+                    ? 7
+                    : 5;
             const r = degreeRadiusBoost(usage.get(node.id) ?? 0, baseR);
             const x = node.x ?? 0;
             const y = node.y ?? 0;
             const lang = node.language || inferLanguageFromId(node.id);
-            const focused = node.id === sess.focusId;
+            const focused = node.id === focusInView;
             const external = !!node.external;
             ctx.beginPath();
             ctx.arc(x, y, r, 0, 2 * Math.PI, false);
