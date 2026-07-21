@@ -211,10 +211,13 @@ func ingestForCanonicalize(rootAbs string, ref Reference) (*Result, bool) {
 			return nil, false
 		}
 		if st.IsDir() {
-			// Non-recursive Dir under the module directory.
+			// Non-recursive Dir walk under the package, but Root stays the project
+			// root so entity paths remain path:./pkg/file.go (not path:./file.go).
+			// Wrong Root here broke graph clicks: path:./pkg::Sym → path:./b.go::Sym.
 			result, err := MaterializeSource(ExtractSource{
 				Kind:      ExtractDir,
-				Root:      abs,
+				Root:      rootAbs,
+				Dir:       abs,
 				Recursive: false,
 			}, MaterializeOptions{ExpandImports: false})
 			return result, err == nil

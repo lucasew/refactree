@@ -226,17 +226,28 @@ function CodeBrowser({ path, onPathChange }: { path: string; onPathChange: () =>
 }
 
 export function App() {
-  const [path, setPath] = useState(() => window.location.pathname);
-  const bump = useCallback(() => setPath(window.location.pathname), []);
+  // pathname + hash so symbol deep-links re-scroll when only the fragment changes
+  const [path, setPath] = useState(
+    () => window.location.pathname + window.location.hash
+  );
+  const bump = useCallback(
+    () => setPath(window.location.pathname + window.location.hash),
+    []
+  );
 
   useEffect(() => {
-    const onPop = () => setPath(window.location.pathname);
+    const onPop = () => setPath(window.location.pathname + window.location.hash);
     window.addEventListener("popstate", onPop);
-    return () => window.removeEventListener("popstate", onPop);
+    window.addEventListener("hashchange", onPop);
+    return () => {
+      window.removeEventListener("popstate", onPop);
+      window.removeEventListener("hashchange", onPop);
+    };
   }, []);
 
-  if (isGraphRoute(path)) {
+  const pathname = path.split("#")[0] || "/";
+  if (isGraphRoute(pathname)) {
     return <ProjectGraphPage onPathChange={bump} />;
   }
-  return <CodeBrowser path={path} onPathChange={bump} />;
+  return <CodeBrowser path={pathname} onPathChange={bump} />;
 }

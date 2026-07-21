@@ -93,6 +93,55 @@ func TestLoadFile_PathStillWorks(t *testing.T) {
 	}
 }
 
+// Graph atoms are module-scoped (path:./pkg::Sym). Clicking one must open the
+// defining file and set focusId to a real definition anchor in that file.
+func TestLoadFile_PackageSymbolOpensDefiningFile(t *testing.T) {
+	dir := t.TempDir()
+	pkg := filepath.Join(dir, "pkg")
+	if err := os.MkdirAll(pkg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Two files; Hello lives only in b.go.
+	if err := os.WriteFile(filepath.Join(pkg, "a.go"), []byte("package pkg\n\nfunc Other() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "b.go"), []byte("package pkg\n\nfunc Hello() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l, err := NewLoader(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := l.LoadFile("path:./pkg::Hello")
+	if v.Error != "" {
+		t.Fatalf("error: %s", v.Error)
+	}
+	if len(v.Segments) == 0 {
+		t.Fatal("expected source segments for Hello definition file")
+	}
+	if v.FocusID == "" {
+		t.Fatal("expected focusId for scroll-to-def")
+	}
+	var sawFocus bool
+	for _, seg := range v.Segments {
+		if seg.ID == v.FocusID && seg.IsDef {
+			sawFocus = true
+			break
+		}
+	}
+	if !sawFocus {
+		t.Fatalf("focusId %q not found on any definition segment", v.FocusID)
+	}
+	// Body should be b.go (contains Hello), not empty package listing.
+	joined := ""
+	for _, seg := range v.Segments {
+		joined += seg.Text
+	}
+	if !strings.Contains(joined, "Hello") {
+		t.Fatalf("expected Hello in source, got %q", joined)
+	}
+}
+
 func TestResolveUnderRoot_RejectsEscape(t *testing.T) {
 	dir := t.TempDir()
 	l, err := NewLoader(dir)

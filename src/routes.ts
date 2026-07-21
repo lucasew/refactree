@@ -46,16 +46,18 @@ export function normalizeRef(ref: string): string {
   return symbol !== "" ? base + "::" + symbol : base;
 }
 
-/** Parse browser path into a focus reference (canonical id). */
+/** Parse browser path into a focus reference (canonical id). Hash is ignored. */
 export function refFromPath(pathname: string): string {
-  if (pathname === "/" || pathname === "" || pathname === "/graph") {
+  // Allow callers to pass pathname+hash or full path.
+  const pathOnly = (pathname ?? "").split("#")[0] ?? "";
+  if (pathOnly === "/" || pathOnly === "" || pathOnly === "/graph") {
     return "path:./";
   }
   const prefix = "/code/";
-  if (!pathname.startsWith(prefix)) {
+  if (!pathOnly.startsWith(prefix)) {
     return "path:./";
   }
-  let rest = pathname.slice(prefix.length);
+  let rest = pathOnly.slice(prefix.length);
   try {
     rest = decodeURIComponent(rest);
   } catch {
@@ -68,17 +70,49 @@ export function refFromPath(pathname: string): string {
   return normalizeRef(rest);
 }
 
+/**
+ * Safe HTML element id for a symbol ref — mirrors pkg/web/annotate.AnchorID.
+ * Used as URL hash so the code pane can scroll to the definition.
+ */
+export function anchorIdFromRef(ref: string): string {
+  const id = normalizeRef(ref ?? "");
+  if (!id.includes("::")) return "";
+  let out = "sym-";
+  for (const ch of id) {
+    if (
+      (ch >= "a" && ch <= "z") ||
+      (ch >= "A" && ch <= "Z") ||
+      (ch >= "0" && ch <= "9") ||
+      ch === "-" ||
+      ch === "_"
+    ) {
+      out += ch;
+    } else {
+      out += "_";
+    }
+  }
+  return out;
+}
+
+/** Hash fragment for a ref (empty when no symbol). */
+export function hashFromRef(ref: string): string {
+  const a = anchorIdFromRef(ref);
+  return a ? "#" + a : "";
+}
+
 export function pathFromRef(ref: string): string {
   const id = normalizeRef(ref);
   if (id === "path:./" || id === "path:.") {
     return "/";
   }
-  return "/code/" + encodeURIComponent(id);
+  // Include #sym-… for symbol refs (restored after React migration).
+  return "/code/" + encodeURIComponent(id) + hashFromRef(id);
 }
 
 export function navigateToRef(ref: string) {
   const path = pathFromRef(ref);
-  if (window.location.pathname + window.location.search !== path) {
+  const cur = window.location.pathname + window.location.hash;
+  if (cur !== path) {
     window.history.pushState({}, "", path);
   }
   window.dispatchEvent(new PopStateEvent("popstate"));

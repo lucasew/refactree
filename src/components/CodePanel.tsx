@@ -1,5 +1,5 @@
 import React, { useEffect } from "react";
-import { normalizeRef } from "../routes";
+import { normalizeRef, pathFromRef } from "../routes";
 
 type Segment = {
   text: string;
@@ -18,11 +18,31 @@ type Props = {
   loading?: boolean;
 };
 
+function scrollToAnchor(id: string | null | undefined) {
+  if (!id) return;
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.scrollIntoView({ block: "center", behavior: "smooth" });
+  el.classList.add("is-focus");
+  // brief highlight for graph → source jumps
+  window.setTimeout(() => el.classList.remove("is-focus"), 1600);
+}
+
 export function CodePanel({ segments, nonText, focusId, onNavigate, loading }: Props) {
+  // Server focusId (preferred) or URL hash (deep link / graph click).
   useEffect(() => {
-    if (!focusId) return;
-    const el = document.getElementById(focusId);
-    el?.scrollIntoView({ block: "center" });
+    const fromHash = window.location.hash.replace(/^#/, "");
+    const id = focusId || fromHash || null;
+    if (!id) return;
+    // segments may paint a tick later after Relay resolve
+    const t0 = requestAnimationFrame(() => scrollToAnchor(id));
+    const t1 = window.setTimeout(() => scrollToAnchor(id), 50);
+    const t2 = window.setTimeout(() => scrollToAnchor(id), 200);
+    return () => {
+      cancelAnimationFrame(t0);
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
   }, [focusId, segments]);
 
   if (nonText) {
@@ -44,12 +64,13 @@ export function CodePanel({ segments, nonText, focusId, onNavigate, loading }: P
           const key = i;
           if (s!.isLink && s!.reference) {
             const ref = normalizeRef(s!.reference);
+            const focused = !!(s!.anchorId && (s!.anchorId === focusId || s!.anchorId === window.location.hash.replace(/^#/, "")));
             return (
               <a
                 key={key}
-                href={"/code/" + encodeURIComponent(ref)}
+                href={pathFromRef(ref)}
                 id={s!.anchorId ?? undefined}
-                className={s!.isDef ? "is-def" : undefined}
+                className={[s!.isDef ? "is-def" : "", focused ? "is-focus" : ""].filter(Boolean).join(" ") || undefined}
                 onClick={(e) => {
                   e.preventDefault();
                   onNavigate(ref);
@@ -60,8 +81,14 @@ export function CodePanel({ segments, nonText, focusId, onNavigate, loading }: P
             );
           }
           if (s!.isDef && s!.anchorId) {
+            const focused =
+              s!.anchorId === focusId || s!.anchorId === window.location.hash.replace(/^#/, "");
             return (
-              <span key={key} id={s!.anchorId} className="is-def">
+              <span
+                key={key}
+                id={s!.anchorId}
+                className={focused ? "is-def is-focus" : "is-def"}
+              >
                 {s!.text}
               </span>
             );

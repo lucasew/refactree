@@ -70,3 +70,10 @@
   color: var(--color-accent);
   font-weight: 600;
 }
+/* Graph / deep-link jump target */
+.code-view .is-focus {
+  background: color-mix(in oklch, var(--color-warning) 35%, transparent);
+  border-radius: 0.15em;
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--color-warning) 50%, transparent);
+  transition: background 0.3s ease, box-shadow 0.3s ease;
+}

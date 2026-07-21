@@ -146,12 +146,12 @@ func (l *Loader) LoadFile(refStr string) FileView {
 
 	if scopeRef.Provider == "" || scopeRef.Provider == "path" {
 		v.Provider = ""
-		return l.loadPathView(v, scopeRef)
+		return l.loadPathView(v, scopeRef, focusRef, parsed)
 	}
 	return l.loadProviderView(v, scopeRef, focusRef, parsed)
 }
 
-func (l *Loader) loadPathView(v FileView, scopeRef ingest.Reference) FileView {
+func (l *Loader) loadPathView(v FileView, scopeRef ingest.Reference, focusRef string, parsed ingest.Reference) FileView {
 	rel := strings.TrimPrefix(scopeRef.Path, "./")
 	if rel == "" || rel == "." {
 		idx := l.LoadIndex()
@@ -176,6 +176,10 @@ func (l *Loader) loadPathView(v FileView, scopeRef ingest.Reference) FileView {
 	if st.IsDir() {
 		v.Files = l.listPathDir(abs, rel)
 		v.ParentHref = l.pathParentHref(rel)
+		// Graph nodes are module-scoped (path:./pkg/web::New). Open the defining file.
+		if parsed.Symbol != "" {
+			return l.openPathPackageSymbol(v, abs, rel, focusRef, parsed.Symbol)
+		}
 		return v
 	}
 
@@ -209,7 +213,142 @@ func (l *Loader) loadPathView(v FileView, scopeRef ingest.Reference) FileView {
 		return EncodeCodeURLInRoot(l.RootDir, r)
 	})
 	v.Symbols = symbolsForFile(rel, result, EncodeCodeURLInRoot, l.RootDir)
+	// Anchor ids are file-scoped (path:./file.go::Sym); match focusId to a real def span.
+	if parsed.Symbol != "" {
+		v.FocusID = focusAnchorForSymbol(result, rel, parsed.Symbol, focusRef)
+	}
 	return v
+}
+
+// openPathPackageSymbol resolves path:./pkg::Sym to the file that defines Sym and
+// loads source with a scrollable definition anchor (graph click → code pane).
+func (l *Loader) openPathPackageSymbol(v FileView, dirAbs, dirRel, focusRef, symbol string) FileView {
+	seeds, err := packageSourceFiles(dirAbs)
+	if err != nil {
+		v.Error = err.Error()
+		return v
+	}
+	if len(seeds) == 0 {
+		v.Error = fmt.Sprintf("no source files in %s", dirRel)
+		return v
+	}
+	result, err := ingest.MaterializeSource(ingest.ExtractSource{
+		Kind:  ingest.ExtractSeed,
+		Root:  l.RootDir,
+		Paths: seeds,
+	}, ingest.MaterializeOptions{ExpandImports: false})
+	if err != nil {
+		v.Error = err.Error()
+		return v
+	}
+	fileRel := findEntityFile(result, symbol)
+	if fileRel == "" {
+		v.Error = fmt.Sprintf("symbol %q not found in %s", symbol, dirRel)
+		return v
+	}
+	fileAbs, fileRel, err := l.resolveEntityFileAbs(fileRel, dirAbs, dirRel)
+	if err != nil {
+		v.Error = err.Error()
+		return v
+	}
+	source, err := os.ReadFile(fileAbs)
+	if err != nil {
+		v.Error = err.Error()
+		return v
+	}
+	if !isTextContent(source) {
+		v.NonText = true
+		return v
+	}
+	// Re-seed from the defining file so annotate neighbors match file view.
+	focused := result
+	if f, err := ingest.SeedResult(l.RootDir, fileAbs); err == nil {
+		focused = f
+	} else if v.Warning == "" {
+		v.Warning = err.Error()
+	}
+	if lang, ok := ingest.LanguageForFile(fileAbs); ok {
+		v.Language = lang
+	}
+	// Sibling files stay the package listing (already set).
+	markActive(&v.Files, filepath.Base(fileRel))
+	v.Segments = annotate.Build(source, fileRel, focused, func(r string) string {
+		return EncodeCodeURLInRoot(l.RootDir, r)
+	})
+	v.Symbols = symbolsForFile(fileRel, focused, EncodeCodeURLInRoot, l.RootDir)
+	v.FocusID = focusAnchorForSymbol(focused, fileRel, symbol, focusRef)
+	v.Title = focusRef
+	v.Reference = focusRef
+	return v
+}
+
+func packageSourceFiles(dirAbs string) ([]string, error) {
+	entries, err := os.ReadDir(dirAbs)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if _, ok := ingest.LanguageForFile(name); !ok {
+			continue
+		}
+		out = append(out, filepath.Join(dirAbs, name))
+	}
+	return out, nil
+}
+
+// resolveEntityFileAbs maps an entity path (project- or package-relative) to an absolute file.
+func (l *Loader) resolveEntityFileAbs(fileRel, dirAbs, dirRel string) (abs string, rel string, err error) {
+	fileRel = strings.TrimPrefix(filepath.ToSlash(fileRel), "./")
+	candidates := []string{
+		filepath.Join(l.RootDir, filepath.FromSlash(fileRel)),
+		filepath.Join(dirAbs, filepath.Base(fileRel)),
+		filepath.Join(l.RootDir, filepath.FromSlash(dirRel), filepath.Base(fileRel)),
+	}
+	for _, c := range candidates {
+		st, e := os.Stat(c)
+		if e != nil || st.IsDir() {
+			continue
+		}
+		// Project-relative for annotate path matching.
+		rel, e = filepath.Rel(l.RootDir, c)
+		if e != nil {
+			rel = fileRel
+		}
+		return c, filepath.ToSlash(rel), nil
+	}
+	return "", "", fmt.Errorf("definition file %q not found under %s", fileRel, dirRel)
+}
+
+// focusAnchorForSymbol picks an element id that exists on a definition span in the page.
+func focusAnchorForSymbol(result *ingest.Result, fileRel, symbol, focusRef string) string {
+	if symbol == "" {
+		return ""
+	}
+	fileRel = normalizeRel(fileRel)
+	if result != nil {
+		// Prefer entity in the opened file (matches annotate.Build anchors).
+		for _, ent := range result.Entities {
+			r := ingest.ParseReference(ent.Reference)
+			if r.Symbol == symbol && normalizeRel(r.Path) == fileRel {
+				return annotate.AnchorID(ent.Reference)
+			}
+		}
+		for _, ent := range result.Entities {
+			r := ingest.ParseReference(ent.Reference)
+			if r.Symbol == symbol {
+				return annotate.AnchorID(ent.Reference)
+			}
+		}
+	}
+	if focusRef != "" {
+		return annotate.AnchorID(focusRef)
+	}
+	return ""
 }
 
 func (l *Loader) loadProviderView(v FileView, scopeRef ingest.Reference, focusRef string, parsed ingest.Reference) FileView {

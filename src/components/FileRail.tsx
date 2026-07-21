@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { normalizeRef } from "../routes";
+import { normalizeRef, pathFromRef } from "../routes";
 
 type Entry = {
   name: string;
@@ -55,7 +55,7 @@ export function FileRail({
             return (
             <li key={ref + f!.name}>
               <a
-                href={"/code/" + encodeURIComponent(ref)}
+                href={pathFromRef(ref)}
                 className={ref === normalizeRef(activeRef) ? "menu-active" : ""}
                 onClick={(e) => {
                   e.preventDefault();
