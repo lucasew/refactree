@@ -34,12 +34,20 @@ type graphSessionOut struct {
 	VisitRef   string             `json:"visitRef,omitempty"`
 }
 
+// sessionJob is work for the explore worker (inbox).
+type sessionJob struct {
+	op  string // visit | project
+	ref string // visit ref; empty for project
+}
+
 // graphExploreSession holds per-tab edge deltas + extract corpus (no re-read).
 //
-// Core explore loop (see SessionCorpus.StreamVisit):
+// Pipeline (non-blocking for the WebSocket read loop):
 //
-//	discover visit closure (one multi-seed BFS) → Touch extracts once
-//	MaterializeVisit(closure) → stream edges → session seen dedupes wire traffic
+//	read loop  → inbox  → explore worker (StreamVisit / StreamProject)
+//	                     → outbox → write loop → WebSocket
+//
+// Heavy package/file work never runs on the socket read or write goroutines.
 type graphExploreSession struct {
 	root   string
 	corpus *graphql.SessionCorpus
@@ -62,14 +70,30 @@ func edgeSeenKey(e *graphql.GraphEdge) string {
 	return string(e.Kind) + "\x00" + e.From + "\x00" + e.To
 }
 
+// sendOut pushes a client message. Returns false if the session is shutting down
+// (caller should stop emitting / exploring).
+func sendOut(ctx context.Context, outbox chan<- graphSessionOut, msg graphSessionOut) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case outbox <- msg:
+		return true
+	}
+}
+
 // handleGraphSession is a long-lived WebSocket explore session.
 //
 //	WS /api/graph/session
 //	→ {"op":"visit","ref":"…"}  /  {"op":"project"}
 //	← focus / edge* (deltas) / done
 //
-// FileExtracts are kept in SessionCorpus for the life of the socket so each
-// project file is parsed at most once per session (mtime cache still applies).
+// Architecture:
+//
+//	• read loop: parse JSON, enqueue visit/project on inbox (never explores)
+//	• worker: one explore at a time from inbox; emits to outbox
+//	• write loop: sole owner of conn writes (JSON + pings)
+//
+// FileExtracts stay in SessionCorpus for the life of the socket.
 func (s *Server) handleGraphSession(w http.ResponseWriter, r *http.Request) {
 	if s.loader == nil {
 		http.Error(w, "loader not configured", http.StatusInternalServerError)
@@ -87,90 +111,159 @@ func (s *Server) handleGraphSession(w http.ResponseWriter, r *http.Request) {
 		return conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
 	})
 
-	sess := newGraphExploreSession(s.loader.RootDir)
-	writeMu := sync.Mutex{}
-	writeJSON := func(out graphSessionOut) error {
-		writeMu.Lock()
-		defer writeMu.Unlock()
-		_ = conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
-		return conn.WriteJSON(out)
-	}
-
-	if err := writeJSON(graphSessionOut{Type: "ready"}); err != nil {
-		return
-	}
-
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+
+	// inbox: pending package/ref explore jobs (buffered so read loop never blocks on work)
+	// size 16: client may click several nodes while one MaterializeVisit runs
+	inbox := make(chan sessionJob, 16)
+	// outbox: unbuffered — backpressure if the socket is slow (worker waits for writer)
+	outbox := make(chan graphSessionOut)
+
+	sess := newGraphExploreSession(s.loader.RootDir)
+
+	var wg sync.WaitGroup
+
+	// --- write loop: only goroutine that writes to conn ---
+	wg.Add(1)
 	go func() {
-		t := time.NewTicker(25 * time.Second)
-		defer t.Stop()
+		defer wg.Done()
+		defer cancel()
+		ping := time.NewTicker(25 * time.Second)
+		defer ping.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-t.C:
-				writeMu.Lock()
+			case <-ping.C:
 				_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-				err := conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(10*time.Second))
-				writeMu.Unlock()
-				if err != nil {
-					cancel()
+				if err := conn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(10*time.Second)); err != nil {
+					return
+				}
+			case msg, ok := <-outbox:
+				if !ok {
+					return
+				}
+				_ = conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
+				if err := conn.WriteJSON(msg); err != nil {
 					return
 				}
 			}
 		}
 	}()
 
+	// --- explore worker: packages/refs from inbox → events on outbox ---
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case job, ok := <-inbox:
+				if !ok {
+					return
+				}
+				switch job.op {
+				case "visit":
+					ref := job.ref
+					if ref == "" {
+						ref = "path:./"
+					}
+					sess.runVisit(ctx, ref, outbox)
+				case "project":
+					sess.runProject(ctx, outbox)
+				}
+			}
+		}
+	}()
+
+	// ready (after pipelines exist)
+	if !sendOut(ctx, outbox, graphSessionOut{Type: "ready"}) {
+		cancel()
+		wg.Wait()
+		return
+	}
+
+	// --- read loop: enqueue only (never Materialize / discover) ---
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
-			return
+			break
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
 
 		var in graphSessionIn
 		if err := json.Unmarshal(data, &in); err != nil {
-			_ = writeJSON(graphSessionOut{Type: "error", Message: "invalid json"})
+			_ = sendOut(ctx, outbox, graphSessionOut{Type: "error", Message: "invalid json"})
 			continue
 		}
 
 		switch in.Op {
 		case "ping":
-			_ = writeJSON(graphSessionOut{Type: "pong"})
+			_ = sendOut(ctx, outbox, graphSessionOut{Type: "pong"})
 		case "visit":
 			ref := in.Ref
 			if ref == "" {
 				ref = "path:./"
 			}
-			sess.handleVisit(ctx, ref, writeJSON)
+			job := sessionJob{op: "visit", ref: ref}
+			select {
+			case <-ctx.Done():
+				// writer/worker already exiting
+			case inbox <- job:
+				// queued for explore worker
+			default:
+				// inbox full: never block the read loop
+				_ = sendOut(ctx, outbox, graphSessionOut{
+					Type:     "error",
+					Message:  "explore inbox full; try again",
+					VisitRef: ref,
+				})
+			}
 		case "project":
-			sess.handleProject(ctx, writeJSON)
+			job := sessionJob{op: "project"}
+			select {
+			case <-ctx.Done():
+			case inbox <- job:
+			default:
+				_ = sendOut(ctx, outbox, graphSessionOut{
+					Type:     "error",
+					Message:  "explore inbox full; try again",
+					VisitRef: "project",
+				})
+			}
 		default:
-			_ = writeJSON(graphSessionOut{Type: "error", Message: "unknown op: " + in.Op})
+			_ = sendOut(ctx, outbox, graphSessionOut{Type: "error", Message: "unknown op: " + in.Op})
 		}
 	}
+
+	cancel()
+	wg.Wait()
 }
 
-func (s *graphExploreSession) handleVisit(ctx context.Context, ref string, write func(graphSessionOut) error) {
-	emit := s.deltaEmitter(write)
+func (s *graphExploreSession) runVisit(ctx context.Context, ref string, outbox chan<- graphSessionOut) {
+	emit := s.deltaEmitter(ctx, outbox)
 	_ = s.corpus.StreamVisit(ctx, ref, emit)
 	inc := true
-	_ = write(graphSessionOut{Type: "done", Incomplete: &inc, VisitRef: ref})
+	_ = sendOut(ctx, outbox, graphSessionOut{Type: "done", Incomplete: &inc, VisitRef: ref})
 }
 
-func (s *graphExploreSession) handleProject(ctx context.Context, write func(graphSessionOut) error) {
-	emit := s.deltaEmitter(write)
+func (s *graphExploreSession) runProject(ctx context.Context, outbox chan<- graphSessionOut) {
+	emit := s.deltaEmitter(ctx, outbox)
 	_ = s.corpus.StreamProject(ctx, emit)
 	inc := true
-	_ = write(graphSessionOut{Type: "done", Incomplete: &inc, VisitRef: "project"})
+	_ = sendOut(ctx, outbox, graphSessionOut{Type: "done", Incomplete: &inc, VisitRef: "project"})
 }
 
-func (s *graphExploreSession) deltaEmitter(write func(graphSessionOut) error) graphql.StreamEmitter {
+func (s *graphExploreSession) deltaEmitter(ctx context.Context, outbox chan<- graphSessionOut) graphql.StreamEmitter {
 	return func(ev graphql.StreamEvent) bool {
+		if ctx.Err() != nil {
+			return false
+		}
 		switch ev.Type {
 		case "focus":
-			return write(graphSessionOut{Type: "focus", Node: ev.Node, Incomplete: ev.Incomplete}) == nil
+			return sendOut(ctx, outbox, graphSessionOut{Type: "focus", Node: ev.Node, Incomplete: ev.Incomplete})
 		case "edge":
 			if ev.Edge == nil {
 				return true
@@ -183,9 +276,9 @@ func (s *graphExploreSession) deltaEmitter(write func(graphSessionOut) error) gr
 			}
 			s.seen[k] = true
 			s.mu.Unlock()
-			return write(graphSessionOut{Type: "edge", Edge: ev.Edge, Incomplete: ev.Incomplete}) == nil
+			return sendOut(ctx, outbox, graphSessionOut{Type: "edge", Edge: ev.Edge, Incomplete: ev.Incomplete})
 		case "error":
-			_ = write(graphSessionOut{Type: "error", Message: ev.Message})
+			_ = sendOut(ctx, outbox, graphSessionOut{Type: "error", Message: ev.Message})
 			return true
 		case "done":
 			return true
