@@ -104,3 +104,29 @@ export function displayModulePath(refOrLabel: string): string {
   }
   return s;
 }
+
+/** Split a ref id into module + optional symbol (display parts, not ids). */
+export function refDisplayParts(id: string): { module: string; symbol: string } {
+  const raw = (id ?? "").trim();
+  let base = raw;
+  let symbol = "";
+  const symIdx = raw.indexOf("::");
+  if (symIdx >= 0) {
+    symbol = raw.slice(symIdx + 2);
+    base = raw.slice(0, symIdx);
+  }
+  return { module: displayModulePath(base), symbol };
+}
+
+export type GraphLabelMode = "package" | "reference";
+
+/**
+ * Canvas / tooltip label for a node.
+ * package: one line (module only)
+ * reference: two lines when a symbol exists (module\\nname)
+ */
+export function formatGraphLabel(id: string, mode: GraphLabelMode): string {
+  const { module, symbol } = refDisplayParts(id);
+  if (mode === "package" || !symbol) return module || ".";
+  return `${module}\n${symbol}`;
+}

@@ -14,8 +14,17 @@ import {
   streamExpandExternal,
 } from "../graphStream";
 import { nodeFill, nodeStroke, inferLanguageFromId } from "../graphColors";
-import { normalizeRef } from "../routes";
-import { computeDegrees, forceUsageGravity, forceUsageRadial, degreeRadiusBoost } from "../graphForces";
+import {
+  formatGraphLabel,
+  normalizeRef,
+  type GraphLabelMode,
+} from "../routes";
+import {
+  computeUsage,
+  forceUsageGravity,
+  forceUsageRadial,
+  degreeRadiusBoost,
+} from "../graphForces";
 
 type Props = {
   focusId: string;
@@ -48,6 +57,8 @@ export function GraphPanel({
   const [tick, setTick] = useState(0);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  /** package = one-line module; reference = module + symbol when present */
+  const [labelMode, setLabelMode] = useState<GraphLabelMode>("reference");
   const lastVisit = useRef<string>("");
 
   const bump = useCallback(() => {
@@ -142,65 +153,62 @@ export function GraphPanel({
     return snapshotGraphData();
   }, [tick]);
 
-  const degrees = useMemo(
-    () => computeDegrees(graphData.links),
-    [graphData.links]
-  );
+  // Indegree usage: imported/used-by-many → center; unused → rim.
+  const usage = useMemo(() => computeUsage(graphData.links), [graphData.links]);
 
-  // Usage-weighted gravity: hubs → center, leaves → rim.
   useEffect(() => {
     const fg = fgRef.current;
     if (!fg || graphData.nodes.length === 0) return;
 
-    const getDeg = (id: string) => degrees.get(id) ?? 0;
+    const getUse = (id: string) => usage.get(id) ?? 0;
 
-    // Soften default center so usage force dominates hub placement.
+    // Soften default center so usage forces dominate placement.
     try {
       const center = fg.d3Force("center");
       if (center && typeof center.strength === "function") {
-        center.strength(0.02);
+        center.strength(0.015);
       }
     } catch {
       /* ignore */
     }
 
-    // Charge: slightly stronger repulsion so leaves don't collapse.
+    // Unused nodes repel harder (spread on rim); hubs cluster.
     try {
       const charge = fg.d3Force("charge");
       if (charge && typeof charge.strength === "function") {
         charge.strength((node: { id?: string }) => {
-          const d = getDeg(node.id ?? "");
-          // hubs less repulsive (cluster), leaves more (spread out)
-          return -28 - Math.max(0, 8 - d) * 4;
+          const u = getUse(node.id ?? "");
+          return -24 - Math.max(0, 10 - u) * 5;
         });
       }
     } catch {
       /* ignore */
     }
 
-    // Link distance: slightly shorter for high-degree pairs.
+    // Links between highly used nodes slightly shorter.
     try {
       const link = fg.d3Force("link");
       if (link && typeof link.distance === "function") {
         link.distance((l: { source?: { id?: string } | string; target?: { id?: string } | string }) => {
           const idOf = (x: unknown) =>
             typeof x === "string" ? x : (x as { id?: string })?.id ?? "";
-          const a = getDeg(idOf(l.source));
-          const b = getDeg(idOf(l.target));
+          const a = getUse(idOf(l.source));
+          const b = getUse(idOf(l.target));
           const avg = (a + b) / 2;
-          return 40 + Math.max(0, 12 - avg) * 3;
+          return 42 + Math.max(0, 14 - avg) * 3;
         });
       }
     } catch {
       /* ignore */
     }
 
-    fg.d3Force("usageGravity", forceUsageGravity(getDeg));
+    fg.d3Force("usageGravity", forceUsageGravity(getUse));
     fg.d3Force(
       "usageRadial",
-      forceUsageRadial(getDeg, {
-        outer: Math.min(size.w, size.h) * 0.38 || 180,
-        inner: 16,
+      forceUsageRadial(getUse, {
+        outer: Math.min(size.w, size.h) * 0.4 || 200,
+        inner: 14,
+        strength: 0.14,
       })
     );
 
@@ -209,7 +217,7 @@ export function GraphPanel({
     } catch {
       /* ignore */
     }
-  }, [degrees, graphData.nodes.length, size.w, size.h, tick]);
+  }, [usage, graphData.nodes.length, size.w, size.h, tick]);
 
   const onNodeClick = useCallback(
     (node: { id: string; expandable?: boolean; external?: boolean }) => {
@@ -252,7 +260,7 @@ export function GraphPanel({
 
   return (
     <div ref={hostRef} className="graph-canvas-host relative h-full min-h-64 overflow-hidden">
-      <div className="absolute z-10 m-2 flex flex-wrap gap-1">
+      <div className="absolute z-10 m-2 flex flex-wrap items-center gap-1">
         <span className="badge badge-ghost badge-sm">
           {graphData.nodes.length}n · {graphData.links.length}e
         </span>
@@ -268,8 +276,29 @@ export function GraphPanel({
           <span className="badge badge-ghost badge-sm opacity-70">session live</span>
         )}
         {err ? <span className="badge badge-error badge-sm">{err}</span> : null}
-        <span className="badge badge-ghost badge-sm opacity-60" title="Fill = language; ring = path vs external; layout = usage (hubs center)">
-          fill: lang · ring: path/ext · gravity: usage
+        <div className="join" role="group" aria-label="Label mode">
+          <button
+            type="button"
+            className={`btn btn-xs join-item ${labelMode === "package" ? "btn-active" : ""}`}
+            title="One-line package path"
+            onClick={() => setLabelMode("package")}
+          >
+            package
+          </button>
+          <button
+            type="button"
+            className={`btn btn-xs join-item ${labelMode === "reference" ? "btn-active" : ""}`}
+            title="Two-line package / name"
+            onClick={() => setLabelMode("reference")}
+          >
+            reference
+          </button>
+        </div>
+        <span
+          className="badge badge-ghost badge-sm opacity-60"
+          title="Used-by many → center; unused → rim. Fill = language; ring = path vs external."
+        >
+          gravity: used→center
         </span>
       </div>
       {size.w > 0 && size.h > 0 ? (
@@ -283,9 +312,9 @@ export function GraphPanel({
             const lang = n.language || inferLanguageFromId(n.id) || "?";
             const scope = n.external ? "external" : "path";
             const tip = n.external ? " — click to expand" : "";
-            const pretty = String(n.name || n.id).replace(/\n/g, " · ");
-            const deg = degrees.get(n.id) ?? 0;
-            return `${pretty} [${lang} · ${scope} · ${deg} links]${tip}`;
+            const pretty = formatGraphLabel(n.id, labelMode).replace(/\n/g, " · ");
+            const u = usage.get(n.id) ?? 0;
+            return `${pretty} [${lang} · ${scope} · used by ${u}]${tip}`;
           }}
           backgroundColor={BG}
           linkWidth={1.25}
@@ -300,10 +329,10 @@ export function GraphPanel({
           linkCurvature={0.05}
           nodeCanvasObjectMode={() => "replace"}
           nodeCanvasObject={(node: any, ctx, globalScale) => {
-            const label = node.name || node.id;
+            const label = formatGraphLabel(node.id, labelMode);
             const fontSize = Math.max(10 / globalScale, 2);
             const baseR = node.kind === "ATOM" ? 4 : node.kind === "MODULE" ? 7 : 5;
-            const r = degreeRadiusBoost(degrees.get(node.id) ?? 0, baseR);
+            const r = degreeRadiusBoost(usage.get(node.id) ?? 0, baseR);
             const x = node.x ?? 0;
             const y = node.y ?? 0;
             const lang = node.language || inferLanguageFromId(node.id);
@@ -325,7 +354,6 @@ export function GraphPanel({
             if (stroke) {
               ctx.strokeStyle = stroke.color;
               ctx.lineWidth = stroke.width / globalScale;
-              // Dashed ring for external, solid for focus/internal
               if (external && !focused) {
                 ctx.setLineDash([3 / globalScale, 2 / globalScale]);
               } else {
@@ -340,7 +368,7 @@ export function GraphPanel({
               ctx.textBaseline = "top";
               let yy = y + r + 2;
               lines.forEach((line: string, i: number) => {
-                // module line slightly smaller/muted; symbol line emphasis
+                // package line muted when reference shows two lines
                 if (lines.length > 1 && i === 0) {
                   ctx.font = `${Math.max(fontSize * 0.85, 1.5)}px sans-serif`;
                   ctx.fillStyle = "rgba(232,224,208,0.7)";
@@ -360,7 +388,7 @@ export function GraphPanel({
             ctx.fill();
           }}
           onNodeClick={onNodeClick}
-          cooldownTicks={80}
+          cooldownTicks={100}
           autoPauseRedraw={false}
           enableNodeDrag={true}
         />
