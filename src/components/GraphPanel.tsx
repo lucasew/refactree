@@ -24,6 +24,7 @@ import {
   computeUsage,
   forceUsageGravity,
   forceUsageRadial,
+  forceNodeDensity,
   degreeRadiusBoost,
 } from "../graphForces";
 
@@ -211,13 +212,29 @@ export function GraphPanel({
       /* ignore */
     }
 
-    fg.d3Force("usageGravity", forceUsageGravity(getUse));
+    const densR = Math.max(40, Math.min(size.w, size.h) * 0.08 || 52);
+    fg.d3Force(
+      "usageGravity",
+      forceUsageGravity(getUse, {
+        densityRadius: densR,
+        densityWeight: 0.65,
+      })
+    );
     fg.d3Force(
       "usageRadial",
       forceUsageRadial(getUse, {
         outer: Math.min(size.w, size.h) * 0.4 || 200,
         inner: 14,
         strength: 0.14,
+        densityRadius: densR,
+        densitySpread: 32,
+      })
+    );
+    fg.d3Force(
+      "nodeDensity",
+      forceNodeDensity({
+        radius: densR,
+        strength: 0.42,
       })
     );
 
@@ -305,9 +322,9 @@ export function GraphPanel({
         </div>
         <span
           className="badge badge-ghost badge-sm opacity-60"
-          title="Used-by many → center; unused → rim. Fill = language; ring = path vs external."
+          title="Used-by many → center; unused → rim. Local density eases center pull and spreads crowded regions."
         >
-          gravity: used→center
+          gravity: used + density
         </span>
       </div>
       {size.w > 0 && size.h > 0 ? (
