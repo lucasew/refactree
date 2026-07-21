@@ -417,10 +417,34 @@ func (l *Loader) loadProviderView(v FileView, scopeRef ingest.Reference, focusRe
 		MapRef: mapRef,
 	})
 	v.Symbols = symbolsForFileMapped(fileRel, focused, EncodeCodeURL, mapRef)
+	// Match focusId to a painted def span (provider-mapped anchors, not path:./file).
+	if parsed.Symbol != "" {
+		v.FocusID = focusAnchorFromSegments(v.Segments, parsed.Symbol, focusRef)
+	}
 	markActiveHref(&v.Files, EncodeCodeURL(focusRef))
 	v.Title = focusRef
 	v.Reference = focusRef
 	return v
+}
+
+// focusAnchorFromSegments prefers an is-def segment for symbol (provider-remapped id).
+func focusAnchorFromSegments(segs []annotate.Segment, symbol, focusRef string) string {
+	if symbol == "" {
+		return ""
+	}
+	for _, seg := range segs {
+		if !seg.IsDef || seg.ID == "" {
+			continue
+		}
+		r := ingest.ParseReference(seg.Reference)
+		if r.Symbol == symbol {
+			return seg.ID
+		}
+	}
+	if focusRef != "" {
+		return annotate.AnchorID(focusRef)
+	}
+	return ""
 }
 
 func providerRefMapper(scopeRef ingest.Reference, result *ingest.Result) func(string) string {

@@ -247,19 +247,21 @@ export function GraphPanel({
 
   const onNodeClick = useCallback(
     (node: { id: string; expandable?: boolean; external?: boolean }) => {
-      const external = node.external || isExternalId(node.id);
+      const id = normalizeRef(node.id);
+      const external = node.external || isExternalId(id);
+      // Always open definition in the code pane (path + external) — same as source hyperlinks.
+      onFocus(id);
+      // Grow graph neighborhood for unexpanded external stubs (do not block navigation).
       if (external && node.expandable !== false) {
         if (onExpandExternal) {
-          onExpandExternal(node.id);
+          onExpandExternal(id);
           return;
         }
         setBusy(true);
-        streamExpandExternal(normalizeRef(node.id), { onEvent: bump })
+        streamExpandExternal(id, { onEvent: bump })
           .catch((e) => setErr(String(e)))
           .finally(() => setBusy(false));
-        return;
       }
-      onFocus(normalizeRef(node.id));
     },
     [onFocus, onExpandExternal, bump]
   );
@@ -337,7 +339,7 @@ export function GraphPanel({
           nodeLabel={(n: any) => {
             const lang = n.language || inferLanguageFromId(n.id) || "?";
             const scope = n.external ? "external" : "path";
-            const tip = n.external ? " — click to expand" : "";
+            const tip = " — click to open source";
             const pretty = formatGraphLabel(n.id, viewMode).replace(/\n/g, " · ");
             const u = usage.get(n.id) ?? 0;
             return `${pretty} [${lang} · ${scope} · used by ${u}]${tip}`;

@@ -3,7 +3,7 @@ import { graphql } from "react-relay";
 import type { ProjectGraphPageRootQuery as RootQ } from "./__generated__/ProjectGraphPageRootQuery.graphql";
 import { GraphPanel } from "./GraphPanel";
 import { useRelayQuery } from "../useRelayQuery";
-import { navigateToRef, normalizeRef } from "../routes";
+import { navigateToRef } from "../routes";
 
 const RootQuery = graphql`
   query ProjectGraphPageRootQuery {
@@ -20,12 +20,9 @@ export function ProjectGraphPage({ onPathChange }: Props) {
 
   const onFocus = useCallback(
     (ref: string) => {
-      const id = normalizeRef(ref);
-      if (id.startsWith("path:")) {
-        navigateToRef(id);
-        onPathChange();
-      }
-      // external: GraphPanel streams expand on click by default
+      // path: and external (go:, node:, …) — open definition in the code browser
+      navigateToRef(ref);
+      onPathChange();
     },
     [onPathChange]
   );
