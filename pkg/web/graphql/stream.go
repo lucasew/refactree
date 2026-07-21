@@ -9,7 +9,7 @@ import (
 	"github.com/lucasew/refactree/pkg/ingest"
 )
 
-// StreamEvent is one progressive graph update (SSE).
+// StreamEvent is one progressive graph update (used by the WS explore session).
 // Primary payload is edges; nodes (except focus) are hydrated on demand via GraphQL.
 type StreamEvent struct {
 	Type string `json:"type"` // focus | edge | done | error

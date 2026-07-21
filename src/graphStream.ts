@@ -308,15 +308,6 @@ export async function streamExpandExternal(
   markExpanded(ref);
 }
 
-/** @deprecated prefer sessionVisit / sessionProject */
-export async function streamGraph(
-  opts: { ref?: string; mode?: "project" | "neighborhood" },
-  handlers: StreamHandlers = {}
-): Promise<void> {
-  if (opts.mode === "project") return sessionProject(handlers);
-  return sessionVisit(opts.ref || "path:./", handlers);
-}
-
 export function ensureGraphSession() {
   client.connect();
 }
