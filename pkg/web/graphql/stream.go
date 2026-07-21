@@ -96,12 +96,12 @@ func (c *SessionCorpus) StreamVisit(ctx context.Context, ref string, emit Stream
 	return emitVisitEdges(ctx, c.root, parsed, focusID, result, emit)
 }
 
-// StreamProject walks the project tree and streams package-level IMPORTS + USES
-// edges progressively (parse → materialize → emit per file / small batch).
-// Local go: packages under the project root are rewritten to path:./… .
+// StreamProject walks the project tree and streams edges progressively
+// (parse → materialize → emit per small batch):
+//   - IMPORTS between packages (module scope)
+//   - USES between atoms (graphRefID keeps ::symbol)
 //
-// Unlike a bulk DiscoverDir+Materialize of the whole tree, edges are pushed as
-// soon as each file is ready so the UI is not blocked for a minute on large repos.
+// Local go: packages under the project root are rewritten to path:./… .
 func (c *SessionCorpus) StreamProject(ctx context.Context, emit StreamEmitter) error {
 	if c == nil || emit == nil {
 		return nil
@@ -121,8 +121,12 @@ func (c *SessionCorpus) StreamProject(ctx context.Context, emit StreamEmitter) e
 	emitEdge := func(from, to string, kind EdgeKind) bool {
 		from = graphRefIDString(c.root, from)
 		to = graphRefIDString(c.root, to)
-		from = projectScopeID(c.root, scopeRef(ingest.ParseReference(from)))
-		to = projectScopeID(c.root, scopeRef(ingest.ParseReference(to)))
+		if kind == EdgeKindImports {
+			// Package-level import map (no atoms).
+			from = projectScopeID(c.root, scopeRef(ingest.ParseReference(from)))
+			to = projectScopeID(c.root, scopeRef(ingest.ParseReference(to)))
+		}
+		// USES keep full atom ids (path:./pkg::Sym) so crawl populates symbols.
 		if from == "" || to == "" || from == to {
 			return true
 		}
@@ -150,6 +154,25 @@ func (c *SessionCorpus) StreamProject(ctx context.Context, emit StreamEmitter) e
 		}
 		for _, rel := range result.Relations {
 			if !emitEdge(rel.Reference, rel.Target, EdgeKindUses) {
+				return false
+			}
+		}
+		// Defs with no relations yet: still surface atoms under their package
+		// (package → atom) so crawl is not packages-only.
+		for _, ent := range result.Entities {
+			if err := ctx.Err(); err != nil {
+				return false
+			}
+			atom := graphRefIDString(c.root, ent.Reference)
+			if atom == "" || !strings.Contains(atom, "::") {
+				continue
+			}
+			pkg := projectScopeID(c.root, scopeRef(ingest.ParseReference(atom)))
+			if pkg == "" || pkg == atom {
+				continue
+			}
+			// USED_BY: atom is "used by" its package as container (shows atom node).
+			if !emitEdge(atom, pkg, EdgeKindUsedBy) {
 				return false
 			}
 		}
