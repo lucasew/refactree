@@ -27,6 +27,7 @@ exclude github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar v0.0.0
 
 require (
 	github.com/99designs/gqlgen v0.17.86
+	github.com/gorilla/websocket v1.5.0
 	github.com/lewtec/eletrocromo v0.0.0-20260720233412-019f2474a08f
 	github.com/moby/moby/api v1.55.0
 	github.com/vektah/gqlparser/v2 v2.5.31
@@ -75,7 +76,6 @@ require (
 	github.com/goccy/go-yaml v1.19.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/css v1.0.1 // indirect
-	github.com/gorilla/websocket v1.5.0 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/klauspost/compress v1.18.5 // indirect

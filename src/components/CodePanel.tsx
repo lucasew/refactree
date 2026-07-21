@@ -1,4 +1,5 @@
 import React, { useEffect } from "react";
+import { normalizeRef } from "../routes";
 
 type Segment = {
   text: string;
@@ -42,15 +43,16 @@ export function CodePanel({ segments, nonText, focusId, onNavigate, loading }: P
         {segments.filter(Boolean).map((s, i) => {
           const key = i;
           if (s!.isLink && s!.reference) {
+            const ref = normalizeRef(s!.reference);
             return (
               <a
                 key={key}
-                href={"/code/" + encodeURIComponent(s!.reference)}
+                href={"/code/" + encodeURIComponent(ref)}
                 id={s!.anchorId ?? undefined}
                 className={s!.isDef ? "is-def" : undefined}
                 onClick={(e) => {
                   e.preventDefault();
-                  onNavigate(s!.reference!);
+                  onNavigate(ref);
                 }}
               >
                 {s!.text}

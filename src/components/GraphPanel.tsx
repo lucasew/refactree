@@ -14,6 +14,7 @@ import {
   streamExpandExternal,
 } from "../graphStream";
 import { nodeFill, nodeStroke, inferLanguageFromId } from "../graphColors";
+import { normalizeRef } from "../routes";
 import { computeDegrees, forceUsageGravity, forceUsageRadial, degreeRadiusBoost } from "../graphForces";
 
 type Props = {
@@ -102,14 +103,15 @@ export function GraphPanel({
   useEffect(() => {
     if (streamProject) return;
     if (streamRef == null || streamRef === "") return;
-    if (lastVisit.current === streamRef && getGraphSession().nodes.size > 0) {
+    const visitRef = normalizeRef(streamRef);
+    if (lastVisit.current === visitRef && getGraphSession().nodes.size > 0) {
       // still re-visit so server can push any new edges; always visit is ok (deltas)
     }
-    lastVisit.current = streamRef;
+    lastVisit.current = visitRef;
     let cancelled = false;
     setBusy(true);
     setErr(null);
-    sessionVisit(streamRef, {
+    sessionVisit(visitRef, {
       onEvent: () => {
         if (!cancelled) bump();
       },
@@ -131,7 +133,7 @@ export function GraphPanel({
   }, [neighborhood, focusId, streamRef, streamProject, bump]);
 
   useEffect(() => {
-    getGraphSession().focusId = focusId;
+    getGraphSession().focusId = normalizeRef(focusId);
     bump();
   }, [focusId, bump]);
 
@@ -218,12 +220,12 @@ export function GraphPanel({
           return;
         }
         setBusy(true);
-        streamExpandExternal(node.id, { onEvent: bump })
+        streamExpandExternal(normalizeRef(node.id), { onEvent: bump })
           .catch((e) => setErr(String(e)))
           .finally(() => setBusy(false));
         return;
       }
-      onFocus(node.id);
+      onFocus(normalizeRef(node.id));
     },
     [onFocus, onExpandExternal, bump]
   );

@@ -1,3 +1,52 @@
+/**
+ * Canonicalize a reference string for navigation / graph ids.
+ * Matches pkg/reference.Parse + path normalization:
+ *   bare "cmd/rft" → "path:./cmd/rft"
+ *   "cmd/rft::main" → "path:./cmd/rft::main"
+ * Display labels may omit the prefix; ids must not.
+ */
+export function normalizeRef(ref: string): string {
+  let s = (ref ?? "").trim();
+  if (!s) return "path:./";
+
+  // Symbol first (same as Go Parse): provider:path::symbol
+  let symbol = "";
+  const symIdx = s.indexOf("::");
+  if (symIdx >= 0) {
+    symbol = s.slice(symIdx + 2);
+    s = s.slice(0, symIdx);
+  }
+
+  let base: string;
+  // Provider colon — not confused with :: (already stripped).
+  const colon = s.indexOf(":");
+  if (colon > 0 && !s.startsWith("./") && !s.startsWith("../") && !s.startsWith("/")) {
+    const prov = s.slice(0, colon).toLowerCase();
+    let path = s.slice(colon + 1);
+    if (prov === "path") {
+      if (path === "" || path === ".") path = "./";
+      else if (!path.startsWith("./") && !path.startsWith("../") && !path.startsWith("/")) {
+        path = "./" + path;
+      }
+      base = "path:" + path;
+    } else {
+      base = prov + ":" + path;
+    }
+  } else if (s.startsWith("./") || s.startsWith("../") || s.startsWith("/")) {
+    base = "path:" + s;
+  } else if (symbol !== "" || s.includes("/") || s.startsWith(".")) {
+    // Bare path / shorthand (Go Parse treats these as path provider).
+    base = "path:./" + s.replace(/^\.\//, "");
+  } else if (s === "" || s === ".") {
+    base = "path:./";
+  } else {
+    // Bare identifier without provider — leave as-is (not a path ref).
+    base = s;
+  }
+
+  return symbol !== "" ? base + "::" + symbol : base;
+}
+
 /** Parse browser path into a focus reference (canonical id). */
 export function refFromPath(pathname: string): string {
   if (pathname === "/" || pathname === "" || pathname === "/graph") {
@@ -17,14 +66,15 @@ export function refFromPath(pathname: string): string {
   if (!rest) {
     return "path:./";
   }
-  return rest;
+  return normalizeRef(rest);
 }
 
 export function pathFromRef(ref: string): string {
-  if (!ref || ref === "path:./" || ref === "path:.") {
+  const id = normalizeRef(ref);
+  if (id === "path:./" || id === "path:.") {
     return "/";
   }
-  return "/code/" + encodeURIComponent(ref);
+  return "/code/" + encodeURIComponent(id);
 }
 
 export function navigateToRef(ref: string) {
@@ -44,4 +94,13 @@ export function navigateToGraph() {
 
 export function isGraphRoute(pathname: string): boolean {
   return pathname === "/graph" || pathname.startsWith("/graph/");
+}
+
+/** Display-only: strip path:./ for module line; never use as an id. */
+export function displayModulePath(refOrLabel: string): string {
+  const s = (refOrLabel ?? "").trim();
+  if (s.startsWith("path:")) {
+    return s.slice("path:".length).replace(/^\.\//, "") || ".";
+  }
+  return s;
 }

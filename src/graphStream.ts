@@ -13,6 +13,7 @@ import {
   type IncomingNode,
 } from "./graphSession";
 import { inferLanguageFromId } from "./graphColors";
+import { normalizeRef } from "./routes";
 
 export type StreamHandlers = {
   onEvent?: () => void;
@@ -112,7 +113,7 @@ class GraphExploreClient {
   }
 
   visit(ref: string) {
-    this.send({ op: "visit", ref: ref || "path:./" });
+    this.send({ op: "visit", ref: normalizeRef(ref || "path:./") });
   }
 
   project() {
@@ -127,7 +128,7 @@ class GraphExploreClient {
       case "focus":
         if (msg.node) {
           applyNode(msg.node, true);
-          s.focusId = msg.node.id;
+          s.focusId = normalizeRef(msg.node.id);
           if (msg.node.parentId) ensureStub(msg.node.parentId);
         }
         break;
@@ -154,7 +155,9 @@ class GraphExploreClient {
 
 const client = new GraphExploreClient();
 
-function stubFromId(id: string): IncomingNode {
+function stubFromId(rawId: string): IncomingNode {
+  // Id must stay canonical (path:./…); only the label strips the prefix for display.
+  const id = normalizeRef(rawId);
   const external = isExternalId(id);
   let kind = "MODULE";
   let modulePart = id;
@@ -165,23 +168,23 @@ function stubFromId(id: string): IncomingNode {
     symbolPart = rest.join("::");
     modulePart = left;
   }
+  // Display module line without path:./
   if (modulePart.startsWith("path:")) {
-    modulePart = modulePart.replace(/^path:(\.\/)?/, "") || ".";
-    // file path in stub → show parent dir as module when it looks like a file
+    modulePart = modulePart.slice("path:".length).replace(/^\.\//, "") || ".";
     if (/\.[a-zA-Z0-9]+$/.test(modulePart) && modulePart.includes("/")) {
       modulePart = modulePart.replace(/\/[^/]+$/, "") || ".";
     }
-  } else if (modulePart.includes(":")) {
-    // provider:path
-    // keep as-is for external module line
   }
-  const label = symbolPart ? `${modulePart}\n${symbolPart}` : modulePart;
+  const label = symbolPart ? `${modulePart}
+${symbolPart}` : modulePart;
   return { id, kind, label, external, expandable: external, language: inferLanguageFromId(id) };
 }
 
 function applyNode(n: IncomingNode, _markResolved = true) {
   const s = getGraphSession();
-  const existing = s.nodes.get(n.id);
+  const id = normalizeRef(n.id);
+  n = { ...n, id };
+  const existing = s.nodes.get(id);
   if (existing) {
     existing.name = n.label || existing.name || n.id;
     existing.kind = n.kind || existing.kind;
@@ -189,9 +192,9 @@ function applyNode(n: IncomingNode, _markResolved = true) {
     if (n.expandable != null) existing.expandable = !!n.expandable;
     if (n.language) existing.language = n.language;
   } else {
-    s.nodes.set(n.id, {
-      id: n.id,
-      name: n.label || n.id,
+    s.nodes.set(id, {
+      id,
+      name: n.label || id,
       kind: n.kind,
       external: !!n.external,
       expandable: !!n.expandable,
@@ -200,8 +203,9 @@ function applyNode(n: IncomingNode, _markResolved = true) {
   }
 }
 
-function ensureStub(id: string) {
-  if (!id) return;
+function ensureStub(rawId: string) {
+  if (!rawId) return;
+  const id = normalizeRef(rawId);
   if (!getGraphSession().nodes.has(id)) {
     applyNode(stubFromId(id), false);
   }
@@ -211,13 +215,15 @@ function ensureStub(id: string) {
 
 function applyEdge(e: IncomingEdge) {
   if (!e.from || !e.to) return;
+  const from = normalizeRef(e.from);
+  const to = normalizeRef(e.to);
   const s = getGraphSession();
-  const k = linkKey(e.from, e.to, e.kind);
+  const k = linkKey(from, to, e.kind);
   if (!s.links.has(k)) {
-    s.links.set(k, { source: e.from, target: e.to, kind: e.kind });
+    s.links.set(k, { source: from, target: to, kind: e.kind });
   }
-  ensureStub(e.from);
-  ensureStub(e.to);
+  ensureStub(from);
+  ensureStub(to);
 }
 
 function scheduleHydrate() {
@@ -290,10 +296,14 @@ function runOp(
 
 /** Visit a ref in the shared session; only new edges are pushed. */
 export function sessionVisit(ref: string, handlers: StreamHandlers = {}): Promise<void> {
-  const want = ref || "path:./";
+  const want = normalizeRef(ref || "path:./");
   return runOp(
     () => client.visit(want),
-    (msg) => msg.type === "done" && msg.visitRef === want,
+    (msg) =>
+      msg.type === "done" &&
+      !!msg.visitRef &&
+      msg.visitRef !== "project" &&
+      normalizeRef(msg.visitRef) === want,
     handlers,
     120_000
   );
@@ -313,8 +323,9 @@ export async function streamExpandExternal(
   ref: string,
   handlers: StreamHandlers = {}
 ): Promise<void> {
-  await sessionVisit(ref, handlers);
-  markExpanded(ref);
+  const id = normalizeRef(ref);
+  await sessionVisit(id, handlers);
+  markExpanded(id);
 }
 
 export function ensureGraphSession() {

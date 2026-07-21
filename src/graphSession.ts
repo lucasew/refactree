@@ -1,3 +1,5 @@
+import { normalizeRef } from "./routes";
+
 /**
  * Session-wide graph facts + stable node object identity for force-graph.
  * Positions live on FGNode objects; force-graph mutates them in place so
@@ -85,18 +87,19 @@ export function mergeNeighborhood(
 
   for (const n of nb.nodes ?? []) {
     if (!n?.id) continue;
-    const existing = s.nodes.get(n.id);
+    const id = normalizeRef(n.id);
+    const existing = s.nodes.get(id);
     if (existing) {
-      existing.name = n.label || n.id;
+      existing.name = n.label || existing.name || id;
       existing.kind = n.kind;
       if (n.external != null) existing.external = n.external;
       if (n.expandable != null) existing.expandable = n.expandable;
       if (n.language != null) existing.language = n.language || existing.language;
       // keep x,y,vx,vy
     } else {
-      s.nodes.set(n.id, {
-        id: n.id,
-        name: n.label || n.id,
+      s.nodes.set(id, {
+        id,
+        name: n.label || id,
         kind: n.kind,
         external: !!n.external,
         expandable: !!n.expandable,
@@ -108,21 +111,25 @@ export function mergeNeighborhood(
 
   for (const e of nb.edges ?? []) {
     if (!e?.from || !e?.to) continue;
-    const k = linkKey(e.from, e.to, e.kind);
+    const from = normalizeRef(e.from);
+    const to = normalizeRef(e.to);
+    const k = linkKey(from, to, e.kind);
     if (!s.links.has(k)) {
-      s.links.set(k, { source: e.from, target: e.to, kind: e.kind });
+      s.links.set(k, { source: from, target: to, kind: e.kind });
       addedLinks++;
     }
   }
 
   s.incomplete = nb.incomplete;
-  s.focusId = nb.focus?.id ?? focusFallback ?? s.focusId;
+  const focusRaw = nb.focus?.id ?? focusFallback;
+  s.focusId = focusRaw ? normalizeRef(focusRaw) : s.focusId;
   return { addedNodes, addedLinks };
 }
 
 export function markExpanded(id: string) {
-  session.expanded.add(id);
-  const n = session.nodes.get(id);
+  const nid = normalizeRef(id);
+  session.expanded.add(nid);
+  const n = session.nodes.get(nid);
   if (n) n.expandable = false;
 }
 

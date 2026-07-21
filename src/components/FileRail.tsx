@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { normalizeRef } from "../routes";
 
 type Entry = {
   name: string;
@@ -49,14 +50,16 @@ export function FileRail({
 
       {tab === "files" ? (
         <ul className="menu menu-sm bg-base-200 rounded-box w-full p-0">
-          {files.filter(Boolean).map((f) => (
-            <li key={f!.reference + f!.name}>
+          {files.filter(Boolean).map((f) => {
+            const ref = normalizeRef(f!.reference);
+            return (
+            <li key={ref + f!.name}>
               <a
-                href={"/code/" + encodeURIComponent(f!.reference)}
-                className={f!.reference === activeRef ? "menu-active" : ""}
+                href={"/code/" + encodeURIComponent(ref)}
+                className={ref === normalizeRef(activeRef) ? "menu-active" : ""}
                 onClick={(e) => {
                   e.preventDefault();
-                  onSelect(f!.reference);
+                  onSelect(ref);
                 }}
               >
                 {f!.isDir ? (
@@ -65,7 +68,8 @@ export function FileRail({
                 <span className="truncate">{f!.name}</span>
               </a>
             </li>
-          ))}
+            );
+          })}
           {!files.length ? (
             <li className="menu-disabled">
               <span className="text-base-content/50">—</span>
@@ -74,17 +78,20 @@ export function FileRail({
         </ul>
       ) : (
         <ul className="menu menu-sm bg-base-200 rounded-box w-full p-0">
-          {symbols.filter(Boolean).map((s) => (
-            <li key={s!.reference + s!.name}>
+          {symbols.filter(Boolean).map((s) => {
+            const ref = normalizeRef(s!.reference);
+            return (
+            <li key={ref + s!.name}>
               <button
                 type="button"
-                className={s!.reference === activeRef ? "menu-active" : ""}
-                onClick={() => onSelect(s!.reference)}
+                className={ref === normalizeRef(activeRef) ? "menu-active" : ""}
+                onClick={() => onSelect(ref)}
               >
                 <span className="truncate">{s!.name}</span>
               </button>
             </li>
-          ))}
+            );
+          })}
           {!symbols.length ? (
             <li className="menu-disabled">
               <span className="text-base-content/50">
