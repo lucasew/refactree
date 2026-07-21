@@ -15,8 +15,8 @@ depends = ["codegen:gql", "codegen:relay"]
 run = "echo 'codegen: ok'"
 
 [tasks."codegen:gql"]
-description = "Generate Go GraphQL from pkg/web/graphql/schema.graphql"
-run = "go run github.com/99designs/gqlgen@v0.17.81 generate"
+description = "gqlgen (mise tool go:github.com/99designs/gqlgen) — same pattern as ciborg"
+run = "gqlgen"
 
 [tasks."codegen:relay"]
 description = "Relay compiler against pkg/web/graphql/schema.graphql"
