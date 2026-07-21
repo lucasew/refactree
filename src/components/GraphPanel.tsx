@@ -40,7 +40,6 @@ type Props = {
   loading?: boolean;
   onFocus: (ref: string) => void;
   onExpandExternal?: (ref: string) => void;
-  emptyHint?: string;
 };
 
 const BG = "#1a1814";
@@ -57,7 +56,6 @@ export function GraphPanel({
   loading: loadingProp,
   onFocus,
   onExpandExternal,
-  emptyHint,
 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const fgRef = useRef<any>(null);
@@ -336,23 +334,7 @@ export function GraphPanel({
   const loading = loadingProp || busy;
   const sess = getGraphSession();
 
-  if (graphData.nodes.length === 0) {
-    return (
-      <div ref={hostRef} className="graph-canvas-host relative h-full min-h-64">
-        <div className="p-4 text-sm text-base-content/60 flex items-center gap-2">
-          {loading ? <span className="loading loading-spinner loading-xs" /> : null}
-          {err ? (
-            <span className="text-error">{err}</span>
-          ) : loading ? (
-            "Session: discovering edges…"
-          ) : (
-            emptyHint ?? "Visit files and symbols — the graph session accumulates edges."
-          )}
-        </div>
-      </div>
-    );
-  }
-
+  // Always mount the force canvas (empty graph is fine) — no placeholder copy.
   return (
     <div ref={hostRef} className="graph-canvas-host relative h-full min-h-64 overflow-hidden">
       <div className="absolute z-10 m-2 flex flex-wrap items-center gap-1">

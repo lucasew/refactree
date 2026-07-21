@@ -65,16 +65,7 @@ export function ProjectGraphPage({ onPathChange }: Props) {
       </div>
 
       <div className="flex-1 min-h-0 relative" style={{ height: "calc(100dvh - 3rem)" }}>
-        <GraphPanel
-          focusId="path:./"
-          streamProject
-          onFocus={onFocus}
-          emptyHint="Turn on “crawl repo” (or wait) to stream the project import graph…"
-        />
-        <p className="absolute bottom-2 left-2 text-xs text-base-content/50 max-w-lg">
-          Crawl repo walks the tree with the usual skip list (node_modules, .venv, vendor, …). Orange-ring nodes are
-          external — click to open source and expand. Path nodes open the code browser.
-        </p>
+        <GraphPanel focusId="path:./" streamProject onFocus={onFocus} />
       </div>
     </div>
   );
