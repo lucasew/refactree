@@ -3,18 +3,22 @@ import ForceGraph2D from "react-force-graph-2d";
 import {
   getGraphSession,
   isExternalId,
-  markExpanded,
   mergeNeighborhood,
   snapshotGraphData,
   type IncomingNeighborhood,
 } from "../graphSession";
+import { streamExpandExternal, streamGraph } from "../graphStream";
 
 type Props = {
   focusId: string;
-  neighborhood: IncomingNeighborhood;
+  /** When set, merges bulk neighborhood (fallback). Prefer streamKey for progressive load. */
+  neighborhood?: IncomingNeighborhood;
+  /** When this changes, start SSE stream for focus (neighborhood mode). */
+  streamRef?: string | null;
+  /** Stream project graph instead of a focus ref. */
+  streamProject?: boolean;
   loading?: boolean;
   onFocus: (ref: string) => void;
-  /** Called when user requests expand of an external (non-path) node. */
   onExpandExternal?: (ref: string) => void;
   emptyHint?: string;
 };
@@ -24,7 +28,9 @@ const BG = "#1a1814";
 export function GraphPanel({
   focusId,
   neighborhood,
-  loading,
+  streamRef,
+  streamProject,
+  loading: loadingProp,
   onFocus,
   onExpandExternal,
   emptyHint,
@@ -33,6 +39,19 @@ export function GraphPanel({
   const fgRef = useRef<any>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [tick, setTick] = useState(0);
+  const [streaming, setStreaming] = useState(false);
+  const [streamError, setStreamError] = useState<string | null>(null);
+
+  const bump = useCallback(() => {
+    setTick((t) => t + 1);
+    const fg = fgRef.current;
+    try {
+      // light reheat as graph grows
+      fg?.d3ReheatSimulation?.();
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   useEffect(() => {
     const el = hostRef.current;
@@ -49,25 +68,38 @@ export function GraphPanel({
     return () => ro.disconnect();
   }, []);
 
+  // Progressive SSE stream
   useEffect(() => {
-    if (!neighborhood) return;
-    const { addedNodes, addedLinks } = mergeNeighborhood(neighborhood, focusId);
-    setTick((t) => t + 1);
-    const fg = fgRef.current;
-    if (fg && (addedNodes > 0 || addedLinks > 0)) {
-      try {
-        fg.d3ReheatSimulation?.();
-      } catch {
-        /* ignore */
-      }
-    }
-  }, [neighborhood, focusId]);
+    if (!streamProject && (streamRef == null || streamRef === "")) return;
+    const ac = new AbortController();
+    setStreaming(true);
+    setStreamError(null);
+    const run = streamProject
+      ? streamGraph({ mode: "project" }, { onEvent: bump }, ac.signal)
+      : streamGraph({ ref: streamRef!, mode: "neighborhood" }, { onEvent: bump }, ac.signal);
+    run
+      .then(() => {
+        if (!ac.signal.aborted) setStreaming(false);
+      })
+      .catch((e: Error) => {
+        if (ac.signal.aborted) return;
+        setStreaming(false);
+        setStreamError(e.message);
+      });
+    return () => ac.abort();
+  }, [streamRef, streamProject, bump]);
 
-  // Keep focus highlight without rewriting node objects.
+  // Optional bulk merge (compat)
+  useEffect(() => {
+    if (!neighborhood || streamRef != null || streamProject) return;
+    mergeNeighborhood(neighborhood, focusId);
+    bump();
+  }, [neighborhood, focusId, streamRef, streamProject, bump]);
+
   useEffect(() => {
     getGraphSession().focusId = focusId;
-    setTick((t) => t + 1);
-  }, [focusId]);
+    bump();
+  }, [focusId, bump]);
 
   const graphData = useMemo(() => {
     void tick;
@@ -77,32 +109,43 @@ export function GraphPanel({
   const onNodeClick = useCallback(
     (node: { id: string; expandable?: boolean; external?: boolean }) => {
       const external = node.external || isExternalId(node.id);
-      if (external && node.expandable !== false && onExpandExternal) {
-        onExpandExternal(node.id);
-        markExpanded(node.id);
-        setTick((t) => t + 1);
+      if (external && node.expandable !== false) {
+        if (onExpandExternal) {
+          onExpandExternal(node.id);
+          return;
+        }
+        // Default: stream expand in place
+        const ac = new AbortController();
+        setStreaming(true);
+        streamExpandExternal(node.id, { onEvent: bump }, ac.signal)
+          .then(() => setStreaming(false))
+          .catch(() => setStreaming(false));
         return;
       }
       onFocus(node.id);
     },
-    [onFocus, onExpandExternal]
+    [onFocus, onExpandExternal, bump]
   );
+
+  const loading = loadingProp || streaming;
+  const sess = getGraphSession();
 
   if (graphData.nodes.length === 0) {
     return (
       <div ref={hostRef} className="graph-canvas-host relative h-full min-h-64">
         <div className="p-4 text-sm text-base-content/60 flex items-center gap-2">
           {loading ? <span className="loading loading-spinner loading-xs" /> : null}
-          {loading
-            ? "Discovering relations…"
-            : emptyHint ??
-              "Focus a file or symbol to expand the relation graph (lazy, incomplete)."}
+          {streamError ? (
+            <span className="text-error">{streamError}</span>
+          ) : loading ? (
+            "Streaming graph…"
+          ) : (
+            emptyHint ?? "Focus a file or symbol to expand the relation graph."
+          )}
         </div>
       </div>
     );
   }
-
-  const sess = getGraphSession();
 
   return (
     <div ref={hostRef} className="graph-canvas-host relative h-full min-h-64 overflow-hidden">
@@ -114,14 +157,14 @@ export function GraphPanel({
           <span className="badge badge-ghost badge-sm">incomplete</span>
         ) : null}
         {loading ? (
-          <span className="badge badge-ghost badge-sm gap-1">
+          <span className="badge badge-primary badge-outline badge-sm gap-1">
             <span className="loading loading-spinner loading-xs" />
-            expanding
+            streaming
           </span>
         ) : null}
-        <span className="badge badge-ghost badge-sm opacity-70">
-          click external to expand
-        </span>
+        {streamError ? (
+          <span className="badge badge-error badge-sm">{streamError}</span>
+        ) : null}
       </div>
       {size.w > 0 && size.h > 0 ? (
         <ForceGraph2D

@@ -85,6 +85,7 @@ func (s *Server) routes() {
 	})
 
 	s.mux.Handle("/graphql", gqlSrv)
+	s.mux.HandleFunc("/api/graph/stream", s.handleGraphStream)
 	s.mux.Handle("/playground", playground.Handler("refactree", "/graphql"))
 
 	// SPA shell for / and /code/...
@@ -118,7 +119,7 @@ func (s *Server) ListenAndServe(addr string) error {
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      120 * time.Second,
+		WriteTimeout:      0, // SSE graph streams need unbounded writes
 		IdleTimeout:       120 * time.Second,
 	}
 	return srv.ListenAndServe()

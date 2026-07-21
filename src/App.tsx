@@ -1,18 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { graphql } from "react-relay";
-import { fetchQuery } from "relay-runtime";
 import type { AppFilesystemQuery as FsQ } from "./__generated__/AppFilesystemQuery.graphql";
 import type { AppCodeQuery as CodeQ } from "./__generated__/AppCodeQuery.graphql";
-import type { AppNeighborhoodQuery as NbQ } from "./__generated__/AppNeighborhoodQuery.graphql";
 import type { AppRootDirQuery as RootQ } from "./__generated__/AppRootDirQuery.graphql";
-import type { AppExpandExternalQuery as EXQ } from "./__generated__/AppExpandExternalQuery.graphql";
 import { FileRail } from "./components/FileRail";
 import { CodePanel } from "./components/CodePanel";
 import { GraphPanel } from "./components/GraphPanel";
 import { ProjectGraphPage } from "./components/ProjectGraphPage";
-import { environment } from "./RelayEnvironment";
 import { isGraphRoute, navigateToGraph, navigateToRef, refFromPath } from "./routes";
-import { markExpanded, mergeNeighborhood } from "./graphSession";
 import { useRelayQuery } from "./useRelayQuery";
 
 const RootDirQuery = graphql`
@@ -63,64 +58,6 @@ const CodeQuery = graphql`
   }
 `;
 
-const NeighborhoodQuery = graphql`
-  query AppNeighborhoodQuery($focus: ID!) {
-    neighborhood(ref: $focus) {
-      incomplete
-      focus {
-        id
-        kind
-        label
-        parentId
-        external
-        expandable
-      }
-      nodes {
-        id
-        kind
-        label
-        parentId
-        external
-        expandable
-      }
-      edges {
-        from
-        to
-        kind
-      }
-    }
-  }
-`;
-
-const ExpandExternalQuery = graphql`
-  query AppExpandExternalQuery($focus: ID!) {
-    neighborhood(ref: $focus) {
-      incomplete
-      focus {
-        id
-        kind
-        label
-        parentId
-        external
-        expandable
-      }
-      nodes {
-        id
-        kind
-        label
-        parentId
-        external
-        expandable
-      }
-      edges {
-        from
-        to
-        kind
-      }
-    }
-  }
-`;
-
 function PanelPending({ label }: { label: string }) {
   return (
     <div className="flex items-center gap-2 p-3 text-sm text-base-content/50">
@@ -147,17 +84,6 @@ function CodeBrowser({ path, onPathChange }: { path: string; onPathChange: () =>
     { focus: codeFocus },
     `code:${codeFocus}`
   );
-  const nb = useRelayQuery<NbQ>(
-    NeighborhoodQuery,
-    { focus: codeFocus },
-    `nb:${codeFocus}`
-  );
-
-  const [expanding, setExpanding] = useState<string | null>(null);
-  const [nbOverride, setNbOverride] = useState(nb.data?.neighborhood ?? null);
-  useEffect(() => {
-    if (nb.data?.neighborhood) setNbOverride(nb.data.neighborhood);
-  }, [nb.data?.neighborhood]);
 
   const onSelect = useCallback(
     (ref: string) => {
@@ -166,31 +92,6 @@ function CodeBrowser({ path, onPathChange }: { path: string; onPathChange: () =>
     },
     [onPathChange]
   );
-
-  const onExpandExternal = useCallback(async (ref: string) => {
-    setExpanding(ref);
-    try {
-      const data = await fetchQuery<EXQ>(environment, ExpandExternalQuery, {
-        focus: ref,
-      }).toPromise();
-      if (data?.neighborhood) {
-        mergeNeighborhood(data.neighborhood, ref);
-        markExpanded(ref);
-        setNbOverride((prev) =>
-          prev
-            ? {
-                ...prev,
-                incomplete: true,
-                nodes: [...(prev.nodes ?? [])],
-                edges: [...(prev.edges ?? [])],
-              }
-            : (data.neighborhood as any)
-        );
-      }
-    } finally {
-      setExpanding(null);
-    }
-  }, []);
 
   const codeData = code.data?.code;
   const files = useMemo(() => {
@@ -221,7 +122,7 @@ function CodeBrowser({ path, onPathChange }: { path: string; onPathChange: () =>
           </code>
         </div>
         <div className="navbar-end gap-2">
-          {(fs.loading || code.loading || nb.loading || expanding) && (
+          {(fs.loading || code.loading) && (
             <span className="loading loading-spinner loading-xs opacity-60" title="Loading…" />
           )}
           <a
@@ -283,14 +184,19 @@ function CodeBrowser({ path, onPathChange }: { path: string; onPathChange: () =>
             <div className="p-4 text-sm text-base-content/70">
               <p>
                 Local code browser. Pick a file, open{" "}
-                <a href="/graph" className="link" onClick={(e) => {
-                  e.preventDefault();
-                  navigateToGraph();
-                  onPathChange();
-                }}>
+                <a
+                  href="/graph"
+                  className="link"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    navigateToGraph();
+                    onPathChange();
+                  }}
+                >
                   project graph
                 </a>
-                , or a <code className="kbd kbd-sm">/code/…</code> reference.
+                , or a <code className="kbd kbd-sm">/code/…</code> reference. Graph streams in
+                as relations are discovered.
               </p>
             </div>
           ) : (
@@ -308,17 +214,10 @@ function CodeBrowser({ path, onPathChange }: { path: string; onPathChange: () =>
           className="relative min-h-64 lg:min-h-0 max-h-[50vh] lg:max-h-[calc(100dvh-3rem)] bg-base-100"
           aria-label="Relation graph"
         >
-          {nb.error ? (
-            <div role="alert" className="alert alert-error alert-soft m-2 text-xs">
-              {nb.error.message}
-            </div>
-          ) : null}
           <GraphPanel
             focusId={codeFocus}
-            neighborhood={(nbOverride ?? nb.data?.neighborhood) as any}
-            loading={nb.loading || !!expanding}
+            streamRef={codeFocus}
             onFocus={onSelect}
-            onExpandExternal={onExpandExternal}
           />
         </section>
       </div>
