@@ -10,9 +10,10 @@ import {
 } from "../graphSession";
 import {
   ensureGraphSession,
-  sessionProject,
+  setSessionCrawl,
   sessionVisit,
   streamExpandExternal,
+  getGraphSessionClient,
 } from "../graphStream";
 import { nodeFill, nodeStroke, inferLanguageFromId } from "../graphColors";
 import {
@@ -45,7 +46,7 @@ const BG = "#1a1814";
 
 /** Tooltip: crawl uses ingest skip list (node_modules, .venv, …). */
 const CRAWL_TITLE =
-  "Walk the current repo for import edges (skips node_modules, .venv, vendor, dist, .git, …)";
+  "When on: worker crawls the repo when free (after visits). Skips node_modules, .venv, vendor, dist, .git, …";
 
 export function GraphPanel({
   focusId,
@@ -101,14 +102,20 @@ export function GraphPanel({
     return () => ro.disconnect();
   }, []);
 
-  // Project crawl when toggle is on (session deltas; skips vendored dirs).
+  // Sticky crawl: worker auto-runs project when free (only while toggle is on).
   useEffect(() => {
-    if (!crawlRepo) return;
     const gen = ++crawlGen.current;
     let cancelled = false;
+    if (!crawlRepo) {
+      void setSessionCrawl(false);
+      return () => {
+        cancelled = true;
+      };
+    }
     setBusy(true);
     setErr(null);
-    sessionProject({
+    // First project kick + wait for its done; later auto-crawls after visits still bump via subscribe.
+    void setSessionCrawl(true, {
       onEvent: () => {
         if (!cancelled) bump();
       },
@@ -118,8 +125,14 @@ export function GraphPanel({
     }).finally(() => {
       if (!cancelled && gen === crawlGen.current) setBusy(false);
     });
+    const unsub = getGraphSessionClient().subscribe((msg) => {
+      if (cancelled) return;
+      if (msg.type === "edge" || msg.type === "focus" || msg.type === "done") bump();
+    });
     return () => {
       cancelled = true;
+      unsub();
+      void setSessionCrawl(false);
     };
   }, [crawlRepo, bump]);
 

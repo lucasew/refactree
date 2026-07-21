@@ -125,6 +125,11 @@ class GraphExploreClient {
     this.send({ op: "project" });
   }
 
+  /** Sticky crawl flag: when true, worker auto-runs project crawl while free (after visits). */
+  setCrawl(enabled: boolean) {
+    this.send({ op: "crawl", enabled });
+  }
+
   private applyServerMsg(msg: ServerMsg) {
     const s = getGraphSession();
     if (msg.incomplete != null) s.incomplete = !!msg.incomplete;
@@ -310,6 +315,27 @@ export function sessionProject(handlers: StreamHandlers = {}): Promise<void> {
   );
 }
 
+/**
+ * Enable/disable sticky repo crawl on the server worker.
+ * When enabled, the worker runs StreamProject when free (after visits), using
+ * the ingest skip list. Disabling preempts an in-flight project crawl.
+ */
+export function setSessionCrawl(
+  enabled: boolean,
+  handlers: StreamHandlers = {}
+): Promise<void> {
+  if (!enabled) {
+    client.setCrawl(false);
+    return Promise.resolve();
+  }
+  return runOp(
+    () => client.setCrawl(true),
+    (msg) => msg.type === "done" && msg.visitRef === "project",
+    handlers,
+    300_000
+  );
+}
+
 export async function streamExpandExternal(
   ref: string,
   handlers: StreamHandlers = {}
@@ -321,4 +347,9 @@ export async function streamExpandExternal(
 
 export function ensureGraphSession() {
   client.connect();
+}
+
+/** Shared WS client (for subscribing to auto-crawl edges while crawl is on). */
+export function getGraphSessionClient() {
+  return client;
 }
