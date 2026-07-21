@@ -41,22 +41,22 @@ func LookupNode(root, id string) *GraphNode {
 	return decorateNode(root, graphNodeForRef(root, ingest.ParseReference(id)))
 }
 
-// StreamNeighborhood is a one-shot helper (ephemeral corpus). Prefer
-// SessionCorpus.StreamVisit for multi-visit sessions.
+// StreamNeighborhood is a one-shot helper (ephemeral corpus).
 func StreamNeighborhood(ctx context.Context, root, ref string, emit StreamEmitter) error {
-	c := NewSessionCorpus(root)
-	return c.StreamVisit(ctx, ref, emit)
+	return NewSessionCorpus(root).StreamVisit(ctx, ref, emit)
 }
 
-// StreamProjectGraph is a one-shot helper. Prefer SessionCorpus.StreamProject.
+// StreamProjectGraph is a one-shot helper.
 func StreamProjectGraph(ctx context.Context, root string, emit StreamEmitter) error {
-	c := NewSessionCorpus(root)
-	return c.StreamProject(ctx, emit)
+	return NewSessionCorpus(root).StreamProject(ctx, emit)
 }
 
-// StreamVisit absorbs Seed extracts for ref (skipping paths already in the
-// corpus), materializes once if the corpus grew, then emits edges.
-// Emits: focus → edge* → done.
+// StreamVisit explores ref into the session corpus and streams edges as files
+// are first absorbed (single-file resolve), then emits remaining cross-file
+// edges after one full Materialize of the corpus.
+//
+// Emits: focus → edge* (live) → edge* (cross-file) → done.
+// Already-cached paths are not re-absorbed; no second full explore of known files.
 func (c *SessionCorpus) StreamVisit(ctx context.Context, ref string, emit StreamEmitter) error {
 	if c == nil || emit == nil {
 		return nil
@@ -72,7 +72,34 @@ func (c *SessionCorpus) StreamVisit(ctx context.Context, ref string, emit Stream
 		return context.Canceled
 	}
 
-	if err := c.absorbForRef(parsed); err != nil {
+	seen := map[string]bool{}
+	emitEdge := func(e *GraphEdge) bool {
+		if e == nil || e.From == "" || e.To == "" || e.From == e.To {
+			return true
+		}
+		k := edgeKey(e)
+		if seen[k] {
+			return true
+		}
+		seen[k] = true
+		return emit(StreamEvent{Type: "edge", Edge: e, Incomplete: boolPtr(true)})
+	}
+
+	// Progressive: each newly absorbed file → local edges immediately.
+	onNew := func(fe *ingest.FileExtract) bool {
+		if ctx.Err() != nil {
+			return false
+		}
+		local := c.MaterializeOne(fe)
+		for _, e := range visitEdges(c.root, parsed, focusID, local) {
+			if !emitEdge(e) {
+				return false
+			}
+		}
+		return true
+	}
+
+	if err := c.absorbForRef(parsed, onNew); err != nil {
 		emit(StreamEvent{Type: "error", Message: err.Error()})
 		return err
 	}
@@ -80,23 +107,13 @@ func (c *SessionCorpus) StreamVisit(ctx context.Context, ref string, emit Stream
 		return err
 	}
 
-	result := c.Result()
-	edges := visitEdges(c.root, parsed, focusID, result)
-
-	seen := map[string]bool{}
-	for _, e := range edges {
+	// One full resolve for cross-file edges not visible in single-file passes.
+	full := c.Result()
+	for _, e := range visitEdges(c.root, parsed, focusID, full) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if e == nil {
-			continue
-		}
-		k := edgeKey(e)
-		if seen[k] {
-			continue
-		}
-		seen[k] = true
-		if !emit(StreamEvent{Type: "edge", Edge: e, Incomplete: boolPtr(true)}) {
+		if !emitEdge(e) {
 			return context.Canceled
 		}
 	}
@@ -108,8 +125,8 @@ func (c *SessionCorpus) StreamVisit(ctx context.Context, ref string, emit Stream
 	return nil
 }
 
-// StreamProject absorbs the full project dir (new files only), materializes
-// once if needed, emits IMPORT edges.
+// StreamProject streams IMPORT edges as new project files are absorbed,
+// then one full Materialize pass for any remaining aliases.
 func (c *SessionCorpus) StreamProject(ctx context.Context, emit StreamEmitter) error {
 	if c == nil || emit == nil {
 		return nil
@@ -125,7 +142,43 @@ func (c *SessionCorpus) StreamProject(ctx context.Context, emit StreamEmitter) e
 		return context.Canceled
 	}
 
-	if err := c.AbsorbDir("", true); err != nil {
+	seen := map[string]bool{}
+	emitEdge := func(e *GraphEdge) bool {
+		if e == nil || e.From == "" || e.To == "" || e.From == e.To {
+			return true
+		}
+		k := edgeKey(e)
+		if seen[k] {
+			return true
+		}
+		seen[k] = true
+		return emit(StreamEvent{Type: "edge", Edge: e, Incomplete: boolPtr(true)})
+	}
+
+	emitImportAliases := func(result *ingest.Result) bool {
+		if result == nil {
+			return true
+		}
+		for _, a := range result.Aliases {
+			fromID := projectScopeID(c.root, ingest.ParseReference(a.Reference))
+			toID := projectScopeID(c.root, ingest.ParseReference(a.Target))
+			if fromID == "" || toID == "" || fromID == toID {
+				continue
+			}
+			if !emitEdge(&GraphEdge{From: fromID, To: toID, Kind: EdgeKindImports}) {
+				return false
+			}
+		}
+		return true
+	}
+
+	if err := c.AbsorbDir("", true, func(fe *ingest.FileExtract) bool {
+		if ctx.Err() != nil {
+			return false
+		}
+		local := c.MaterializeOne(fe)
+		return emitImportAliases(local)
+	}); err != nil {
 		emit(StreamEvent{Type: "error", Message: err.Error()})
 		return err
 	}
@@ -133,26 +186,8 @@ func (c *SessionCorpus) StreamProject(ctx context.Context, emit StreamEmitter) e
 		return err
 	}
 
-	result := c.Result()
-	seen := map[string]bool{}
-	for _, a := range result.Aliases {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		fromID := projectScopeID(c.root, ingest.ParseReference(a.Reference))
-		toID := projectScopeID(c.root, ingest.ParseReference(a.Target))
-		if fromID == "" || toID == "" || fromID == toID {
-			continue
-		}
-		e := &GraphEdge{From: fromID, To: toID, Kind: EdgeKindImports}
-		k := edgeKey(e)
-		if seen[k] {
-			continue
-		}
-		seen[k] = true
-		if !emit(StreamEvent{Type: "edge", Edge: e, Incomplete: boolPtr(true)}) {
-			return context.Canceled
-		}
+	if !emitImportAliases(c.Result()) {
+		return context.Canceled
 	}
 
 	inc := true
@@ -162,8 +197,7 @@ func (c *SessionCorpus) StreamProject(ctx context.Context, emit StreamEmitter) e
 	return nil
 }
 
-func (c *SessionCorpus) absorbForRef(parsed ingest.Reference) error {
-	// Provider scopes: materialize module dir into corpus.
+func (c *SessionCorpus) absorbForRef(parsed ingest.Reference, onNew func(*ingest.FileExtract) bool) error {
 	if parsed.Provider != "" && parsed.Provider != "path" {
 		scope, ok, err := ingest.NewResolver(c.root).ResolveScopeTarget(ingest.Reference{
 			Provider: parsed.Provider,
@@ -175,8 +209,7 @@ func (c *SessionCorpus) absorbForRef(parsed ingest.Reference) error {
 		if !ok {
 			return nil
 		}
-		// Dir walk under scope — AbsorbDir with Dir=scope.Dir
-		return c.AbsorbDir(scope.Dir, false)
+		return c.AbsorbDir(scope.Dir, false, onNew)
 	}
 
 	abs, isDir, err := resolvePath(c.root, parsed)
@@ -184,10 +217,9 @@ func (c *SessionCorpus) absorbForRef(parsed ingest.Reference) error {
 		return err
 	}
 	if isDir {
-		return c.AbsorbDir(abs, false)
+		return c.AbsorbDir(abs, false, onNew)
 	}
-	// Seed neighborhood from this file (BFS); already-cached paths are not re-stored.
-	return c.AbsorbSeed(abs)
+	return c.AbsorbSeed(abs, onNew)
 }
 
 // visitEdges builds the edge list for a focus ref from a closed Result.
@@ -196,7 +228,7 @@ func visitEdges(root string, focusRef ingest.Reference, focusID string, result *
 		return nil
 	}
 	var edges []*GraphEdge
-	nodes := map[string]*GraphNode{} // API filler for addRelationEdges
+	nodes := map[string]*GraphNode{}
 
 	if focusRef.Symbol != "" {
 		addRelationEdges(root, result, nodes, &edges, func(from, to string) bool {
@@ -210,7 +242,6 @@ func visitEdges(root string, focusRef ingest.Reference, focusID string, result *
 		return dedupeEdges(edges)
 	}
 
-	// File / module focus.
 	abs, isDir, err := resolvePath(root, focusRef)
 	if err == nil && !isDir {
 		focusPath := normalizePath(focusRef.Path)
@@ -227,7 +258,6 @@ func visitEdges(root string, focusRef ingest.Reference, focusID string, result *
 		return dedupeEdges(edges)
 	}
 
-	// Module/dir: import edges among scopes present in result.
 	for _, a := range result.Aliases {
 		fromID := projectScopeID(root, ingest.ParseReference(a.Reference))
 		toID := projectScopeID(root, ingest.ParseReference(a.Target))

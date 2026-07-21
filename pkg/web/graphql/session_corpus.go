@@ -10,9 +10,8 @@ import (
 )
 
 // SessionCorpus holds FileExtracts for one graph explore session.
-// Each relative path is absorbed at most once; Materialize runs only when the
-// set grows. Parse still goes through ingest.parseFileCached (mtime), so a
-// second absorb of the same path is a cache hit even across sessions.
+// Each relative path is absorbed at most once; Materialize of the full set
+// runs only when the set grows. Parse uses ingest.parseFileCached (mtime).
 type SessionCorpus struct {
 	root string
 
@@ -79,8 +78,9 @@ func (c *SessionCorpus) Len() int {
 	return len(c.byPath)
 }
 
-// AbsorbSeed runs Seed BFS from seedAbs and adds only new extracts.
-func (c *SessionCorpus) AbsorbSeed(seedAbs string) error {
+// AbsorbSeed runs Seed BFS from seedAbs. onNew is called only for newly
+// absorbed extracts (return false to stop). Already-cached paths are skipped.
+func (c *SessionCorpus) AbsorbSeed(seedAbs string, onNew func(*ingest.FileExtract) bool) error {
 	if c == nil {
 		return fmt.Errorf("nil corpus")
 	}
@@ -89,13 +89,18 @@ func (c *SessionCorpus) AbsorbSeed(seedAbs string) error {
 		Root:  c.root,
 		Paths: []string{seedAbs},
 	}, func(fe *ingest.FileExtract) bool {
-		c.Absorb(fe)
+		if !c.Absorb(fe) {
+			return true // known path — do not re-parse into corpus
+		}
+		if onNew != nil {
+			return onNew(fe)
+		}
 		return true
 	})
 }
 
-// AbsorbDir walks the project (or subdir) and adds only new extracts.
-func (c *SessionCorpus) AbsorbDir(dir string, recursive bool) error {
+// AbsorbDir walks the project (or subdir). onNew only for newly absorbed files.
+func (c *SessionCorpus) AbsorbDir(dir string, recursive bool, onNew func(*ingest.FileExtract) bool) error {
 	if c == nil {
 		return fmt.Errorf("nil corpus")
 	}
@@ -108,7 +113,12 @@ func (c *SessionCorpus) AbsorbDir(dir string, recursive bool) error {
 		src.Dir = dir
 	}
 	return ingest.WalkExtracts(src, func(fe *ingest.FileExtract) bool {
-		c.Absorb(fe)
+		if !c.Absorb(fe) {
+			return true
+		}
+		if onNew != nil {
+			return onNew(fe)
+		}
 		return true
 	})
 }
@@ -131,6 +141,14 @@ func (c *SessionCorpus) Result() *ingest.Result {
 	c.result = ingest.Materialize(c.root, extracts, ingest.MaterializeOptions{ExpandImports: false})
 	c.dirty = false
 	return c.result
+}
+
+// MaterializeOne resolves a single extract (progressive local edges; no corpus dirty change).
+func (c *SessionCorpus) MaterializeOne(fe *ingest.FileExtract) *ingest.Result {
+	if c == nil || fe == nil {
+		return &ingest.Result{}
+	}
+	return ingest.Materialize(c.root, []*ingest.FileExtract{fe}, ingest.MaterializeOptions{ExpandImports: false})
 }
 
 // SnapshotExtracts returns a copy of the extract slice (for tests).
