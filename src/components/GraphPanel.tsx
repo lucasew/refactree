@@ -26,6 +26,7 @@ import {
   forceUsageGravity,
   forceUsageRadial,
   forceNodeDensity,
+  forceEdgeCrossing,
   degreeRadiusBoost,
 } from "../graphForces";
 
@@ -257,13 +258,21 @@ export function GraphPanel({
         strength: 0.42,
       })
     );
+    // Uncross links: O(E²) capped (~96 edges ⇒ ~5k pair checks / tick).
+    fg.d3Force(
+      "edgeCrossing",
+      forceEdgeCrossing(() => graphData.links, {
+        strength: 0.14,
+        maxLinks: 96,
+      })
+    );
 
     try {
       fg.d3ReheatSimulation?.();
     } catch {
       /* ignore */
     }
-  }, [usage, graphData.nodes.length, size.w, size.h, tick]);
+  }, [usage, graphData.nodes.length, graphData.links, size.w, size.h, tick]);
 
   const onNodeClick = useCallback(
     (node: { id: string; expandable?: boolean; external?: boolean }) => {

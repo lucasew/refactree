@@ -1,10 +1,11 @@
 /**
- * Usage- + density-weighted layout forces for react-force-graph-2d / d3-force.
+ * Usage- + density- + crossing-weighted layout forces for react-force-graph-2d.
  *
  * Criteria:
  *  1. Usage (indegree) — heavily used → center; unused → rim
  *  2. Node density — crowded regions weaken center pull and get soft
  *     spatial repulsion so the core does not collapse into one blob
+ *  3. Edge crossings — soft uncross force (O(E²), capped; cheap for typical sessions)
  */
 
 export type DegreeMap = Map<string, number>;
@@ -237,4 +238,145 @@ export function forceNodeDensity(opts?: {
 /** Node radius scale from usage score (for drawing). */
 export function degreeRadiusBoost(usage: number, base: number): number {
   return base + Math.min(usage, 16) * 0.35;
+}
+
+type LinkLike = {
+  source: string | { id?: string; x?: number; y?: number };
+  target: string | { id?: string; x?: number; y?: number };
+};
+
+function endpoint(
+  end: string | { id?: string; x?: number; y?: number },
+  byId: Map<string, SimNode>
+): SimNode | null {
+  if (typeof end === "string") return byId.get(end) ?? null;
+  if (end && typeof end === "object") {
+    if (end.x != null && end.y != null) return end as SimNode;
+    if (end.id) return byId.get(end.id) ?? null;
+  }
+  return null;
+}
+
+/** Proper segment intersection (excludes shared endpoints / collinear touch). */
+export function segmentsProperlyIntersect(
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  cx: number,
+  cy: number,
+  dx: number,
+  dy: number
+): boolean {
+  const orient = (px: number, py: number, qx: number, qy: number, rx: number, ry: number) => {
+    const v = (qy - py) * (rx - qx) - (qx - px) * (ry - qy);
+    if (v > 1e-9) return 1;
+    if (v < -1e-9) return -1;
+    return 0;
+  };
+  const o1 = orient(ax, ay, bx, by, cx, cy);
+  const o2 = orient(ax, ay, bx, by, dx, dy);
+  const o3 = orient(cx, cy, dx, dy, ax, ay);
+  const o4 = orient(cx, cy, dx, dy, bx, by);
+  return o1 !== 0 && o2 !== 0 && o3 !== 0 && o4 !== 0 && o1 !== o2 && o3 !== o4;
+}
+
+/**
+ * Soft force that uncrosses link pairs by pushing edge midpoints apart.
+ *
+ * Cost: O(E²) orientation tests per tick, capped at maxLinks (default 96) so
+ * a full session of a few hundred edges stays cheap (~5k pair checks).
+ * Adjacent edges (shared vertex) are skipped — they cannot properly cross.
+ */
+export function forceEdgeCrossing(
+  getLinks: () => ReadonlyArray<LinkLike>,
+  opts?: {
+    /** Push strength (default 0.12). */
+    strength?: number;
+    /** Cap edge count for pair checks (default 96). */
+    maxLinks?: number;
+  }
+) {
+  const strength = opts?.strength ?? 0.12;
+  const maxLinks = opts?.maxLinks ?? 96;
+  let nodes: SimNode[] = [];
+
+  function force(alpha: number) {
+    const n = nodes.length;
+    if (n < 4) return;
+    const byId = new Map<string, SimNode>();
+    for (const node of nodes) {
+      if (node.id) byId.set(node.id, node);
+    }
+
+    const raw = getLinks();
+    // Prefer a stable subsample if the graph is large (first maxLinks is fine;
+    // force-graph order is stable enough for layout).
+    const links = raw.length > maxLinks ? raw.slice(0, maxLinks) : raw;
+    const m = links.length;
+    if (m < 2) return;
+
+    type Seg = {
+      a: SimNode;
+      b: SimNode;
+      ax: number;
+      ay: number;
+      bx: number;
+      by: number;
+    };
+    const segs: Seg[] = [];
+    for (const l of links) {
+      const a = endpoint(l.source, byId);
+      const b = endpoint(l.target, byId);
+      if (!a || !b || a === b) continue;
+      if (a.x == null || a.y == null || b.x == null || b.y == null) continue;
+      segs.push({ a, b, ax: a.x, ay: a.y, bx: b.x, by: b.y });
+    }
+
+    const k = strength * alpha;
+    for (let i = 0; i < segs.length; i++) {
+      const s = segs[i];
+      for (let j = i + 1; j < segs.length; j++) {
+        const t = segs[j];
+        // Skip edges that share a vertex (not a proper crossing).
+        if (s.a === t.a || s.a === t.b || s.b === t.a || s.b === t.b) continue;
+        if (
+          !segmentsProperlyIntersect(s.ax, s.ay, s.bx, s.by, t.ax, t.ay, t.bx, t.by)
+        ) {
+          continue;
+        }
+        // Repel midpoints; distribute half force to each endpoint.
+        const mx1 = (s.ax + s.bx) * 0.5;
+        const my1 = (s.ay + s.by) * 0.5;
+        const mx2 = (t.ax + t.bx) * 0.5;
+        const my2 = (t.ay + t.by) * 0.5;
+        let dx = mx1 - mx2;
+        let dy = my1 - my2;
+        let len = Math.hypot(dx, dy);
+        if (len < 1e-6) {
+          // Coincident midpoints: pick a tiny arbitrary separation.
+          dx = 1;
+          dy = 0;
+          len = 1;
+        }
+        const f = k / len;
+        const fx = (dx * f) * 0.5;
+        const fy = (dy * f) * 0.5;
+        s.a.vx = (s.a.vx ?? 0) + fx;
+        s.a.vy = (s.a.vy ?? 0) + fy;
+        s.b.vx = (s.b.vx ?? 0) + fx;
+        s.b.vy = (s.b.vy ?? 0) + fy;
+        t.a.vx = (t.a.vx ?? 0) - fx;
+        t.a.vy = (t.a.vy ?? 0) - fy;
+        t.b.vx = (t.b.vx ?? 0) - fx;
+        t.b.vy = (t.b.vy ?? 0) - fy;
+      }
+    }
+  }
+
+  force.initialize = (initNodes: SimNode[]) => {
+    nodes = initNodes;
+  };
+
+  return force;
 }
