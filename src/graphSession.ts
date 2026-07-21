@@ -10,6 +10,7 @@ export type FGNode = {
   kind: string;
   external?: boolean;
   expandable?: boolean;
+  language?: string;
   x?: number;
   y?: number;
   vx?: number;
@@ -56,6 +57,7 @@ export type IncomingNode = {
   parentId?: string | null;
   external?: boolean | null;
   expandable?: boolean | null;
+  language?: string | null;
 };
 
 export type IncomingEdge = {
@@ -89,6 +91,7 @@ export function mergeNeighborhood(
       existing.kind = n.kind;
       if (n.external != null) existing.external = n.external;
       if (n.expandable != null) existing.expandable = n.expandable;
+      if (n.language != null) existing.language = n.language || existing.language;
       // keep x,y,vx,vy
     } else {
       s.nodes.set(n.id, {
@@ -97,6 +100,7 @@ export function mergeNeighborhood(
         kind: n.kind,
         external: !!n.external,
         expandable: !!n.expandable,
+        language: n.language || undefined,
       });
       addedNodes++;
     }

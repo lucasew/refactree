@@ -91,6 +91,7 @@ type ComplexityRoot struct {
 		ID         func(childComplexity int) int
 		Kind       func(childComplexity int) int
 		Label      func(childComplexity int) int
+		Language   func(childComplexity int) int
 		ParentID   func(childComplexity int) int
 	}
 
@@ -328,6 +329,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.GraphNode.Label(childComplexity), true
+	case "GraphNode.language":
+		if e.complexity.GraphNode.Language == nil {
+			break
+		}
+
+		return e.complexity.GraphNode.Language(childComplexity), true
 	case "GraphNode.parentId":
 		if e.complexity.GraphNode.ParentID == nil {
 			break
@@ -1605,6 +1612,35 @@ func (ec *executionContext) fieldContext_GraphNode_expandable(_ context.Context,
 	return fc, nil
 }
 
+func (ec *executionContext) _GraphNode_language(ctx context.Context, field graphql.CollectedField, obj *GraphNode) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_GraphNode_language,
+		func(ctx context.Context) (any, error) {
+			return obj.Language, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_GraphNode_language(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "GraphNode",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _Neighborhood_focus(ctx context.Context, field graphql.CollectedField, obj *Neighborhood) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -1641,6 +1677,8 @@ func (ec *executionContext) fieldContext_Neighborhood_focus(_ context.Context, f
 				return ec.fieldContext_GraphNode_external(ctx, field)
 			case "expandable":
 				return ec.fieldContext_GraphNode_expandable(ctx, field)
+			case "language":
+				return ec.fieldContext_GraphNode_language(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type GraphNode", field.Name)
 		},
@@ -1684,6 +1722,8 @@ func (ec *executionContext) fieldContext_Neighborhood_nodes(_ context.Context, f
 				return ec.fieldContext_GraphNode_external(ctx, field)
 			case "expandable":
 				return ec.fieldContext_GraphNode_expandable(ctx, field)
+			case "language":
+				return ec.fieldContext_GraphNode_language(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type GraphNode", field.Name)
 		},
@@ -2074,6 +2114,8 @@ func (ec *executionContext) fieldContext_Query_node(ctx context.Context, field g
 				return ec.fieldContext_GraphNode_external(ctx, field)
 			case "expandable":
 				return ec.fieldContext_GraphNode_expandable(ctx, field)
+			case "language":
+				return ec.fieldContext_GraphNode_language(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type GraphNode", field.Name)
 		},
@@ -2129,6 +2171,8 @@ func (ec *executionContext) fieldContext_Query_nodes(ctx context.Context, field 
 				return ec.fieldContext_GraphNode_external(ctx, field)
 			case "expandable":
 				return ec.fieldContext_GraphNode_expandable(ctx, field)
+			case "language":
+				return ec.fieldContext_GraphNode_language(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type GraphNode", field.Name)
 		},
@@ -4009,6 +4053,11 @@ func (ec *executionContext) _GraphNode(ctx context.Context, sel ast.SelectionSet
 			}
 		case "expandable":
 			out.Values[i] = ec._GraphNode_expandable(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "language":
+			out.Values[i] = ec._GraphNode_language(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}

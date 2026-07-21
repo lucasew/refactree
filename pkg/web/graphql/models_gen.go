@@ -59,6 +59,8 @@ type GraphNode struct {
 	External bool `json:"external"`
 	// True when neighbors for this node have not been loaded yet (external expand).
 	Expandable bool `json:"expandable"`
+	// Inferred language (go, python, javascript, …); empty if unknown.
+	Language string `json:"language"`
 }
 
 // Focus-driven lazy neighborhood. May be incomplete (Seed-style).

@@ -23,6 +23,8 @@ type GraphNode {
   external: Boolean!
   """True when neighbors for this node have not been loaded yet (external expand)."""
   expandable: Boolean!
+  """Inferred language (go, python, javascript, …); empty if unknown."""
+  language: String!
 }
 
 type GraphEdge {

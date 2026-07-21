@@ -13,6 +13,7 @@ import {
   sessionVisit,
   streamExpandExternal,
 } from "../graphStream";
+import { nodeFill, nodeStroke, inferLanguageFromId } from "../graphColors";
 
 type Props = {
   focusId: string;
@@ -195,6 +196,9 @@ export function GraphPanel({
           <span className="badge badge-ghost badge-sm opacity-70">session live</span>
         )}
         {err ? <span className="badge badge-error badge-sm">{err}</span> : null}
+        <span className="badge badge-ghost badge-sm opacity-60" title="Fill = language; solid ring = path (internal); dashed amber = external provider">
+          fill: lang · ring: path/external
+        </span>
       </div>
       {size.w > 0 && size.h > 0 ? (
         <ForceGraph2D
@@ -203,11 +207,12 @@ export function GraphPanel({
           height={size.h}
           graphData={graphData}
           nodeId="id"
-          nodeLabel={(n: any) =>
-            n.external
-              ? `${n.name || n.id} (external — click to expand)`
-              : n.name || n.id
-          }
+          nodeLabel={(n: any) => {
+            const lang = n.language || inferLanguageFromId(n.id) || "?";
+            const scope = n.external ? "external" : "path";
+            const tip = n.external ? " — click to expand" : "";
+            return `${n.name || n.id} [${lang} · ${scope}]${tip}`;
+          }}
           backgroundColor={BG}
           linkWidth={1.25}
           linkColor={(l: any) => {
@@ -226,25 +231,33 @@ export function GraphPanel({
             const r = node.kind === "ATOM" ? 4 : node.kind === "MODULE" ? 7 : 5;
             const x = node.x ?? 0;
             const y = node.y ?? 0;
+            const lang = node.language || inferLanguageFromId(node.id);
+            const focused = node.id === sess.focusId;
+            const external = !!node.external;
             ctx.beginPath();
             ctx.arc(x, y, r, 0, 2 * Math.PI, false);
-            if (node.external) {
-              ctx.fillStyle = node.id === sess.focusId ? "#e8a838" : "#c45c26";
-            } else {
-              ctx.fillStyle =
-                node.id === sess.focusId
-                  ? "#e8a838"
-                  : node.kind === "ATOM"
-                    ? "#6bcf8e"
-                    : node.kind === "MODULE"
-                      ? "#7aa2f7"
-                      : "#a0a0a0";
-            }
+            ctx.fillStyle = nodeFill({
+              language: lang,
+              external,
+              focused,
+            });
             ctx.fill();
-            if (node.external && node.expandable !== false) {
-              ctx.strokeStyle = "#e8a838";
-              ctx.lineWidth = 1.5 / globalScale;
+            const stroke = nodeStroke({
+              external,
+              focused,
+              expandable: node.expandable,
+            });
+            if (stroke) {
+              ctx.strokeStyle = stroke.color;
+              ctx.lineWidth = stroke.width / globalScale;
+              // Dashed ring for external, solid for focus/internal
+              if (external && !focused) {
+                ctx.setLineDash([3 / globalScale, 2 / globalScale]);
+              } else {
+                ctx.setLineDash([]);
+              }
               ctx.stroke();
+              ctx.setLineDash([]);
             }
             if (globalScale > 0.6) {
               ctx.font = `${fontSize}px sans-serif`;

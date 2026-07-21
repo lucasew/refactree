@@ -254,7 +254,7 @@ func graphNodeForRef(root string, ref ingest.Reference) *GraphNode {
 			label = ref.String()
 		}
 	}
-	n := &GraphNode{ID: id, Kind: kind, Label: label, ParentID: parent}
+	n := &GraphNode{ID: id, Kind: kind, Label: label, ParentID: parent, Language: languageForRef(root, ref)}
 	return decorateNode(root, n)
 }
 
@@ -335,4 +335,34 @@ func mustRel(root, abs string) string {
 		return abs
 	}
 	return rel
+}
+
+// languageForRef infers a language id for coloring (path extension or provider).
+func languageForRef(root string, ref ingest.Reference) string {
+	p := strings.ToLower(ref.Provider)
+	switch p {
+	case "go":
+		return "go"
+	case "python":
+		return "python"
+	case "node", "javascript", "js":
+		return "javascript"
+	case "java":
+		return "java"
+	case "nix":
+		return "nix"
+	case "svelte":
+		return "svelte"
+	}
+	// path: use extension
+	path := ref.Path
+	if path == "" {
+		return ""
+	}
+	if lang, ok := ingest.LanguageForFile(path); ok {
+		return lang
+	}
+	// directory module: try a file under dir later; empty is fine
+	_ = root
+	return ""
 }

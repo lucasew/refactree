@@ -12,6 +12,7 @@ import {
   type IncomingEdge,
   type IncomingNode,
 } from "./graphSession";
+import { inferLanguageFromId } from "./graphColors";
 
 export type StreamHandlers = {
   onEvent?: () => void;
@@ -169,7 +170,7 @@ function stubFromId(id: string): IncomingNode {
   } else if (id.includes(":")) {
     label = id.slice(id.indexOf(":") + 1) || id;
   }
-  return { id, kind, label, external, expandable: external };
+  return { id, kind, label, external, expandable: external, language: inferLanguageFromId(id) };
 }
 
 function applyNode(n: IncomingNode, _markResolved = true) {
@@ -180,6 +181,7 @@ function applyNode(n: IncomingNode, _markResolved = true) {
     existing.kind = n.kind || existing.kind;
     if (n.external != null) existing.external = !!n.external;
     if (n.expandable != null) existing.expandable = !!n.expandable;
+    if (n.language) existing.language = n.language;
   } else {
     s.nodes.set(n.id, {
       id: n.id,
@@ -187,6 +189,7 @@ function applyNode(n: IncomingNode, _markResolved = true) {
       kind: n.kind,
       external: !!n.external,
       expandable: !!n.expandable,
+      language: n.language || inferLanguageFromId(n.id),
     });
   }
 }
@@ -230,7 +233,7 @@ async function hydratePendingNodes() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         query: `query HydrateNodes($ids: [ID!]!) {
-          nodes(ids: $ids) { id kind label parentId external expandable }
+          nodes(ids: $ids) { id kind label parentId external expandable language }
         }`,
         variables: { ids },
       }),

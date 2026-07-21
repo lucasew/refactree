@@ -133,7 +133,7 @@ func (c *SessionCorpus) StreamProject(ctx context.Context, emit StreamEmitter) e
 	}
 	focus := &GraphNode{
 		ID: "path:./", Kind: NodeKindModule, Label: filepath.Base(c.root),
-		External: false, Expandable: false,
+		External: false, Expandable: false, Language: "",
 	}
 	if focus.Label == "" || focus.Label == "." {
 		focus.Label = "project"

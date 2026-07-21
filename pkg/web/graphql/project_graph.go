@@ -28,6 +28,7 @@ func BuildProjectGraph(root string) (*Neighborhood, error) {
 		Label:      filepath.Base(root),
 		External:   false,
 		Expandable: false,
+		Language:   "",
 	}
 	if focus.Label == "" || focus.Label == "." {
 		focus.Label = "project"

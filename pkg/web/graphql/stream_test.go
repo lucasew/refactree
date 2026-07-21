@@ -52,8 +52,11 @@ func TestLookupNode_Cheap(t *testing.T) {
 	if n == nil || n.Kind != NodeKindAtom || n.Label != "New" {
 		t.Fatalf("%+v", n)
 	}
+	if n.Language != "go" {
+		t.Fatalf("language=%q want go", n.Language)
+	}
 	ext := LookupNode("/tmp", "go:fmt")
-	if ext == nil || !ext.External {
+	if ext == nil || !ext.External || ext.Language != "go" {
 		t.Fatalf("%+v", ext)
 	}
 }
