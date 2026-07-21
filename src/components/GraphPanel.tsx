@@ -14,6 +14,7 @@ import {
   streamExpandExternal,
 } from "../graphStream";
 import { nodeFill, nodeStroke, inferLanguageFromId } from "../graphColors";
+import { computeDegrees, forceUsageGravity, forceUsageRadial, degreeRadiusBoost } from "../graphForces";
 
 type Props = {
   focusId: string;
@@ -139,6 +140,75 @@ export function GraphPanel({
     return snapshotGraphData();
   }, [tick]);
 
+  const degrees = useMemo(
+    () => computeDegrees(graphData.links),
+    [graphData.links]
+  );
+
+  // Usage-weighted gravity: hubs → center, leaves → rim.
+  useEffect(() => {
+    const fg = fgRef.current;
+    if (!fg || graphData.nodes.length === 0) return;
+
+    const getDeg = (id: string) => degrees.get(id) ?? 0;
+
+    // Soften default center so usage force dominates hub placement.
+    try {
+      const center = fg.d3Force("center");
+      if (center && typeof center.strength === "function") {
+        center.strength(0.02);
+      }
+    } catch {
+      /* ignore */
+    }
+
+    // Charge: slightly stronger repulsion so leaves don't collapse.
+    try {
+      const charge = fg.d3Force("charge");
+      if (charge && typeof charge.strength === "function") {
+        charge.strength((node: { id?: string }) => {
+          const d = getDeg(node.id ?? "");
+          // hubs less repulsive (cluster), leaves more (spread out)
+          return -28 - Math.max(0, 8 - d) * 4;
+        });
+      }
+    } catch {
+      /* ignore */
+    }
+
+    // Link distance: slightly shorter for high-degree pairs.
+    try {
+      const link = fg.d3Force("link");
+      if (link && typeof link.distance === "function") {
+        link.distance((l: { source?: { id?: string } | string; target?: { id?: string } | string }) => {
+          const idOf = (x: unknown) =>
+            typeof x === "string" ? x : (x as { id?: string })?.id ?? "";
+          const a = getDeg(idOf(l.source));
+          const b = getDeg(idOf(l.target));
+          const avg = (a + b) / 2;
+          return 40 + Math.max(0, 12 - avg) * 3;
+        });
+      }
+    } catch {
+      /* ignore */
+    }
+
+    fg.d3Force("usageGravity", forceUsageGravity(getDeg));
+    fg.d3Force(
+      "usageRadial",
+      forceUsageRadial(getDeg, {
+        outer: Math.min(size.w, size.h) * 0.38 || 180,
+        inner: 16,
+      })
+    );
+
+    try {
+      fg.d3ReheatSimulation?.();
+    } catch {
+      /* ignore */
+    }
+  }, [degrees, graphData.nodes.length, size.w, size.h, tick]);
+
   const onNodeClick = useCallback(
     (node: { id: string; expandable?: boolean; external?: boolean }) => {
       const external = node.external || isExternalId(node.id);
@@ -196,8 +266,8 @@ export function GraphPanel({
           <span className="badge badge-ghost badge-sm opacity-70">session live</span>
         )}
         {err ? <span className="badge badge-error badge-sm">{err}</span> : null}
-        <span className="badge badge-ghost badge-sm opacity-60" title="Fill = language; solid ring = path (internal); dashed amber = external provider">
-          fill: lang · ring: path/external
+        <span className="badge badge-ghost badge-sm opacity-60" title="Fill = language; ring = path vs external; layout = usage (hubs center)">
+          fill: lang · ring: path/ext · gravity: usage
         </span>
       </div>
       {size.w > 0 && size.h > 0 ? (
@@ -212,7 +282,8 @@ export function GraphPanel({
             const scope = n.external ? "external" : "path";
             const tip = n.external ? " — click to expand" : "";
             const pretty = String(n.name || n.id).replace(/\n/g, " · ");
-            return `${pretty} [${lang} · ${scope}]${tip}`;
+            const deg = degrees.get(n.id) ?? 0;
+            return `${pretty} [${lang} · ${scope} · ${deg} links]${tip}`;
           }}
           backgroundColor={BG}
           linkWidth={1.25}
@@ -229,7 +300,8 @@ export function GraphPanel({
           nodeCanvasObject={(node: any, ctx, globalScale) => {
             const label = node.name || node.id;
             const fontSize = Math.max(10 / globalScale, 2);
-            const r = node.kind === "ATOM" ? 4 : node.kind === "MODULE" ? 7 : 5;
+            const baseR = node.kind === "ATOM" ? 4 : node.kind === "MODULE" ? 7 : 5;
+            const r = degreeRadiusBoost(degrees.get(node.id) ?? 0, baseR);
             const x = node.x ?? 0;
             const y = node.y ?? 0;
             const lang = node.language || inferLanguageFromId(node.id);
