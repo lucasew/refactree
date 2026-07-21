@@ -54,7 +54,7 @@ Structural spine for discovery and graphs. Goal: one walk/parse path, no duplica
 - **edit** open / navigation canonicalize: Hop → Materialize(ExpandImports=false) or equivalent minimal result → `CanonicalizeInResult`; not full Dir
 - **doc**: minimal file/hop extract; not full project Materialize
 - **mv**: eager on purpose — Dir WalkExtracts over project root (skip rules) → Materialize(**ExpandImports=true**) → plan from full `*Result`. Must not use list-only path
-- **serve** / **desktop** / browse file annotate: Seed → Materialize(ExpandImports=false)
+- **serve** / **desktop** / browse file annotate: Seed → Materialize(ExpandImports=false); target SPA uses the same lazy spine via GraphQL (see Web browser)
 - **lsp**: another surface on the same spine (see Language server); two-tier recompute over ProjectFS overlays
 - **fuzzy / full-graph tests**: same as mv-style full Dir Materialize when the check needs the whole picture
 
@@ -107,11 +107,12 @@ Structural spine for discovery and graphs. Goal: one walk/parse path, no duplica
 - Equivalent semantic of opening a target for editing in general; add flags on demand, don't invent useless flags
 
 ### Subcommand: serve
-- Headless local HTTP code browser (same symbol hyperlinks as the CLI path system)
+- Headless local HTTP code browser (same symbol hyperlinks / reference system as the CLI)
 - `-l` / `--addr`: listen address (default `127.0.0.1:8080`)
 - `-C` / `--dir`: project root (default `.`); no project-marker walk-up
 - Prints a one-line banner on stdout (root, addr, openable URL); does not open a browser
-- Extract path: Seed → Materialize(ExpandImports=false) per annotated file
+- **Today:** Go `html/template` SSR (`pkg/web`), Seed → Materialize(ExpandImports=false) per annotated file
+- **Target:** graph-model-centric SPA — see **Web browser (serve SPA)** below; desktop tracks the same UI
 
 ### Subcommand: desktop
 - Same UI as `serve`, shelled via **[eletrocromo](https://github.com/lewtec/eletrocromo)** (Helium `--app` window)
@@ -255,3 +256,108 @@ Helix: define `[language-server.rft]` with `command = "rft"` / `args = ["lsp"]`,
 | ProjectFS | One read path for CLI disk and LSP overlays |
 | Surfaces | LSP consumes spine APIs (`WalkExtracts`, `Materialize`, `Canonicalize*`, `DocFor`, `Rename`, …) |
 | Context | Cancel in-flight slow rebuilds without publishing stale snapshots |
+
+## Web browser (serve SPA)
+
+Status: **specified; not implemented.** Replaces template-centric `rft serve` with a graph-model-centric SPA. First cut is **lazy-only**; eager analyses are backlog. `desktop` uses the same UI once serve ships it.
+
+### Split of responsibility
+
+| Side | Owns | Must not own |
+|------|------|----------------|
+| Backend | Discovery, resolve, **facts**: atoms / files / modules, parents, edge kinds; lazy Seed-style work by default | Layout, gravity, camera, animation, pixels |
+| Frontend | **All dataviz**: force simulation, positions, zoom chrome, drill UX, what to draw | Source of truth for “what exists in the project” |
+
+Shared **perception** means shared **ids, schema, and relation facts** — not shared layout. The picture of the graph is entirely a client artifact.
+
+### Domain levels (existing lattice; product wording)
+
+Three levels already exist in ingest/browse (`DirectoryModule`, path vs `::symbol`, scope navigation). Product names:
+
+| Level | Meaning | Graph edges at this zoom |
+|-------|---------|---------------------------|
+| **Module** | Language loadable unit (Go/Java: package dir when `DirectoryModule`; Python/JS: often the file — driver decides; collapse when module ≡ file) | Import / depends-on between modules |
+| **File** | One source/parse unit | **None** — filesystem list/rail (today-like), not a force graph |
+| **Atom** | One defined entity (`provider:path::symbol` / `Entity`) | Uses / used-by from `Relation` (and reverse as query direction) |
+
+- **Drill up/down** between levels (zoom), not three permanent node layers drawn at once.
+- **Containment** (module→file→atom) is **structure** (parent / cluster / hull), **not** a default walk edge. Do not treat “lives in file” as a relation that pollutes the force graph.
+- Language-specific module boundaries stay in language packages / providers (`LanguageUsesDirectoryModule`, `ResolveScopeTarget`, …).
+
+### UX shell
+
+| Rule | Behavior |
+|------|----------|
+| Default entry | **Filesystem at project root** (cold start like today) — not a full-repo module hairball |
+| Primary refactor | Whole serve view re-centered on the graph data model; fs + code are views of that model |
+| Module zoom | Force graph of modules + import edges |
+| File level | Filesystem navigation only (no force edges) |
+| Atom zoom | Force graph of atoms + use/used-by edges around focus |
+| Deep links | Keep `/` and `/code/...` (History API SPA); same reference URLs as today |
+| Graph renderer | **`react-force-graph-2d`** (positions stay in the client sim) |
+
+### Loading: lazy vs eager
+
+Same spine rules as the rest of the product: lazy by default; eager only when a query claims completeness.
+
+| Mode | Queries | Spine |
+|------|---------|--------|
+| **Lazy (first cut)** | Focus neighborhood, optional bounded module-import expand, filesystem list; relation delivery may be incremental | Seed / Hop-style; partial OK; UI must not claim completeness |
+| **On demand** | Annotated **code**, **docs** | Separate GraphQL fields/ops — not on the relation stream |
+| **Eager (backlog)** | **Backlinks** (complete used-by), **dead code** (unreferenced in closed project graph) | Full Dir Materialize (ExpandImports as required for closed truth) |
+
+- **Focus-driven expansion (v1):** changing focus loads that ref’s neighborhood (about 1 hop). Client merges facts into a growing store; force layout keeps running as nodes appear. Other triggers (prefetch, viewport) are later iteration.
+- Lazy browse perception is **open/incomplete**. Never use a half-stream as authority for refactor/`mv`.
+- Streamy payload priority: **relations/edges** (plus node stubs: id, kind, label, parent). Code references and docs load later via their own queries.
+- Optional GraphQL `@stream` / incremental delivery is an enhancement when the Go stack supports it — not a day-one gate. Batch neighborhood + client animation is enough for first feel.
+
+### Stack (first implementation PR)
+
+| Piece | Choice |
+|-------|--------|
+| UI | **React + Relay** from day one |
+| API | **GraphQL**, **gqlgen** (schema-first) |
+| Global id | **Canonical reference string** is the Relay/Node id (run canonicalize before minting ids); expose the same string for CLI/URL parity |
+| JS toolchain | **Bun**; `package.json` at **repo root** |
+| Build output | Bun → **`dist/`**; Go **`//go:embed`s `dist`** into the serve binary |
+| Tooling | **`mise` `codegen:*`** (gqlgen + Relay compiler / related); replace today’s no-op `codegen` task |
+| Dev | Bun/Vite-style dev server may proxy GraphQL to `rft serve`; prod is embed-only |
+| Graph viz | **`react-force-graph-2d`** |
+
+### GraphQL surface (intent)
+
+- Operations for: filesystem listing, focus **neighborhood** (nodes + relations), on-demand **code** / **doc**, later eager **backlinks** / **dead code**.
+- Node kinds align with module / file / atom; edges carry a kind (import, uses, used-by, …).
+- Responses for lazy ops may mark incompleteness; eager ops fail closed or report progress rather than silently partial.
+
+### First cut — in scope
+
+- SPA shell embedded in `rft serve` (and thus `desktop`)
+- GraphQL + gqlgen + Relay wiring
+- Filesystem default entry; focus-driven lazy relation graph
+- Module map + atom ego via `react-force-graph-2d`
+- Code (and docs if cheap) as separate on-demand queries
+- Routes `/`, `/code/...`, GraphQL endpoint, embedded assets
+
+### First cut — out of scope / backlog
+
+| Item | Notes |
+|------|--------|
+| Eager **backlinks** UI | Closed used-by for a focus |
+| Eager **dead code** UI | Project-wide unreferenced atoms |
+| Dual-focus “path between A and B” | Optional later investigation mode |
+| Live server graph session | Long-lived backend crawl session; prefer stateless focus queries + client merge first |
+| Server-side layout | Forbidden |
+| File-level force graph | Forbidden (fs view only) |
+| Full-repo graph as homepage | Forbidden as default |
+| sigma.js / other renderers | Upgrade path if 2d force-graph limits hit; not day one |
+| Product wording janitor | Standardize atom/file/module in UI, docs, GraphQL names (map from Entity/Relation/…) without drive-by renames of core ingest types |
+
+### Architecture seams
+
+| Seam | Intent |
+|------|--------|
+| Ingest spine | Serve GraphQL resolvers call WalkExtracts / Seed / Materialize / Canonicalize* — no second discovery stack |
+| Relay store | Normalized **facts**; force-graph holds **positions** |
+| Language packages | Module boundary and resolve rules stay behind existing interfaces |
+| Embed | One binary: `rft serve` does not require a separate node process in prod |
