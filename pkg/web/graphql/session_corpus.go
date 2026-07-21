@@ -9,16 +9,19 @@ import (
 	"github.com/lucasew/refactree/pkg/ingest"
 )
 
-// SessionCorpus holds FileExtracts for one graph explore session.
-// Each relative path is absorbed at most once; Materialize of the full set
-// runs only when the set grows. Parse uses ingest.parseFileCached (mtime).
+// SessionCorpus is the core session store for graph exploration:
+//
+//   - FileExtracts keyed by relative path (each project file at most once)
+//   - Parse goes through ingest.parseFileCached (mtime)
+//   - Resolve is visit-scoped: Materialize only the extracts discovered for
+//     that visit, not the entire session history
+//
+// This is the single source of truth for "what have we already read".
 type SessionCorpus struct {
 	root string
 
 	mu     sync.Mutex
 	byPath map[string]*ingest.FileExtract // key: ToSlash rel path, no "./" prefix
-	result *ingest.Result
-	dirty  bool
 }
 
 // NewSessionCorpus builds an empty corpus for root.
@@ -36,6 +39,24 @@ func extractRelKey(fe *ingest.FileExtract) string {
 	return strings.TrimPrefix(filepath.ToSlash(fe.Path), "./")
 }
 
+// Touch stores fe if new and returns the corpus-owned extract for that path.
+func (c *SessionCorpus) Touch(fe *ingest.FileExtract) *ingest.FileExtract {
+	if c == nil || fe == nil {
+		return fe
+	}
+	key := extractRelKey(fe)
+	if key == "" {
+		return fe
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if existing, ok := c.byPath[key]; ok {
+		return existing
+	}
+	c.byPath[key] = fe
+	return fe
+}
+
 // Absorb records fe if its path is new. Returns true when the corpus grew.
 func (c *SessionCorpus) Absorb(fe *ingest.FileExtract) bool {
 	if c == nil || fe == nil {
@@ -51,8 +72,6 @@ func (c *SessionCorpus) Absorb(fe *ingest.FileExtract) bool {
 		return false
 	}
 	c.byPath[key] = fe
-	c.dirty = true
-	c.result = nil
 	return true
 }
 
@@ -67,7 +86,6 @@ func (c *SessionCorpus) Has(rel string) bool {
 	_, ok := c.byPath[key]
 	return ok
 }
-
 
 // GetByRel returns a cached extract by project-relative path, or nil.
 func (c *SessionCorpus) GetByRel(rel string) *ingest.FileExtract {
@@ -110,31 +128,40 @@ func (c *SessionCorpus) Len() int {
 	return len(c.byPath)
 }
 
-// AbsorbSeed runs Seed BFS from seedAbs. onNew is called only for newly
-// absorbed extracts (return false to stop). Already-cached paths are skipped.
-func (c *SessionCorpus) AbsorbSeed(seedAbs string, onNew func(*ingest.FileExtract) bool) error {
+// DiscoverSeeds runs one Seed BFS from all seed paths at once.
+// Every yielded extract is Touched into the corpus and recorded in visit
+// (visit is the resolve universe for this operation).
+func (c *SessionCorpus) DiscoverSeeds(seedAbs []string, visit map[string]*ingest.FileExtract) error {
 	if c == nil {
 		return fmt.Errorf("nil corpus")
+	}
+	if len(seedAbs) == 0 {
+		return nil
+	}
+	if visit == nil {
+		visit = make(map[string]*ingest.FileExtract)
 	}
 	return ingest.WalkExtracts(ingest.ExtractSource{
 		Kind:  ingest.ExtractSeed,
 		Root:  c.root,
-		Paths: []string{seedAbs},
+		Paths: seedAbs,
 	}, func(fe *ingest.FileExtract) bool {
-		if !c.Absorb(fe) {
-			return true // known path — do not re-parse into corpus
+		if fe == nil {
+			return true
 		}
-		if onNew != nil {
-			return onNew(fe)
-		}
+		stored := c.Touch(fe)
+		visit[extractRelKey(stored)] = stored
 		return true
 	})
 }
 
-// AbsorbDir walks the project (or subdir). onNew only for newly absorbed files.
-func (c *SessionCorpus) AbsorbDir(dir string, recursive bool, onNew func(*ingest.FileExtract) bool) error {
+// DiscoverDir walks a directory into the corpus and visit set.
+func (c *SessionCorpus) DiscoverDir(dir string, recursive bool, visit map[string]*ingest.FileExtract) error {
 	if c == nil {
 		return fmt.Errorf("nil corpus")
+	}
+	if visit == nil {
+		visit = make(map[string]*ingest.FileExtract)
 	}
 	src := ingest.ExtractSource{
 		Kind:      ingest.ExtractDir,
@@ -145,45 +172,30 @@ func (c *SessionCorpus) AbsorbDir(dir string, recursive bool, onNew func(*ingest
 		src.Dir = dir
 	}
 	return ingest.WalkExtracts(src, func(fe *ingest.FileExtract) bool {
-		if !c.Absorb(fe) {
+		if fe == nil {
 			return true
 		}
-		if onNew != nil {
-			return onNew(fe)
-		}
+		stored := c.Touch(fe)
+		visit[extractRelKey(stored)] = stored
 		return true
 	})
 }
 
-// Result returns Materialize over all absorbed extracts.
-// Recomputes only when the corpus grew since the last call.
-func (c *SessionCorpus) Result() *ingest.Result {
-	if c == nil {
+// MaterializeVisit resolves exactly the visit extract set (not the whole session).
+func (c *SessionCorpus) MaterializeVisit(visit map[string]*ingest.FileExtract) *ingest.Result {
+	if c == nil || len(visit) == 0 {
 		return &ingest.Result{}
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !c.dirty && c.result != nil {
-		return c.result
+	extracts := make([]*ingest.FileExtract, 0, len(visit))
+	for _, fe := range visit {
+		if fe != nil {
+			extracts = append(extracts, fe)
+		}
 	}
-	extracts := make([]*ingest.FileExtract, 0, len(c.byPath))
-	for _, fe := range c.byPath {
-		extracts = append(extracts, fe)
-	}
-	c.result = ingest.Materialize(c.root, extracts, ingest.MaterializeOptions{ExpandImports: false})
-	c.dirty = false
-	return c.result
+	return ingest.Materialize(c.root, extracts, ingest.MaterializeOptions{ExpandImports: false})
 }
 
-// MaterializeOne resolves a single extract (progressive local edges; no corpus dirty change).
-func (c *SessionCorpus) MaterializeOne(fe *ingest.FileExtract) *ingest.Result {
-	if c == nil || fe == nil {
-		return &ingest.Result{}
-	}
-	return ingest.Materialize(c.root, []*ingest.FileExtract{fe}, ingest.MaterializeOptions{ExpandImports: false})
-}
-
-// SnapshotExtracts returns a copy of the extract slice (for tests).
+// SnapshotExtracts returns a copy of all corpus extracts (tests).
 func (c *SessionCorpus) SnapshotExtracts() []*ingest.FileExtract {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -192,4 +204,21 @@ func (c *SessionCorpus) SnapshotExtracts() []*ingest.FileExtract {
 		out = append(out, fe)
 	}
 	return out
+}
+
+// AbsorbSeed is kept for tests: seed from one path into the corpus only.
+func (c *SessionCorpus) AbsorbSeed(seedAbs string, onNew func(*ingest.FileExtract) bool) error {
+	visit := make(map[string]*ingest.FileExtract)
+	if err := c.DiscoverSeeds([]string{seedAbs}, visit); err != nil {
+		return err
+	}
+	if onNew != nil {
+		for _, fe := range visit {
+			// onNew historically meant "newly absorbed"; call for all in visit for compat
+			if !onNew(fe) {
+				return nil
+			}
+		}
+	}
+	return nil
 }

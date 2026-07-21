@@ -35,11 +35,16 @@ type graphSessionOut struct {
 }
 
 // graphExploreSession holds per-tab edge deltas + extract corpus (no re-read).
+//
+// Core explore loop (see SessionCorpus.StreamVisit):
+//
+//	discover visit closure (one multi-seed BFS) → Touch extracts once
+//	MaterializeVisit(closure) → stream edges → session seen dedupes wire traffic
 type graphExploreSession struct {
-	root    string
-	corpus  *graphql.SessionCorpus
-	mu      sync.Mutex
-	seen    map[string]bool // edge keys already sent
+	root   string
+	corpus *graphql.SessionCorpus
+	mu     sync.Mutex
+	seen   map[string]bool // edge keys already sent
 }
 
 func newGraphExploreSession(root string) *graphExploreSession {
