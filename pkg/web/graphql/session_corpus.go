@@ -68,6 +68,38 @@ func (c *SessionCorpus) Has(rel string) bool {
 	return ok
 }
 
+
+// GetByRel returns a cached extract by project-relative path, or nil.
+func (c *SessionCorpus) GetByRel(rel string) *ingest.FileExtract {
+	if c == nil {
+		return nil
+	}
+	key := strings.TrimPrefix(filepath.ToSlash(rel), "./")
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.byPath[key]
+}
+
+// GetByAbs returns a cached extract for an absolute path under root, or nil.
+func (c *SessionCorpus) GetByAbs(abs string) *ingest.FileExtract {
+	if c == nil {
+		return nil
+	}
+	rootAbs, err := filepath.Abs(c.root)
+	if err != nil {
+		rootAbs = c.root
+	}
+	abs, err = filepath.Abs(abs)
+	if err != nil {
+		return nil
+	}
+	rel, err := filepath.Rel(rootAbs, abs)
+	if err != nil {
+		return nil
+	}
+	return c.GetByRel(rel)
+}
+
 // Len returns number of cached extracts.
 func (c *SessionCorpus) Len() int {
 	if c == nil {

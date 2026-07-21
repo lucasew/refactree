@@ -90,3 +90,37 @@ func TestStreamVisit_EmitsEdgesDuringExplore(t *testing.T) {
 		t.Fatalf("no edges in %v", seq)
 	}
 }
+
+func TestStreamVisit_ModuleVisitsDirectFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package example\n\nfunc A() { B() }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b.go"), []byte("package example\n\nfunc B() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// nested package must NOT be absorbed by direct visit
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sub", "c.go"), []byte("package sub\n\nfunc C() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewSessionCorpus(dir)
+	if err := c.StreamVisit(context.Background(), "path:./", func(ev StreamEvent) bool {
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// a.go and b.go absorbed; sub/c.go not (nested package)
+	if !c.Has("a.go") || !c.Has("b.go") {
+		t.Fatalf("expected a.go and b.go in corpus, len=%d", c.Len())
+	}
+	if c.Has("sub/c.go") {
+		t.Fatal("nested package file should not be direct-visited")
+	}
+}
