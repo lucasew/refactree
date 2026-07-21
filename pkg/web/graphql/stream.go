@@ -199,8 +199,13 @@ func (c *SessionCorpus) StreamProject(ctx context.Context, emit StreamEmitter) e
 		if err := ctx.Err(); err != nil {
 			return false
 		}
+		key := extractRelKey(fe)
+		// Skip paths already in the corpus (file browser / prior visit primed).
+		if key != "" && c.Has(key) {
+			return true
+		}
 		stored := c.Touch(fe)
-		key := extractRelKey(stored)
+		key = extractRelKey(stored)
 		if key == "" {
 			return true
 		}

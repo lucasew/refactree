@@ -128,9 +128,11 @@ func (c *SessionCorpus) Len() int {
 	return len(c.byPath)
 }
 
-// PrimeVisit discovers the same extract closure StreamVisit would use and
-// stores it in the corpus without streaming edges. Used when the code browser
-// opens a file so the graph session reuses the same parse cache.
+// PrimeVisit warms the corpus with the opened file/package extracts only
+// (no import BFS). Used when the code browser opens a file so the graph
+// session reuses the same parse cache. StreamVisit still does Seed BFS for
+// neighborhood edges — PrimeVisit must stay cheap so go-to-def does not
+// re-walk the import graph on every click.
 func (c *SessionCorpus) PrimeVisit(ref string) error {
 	if c == nil {
 		return nil
@@ -140,7 +142,80 @@ func (c *SessionCorpus) PrimeVisit(ref string) error {
 	focus := graphNodeForRef(c.root, parsed)
 	parsed = ingest.ParseReference(focus.ID)
 	visit := make(map[string]*ingest.FileExtract)
-	return c.discoverVisit(parsed, visit)
+	return c.primeVisitHop(parsed, visit)
+}
+
+// primeVisitHop records direct package/file extracts without neighbor BFS.
+func (c *SessionCorpus) primeVisitHop(parsed ingest.Reference, visit map[string]*ingest.FileExtract) error {
+	if visit == nil {
+		visit = make(map[string]*ingest.FileExtract)
+	}
+	if parsed.Provider != "" && parsed.Provider != "path" {
+		scope, ok, err := ingest.NewResolver(c.root).ResolveScopeTarget(ingest.Reference{
+			Provider: parsed.Provider,
+			Path:     parsed.Path,
+		})
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return nil
+		}
+		files, err := directSourceFilesAbs(scope.Dir)
+		if err != nil {
+			return err
+		}
+		return c.DiscoverHop(files, visit)
+	}
+
+	abs, isDir, err := resolvePath(c.root, scopeRef(parsed))
+	if err != nil {
+		return err
+	}
+	var seeds []string
+	if parsed.Symbol == "" {
+		if isDir {
+			seeds, err = directSourceFilesAbs(abs)
+			if err != nil {
+				return err
+			}
+		} else {
+			seeds = []string{abs}
+		}
+	} else if isDir {
+		seeds, err = directSourceFilesAbs(abs)
+		if err != nil {
+			return err
+		}
+	} else {
+		seeds = []string{abs}
+	}
+	return c.DiscoverHop(seeds, visit)
+}
+
+// DiscoverHop parses only the given paths (no neighbor/import BFS).
+func (c *SessionCorpus) DiscoverHop(seedAbs []string, visit map[string]*ingest.FileExtract) error {
+	if c == nil {
+		return fmt.Errorf("nil corpus")
+	}
+	if len(seedAbs) == 0 {
+		return nil
+	}
+	if visit == nil {
+		visit = make(map[string]*ingest.FileExtract)
+	}
+	return ingest.WalkExtracts(ingest.ExtractSource{
+		Kind:  ingest.ExtractHop,
+		Root:  c.root,
+		Paths: seedAbs,
+	}, func(fe *ingest.FileExtract) bool {
+		if fe == nil {
+			return true
+		}
+		stored := c.Touch(fe)
+		visit[extractRelKey(stored)] = stored
+		return true
+	})
 }
 
 // DiscoverSeeds runs one Seed BFS from all seed paths at once.

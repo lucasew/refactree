@@ -118,6 +118,9 @@ type graphExploreSession struct {
 	corpus *graphql.SessionCorpus
 	mu     sync.Mutex
 	seen   map[string]bool // session-wide edge wire dedupe
+	// crawlDone: paths whose crawl batch was successfully materialized+emitted.
+	// Re-walks skip these so visit/open does not rematerialize the whole tree.
+	crawlDone map[string]bool
 
 	crawlOn    atomic.Bool
 	crawlPause atomic.Bool // visit: pump stops sending; current batch finishes
@@ -128,10 +131,39 @@ func newGraphExploreSession(root string, corpus *graphql.SessionCorpus) *graphEx
 		corpus = graphql.NewSessionCorpus(root)
 	}
 	return &graphExploreSession{
-		root:   root,
-		corpus: corpus,
-		seen:   make(map[string]bool),
+		root:      root,
+		corpus:    corpus,
+		seen:      make(map[string]bool),
+		crawlDone: make(map[string]bool),
 	}
+}
+
+func (s *graphExploreSession) crawlAlreadyDone(key string) bool {
+	if key == "" {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.crawlDone[key]
+}
+
+func (s *graphExploreSession) markCrawlDone(batch crawlBatch) {
+	if len(batch) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k := range batch {
+		if k != "" {
+			s.crawlDone[k] = true
+		}
+	}
+}
+
+func (s *graphExploreSession) resetCrawlDone() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.crawlDone = make(map[string]bool)
 }
 
 func edgeSeenKey(e *graphql.GraphEdge) string {
@@ -193,7 +225,8 @@ func extractKey(fe *ingest.FileExtract) string {
 //
 //	crawl pump  --batches-->  crawlCh  --worker--> outbox --> WS
 //	visitCh (priority) pauses the pump (stops pumping); current batch finishes,
-//	then visit runs, then pump resumes if crawl is still on.
+//	then visit runs. Pump pause-waits poll crawlPause (no full re-walk on visit).
+//	Re-walks skip crawlDone paths so opening source does not rematerialize the tree.
 func (s *Server) handleGraphSession(w http.ResponseWriter, r *http.Request) {
 	if s.loader == nil {
 		http.Error(w, "loader not configured", http.StatusInternalServerError)
@@ -341,9 +374,14 @@ func (s *Server) handleGraphSession(w http.ResponseWriter, r *http.Request) {
 				if err := ctx.Err(); err != nil {
 					return false
 				}
+				key := extractKey(fe)
+				if key == "" || sess.crawlAlreadyDone(key) {
+					// Already materialized+emitted this session — skip.
+					return true
+				}
 				stored := sess.corpus.Touch(fe)
-				key := extractKey(stored)
-				if key == "" {
+				key = extractKey(stored)
+				if key == "" || sess.crawlAlreadyDone(key) {
 					return true
 				}
 				batch[key] = stored
@@ -357,14 +395,25 @@ func (s *Server) handleGraphSession(w http.ResponseWriter, r *http.Request) {
 			}
 			_ = pumpBatch()
 
-			// Full walk finished (or stopped). Flush edges then done.
-			if sess.crawlOn.Load() && !sess.crawlPause.Load() {
+			// Walk finished. If a visit is still holding the pause, wait it out
+			// (do not require a kick — visits no longer kick full re-walks).
+			for sess.crawlPause.Load() && sess.crawlOn.Load() {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(15 * time.Millisecond):
+				}
+			}
+
+			// Full walk finished (or stopped). Flush edges then done once.
+			if sess.crawlOn.Load() {
 				_ = edgeBatch.Flush()
 				inc := true
 				_ = sendOut(ctx, outbox, graphSessionOut{Type: "done", Incomplete: &inc, VisitRef: "project"})
 			}
 
-			// Wait for another kick (re-enable, or after visit) before next full walk.
+			// Idle until crawl is re-enabled (toggle off→on). Visits only pause/resume
+			// mid-walk via crawlPause — they must not restart a full rematerialize.
 			if !sess.crawlOn.Load() {
 				continue
 			}
@@ -382,17 +431,6 @@ func (s *Server) handleGraphSession(w http.ResponseWriter, r *http.Request) {
 		defer wg.Done()
 		emit := sess.deltaEmitter(ctx, outbox, edgeBatch)
 
-		drainCrawl := func() {
-			for {
-				select {
-				case <-crawlCh:
-					// Drop buffered batch; pump will resend after unpause/kick.
-				default:
-					return
-				}
-			}
-		}
-
 		for {
 			// Prefer pending visits without blocking on crawl.
 			select {
@@ -401,8 +439,9 @@ func (s *Server) handleGraphSession(w http.ResponseWriter, r *http.Request) {
 				return
 			case ref := <-visitCh:
 				sess.crawlPause.Store(true)
-				drainCrawl() // unblock pump if it was sending into a full buffer
-				sess.handleVisitPriority(ctx, ref, outbox, edgeBatch, kick)
+				// Do not drop the buffered batch — process it after the visit so
+				// crawlDone stays accurate and edges are not lost.
+				sess.handleVisitPriority(ctx, ref, outbox, edgeBatch)
 				continue
 			default:
 			}
@@ -413,8 +452,7 @@ func (s *Server) handleGraphSession(w http.ResponseWriter, r *http.Request) {
 				return
 			case ref := <-visitCh:
 				sess.crawlPause.Store(true)
-				drainCrawl()
-				sess.handleVisitPriority(ctx, ref, outbox, edgeBatch, kick)
+				sess.handleVisitPriority(ctx, ref, outbox, edgeBatch)
 			case batch, ok := <-crawlCh:
 				if !ok {
 					_ = edgeBatch.Flush()
@@ -427,7 +465,10 @@ func (s *Server) handleGraphSession(w http.ResponseWriter, r *http.Request) {
 						_ = edgeBatch.Flush()
 						return
 					}
+					// emit cancelled mid-batch: do not mark done (retry next walk)
+					continue
 				}
+				sess.markCrawlDone(batch)
 			}
 		}
 	}()
@@ -480,6 +521,10 @@ func (s *Server) handleGraphSession(w http.ResponseWriter, r *http.Request) {
 			en := in.Enabled != nil && *in.Enabled
 			was := sess.crawlOn.Swap(en)
 			if en {
+				// Fresh enable: allow rematerialize of the tree (toggle off→on).
+				if !was {
+					sess.resetCrawlDone()
+				}
 				sess.crawlPause.Store(false)
 				kick()
 			} else {
@@ -503,18 +548,16 @@ func (s *graphExploreSession) handleVisitPriority(
 	ref string,
 	outbox chan<- graphSessionOut,
 	edgeBatch *edgeWireBatcher,
-	kick func(),
 ) {
-	// crawlPause already set by worker before drain.
+	// crawlPause already set by worker. Pump polls crawlPause every ~15ms while
+	// mid-walk — do not kick a full re-walk here (that rematerialized the repo
+	// on every go-to-def and pegged the CPU).
 	emit := s.deltaEmitter(ctx, outbox, edgeBatch)
 	_ = s.corpus.StreamVisit(ctx, ref, emit)
 	_ = edgeBatch.Flush()
 	inc := true
 	_ = sendOut(ctx, outbox, graphSessionOut{Type: "done", Incomplete: &inc, VisitRef: ref})
 	s.crawlPause.Store(false)
-	if s.crawlOn.Load() {
-		kick() // resume pumping
-	}
 }
 
 func (s *graphExploreSession) emitPackageFocus(ctx context.Context, ref string, outbox chan<- graphSessionOut) {
