@@ -211,7 +211,8 @@ export function GraphPanel({
             const lang = n.language || inferLanguageFromId(n.id) || "?";
             const scope = n.external ? "external" : "path";
             const tip = n.external ? " — click to expand" : "";
-            return `${n.name || n.id} [${lang} · ${scope}]${tip}`;
+            const pretty = String(n.name || n.id).replace(/\n/g, " · ");
+            return `${pretty} [${lang} · ${scope}]${tip}`;
           }}
           backgroundColor={BG}
           linkWidth={1.25}
@@ -259,12 +260,23 @@ export function GraphPanel({
               ctx.stroke();
               ctx.setLineDash([]);
             }
-            if (globalScale > 0.6) {
-              ctx.font = `${fontSize}px sans-serif`;
+            if (globalScale > 0.55) {
+              const lines = String(label).split("\n").filter(Boolean);
               ctx.textAlign = "center";
               ctx.textBaseline = "top";
-              ctx.fillStyle = "#e8e0d0";
-              ctx.fillText(label, x, y + r + 1);
+              let yy = y + r + 2;
+              lines.forEach((line: string, i: number) => {
+                // module line slightly smaller/muted; symbol line emphasis
+                if (lines.length > 1 && i === 0) {
+                  ctx.font = `${Math.max(fontSize * 0.85, 1.5)}px sans-serif`;
+                  ctx.fillStyle = "rgba(232,224,208,0.7)";
+                } else {
+                  ctx.font = `${fontSize}px sans-serif`;
+                  ctx.fillStyle = "#e8e0d0";
+                }
+                ctx.fillText(line, x, yy);
+                yy += fontSize * 1.15;
+              });
             }
           }}
           nodePointerAreaPaint={(node: any, color, ctx) => {

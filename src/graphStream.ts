@@ -157,19 +157,25 @@ const client = new GraphExploreClient();
 function stubFromId(id: string): IncomingNode {
   const external = isExternalId(id);
   let kind = "MODULE";
-  let label = id;
+  let modulePart = id;
+  let symbolPart = "";
   if (id.includes("::")) {
     kind = "ATOM";
-    label = id.split("::").pop() || id;
-  } else if (id.startsWith("path:") && /\.[a-zA-Z0-9]+$/.test(id)) {
-    kind = "FILE";
-    label = id.replace(/^path:(\.\/)?/, "").split("/").pop() || id;
-  } else if (id.startsWith("path:")) {
-    kind = "MODULE";
-    label = id.replace(/^path:(\.\/)?/, "") || "project";
-  } else if (id.includes(":")) {
-    label = id.slice(id.indexOf(":") + 1) || id;
+    const [left, ...rest] = id.split("::");
+    symbolPart = rest.join("::");
+    modulePart = left;
   }
+  if (modulePart.startsWith("path:")) {
+    modulePart = modulePart.replace(/^path:(\.\/)?/, "") || ".";
+    // file path in stub → show parent dir as module when it looks like a file
+    if (/\.[a-zA-Z0-9]+$/.test(modulePart) && modulePart.includes("/")) {
+      modulePart = modulePart.replace(/\/[^/]+$/, "") || ".";
+    }
+  } else if (modulePart.includes(":")) {
+    // provider:path
+    // keep as-is for external module line
+  }
+  const label = symbolPart ? `${modulePart}\n${symbolPart}` : modulePart;
   return { id, kind, label, external, expandable: external, language: inferLanguageFromId(id) };
 }
 

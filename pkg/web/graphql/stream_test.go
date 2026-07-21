@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "github.com/lucasew/refactree/pkg/ingest/go"
@@ -48,14 +49,26 @@ func TestStreamNeighborhood_EmitsFocusEdgesDone(t *testing.T) {
 }
 
 func TestLookupNode_Cheap(t *testing.T) {
-	n := LookupNode("/tmp", "path:./pkg/web/server.go::New")
-	if n == nil || n.Kind != NodeKindAtom || n.Label != "New" {
+	// cwd is pkg/web/graphql; module root is ../../..
+	root, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// File path normalizes to module path; two-line label.
+	n := LookupNode(root, "path:./pkg/web/server.go::New")
+	if n == nil || n.Kind != NodeKindAtom {
 		t.Fatalf("%+v", n)
+	}
+	if n.ID != "path:./pkg/web::New" {
+		t.Fatalf("id=%q", n.ID)
+	}
+	if !strings.Contains(n.Label, "pkg/web") || !strings.Contains(n.Label, "New") {
+		t.Fatalf("label=%q", n.Label)
 	}
 	if n.Language != "go" {
 		t.Fatalf("language=%q want go", n.Language)
 	}
-	ext := LookupNode("/tmp", "go:fmt")
+	ext := LookupNode(root, "go:fmt")
 	if ext == nil || !ext.External || ext.Language != "go" {
 		t.Fatalf("%+v", ext)
 	}

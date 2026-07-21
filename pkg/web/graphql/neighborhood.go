@@ -12,8 +12,10 @@ import (
 // BuildNeighborhood returns a lazy Seed-style neighborhood for ref.
 func BuildNeighborhood(root, refStr string) (*Neighborhood, error) {
 	parsed := ingest.CanonicalizeReference(root, ingest.ParseReference(refStr))
-	focusID := parsed.String()
 	focus := graphNodeForRef(root, parsed)
+	focusID := focus.ID
+	// Use module-normalized focus for scope comparisons.
+	parsed = ingest.ParseReference(focusID)
 
 	nodes := map[string]*GraphNode{focusID: focus}
 	var edges []*GraphEdge
@@ -23,23 +25,23 @@ func BuildNeighborhood(root, refStr string) (*Neighborhood, error) {
 		if err != nil {
 			return &Neighborhood{Focus: focus, Nodes: []*GraphNode{focus}, Edges: nil, Incomplete: true}, nil
 		}
-		// Parent file as structure (not a walk edge).
-		parent := parsed
-		parent.Symbol = ""
-		parentID := parent.String()
-		if _, ok := nodes[parentID]; !ok {
-			nodes[parentID] = graphNodeForRef(root, parent)
+		// Parent module as structure (not a walk edge).
+		if focus.ParentID != nil {
+			parentID := *focus.ParentID
+			if _, ok := nodes[parentID]; !ok {
+				nodes[parentID] = graphNodeForRef(root, ingest.ParseReference(parentID))
+			}
 		}
-		focus.ParentID = &parentID
 
+		modFocus := scopeRef(parsed)
 		addRelationEdges(root, result, nodes, &edges, func(from, to string) bool {
-			// Ego: incident on focus, or both ends in the focus file (local structure).
 			if from == focusID || to == focusID {
 				return true
 			}
-			return sameScope(parsed, ingest.ParseReference(from)) || sameScope(parsed, ingest.ParseReference(to))
+			return sameScope(modFocus, scopeRef(ingest.ParseReference(from))) ||
+				sameScope(modFocus, scopeRef(ingest.ParseReference(to)))
 		})
-		addImportEdges(root, result, nodes, &edges, parsed)
+		addImportEdges(root, result, nodes, &edges, modFocus)
 
 		return &Neighborhood{
 			Focus:      focus,
@@ -49,30 +51,41 @@ func BuildNeighborhood(root, refStr string) (*Neighborhood, error) {
 		}, nil
 	}
 
-	// No symbol: file or module.
+	// Module focus (files already normalized to modules).
 	abs, isDir, err := resolvePath(root, parsed)
-	if err == nil && !isDir && (parsed.Provider == "" || parsed.Provider == "path") {
-		// File focus: atoms in file + their use edges (relations), not an import map.
-		result, err := ingest.SeedResult(root, abs)
+	// After normalize, path may be a package directory.
+	if err == nil && (parsed.Provider == "" || parsed.Provider == "path") {
+		// Prefer seed from a representative path: if module is a dir, use dir materialize.
+		var result *ingest.Result
+		if isDir {
+			result, err = materializeModule(root, parsed, abs, true)
+		} else {
+			// File-as-module (JS/Python): seed that file.
+			result, err = ingest.SeedResult(root, abs)
+		}
 		if err != nil {
 			return &Neighborhood{Focus: focus, Nodes: []*GraphNode{focus}, Incomplete: true}, nil
 		}
-		rel := strings.TrimPrefix(filepath.ToSlash(mustRel(root, abs)), "./")
+		modFocus := scopeRef(parsed)
+		// Atoms under this module.
 		localAtoms := map[string]bool{}
+		modID := projectScopeID(root, parsed)
 		for _, ent := range result.Entities {
 			er := ingest.ParseReference(ent.Reference)
-			if normalizePath(er.Path) != normalizePath(rel) && filepath.Base(normalizePath(er.Path)) != filepath.Base(normalizePath(rel)) {
+			eid := graphRefIDString(root, ingest.CanonicalizeReference(root, er).String())
+			em := projectScopeID(root, scopeRef(ingest.ParseReference(eid)))
+			if em != modID {
 				continue
 			}
-			id := ingest.CanonicalizeReference(root, er).String()
-			ensureNode(nodes, root, id)
-			pid := focusID
-			nodes[id].ParentID = &pid
-			localAtoms[id] = true
+			ensureNode(nodes, root, eid)
+			if n := nodes[eid]; n != nil {
+				pid := focusID
+				n.ParentID = &pid
+			}
+			localAtoms[eid] = true
 		}
-		// USES edges: from local atoms (and file-scoped relations) to their targets.
 		addRelationEdges(root, result, nodes, &edges, func(from, to string) bool {
-			return localAtoms[from] || sameScope(parsed, ingest.ParseReference(from))
+			return localAtoms[from] || sameScope(modFocus, scopeRef(ingest.ParseReference(from)))
 		})
 		return &Neighborhood{
 			Focus:      focus,
@@ -82,18 +95,17 @@ func BuildNeighborhood(root, refStr string) (*Neighborhood, error) {
 		}, nil
 	}
 
-	// Module / directory / provider scope: import edges between scopes.
+	// Provider scope: import edges between modules.
 	result, err := materializeModule(root, parsed, abs, isDir)
 	if err != nil {
 		return &Neighborhood{Focus: focus, Nodes: []*GraphNode{focus}, Incomplete: true}, nil
 	}
 	for _, a := range result.Aliases {
-		fromRef := ingest.ParseReference(a.Reference)
-		toRef := ingest.ParseReference(a.Target)
-		fromScope := scopeRef(fromRef)
-		toScope := scopeRef(toRef)
-		fromID := ingest.CanonicalizeReference(root, fromScope).String()
-		toID := ingest.CanonicalizeReference(root, toScope).String()
+		fromID := graphRefIDString(root, a.Reference)
+		toID := graphRefIDString(root, a.Target)
+		// strip symbols for import map endpoints
+		fromID = projectScopeID(root, scopeRef(ingest.ParseReference(fromID)))
+		toID = projectScopeID(root, scopeRef(ingest.ParseReference(toID)))
 		if fromID == "" || toID == "" || fromID == toID {
 			continue
 		}
@@ -120,8 +132,8 @@ func addRelationEdges(
 		return
 	}
 	for _, rel := range result.Relations {
-		from := ingest.CanonicalizeReference(root, ingest.ParseReference(rel.Reference)).String()
-		to := ingest.CanonicalizeReference(root, ingest.ParseReference(rel.Target)).String()
+		from := graphRefIDString(root, ingest.CanonicalizeReference(root, ingest.ParseReference(rel.Reference)).String())
+		to := graphRefIDString(root, ingest.CanonicalizeReference(root, ingest.ParseReference(rel.Target)).String())
 		if from == "" || to == "" || from == to {
 			continue
 		}
@@ -139,13 +151,22 @@ func addImportEdges(root string, result *ingest.Result, nodes map[string]*GraphN
 		return
 	}
 	for _, a := range result.Aliases {
-		from := ingest.CanonicalizeReference(root, ingest.ParseReference(a.Reference)).String()
-		to := ingest.CanonicalizeReference(root, ingest.ParseReference(a.Target)).String()
+		from := graphRefIDString(root, ingest.CanonicalizeReference(root, ingest.ParseReference(a.Reference)).String())
+		to := graphRefIDString(root, ingest.CanonicalizeReference(root, ingest.ParseReference(a.Target)).String())
 		if from == "" || to == "" || from == to {
 			continue
 		}
-		if !sameScope(focus, ingest.ParseReference(from)) && !sameScope(focus, ingest.ParseReference(to)) {
-			continue
+		// sameScope on module path of endpoints
+		if !sameScope(focus, scopeRef(ingest.ParseReference(from))) && !sameScope(focus, scopeRef(ingest.ParseReference(to))) {
+			// also compare after module-normalizing focus path
+			fr := scopeRef(ingest.ParseReference(from))
+			tr := scopeRef(ingest.ParseReference(to))
+			fm := ingest.ParseReference(projectScopeID(root, fr))
+			tm := ingest.ParseReference(projectScopeID(root, tr))
+			fo := ingest.ParseReference(projectScopeID(root, scopeRef(focus)))
+			if !sameScope(fo, fm) && !sameScope(fo, tm) {
+				continue
+			}
 		}
 		ensureNode(nodes, root, from)
 		ensureNode(nodes, root, to)
@@ -223,39 +244,86 @@ func seedForRef(root string, parsed ingest.Reference) (*ingest.Result, error) {
 		}
 		return result, nil
 	}
-	abs, _, err := resolvePath(root, parsed)
+	// Module-normalized path may be a package directory (e.g. path:./pkg/web::New).
+	abs, isDir, err := resolvePath(root, scopeRef(parsed))
 	if err != nil {
 		return nil, err
+	}
+	if isDir {
+		// Seed from all source files under the package dir (ExpandImports off).
+		return ingest.MaterializeSource(ingest.ExtractSource{
+			Kind:      ingest.ExtractDir,
+			Root:      root,
+			Dir:       abs,
+			Recursive: false,
+		}, ingest.MaterializeOptions{ExpandImports: false})
 	}
 	return ingest.SeedResult(root, abs)
 }
 
 func graphNodeForRef(root string, ref ingest.Reference) *GraphNode {
-	id := ref.String()
-	kind := NodeKindFile
-	label := ref.Path
+	// Normalize file paths to module scope (DirectoryModule → package dir, else file-as-module).
+	id := graphRefID(root, ref)
+	ref = ingest.ParseReference(id)
+
+	kind := NodeKindModule
+	moduleName := moduleDisplayName(root, ref)
 	var parent *string
+	var label string
+
 	if ref.Symbol != "" {
 		kind = NodeKindAtom
-		label = ref.Symbol
+		// Two-line label: module\nsymbol (canvas splits on newline).
+		label = moduleName + "\n" + ref.Symbol
 		p := ref
 		p.Symbol = ""
 		ps := p.String()
 		parent = &ps
-	} else if isModuleRef(root, ref) {
-		kind = NodeKindModule
-		label = ref.Path
-		if label == "" {
-			label = ref.Provider + ":" + ref.Path
-		}
 	} else {
-		label = filepath.Base(strings.TrimSuffix(ref.Path, "/"))
-		if label == "" || label == "." {
-			label = ref.String()
-		}
+		label = moduleName
+		// Never FILE in the graph — files are modules (or package dirs).
+		kind = NodeKindModule
 	}
+
 	n := &GraphNode{ID: id, Kind: kind, Label: label, ParentID: parent, Language: languageForRef(root, ref)}
 	return decorateNode(root, n)
+}
+
+// graphRefID normalizes a reference for the graph: file → module; atoms keep symbol on module path.
+func graphRefID(root string, ref ingest.Reference) string {
+	if ref.Symbol != "" {
+		modID := projectScopeID(root, scopeRef(ref))
+		mod := ingest.ParseReference(modID)
+		mod.Symbol = ref.Symbol
+		return mod.String()
+	}
+	return projectScopeID(root, ref)
+}
+
+// graphRefIDString normalizes an edge endpoint string.
+func graphRefIDString(root, refStr string) string {
+	if strings.TrimSpace(refStr) == "" {
+		return ""
+	}
+	return graphRefID(root, ingest.ParseReference(refStr))
+}
+
+// moduleDisplayName is a short module label for the first line of a node.
+func moduleDisplayName(root string, ref ingest.Reference) string {
+	if isExternalRef(ref) {
+		if ref.Path == "" {
+			return ref.Provider
+		}
+		return ref.Provider + ":" + ref.Path
+	}
+	rel := strings.TrimPrefix(filepath.ToSlash(ref.Path), "./")
+	if rel == "" || rel == "." {
+		if base := filepath.Base(root); base != "" && base != "." {
+			return base
+		}
+		return "."
+	}
+	return rel
 }
 
 func isModuleRef(root string, ref ingest.Reference) bool {
@@ -282,6 +350,10 @@ func isModuleRef(root string, ref ingest.Reference) bool {
 }
 
 func ensureNode(nodes map[string]*GraphNode, root, id string) {
+	if id == "" {
+		return
+	}
+	id = graphRefIDString(root, id)
 	if id == "" {
 		return
 	}
@@ -354,7 +426,6 @@ func languageForRef(root string, ref ingest.Reference) string {
 	case "svelte":
 		return "svelte"
 	}
-	// path: use extension
 	path := ref.Path
 	if path == "" {
 		return ""
@@ -362,7 +433,25 @@ func languageForRef(root string, ref ingest.Reference) string {
 	if lang, ok := ingest.LanguageForFile(path); ok {
 		return lang
 	}
-	// directory module: try a file under dir later; empty is fine
-	_ = root
+	// Package directory: peek at child source files.
+	abs, isDir, err := resolvePath(root, scopeRef(ref))
+	if err != nil {
+		return ""
+	}
+	if !isDir {
+		return ""
+	}
+	entries, err := os.ReadDir(abs)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if lang, ok := ingest.LanguageForFile(e.Name()); ok {
+			return lang
+		}
+	}
 	return ""
 }

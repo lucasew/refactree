@@ -66,8 +66,10 @@ func (c *SessionCorpus) StreamVisit(ctx context.Context, ref string, emit Stream
 	}
 
 	parsed := ingest.CanonicalizeReference(c.root, ingest.ParseReference(ref))
-	focusID := parsed.String()
 	focus := decorateNode(c.root, graphNodeForRef(c.root, parsed))
+	focusID := focus.ID
+	// Align keep-filters with module-normalized focus path.
+	parsed = ingest.ParseReference(focusID)
 	if !emit(StreamEvent{Type: "focus", Node: focus, Incomplete: boolPtr(true)}) {
 		return context.Canceled
 	}
