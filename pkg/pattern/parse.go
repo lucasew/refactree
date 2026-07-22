@@ -8,7 +8,9 @@ import (
 )
 
 // ParsePattern parses a CLI pattern string into match IR.
-// Supported subset (v1): type tokens, @ref holes, calls, string/lit/capture/rest args.
+// Supported subset (v1): grammar tokens (exact node text), @ref holes, calls,
+// string/lit/capture/rest args. Tokens are language-agnostic exact spans from
+// the tree-sitter tree (e.g. interface{}, any, keywords) — not builtin refs.
 func ParsePattern(s string) (Node, error) {
 	p := &parser{s: s}
 	p.skipSpace()
@@ -77,36 +79,26 @@ func (p *parser) parseExpr(allowCall bool) (Node, error) {
 		return Node{}, p.errf("unexpected end")
 	}
 
-	// type_token: interface{}
+	// Grammar token: exact source text of a tree-sitter node (any language).
+	// interface{} is one token with braces; bare idents (any, func, …) are tokens.
 	if strings.HasPrefix(p.s[p.i:], "interface{}") {
 		p.i += len("interface{}")
-		n := Node{Kind: "type_token", Text: "interface{}", As: "ROOT"}
-		return n, nil
+		return Node{Kind: "token", Text: "interface{}", As: "ROOT"}, nil
 	}
 
-	// Bare word type_token like any (only when not followed by '(' or '.' as package)
 	if r, _ := p.peekRune(); unicode.IsLetter(r) || r == '_' {
-		start := p.i
 		ident := p.scanIdent()
+		// Allow trailing {} for other empty composite tokens if present (e.g. future)
+		if strings.HasPrefix(p.s[p.i:], "{}") {
+			ident += "{}"
+			p.i += 2
+		}
 		p.skipSpace()
 		if allowCall && p.peek() == '(' {
-			// treat as callee name without capture — unusual; wrap as capture-less ref-less
-			// For replacement/call like fmt.Errorf(...) we need callee as text.
-			// Represent as capture with fixed text via kind "lit" for callee? Better: kind "text".
-			// Matcher uses capture/ref for callee. Instantiator for call uses instantiateNode.
-			// Add kind "text" for raw emission — or type_token for simple idents.
-			// For match, plain identifier call is rare in our fixtures.
-			// Use kind "lit" for callee text in replacement of form Foo(bar) without $.
 			callee := Node{Kind: "lit", Text: ident}
 			return p.parseCall(callee)
 		}
-		// Standalone bare ident → type_token (any) or lit
-		if ident == "any" || ident == "interface{}" {
-			return Node{Kind: "type_token", Text: ident, As: "ROOT"}, nil
-		}
-		// Reset not needed — only type_token/any for now
-		_ = start
-		return Node{Kind: "type_token", Text: ident, As: "ROOT"}, nil
+		return Node{Kind: "token", Text: ident, As: "ROOT"}, nil
 	}
 
 	// $$$rest or $hole

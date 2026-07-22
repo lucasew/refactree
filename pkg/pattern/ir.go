@@ -28,7 +28,7 @@ type Node struct {
 	As  string `json:"as,omitempty"`
 	Ref string `json:"ref,omitempty"`
 
-	// type_token / lit
+	// token (grammar node text) / lit
 	Text string `json:"text,omitempty"`
 
 	// string

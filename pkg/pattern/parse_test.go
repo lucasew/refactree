@@ -14,7 +14,7 @@ func TestParsePattern_Fixtures(t *testing.T) {
 		pattern string
 		wantKind string
 	}{
-		{"any", "interface{}", "type_token"},
+		{"any", "interface{}", "token"},
 		{"failed", `$F:@go:fmt::Errorf($MSG:/(?i)^failed to\s+(.*)/, $ERR)`, "call"},
 		{"splitn", `$F:@go:strings::SplitN($S, $SEP, 2)`, "call"},
 		{"listen", `$F:@go:net/http::ListenAndServe($ADDR, $HANDLER)`, "call"},

@@ -126,7 +126,7 @@ via regex with a capture group re-emit the group text as a string literal.`,
 	}
 
 	cmd.Flags().StringVarP(&dir, "dir", "C", ".", "project root")
-	cmd.Flags().StringVarP(&lang, "lang", "l", "go", "language (only go supported)")
+	cmd.Flags().StringVarP(&lang, "lang", "l", "", "language filter (empty = all registered languages)")
 	cmd.Flags().BoolVarP(&backup, "backup", "b", false, "create .bak files before writing")
 	cmd.Flags().BoolVarP(&interactive, "interactive", "i", false, "show edit plan and ask for confirmation")
 	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "show edit plan without writing")

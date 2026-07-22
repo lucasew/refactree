@@ -75,7 +75,7 @@ Exit status is 0 if any match, 1 if none, 2 on error.`,
 	}
 
 	cmd.Flags().StringVarP(&dir, "dir", "C", ".", "project root")
-	cmd.Flags().StringVarP(&lang, "lang", "l", "go", "language (only go supported)")
+	cmd.Flags().StringVarP(&lang, "lang", "l", "", "language filter (empty = all registered languages)")
 	return cmd
 }
 

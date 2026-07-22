@@ -5,7 +5,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/lucasew/refactree/pkg/ingest"
 )
@@ -28,19 +27,16 @@ type StreamOptions struct {
 	Paths []string
 
 	// OnMatch is invoked for each match as soon as its file is processed.
-	// Return false to stop the walk early. Nil means collect-only via return value helpers.
+	// Return false to stop the walk early.
 	OnMatch func(Match) bool
 
 	// OnFile is invoked after a file is matched (and, for rewrite, after its edits
-	// are computed). fileEdits is nil for grep. Return false to stop.
+	// are computed). fileEdits is nil/empty for pure grep. Return false to stop.
 	OnFile func(rel string, matches []Match, fileEdits []ingest.Edit) bool
 }
 
 // OpFromCLI builds an Op from grep/rewrite argv strings.
 func OpFromCLI(mode, lang, patternStr, replacementStr string) (Op, error) {
-	if lang == "" {
-		lang = "go"
-	}
 	pat, err := ParsePattern(patternStr)
 	if err != nil {
 		return Op{}, fmt.Errorf("pattern: %w", err)
@@ -62,9 +58,7 @@ func OpFromCLI(mode, lang, patternStr, replacementStr string) (Op, error) {
 	return op, nil
 }
 
-// Run loads sources under root, matches op.PatternIR, and for rewrite builds edits
-// from op.ReplacementIR. It does not write the filesystem.
-// Processing is per-file (map); results are collected (reduce) for the return value.
+// Run loads sources under root, matches op.PatternIR, and for rewrite builds edits.
 func Run(root string, op Op) (RunResult, error) {
 	return RunWithOptions(root, op, RunOptions{})
 }
@@ -88,13 +82,8 @@ func RunWithOptions(root string, op Op, opts RunOptions) (RunResult, error) {
 	return out, err
 }
 
-// Stream processes one file at a time (map): hop-materialize → match → optional
-// rewrite edits for that file. Callbacks fire as each file finishes so CLI can
-// print matches without waiting for the whole tree (reduce is the consumer).
+// Stream processes one file at a time (map): hop-materialize → match → callbacks.
 func Stream(root string, op Op, opts StreamOptions) error {
-	if op.Lang != "" && op.Lang != "go" {
-		return fmt.Errorf("pattern: lang %q not supported yet (only go)", op.Lang)
-	}
 	if op.PatternIR.Kind == "" {
 		return fmt.Errorf("pattern: empty pattern_ir")
 	}
@@ -107,15 +96,13 @@ func Stream(root string, op Op, opts StreamOptions) error {
 		return err
 	}
 
-	return forEachGoFile(rootAbs, opts.Paths, func(abs string) error {
+	return forEachSourceFile(rootAbs, op.Lang, opts.Paths, func(abs, lang string) error {
 		rel, err := filepath.Rel(rootAbs, abs)
 		if err != nil {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
 
-		// Per-file hop: enough for import-resolved stdlib/module refs in this file.
-		// Avoids a full-tree Materialize before any output (map, not global shuffle).
 		fileResult, err := ingest.MaterializeSource(ingest.ExtractSource{
 			Kind:  ingest.ExtractHop,
 			Root:  rootAbs,
@@ -129,7 +116,7 @@ func Stream(root string, op Op, opts StreamOptions) error {
 		if err != nil {
 			return err
 		}
-		pf, err := ingest.ParseSourceFile(abs, "go")
+		pf, err := ingest.ParseSourceFile(abs, lang)
 		if err != nil {
 			return fmt.Errorf("parse %s: %w", rel, err)
 		}
@@ -141,7 +128,7 @@ func Stream(root string, op Op, opts StreamOptions) error {
 
 		for _, m := range ms {
 			if opts.OnMatch != nil && !opts.OnMatch(m) {
-				return nil // early stop
+				return nil
 			}
 		}
 
@@ -159,13 +146,12 @@ func Stream(root string, op Op, opts StreamOptions) error {
 	})
 }
 
-// Apply runs a rewrite op and writes edits under root, file-by-file as matches are found.
+// Apply runs a rewrite op and writes edits under root, file-by-file.
 func Apply(root string, op Op) (RunResult, error) {
 	return ApplyWithOptions(root, op, RunOptions{})
 }
 
-// ApplyWithOptions is Apply with a path filter. Each file is rewritten as soon as
-// it is processed (no global edit barrier).
+// ApplyWithOptions is Apply with a path filter.
 func ApplyWithOptions(root string, op Op, opts RunOptions) (RunResult, error) {
 	if op.Mode != "rewrite" {
 		return RunResult{}, fmt.Errorf("Apply: mode is %q, want rewrite", op.Mode)
@@ -196,12 +182,9 @@ func ApplyWithOptions(root string, op Op, opts RunOptions) (RunResult, error) {
 	return out, applyErr
 }
 
-// forEachGoFile walks paths (or root) and calls fn for each .go file in order.
-// Files are discovered incrementally for directory walks (no full path list first
-// when Paths is empty or a single dir — still walks, yielding as found).
-func forEachGoFile(rootAbs string, paths []string, fn func(abs string) error) error {
+func forEachSourceFile(rootAbs, langFilter string, paths []string, fn func(abs, lang string) error) error {
 	if len(paths) == 0 {
-		return walkGoFilesFn(rootAbs, fn)
+		return walkSourceFiles(rootAbs, langFilter, fn)
 	}
 	seen := map[string]bool{}
 	for _, p := range paths {
@@ -219,32 +202,36 @@ func forEachGoFile(rootAbs string, paths []string, fn func(abs string) error) er
 			return err
 		}
 		if st.IsDir() {
-			if err := walkGoFilesFn(abs, func(f string) error {
+			if err := walkSourceFiles(abs, langFilter, func(f, lang string) error {
 				if seen[f] {
 					return nil
 				}
 				seen[f] = true
-				return fn(f)
+				return fn(f, lang)
 			}); err != nil {
 				return err
 			}
 			continue
 		}
-		if !strings.HasSuffix(abs, ".go") {
+		lang, ok := ingest.LanguageForFile(abs)
+		if !ok {
+			continue
+		}
+		if langFilter != "" && lang != langFilter {
 			continue
 		}
 		if seen[abs] {
 			continue
 		}
 		seen[abs] = true
-		if err := fn(abs); err != nil {
+		if err := fn(abs, lang); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func walkGoFilesFn(root string, fn func(abs string) error) error {
+func walkSourceFiles(root, langFilter string, fn func(abs, lang string) error) error {
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -256,9 +243,13 @@ func walkGoFilesFn(root string, fn func(abs string) error) error {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(path, ".go") {
+		lang, ok := ingest.LanguageForFile(path)
+		if !ok {
 			return nil
 		}
-		return fn(path)
+		if langFilter != "" && lang != langFilter {
+			return nil
+		}
+		return fn(path, lang)
 	})
 }

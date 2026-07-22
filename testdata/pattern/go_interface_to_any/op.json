@@ -1,20 +1,20 @@
 {
   "mode": "rewrite",
   "lang": "go",
-  "description": "A2: interface{} type token → any",
+  "description": "A2: rewrite interface{} grammar token to any (exact tree-sitter node text)",
   "pattern": "interface{}",
   "replacement": "any",
   "pattern_ir": {
-    "kind": "type_token",
+    "kind": "token",
     "as": "ROOT",
     "text": "interface{}"
   },
   "replacement_ir": {
-    "kind": "type_token",
+    "kind": "token",
     "text": "any"
   },
   "notes": [
-    "rft rewrite 'interface{}' 'any'",
-    "pattern_ir / replacement_ir mirror the two CLI strings."
+    "Tokens match grammar node spans by exact source text — not go:builtin refs.",
+    "Works for any language whose tree exposes a node spanning that text."
   ]
 }

@@ -84,6 +84,22 @@ Structural spine for discovery and graphs. Goal: one walk/parse path, no duplica
 - Just the doc, and if it makes sense the signature of functions
 - `# name\nSignature: $signature\n$actual_docstring`
 
+### Subcommands: grep / rewrite
+- Structural find (`grep`) and site rewrite (`rewrite`) — **not** symbol identity ops (`mv`)
+- **Dialect locks** (authoritative detail: `testdata/pattern/README.md`):
+  - Match unit: **token stream** from tree-sitter leaves (flexible whitespace between tokens)
+  - Literals: exact token text; patterns: `/regex/` on token text (not `//`); refs: `@provider:path::Symbol` on link leaf
+  - `$name` = one token; `$name:{…}` = group whose capture span is the **smallest AST node covering** the match; text = that node’s byte range
+  - `$F:@ref` binds the **selector ending at the ref leaf** (e.g. `fmt.Errorf`, not only `Errorf`; does not include call args)
+  - `$$$_` = zero or more tokens (rest)
+  - String `/regex/`: filter only; capture is the **full string token** (including quotes) unless a fixture documents a stretch
+  - Grammar tokens (`interface{}`, `any`, …): exact node text from the grammar — **not** synthetic `go:builtin` refs
+  - **Replacement is a template only** (literals + `$captures`), not a second match dialect
+- Execution: **per-file stream** (map); no full-project materialize barrier before first grep output
+- CLI: `rft grep <pattern> [paths…]`; `rft rewrite <pattern> <replacement> [paths…]`; `-C` root; `-l` optional lang filter; rewrite `-n`/`-i`/`-b` like plan/confirm/backup
+- Fixtures: `testdata/pattern/` (`input/` + optional `expected/` + `op.json`), same idea as `testdata/mv/`
+- Language-specific parse/extract/ref resolution stays in language packages; pattern core stays token + ref algebra
+
 ### Subcommand: edit
 - Opens the definition of a reference in `$EDITOR` (or jumps to a file), blocking until the editor exits
 - Argument modes:

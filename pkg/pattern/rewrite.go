@@ -17,9 +17,9 @@ func instantiateNode(n Node, m Match) (string, error) {
 	switch n.Kind {
 	case "call":
 		return instantiateCall(n, m)
-	case "type_token":
+	case "token", "type_token":
 		if n.Text == "" {
-			return "", fmt.Errorf("type_token replacement missing text")
+			return "", fmt.Errorf("token replacement missing text")
 		}
 		return n.Text, nil
 	case "string":
@@ -28,7 +28,7 @@ func instantiateNode(n Node, m Match) (string, error) {
 			if !ok {
 				return "", fmt.Errorf("string from_capture %q not bound", n.FromCapture)
 			}
-			// Always emit as a double-quoted Go string for format args.
+			// Emit as a double-quoted string literal (common across langs).
 			return strconv.Quote(v), nil
 		}
 		if n.Equals != "" {

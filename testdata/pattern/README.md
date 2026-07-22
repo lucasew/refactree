@@ -1,30 +1,114 @@
 # Pattern fixtures (`rft grep` / `rft rewrite`)
 
-Same shape as `testdata/mv/`: **input tree**, optional **expected tree**, **op.json**.
+Same shape as `testdata/mv/`: **input/**, optional **expected/**, **op.json**.
 
 Engine + harness: `pkg/pattern` (`go test ./pkg/pattern/`).
 
-- copy `input/` → temp
-- match `pattern_ir` (Go tree-sitter + ingest uses for `@ref`)
-- **rewrite:** instantiate `replacement_ir`, `ApplyEdits`, compare to `expected/`
-- **grep:** assert `expect_match_count`
+Fixtures under this tree are **kept as authored** (including A1’s strip behavior). This document is the **locked product dialect** from design grilling; the engine should converge on it. Where a fixture is ahead of a pure-template rule (e.g. A1 string strip), treat the fixture as a stretch case, not a contradiction of the locks below.
+
+---
+
+## Locked dialect (authoritative)
+
+### Product role
+
+| Command | Role |
+|---------|------|
+| `rft grep <pattern> [paths…]` | Find only; stream per file |
+| `rft rewrite <pattern> <replacement> [paths…]` | Match + **template** replacement |
+
+- **Not** a fancy `mv` (symbol identity / import graph renames stay on `mv`).
+- **Site codemod / search**: structural token patterns over source.
+
+### Matching model (one way)
+
+1. **Token stream** — ordered significant leaves from the tree-sitter grammar for that file’s language (not a semantic `call_expression` matcher as the primary model).
+2. **Hyperlinks** — tokens may carry a resolved ref target (same notion as code-view links / ingest `Uses`).
+3. **Whitespace** — pattern spaces only separate atoms; between matched tokens, source may have any whitespace/newlines (flexible).
+4. **Groups** — `$name:{ … }` matches the interior sequence; the capture’s **span** is the **smallest AST node covering** the matched pieces; capture **text** is source in that node’s byte offsets.
+5. **Streaming** — per-file map (hop/parse/match); emit/apply as each file finishes; no full-project materialize barrier before first output.
+
+### Pattern syntax
+
+| Form | Meaning |
+|------|---------|
+| plain text | Exact token text (`func`, `(`, `*`, `.`, `,`, `interface{}`, `2`, …) |
+| `@provider:path::Symbol` | Token whose **link target** is that ref (product ref form; e.g. `@go:testing::T`) |
+| `/regex/` | Token **text** matches regex (**not** `//…`) |
+| `$name` | Capture **one** token |
+| `$name:@ref` | Match ref on the **link leaf**; bind **selector** ending at that leaf (see below) |
+| `$name:/regex/` | Capture one token whose text matches regex |
+| `$name:{ … }` | Capture **group**: match sequence `…`; bind covering AST node |
+| `$$$_` | Zero or more tokens (rest / skip), ast-grep-familiar |
+
+### `$F:@ref` = selector only
+
+- Match constraint: hyperlink on the **leaf** that ends the name (`Errorf`, `SplitN`, `ListenAndServe`, `T`).
+- **Bound text/node**: the **selector expression** ending at that leaf — **not** the call args, **not** `(…)`.
+- The selector **ends where the ref ends**.
+
+Examples:
+
+| Source | Pattern hole | `$F` holds |
+|--------|--------------|------------|
+| `fmt.Errorf(...)` | `$F:@go:fmt::Errorf` | `fmt.Errorf` |
+| `f.Errorf(...)` | same | `f.Errorf` |
+| `strings.SplitN(...)` | `$F:@go:strings::SplitN` | `strings.SplitN` |
+| `http.ListenAndServe(...)` | `$F:@go:net/http::ListenAndServe` | `http.ListenAndServe` |
+
+No extra `$pkg` is required for rewrite of the callee name chain.
+
+### String holes `/regex/`
+
+- Regex **filters** which string tokens match.
+- Bound capture is the **full string token** (including quotes), e.g. `"failed to open image: %w"`.
+- A capturing group inside `/…(…)/` does **not** redefine the capture span by default (locked: full token).
+- Fixture **go_failed_to_prefix** still encodes a **strip** expected rewrite; that is a **stretch** beyond pure full-token template fill (kept as-is).
+
+### Tokens like `interface{}` / `any`
+
+- Matched as **grammar node text** (exact span the tree exposes), not `go:builtin::…` refs.
+- Language-agnostic token algebra; any registered language grammar may expose such nodes.
+
+### Replacement (template only)
+
+- Replacement is **not** a second match dialect.
+- Emit template: literal text + `$name` placeholders filled from match captures (bound node text).
+- Example: `$F($MSG, $ERR)` with `$F` = `fmt.Errorf`.
+
+### Execution / CLI (locked intent)
+
+```text
+rft grep <pattern> [paths…]
+rft rewrite <pattern> <replacement> [paths…]
+```
+
+| Flag | Meaning |
+|------|---------|
+| `-C` / `--dir` | Project root |
+| `-l` / `--lang` | Optional language filter (empty = all registered) |
+| `-n` / `--dry-run` | rewrite: plan only |
+| `-i` / `--interactive` | rewrite: plan + confirm |
+| `-b` / `--backup` | rewrite: `.bak` before write |
+
+Grep exit: `0` matches, `1` none, `2` error. Stream matches as files complete.
+
+### Non-goals (for this dialect)
+
+- Replacing `mv` for symbol renames / package moves
+- Typed-as (“expression of type T”) without a hyperlink or token
+- Full ast-grep YAML rule packs as day-one requirement
+- Semantic-only call AST as the primary match engine
+
+---
 
 ## Layout
 
 ```text
 testdata/pattern/<lang>_<behavior>/
   input/           # sources before
-  expected/        # sources after rewrite only (omit for mode=grep)
-  op.json          # pattern (+ replacement for rewrite)
-```
-
-Mirrors:
-
-```text
-testdata/mv/<case>/
-  input/
-  expected/
-  op.json
+  expected/        # after rewrite only (omit for grep)
+  op.json          # pattern + replacement + IR
 ```
 
 ## CLI ↔ `op.json`
@@ -34,87 +118,67 @@ testdata/mv/<case>/
 | `rft grep <pattern> [files…]` | `"mode":"grep"`, `"pattern":"…"` |
 | `rft rewrite <pattern> <replacement> [files…]` | `"mode":"rewrite"`, `"pattern":"…"`, `"replacement":"…"` |
 
-**String fields** are the CLI argv forms. **`_ir` fields** are the canonical trees the engine should use (fixtures do not depend on a perfect pretty-parser).
-
-| String (CLI) | IR (engine / fixture truth) |
-|--------------|-----------------------------|
+| String (CLI) | IR (engine / fixture) |
+|--------------|------------------------|
 | `pattern` | `pattern_ir` |
 | `replacement` | `replacement_ir` (`null` for grep) |
 
-```json
-{
-  "mode": "rewrite",
-  "pattern": "$F:@go:fmt::Errorf(\"failed to open image: %w\", $ERR)",
-  "replacement": "$F(\"open image: %w\", $ERR)",
-  "pattern_ir": { "kind": "call", "…": "…" },
-  "replacement_ir": { "kind": "call", "…": "…" }
-}
-```
-
-```bash
-rft rewrite \
-  '$F:@go:fmt::Errorf("failed to open image: %w", $ERR)' \
-  '$F("open image: %w", $ERR)' \
-  .
-```
+`pattern_ir` may still use nested `call` sugar in existing fixtures; that is **sugar for a token sequence** (callee selector + `(` + args + `)`), not a mandate to match only `call_expression` nodes forever.
 
 ## `op.json` fields
 
 | Field | Required | Meaning |
 |-------|----------|---------|
 | `mode` | yes | `grep` \| `rewrite` |
-| `lang` | yes | e.g. `go` |
-| `description` | yes | Intent / inventory id |
-| `pattern` | yes | Match pattern string (CLI arg) |
-| `replacement` | rewrite | Replacement pattern string (CLI arg); `null` for grep |
+| `lang` | yes | e.g. `go` (fixture filter; CLI may be broader) |
+| `description` | yes | Intent |
+| `pattern` | yes | Match pattern string |
+| `replacement` | rewrite | **Template** string; `null` for grep |
 | `pattern_ir` | yes | Canonical match IR |
-| `replacement_ir` | rewrite | Canonical replacement IR; `null` for grep |
-| `expect_match_count` | grep (optional) | How many matches in `input/` |
-| `notes` | no | Non-goals, caveats |
+| `replacement_ir` | rewrite | Canonical emit IR; `null` for grep |
+| `expect_match_count` | grep optional | Match count over `input/` |
+| `notes` | no | Caveats |
 
-### Rewrite
+### Harness
 
-1. Start from `input/`
-2. Match with `pattern_ir` (string form is documentation / future parser input)
-3. Instantiate `replacement_ir` with captures → edits
-4. Result must match `expected/` file-for-file (same idea as `mv_test.compareDir`)
+- **rewrite:** copy `input/` → temp → apply → compare `expected/`
+- **grep:** copy `input/` → temp → count matches
 
-### Grep
+## Golden set (kept as-is)
 
-- Only `input/` + `op.json`
-- No `expected/`
-- `"replacement": null`, `"replacement_ir": null`
-- Optional `expect_match_count`
+| Directory | Mode | Notes vs locks |
+|-----------|------|----------------|
+| `go_failed_to_prefix` | rewrite | Stretch: strip via regex group / expected beyond pure full-token `$MSG` |
+| `go_interface_to_any` | rewrite | Aligns: grammar tokens |
+| `go_strings_splitn` | grep | Aligns: `$F` = `strings.SplitN`, lit `2` |
+| `go_listen_and_serve` | grep | Aligns: `$F` = `http.ListenAndServe` |
 
-## IR kinds (v1)
+## Example patterns (locked style)
 
-| `kind` | Role |
-|--------|------|
-| `call` | Call expression; `callee` + `args` |
-| `ref` | Hyperlink hole → target ref (`go:fmt::Errorf`) |
-| `string` | String literal; optional `equals` / `regex` |
-| `type_token` | Fixed type text (`interface{}`, `any`) |
-| `capture` | Structural `$Name` (in replacement_ir: emit bound text) |
-| `rest` | `$$$Name` |
-| `lit` | Non-string literal (`2`) |
+```text
+# A1-shaped (selector $F)
+$F:@go:fmt::Errorf($MSG:/(?i)^failed to\s+(.*)/, $ERR)
 
-In `pattern`, `@go:fmt::Errorf` is hole sugar for `{ "kind": "ref", "ref": "go:fmt::Errorf" }`.
+# A2
+interface{}
 
-In `replacement_ir`, prefer `{ "kind": "capture", "as": "F" }` for holes filled from the match (not re-resolving refs).
+# A3
+$F:@go:strings::SplitN($S, $SEP, 2)
 
-## Golden set
+# B4
+$F:@go:net/http::ListenAndServe($ADDR, $HANDLER)
 
-| Directory | Mode | Inventory |
-|-----------|------|-----------|
-| `go_failed_to_prefix` | rewrite | A1 `fmt.Errorf` format string |
-| `go_interface_to_any` | rewrite | A2 `interface{}` → `any` |
-| `go_strings_splitn` | grep | A3 `SplitN` N=2 only |
-| `go_listen_and_serve` | grep | B4 `ListenAndServe` sites |
+# Test-shaped (future)
+func $name:{/^Test/} ( $$$_ $t * @go:testing::T $$$_ )
 
-## Checks without an engine
+# Bare ref leaf scan
+@go:testing::T
+```
+
+## Checks
 
 ```bash
-go run ./cmd/rft ingest testdata/pattern/go_failed_to_prefix/input
+go test ./pkg/pattern/
+go run ./cmd/rft grep 'interface{}' testdata/pattern/go_interface_to_any/input
 diff -ru testdata/pattern/go_failed_to_prefix/input testdata/pattern/go_failed_to_prefix/expected
-diff -ru testdata/pattern/go_interface_to_any/input testdata/pattern/go_interface_to_any/expected
 ```
