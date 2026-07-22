@@ -14,6 +14,8 @@ import (
 func newGrepCmd() *cobra.Command {
 	var dir string
 	var lang string
+	var showVars bool
+	var format string
 
 	cmd := &cobra.Command{
 		Use:   "grep <pattern> [paths...]",
@@ -29,14 +31,29 @@ Patterns use a small code-shaped dialect:
   $F:@go:fmt::Errorf($MSG:/(?i)^failed to\s+(.*)/, $ERR)
   $F:@go:strings::SplitN($S, $SEP, 2)
   $F:@go:testing::T
+  func $name:{/^Test(?P<rest>.*)/}
 
 @provider:path::Symbol is a hyperlink hole (same targets as the code view).
+
+Output (--format):
+  text   (default)  file:line:col: snippet
+                    --vars: tab-indented name=value under each match
+  csv               header file,line,col,match,<capture…> then one row per hit
+                    capture columns are derived statically from the pattern
+  jsonl             one JSON object per match (captures map uses the same names)
+
+Formats are pluggable (pattern.GrepFormatter); more can be added later.
 
 Exit status is 0 if any match, 1 if none, 2 on error.`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pat := args[0]
 			paths := args[1:]
+			format = strings.ToLower(strings.TrimSpace(format))
+			if format == "" {
+				format = "text"
+			}
+
 			op, err := pattern.OpFromCLI("grep", lang, pat, "")
 			if err != nil {
 				return errExit{code: 2, err: err}
@@ -46,24 +63,49 @@ Exit status is 0 if any match, 1 if none, 2 on error.`,
 				return errExit{code: 2, err: err}
 			}
 
+			var enc pattern.GrepFormatter
+			switch format {
+			case "text":
+				enc = pattern.NewTextGrepFormatter(showVars)
+			default:
+				enc, err = pattern.NewGrepFormatter(format)
+				if err != nil {
+					return errExit{code: 2, err: err}
+				}
+			}
+
+			varNames := pattern.CaptureNames(op.PatternIR)
 			w := cmd.OutOrStdout()
+			if err := enc.Begin(w, varNames); err != nil {
+				return errExit{code: 2, err: err}
+			}
+
 			matchCount := 0
 			err = pattern.Stream(root, op, pattern.StreamOptions{
 				Paths: paths,
 				OnMatch: func(m pattern.Match) bool {
 					line, col, snippet, err := matchDisplay(root, m)
 					if err != nil {
-						// Can't return error from callback cleanly; print and continue.
 						fmt.Fprintf(cmd.ErrOrStderr(), "display %s: %v\n", m.File, err)
 						return true
 					}
-					if _, err := fmt.Fprintf(w, "%s:%d:%d: %s\n", m.File, line, col, snippet); err != nil {
+					hit := pattern.GrepHit{
+						File:     m.File,
+						Line:     line,
+						Col:      col,
+						Match:    snippet,
+						Captures: pattern.PublicCaptures(m),
+					}
+					if err := enc.Format(w, hit, varNames); err != nil {
 						return false
 					}
 					matchCount++
 					return true
 				},
 			})
+			if endErr := enc.End(w); endErr != nil && err == nil {
+				err = endErr
+			}
 			if err != nil {
 				return errExit{code: 2, err: err}
 			}
@@ -76,6 +118,8 @@ Exit status is 0 if any match, 1 if none, 2 on error.`,
 
 	cmd.Flags().StringVarP(&dir, "dir", "C", ".", "project root")
 	cmd.Flags().StringVarP(&lang, "lang", "l", "", "language filter (empty = all registered languages)")
+	cmd.Flags().BoolVar(&showVars, "vars", false, "with --format=text: print captures under each match as tab-indented name=value")
+	cmd.Flags().StringVar(&format, "format", "text", "output format: text, csv, or jsonl")
 	return cmd
 }
 
