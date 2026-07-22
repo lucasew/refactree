@@ -1429,9 +1429,14 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 			allowed := importAllowedReceivers(content, pkgDirs, ourPkgDirs, ourReceivers, rootDir, result, oldLeaf)
 			// Field renames: also allow range/short-var locals typed from methods
 			// that return []T / T for field receiver T (e.g. for _, rf := range
-			// provider.Resolve(...); rf.AbsPath when renaming ResolvedFile.AbsPath).
+			// provider.Resolve(...); rf.AbsPath when renaming ResolvedFile.AbsPath),
+			// and locals peeled from map/slice of imported T (b := m["k"]; b.Field).
 			if len(fieldReceivers) > 0 {
 				for name := range identsFromImportedFieldReturns(content, ourPkgDirs, fieldReceivers, rootDir, result) {
+					allowed[name] = true
+				}
+				importLocals := importLocalsForPackages(content, ourPkgDirs)
+				for name := range identsFromImportedFieldCollections(content, importLocals, fieldReceivers) {
 					allowed[name] = true
 				}
 			}
@@ -1466,6 +1471,8 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 			// pkg imports our package and Type is a field receiver (not a method).
 			importLocals := importLocalsForPackages(content, ourPkgDirs)
 			edits = appendUnoccupiedAll(edits, occ, findImportedCompositeFieldKeyEdits(rel, content, oldLeaf, newLeaf, fieldReceivers, importLocals))
+			// xs[i].Field / m[k].Field when xs/m is []pkg.T / map[K]pkg.T.
+			edits = appendUnoccupiedAll(edits, occ, findImportedIndexFieldSelectorEdits(rel, content, oldLeaf, newLeaf, importLocals, fieldReceivers))
 		}
 		if inOurPkg {
 			// Interface method decls: do not mark occupied (matches prior behavior).
@@ -1619,6 +1626,329 @@ func identsFromImportedFieldReturns(content []byte, ourPkgDirs, fieldReceivers m
 	}
 	walkRange(pf.Root)
 	return out
+}
+
+// identsFromImportedFieldCollections finds identifiers that hold a field-
+// receiver value via map/slice params and vars of imported T:
+//
+//	func F(m map[string]pkga.Box, xs []pkga.Box) {
+//	  b := m["k"]              // b
+//	  c := xs[0]               // c
+//	  for _, d := range m { …} // d
+//	  for _, e := range xs { …} // e
+//	}
+//
+// Collection names themselves are not added (they are not field-receiver values).
+// Used only for pure field renames (not method leaves).
+func identsFromImportedFieldCollections(content []byte, importLocals, fieldReceivers map[string]bool) map[string]bool {
+	out := map[string]bool{}
+	if len(importLocals) == 0 || len(fieldReceivers) == 0 {
+		return out
+	}
+	pf, err := ingest.ParseSource(content, ".go", "")
+	if err != nil {
+		return out
+	}
+	defer pf.Close()
+
+	rangeSrc := map[string]rangeSourceInfo{}
+	collectImportedFieldCollections(pf.Root, content, importLocals, fieldReceivers, rangeSrc)
+
+	// Short-var / assign from index: b := m["k"] / b := xs[0]
+	var walkAssign func(n *grammar.Node)
+	walkAssign = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		if n.Type() == "short_var_declaration" || n.Type() == "assignment_statement" {
+			left := ingest.ChildByField(n, "left")
+			right := ingest.ChildByField(n, "right")
+			if left != nil && right != nil {
+				names := identListNames(left, content)
+				if len(names) > 0 {
+					if elem, ok := elemTypeFromIndexExpr(right, content, rangeSrc, nil); ok && fieldReceivers[elem] {
+						if names[0] != "" && names[0] != "_" {
+							out[names[0]] = true
+						}
+					}
+				}
+			}
+		}
+		if n.Type() == "var_spec" {
+			// var b = m["k"]
+			namesN := ingest.ChildByField(n, "name")
+			valueN := ingest.ChildByField(n, "value")
+			if namesN != nil && valueN != nil {
+				names := identListNames(namesN, content)
+				if len(names) == 0 {
+					// Some grammars put names as identifier children.
+					for i := uint32(0); i < n.ChildCount(); i++ {
+						c := n.Child(i)
+						if c != nil && c.Type() == "identifier" {
+							// Only names before type/value.
+							if valueN != nil && c.StartByte() >= valueN.StartByte() {
+								continue
+							}
+							if t := ingest.ChildByField(n, "type"); t != nil && c.StartByte() >= t.StartByte() {
+								continue
+							}
+							names = append(names, ingest.NodeText(c, content))
+						}
+					}
+				}
+				if len(names) > 0 {
+					if elem, ok := elemTypeFromIndexExpr(valueN, content, rangeSrc, nil); ok && fieldReceivers[elem] {
+						if names[0] != "" && names[0] != "_" {
+							out[names[0]] = true
+						}
+					}
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walkAssign(n.Child(i))
+		}
+	}
+	walkAssign(pf.Root)
+
+	// Range value vars over those collections.
+	var walkRange func(n *grammar.Node)
+	walkRange = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		if n.Type() == "for_statement" {
+			var bindings []identTypeBinding
+			collectRangeClauseBindings(n, content, &bindings, rangeSrc)
+			for _, b := range bindings {
+				if b.name != "" && b.name != "_" && fieldReceivers[b.typ] {
+					out[b.name] = true
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walkRange(n.Child(i))
+		}
+	}
+	walkRange(pf.Root)
+	return out
+}
+
+// collectImportedFieldCollections records rangeSrc for params and vars typed
+// as map[K]pkg.T / []pkg.T / []*pkg.T (and pointer-to-collection peels).
+func collectImportedFieldCollections(root *grammar.Node, content []byte, importLocals, fieldReceivers map[string]bool, rangeSrc map[string]rangeSourceInfo) {
+	if root == nil || rangeSrc == nil {
+		return
+	}
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		switch n.Type() {
+		case "parameter_declaration", "variadic_parameter_declaration":
+			typ := ingest.ChildByField(n, "type")
+			if info, ok := rangeSourceFromImportedFieldCollectionType(typ, content, importLocals, fieldReceivers); ok {
+				for i := uint32(0); i < n.ChildCount(); i++ {
+					c := n.Child(i)
+					if c == nil || c.Type() != "identifier" {
+						continue
+					}
+					if typ != nil && c.StartByte() >= typ.StartByte() {
+						continue
+					}
+					name := ingest.NodeText(c, content)
+					if name != "" && name != "_" {
+						rangeSrc[name] = info
+					}
+				}
+			}
+		case "var_spec":
+			typ := ingest.ChildByField(n, "type")
+			if info, ok := rangeSourceFromImportedFieldCollectionType(typ, content, importLocals, fieldReceivers); ok {
+				// Names: field "name" expression_list, or identifier children before type.
+				if namesN := ingest.ChildByField(n, "name"); namesN != nil {
+					for _, name := range identListNames(namesN, content) {
+						if name != "" && name != "_" {
+							rangeSrc[name] = info
+						}
+					}
+				} else {
+					for i := uint32(0); i < n.ChildCount(); i++ {
+						c := n.Child(i)
+						if c == nil || c.Type() != "identifier" {
+							continue
+						}
+						if typ != nil && c.StartByte() >= typ.StartByte() {
+							continue
+						}
+						name := ingest.NodeText(c, content)
+						if name != "" && name != "_" {
+							rangeSrc[name] = info
+						}
+					}
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(root)
+}
+
+// rangeSourceFromImportedFieldCollectionType returns range source info when
+// typ is map/slice/array of importLocal.T or *importLocal.T (T in fieldReceivers).
+func rangeSourceFromImportedFieldCollectionType(typ *grammar.Node, content []byte, importLocals, fieldReceivers map[string]bool) (rangeSourceInfo, bool) {
+	if typ == nil {
+		return rangeSourceInfo{}, false
+	}
+	switch typ.Type() {
+	case "map_type":
+		val := ingest.ChildByField(typ, "value")
+		if val == nil {
+			// Fall back: last non-key type-ish child.
+			for i := typ.ChildCount(); i > 0; i-- {
+				c := typ.Child(i - 1)
+				if c == nil {
+					continue
+				}
+				switch c.Type() {
+				case "type_identifier", "qualified_type", "pointer_type", "generic_type", "slice_type", "array_type", "map_type":
+					val = c
+				default:
+					continue
+				}
+				if val != nil {
+					break
+				}
+			}
+		}
+		if elem := importedFieldReceiverLeaf(val, content, importLocals, fieldReceivers); elem != "" {
+			return rangeSourceInfo{elemType: elem, isMap: true}, true
+		}
+	case "slice_type", "array_type":
+		elemN := ingest.ChildByField(typ, "element")
+		if elemN == nil {
+			for i := uint32(0); i < typ.ChildCount(); i++ {
+				c := typ.Child(i)
+				if c == nil {
+					continue
+				}
+				switch c.Type() {
+				case "[", "]", "literal", "int_literal", "identifier":
+					// length / brackets — skip bare identifiers that are only length dims
+					// for array_type; element type is usually type_identifier/qualified.
+					if c.Type() == "identifier" {
+						continue
+					}
+					if c.Type() == "[" || c.Type() == "]" || c.Type() == "int_literal" || c.Type() == "literal" {
+						continue
+					}
+				case "type_identifier", "qualified_type", "pointer_type", "generic_type", "slice_type", "map_type":
+					elemN = c
+				}
+				if elemN != nil {
+					break
+				}
+			}
+			// Second pass: any type-ish child as element.
+			if elemN == nil {
+				for i := uint32(0); i < typ.ChildCount(); i++ {
+					c := typ.Child(i)
+					if c == nil {
+						continue
+					}
+					switch c.Type() {
+					case "type_identifier", "qualified_type", "pointer_type", "generic_type":
+						elemN = c
+					}
+					if elemN != nil {
+						break
+					}
+				}
+			}
+		}
+		if elem := importedFieldReceiverLeaf(elemN, content, importLocals, fieldReceivers); elem != "" {
+			return rangeSourceInfo{elemType: elem, isMap: false, isArray: typ.Type() == "array_type"}, true
+		}
+	case "pointer_type":
+		// *[]T / *map[K]T — peel one pointer level.
+		for i := uint32(0); i < typ.ChildCount(); i++ {
+			if info, ok := rangeSourceFromImportedFieldCollectionType(typ.Child(i), content, importLocals, fieldReceivers); ok {
+				return info, true
+			}
+		}
+	}
+	return rangeSourceInfo{}, false
+}
+
+// importedFieldReceiverLeaf returns T when typ is importLocal.T or *importLocal.T
+// and T is a field receiver; empty otherwise.
+func importedFieldReceiverLeaf(typ *grammar.Node, content []byte, importLocals, fieldReceivers map[string]bool) string {
+	if typ == nil {
+		return ""
+	}
+	if typ.Type() == "pointer_type" {
+		for i := uint32(0); i < typ.ChildCount(); i++ {
+			if t := importedFieldReceiverLeaf(typ.Child(i), content, importLocals, fieldReceivers); t != "" {
+				return t
+			}
+		}
+		return ""
+	}
+	local, name := qualifiedTypeParts(typ, content)
+	if local != "" && importLocals[local] && name != "" && fieldReceivers[name] {
+		return name
+	}
+	return ""
+}
+
+// findImportedIndexFieldSelectorEdits rewrites xs[i].OldLeaf / m[k].OldLeaf when
+// the collection is typed as map/slice of importLocal.FieldRecv (cross-package
+// pure field renames). Identifier receivers are handled via allowed sets.
+func findImportedIndexFieldSelectorEdits(file string, content []byte, oldLeaf, newLeaf string, importLocals, fieldReceivers map[string]bool) []ingest.Edit {
+	if oldLeaf == "" || len(importLocals) == 0 || len(fieldReceivers) == 0 {
+		return nil
+	}
+	pf, err := ingest.ParseSource(content, file, "go")
+	if err != nil {
+		return nil
+	}
+	defer pf.Close()
+
+	rangeSrc := map[string]rangeSourceInfo{}
+	collectImportedFieldCollections(pf.Root, content, importLocals, fieldReceivers, rangeSrc)
+	if len(rangeSrc) == 0 {
+		return nil
+	}
+
+	var edits []ingest.Edit
+	var walk func(n *grammar.Node)
+	walk = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		if n.Type() == "selector_expression" {
+			field := ingest.ChildByField(n, "field")
+			operand := ingest.ChildByField(n, "operand")
+			if field != nil && operand != nil && ingest.NodeText(field, content) == oldLeaf {
+				if elem, ok := elemTypeFromIndexExpr(operand, content, rangeSrc, nil); ok && fieldReceivers[elem] {
+					edits = append(edits, ingest.Edit{
+						File:      file,
+						StartByte: field.StartByte(),
+						EndByte:   field.EndByte(),
+						NewText:   newLeaf,
+					})
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i))
+		}
+	}
+	walk(pf.Root)
+	return edits
 }
 
 // ourMethodsReturningFieldReceivers maps method leaf names declared in our
