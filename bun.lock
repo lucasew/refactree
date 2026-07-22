@@ -1,5 +1,6 @@
 {
   "lockfileVersion": 1,
+  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "refactree-web",
@@ -19,7 +20,7 @@
         "@vitejs/plugin-react": "^4.3.4",
         "babel-plugin-relay": "^18.2.0",
         "daisyui": "^5.7.0",
-        "relay-compiler": "^18.2.0",
+        "relay-compiler": "^19.0.0",
         "tailwindcss": "^4.3.3",
         "typescript": "^5.7.2",
         "vite": "^6.0.0",
@@ -462,7 +463,7 @@
 
     "react-relay": ["react-relay@18.2.0", "", { "dependencies": { "@babel/runtime": "^7.25.0", "fbjs": "^3.0.2", "invariant": "^2.2.4", "nullthrows": "^1.1.1", "relay-runtime": "18.2.0" }, "peerDependencies": { "react": "^16.9.0 || ^17 || ^18" } }, "sha512-/yHlv4pj3IQQPtDzYLfVk6P4wrOSvYPu/5ySPcRp4xV3pn9xoVOHVczSLcZkRVf72lJu8CIjoT8rn3roaGoFyQ=="],
 
-    "relay-compiler": ["relay-compiler@18.2.0", "", { "bin": { "relay-compiler": "cli.js" } }, "sha512-P3o5/Gv/oLC9hckUaz/a+KvDgbFERpjtz5lgsJSIQILg9paaF3k1yaX9qSxErGuU4icZvjoK5G82a/bfPgGZpA=="],
+    "relay-compiler": ["relay-compiler@19.0.0", "", { "bin": { "relay-compiler": "cli.js" } }, "sha512-DwyNWPUkzdggT3oBuNTS18bL6KCU3Sg/oSW/q+pqOQNHLo+RUZOWAx44ALy5XoBrsXjQVBr0EiNqJ4A8G1skOw=="],
 
     "relay-runtime": ["relay-runtime@18.2.0", "", { "dependencies": { "@babel/runtime": "^7.25.0", "fbjs": "^3.0.2", "invariant": "^2.2.4" } }, "sha512-r4FYWlx1dPwFW+KQnuF1ugwVKR4toIFduCGheEf2paRc6nEEcCIgd2p2Jx2gRF+4niO3mCbRZvqdCoKaznUDzg=="],
 
