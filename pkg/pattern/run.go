@@ -28,12 +28,12 @@ type StreamOptions struct {
 	Paths []string
 
 	// OnMatch is invoked for each match as soon as its file is processed.
-	// Return false to stop the walk early.
-	OnMatch func(Match) bool
+	// source is that file's bytes (for Capture.Text). Return false to stop early.
+	OnMatch func(m Match, source []byte) bool
 
 	// OnFile is invoked after a file is matched (and, for rewrite, after its edits
-	// are computed). Return false to stop.
-	OnFile func(rel string, matches []Match, fileEdits []ingest.Edit) bool
+	// are computed). source is that file's bytes. Return false to stop.
+	OnFile func(rel string, matches []Match, fileEdits []ingest.Edit, source []byte) bool
 }
 
 // OpFromCLI builds an Op from grep/rewrite argv strings.
@@ -69,11 +69,11 @@ func RunWithOptions(root string, op Op, opts RunOptions) (RunResult, error) {
 	var out RunResult
 	err := Stream(root, op, StreamOptions{
 		Paths: opts.Paths,
-		OnMatch: func(m Match) bool {
+		OnMatch: func(m Match, _ []byte) bool {
 			out.Matches = append(out.Matches, m)
 			return true
 		},
-		OnFile: func(rel string, matches []Match, fileEdits []ingest.Edit) bool {
+		OnFile: func(rel string, matches []Match, fileEdits []ingest.Edit, _ []byte) bool {
 			if len(fileEdits) > 0 {
 				out.Edits = append(out.Edits, fileEdits...)
 			}
@@ -152,7 +152,7 @@ func Stream(root string, op Op, opts StreamOptions) error {
 		}
 
 		for _, m := range ms {
-			if opts.OnMatch != nil && !opts.OnMatch(m) {
+			if opts.OnMatch != nil && !opts.OnMatch(m, source) {
 				stop = true
 				return nil
 			}
@@ -160,12 +160,12 @@ func Stream(root string, op Op, opts StreamOptions) error {
 
 		var fileEdits []ingest.Edit
 		if op.Mode == "rewrite" && len(ms) > 0 {
-			fileEdits, err = EditsForMatches(ms, *op.ReplacementIR)
+			fileEdits, err = EditsForMatches(ms, *op.ReplacementIR, source)
 			if err != nil {
 				return err
 			}
 		}
-		if opts.OnFile != nil && !opts.OnFile(rel, ms, fileEdits) {
+		if opts.OnFile != nil && !opts.OnFile(rel, ms, fileEdits, source) {
 			stop = true
 			return nil
 		}
@@ -187,11 +187,11 @@ func ApplyWithOptions(root string, op Op, opts RunOptions) (RunResult, error) {
 	var applyErr error
 	err := Stream(root, op, StreamOptions{
 		Paths: opts.Paths,
-		OnMatch: func(m Match) bool {
+		OnMatch: func(m Match, _ []byte) bool {
 			out.Matches = append(out.Matches, m)
 			return true
 		},
-		OnFile: func(rel string, matches []Match, fileEdits []ingest.Edit) bool {
+		OnFile: func(rel string, matches []Match, fileEdits []ingest.Edit, _ []byte) bool {
 			if len(fileEdits) == 0 {
 				return true
 			}

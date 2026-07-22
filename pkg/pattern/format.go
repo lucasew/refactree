@@ -110,7 +110,10 @@ func (f *csvFormatter) Format(w io.Writer, hit GrepHit, captureNames []string) e
 		fmt.Sprintf("%d", hit.Col),
 		hit.Match,
 	}
-	row = append(row, CaptureValues(captureNames, Match{Captures: hit.Captures})...)
+	// hit.Captures is already display text (PublicCaptures).
+	for _, name := range captureNames {
+		row = append(row, hit.Captures[name])
+	}
 	if err := f.cw.Write(row); err != nil {
 		return err
 	}

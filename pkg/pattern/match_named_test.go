@@ -5,12 +5,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/lucasew/refactree/pkg/ingest"
 	_ "github.com/lucasew/refactree/pkg/ingest/go"
 )
 
 func TestNamedRegexCaptures(t *testing.T) {
-	// Write a tiny file with TestFoo
 	dir := t.TempDir()
 	src := []byte("package p\n\nfunc TestFoo(t *testing.T) {}\n")
 	path := filepath.Join(dir, "x_test.go")
@@ -21,31 +19,19 @@ func TestNamedRegexCaptures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pf, err := ingest.ParseSourceFile(path, "go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pf.Close()
-	result, err := ingest.MaterializeSource(ingest.ExtractSource{
-		Kind: ingest.ExtractHop, Root: dir, Paths: []string{path},
-	}, ingest.MaterializeOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ms, err := MatchFile(dir, "x_test.go", src, pf.Root, pat, result)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ms := mustMatchFile(t, dir, path, "x_test.go", src, pat)
 	if len(ms) != 1 {
-		t.Fatalf("matches=%d want 1", len(ms))
+		t.Fatalf("matches=%d", len(ms))
 	}
-	// $name = full token
-	if got := ms[0].Captures["name"]; got != "TestFoo" {
-		// group covering node might be just TestFoo
-		t.Logf("name=%q caps=%v", got, ms[0].Captures)
+	if got := ms[0].Captures["name"].Text(src); got != "TestFoo" {
+		t.Logf("name=%q caps=%v", got, PublicCaptures(ms[0], src))
 	}
-	if got := ms[0].Captures["rest"]; got != "Foo" {
-		t.Fatalf("rest=%q want Foo; caps=%v", got, ms[0].Captures)
+	rest := ms[0].Captures["rest"]
+	if got := rest.Text(src); got != "Foo" {
+		t.Fatalf("rest=%q want Foo", got)
+	}
+	if got := string(src[rest.StartByte:rest.EndByte]); got != "Foo" {
+		t.Fatalf("rest span text=%q want Foo [%d:%d]", got, rest.StartByte, rest.EndByte)
 	}
 }
 
@@ -75,33 +61,23 @@ func Helper() {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pf, err := ingest.ParseSourceFile(path, "go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pf.Close()
-	result, err := ingest.MaterializeSource(ingest.ExtractSource{
-		Kind: ingest.ExtractHop, Root: dir, Paths: []string{path},
-	}, ingest.MaterializeOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ms, err := MatchFile(dir, "x_test.go", src, pf.Root, pat, result)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ms := mustMatchFile(t, dir, path, "x_test.go", src, pat)
 	if len(ms) != 1 {
-		t.Fatalf("matches=%d want 1; caps=%v", len(ms), capsOf(ms))
+		t.Fatalf("matches=%d want 1; caps=%v", len(ms), capsOf(ms, src))
 	}
-	if got := ms[0].Captures["c"]; got != "context.Background" {
-		t.Fatalf("c=%q want context.Background; caps=%v", got, ms[0].Captures)
+	c := ms[0].Captures["c"]
+	if got := c.Text(src); got != "context.Background" {
+		t.Fatalf("c=%q want context.Background", got)
+	}
+	if got := string(src[c.StartByte:c.EndByte]); got != "context.Background" {
+		t.Fatalf("c span text=%q", got)
 	}
 }
 
-func capsOf(ms []Match) []map[string]string {
+func capsOf(ms []Match, src []byte) []map[string]string {
 	out := make([]map[string]string, len(ms))
 	for i, m := range ms {
-		out[i] = m.Captures
+		out[i] = PublicCaptures(m, src)
 	}
 	return out
 }

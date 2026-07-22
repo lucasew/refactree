@@ -12,16 +12,33 @@ import (
 	"github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar"
 )
 
+// Capture is one bound pattern variable as a half-open UTF-8 byte range.
+// Offsets match tree-sitter StartByte/EndByte (not rune indexes). A bind is
+// only recorded when the range is known. Read text with Text(src) using the
+// same []byte buffer that was matched.
+type Capture struct {
+	StartByte uint32
+	EndByte   uint32
+}
+
+// Text returns src[StartByte:EndByte]. src must be the UTF-8 file bytes used
+// for matching; offsets are byte indexes, so []rune would disagree with
+// tree-sitter and must not be used here.
+func (c Capture) Text(src []byte) string {
+	if src == nil || c.EndByte > uint32(len(src)) || c.StartByte > c.EndByte {
+		return ""
+	}
+	return string(src[c.StartByte:c.EndByte])
+}
+
 // Match is one successful pattern match in a file.
+// It does not retain file contents; pass the file []byte at the call site
+// (Stream OnMatch/OnFile, Capture.Text, PublicCaptures, Instantiate).
 type Match struct {
 	File      string
 	StartByte uint32
 	EndByte   uint32
-	Captures  map[string]string
-	// emitQuoted: when true and no emitOverride, re-quote Captures[name] as string lit.
-	emitQuoted map[string]bool
-	// emitOverride: rewrite text for a capture (e.g. strip via regex group; full token still in Captures).
-	emitOverride map[string]string
+	Captures  map[string]Capture
 }
 
 type span struct{ start, end uint32 }
@@ -113,9 +130,7 @@ func flattenPattern(pat Node) []Node {
 }
 
 func matchSeq(tokens []tok, startIdx int, seq []Node, source []byte, root *grammar.Node) (Match, int, bool, error) {
-	caps := map[string]string{}
-	quoted := map[string]bool{}
-	override := map[string]string{}
+	caps := map[string]Capture{}
 	pos := startIdx
 	if pos >= len(tokens) || len(seq) == 0 {
 		return Match{}, startIdx, false, nil
@@ -129,12 +144,12 @@ func matchSeq(tokens []tok, startIdx int, seq []Node, source []byte, root *gramm
 
 		if step.Kind == "rest" {
 			after := seq[si+1:]
-			j, next, restText, ok, err := findRest(tokens, pos, after, caps, quoted, override, source, root)
+			j, next, restStart, restEnd, ok, err := findRest(tokens, pos, after, caps, source, root)
 			if err != nil || !ok {
 				return Match{}, startIdx, false, err
 			}
 			if step.As != "" && step.As != "_" {
-				caps[step.As] = restText
+				bindCapture(caps, step.As, restStart, restEnd)
 			}
 			if j > pos {
 				matchEnd = tokens[j-1].end
@@ -151,7 +166,7 @@ func matchSeq(tokens []tok, startIdx int, seq []Node, source []byte, root *gramm
 			return Match{}, startIdx, false, nil
 		}
 
-		ok, advance, err := matchStep(tokens, pos, step, caps, quoted, override, source, root)
+		ok, advance, err := matchStep(tokens, pos, step, caps, source, root)
 		if err != nil || !ok {
 			return Match{}, startIdx, false, err
 		}
@@ -173,53 +188,51 @@ func matchSeq(tokens []tok, startIdx int, seq []Node, source []byte, root *gramm
 	}
 
 	return Match{
-		StartByte:    matchStart,
-		EndByte:      matchEnd,
-		Captures:     caps,
-		emitQuoted:   quoted,
-		emitOverride: override,
+		StartByte: matchStart,
+		EndByte:   matchEnd,
+		Captures:  caps,
 	}, pos, true, nil
 }
 
-func findRest(tokens []tok, pos int, after []Node, caps map[string]string, quoted map[string]bool, override map[string]string, source []byte, root *grammar.Node) (restEndIdx, next int, restText string, ok bool, err error) {
+func findRest(tokens []tok, pos int, after []Node, caps map[string]Capture, source []byte, root *grammar.Node) (restEndIdx, next int, restStart, restEnd uint32, ok bool, err error) {
 	if len(after) == 0 {
 		if pos < len(tokens) {
-			return len(tokens), len(tokens), string(source[tokens[pos].start:tokens[len(tokens)-1].end]), true, nil
+			rs, re := tokens[pos].start, tokens[len(tokens)-1].end
+			return len(tokens), len(tokens), rs, re, true, nil
 		}
-		return pos, pos, "", true, nil
+		// Empty rest at EOF: zero-width at end of previous token when possible.
+		var z uint32
+		if pos > 0 && pos-1 < len(tokens) {
+			z = tokens[pos-1].end
+		}
+		return pos, pos, z, z, true, nil
 	}
 	for j := pos; j <= len(tokens); j++ {
-		// Save and try
-		c2 := cloneStr(caps)
-		q2 := cloneBool(quoted)
-		o2 := cloneStr(override)
-		_, next, ok, err := matchSeqFrom(tokens, j, after, c2, q2, o2, source, root)
+		c2 := cloneCaptures(caps)
+		_, next, ok, err := matchSeqFrom(tokens, j, after, c2, source, root)
 		if err != nil {
-			return 0, 0, "", false, err
+			return 0, 0, 0, 0, false, err
 		}
 		if !ok {
 			continue
 		}
-		// commit
 		for k, v := range c2 {
 			caps[k] = v
 		}
-		for k, v := range q2 {
-			quoted[k] = v
-		}
-		for k, v := range o2 {
-			override[k] = v
-		}
-		rt := ""
+		var rs, re uint32
 		if j > pos {
-			rt = string(source[tokens[pos].start:tokens[j-1].end])
+			rs, re = tokens[pos].start, tokens[j-1].end
+		} else if pos < len(tokens) {
+			rs, re = tokens[pos].start, tokens[pos].start
+		} else if pos > 0 {
+			rs, re = tokens[pos-1].end, tokens[pos-1].end
 		}
-		return j, next, rt, true, nil
+		return j, next, rs, re, true, nil
 	}
-	return 0, 0, "", false, nil
+	return 0, 0, 0, 0, false, nil
 }
 
-func matchSeqFrom(tokens []tok, startIdx int, seq []Node, caps map[string]string, quoted map[string]bool, override map[string]string, source []byte, root *grammar.Node) (Match, int, bool, error) {
+func matchSeqFrom(tokens []tok, startIdx int, seq []Node, caps map[string]Capture, source []byte, root *grammar.Node) (Match, int, bool, error) {
 	pos := startIdx
 	matchStart, matchEnd := uint32(0), uint32(0)
 	if pos < len(tokens) {
@@ -230,12 +243,12 @@ func matchSeqFrom(tokens []tok, startIdx int, seq []Node, caps map[string]string
 		// Multi-$$$_: rest may appear more than once; recurse via findRest.
 		if step.Kind == "rest" {
 			after := seq[si+1:]
-			j, next, restText, ok, err := findRest(tokens, pos, after, caps, quoted, override, source, root)
+			j, next, restStart, restEnd, ok, err := findRest(tokens, pos, after, caps, source, root)
 			if err != nil || !ok {
 				return Match{}, startIdx, false, err
 			}
 			if step.As != "" && step.As != "_" {
-				caps[step.As] = restText
+				bindCapture(caps, step.As, restStart, restEnd)
 			}
 			if j > pos {
 				matchEnd = tokens[j-1].end
@@ -243,7 +256,7 @@ func matchSeqFrom(tokens []tok, startIdx int, seq []Node, caps map[string]string
 			if next > startIdx && next <= len(tokens) {
 				matchEnd = tokens[next-1].end
 			}
-			return Match{StartByte: matchStart, EndByte: matchEnd}, next, true, nil
+			return Match{StartByte: matchStart, EndByte: matchEnd, Captures: caps}, next, true, nil
 		}
 		for pos < len(tokens) && isSpaceText(tokens[pos].text) {
 			pos++
@@ -251,14 +264,14 @@ func matchSeqFrom(tokens []tok, startIdx int, seq []Node, caps map[string]string
 		if pos >= len(tokens) {
 			return Match{}, startIdx, false, nil
 		}
-		ok, advance, err := matchStep(tokens, pos, step, caps, quoted, override, source, root)
+		ok, advance, err := matchStep(tokens, pos, step, caps, source, root)
 		if err != nil || !ok {
 			return Match{}, startIdx, false, err
 		}
 		matchEnd = tokens[pos+advance-1].end
 		pos += advance
 	}
-	return Match{StartByte: matchStart, EndByte: matchEnd}, pos, true, nil
+	return Match{StartByte: matchStart, EndByte: matchEnd, Captures: caps}, pos, true, nil
 }
 
 func looksLikeCallSeq(seq []Node) bool {
@@ -270,7 +283,7 @@ func looksLikeCallSeq(seq []Node) bool {
 	return false
 }
 
-func matchStep(tokens []tok, pos int, step Node, caps map[string]string, quoted map[string]bool, override map[string]string, source []byte, root *grammar.Node) (bool, int, error) {
+func matchStep(tokens []tok, pos int, step Node, caps map[string]Capture, source []byte, root *grammar.Node) (bool, int, error) {
 	if pos >= len(tokens) {
 		return false, 0, nil
 	}
@@ -279,22 +292,13 @@ func matchStep(tokens []tok, pos int, step Node, caps map[string]string, quoted 
 	switch step.Kind {
 	case "group":
 		inner := flattenPattern(*step.Callee)
-		// match inner sequence starting at pos
-		c2 := cloneStr(caps)
-		q2 := cloneBool(quoted)
-		o2 := cloneStr(override)
-		m, next, ok, err := matchSeqFrom(tokens, pos, inner, c2, q2, o2, source, root)
+		c2 := cloneCaptures(caps)
+		m, next, ok, err := matchSeqFrom(tokens, pos, inner, c2, source, root)
 		if err != nil || !ok {
 			return false, 0, err
 		}
 		for k, v := range c2 {
 			caps[k] = v
-		}
-		for k, v := range q2 {
-			quoted[k] = v
-		}
-		for k, v := range o2 {
-			override[k] = v
 		}
 		start, end := m.StartByte, m.EndByte
 		// fix: matchSeqFrom doesn't set start well — use tokens
@@ -306,7 +310,7 @@ func matchStep(tokens []tok, pos int, step Node, caps map[string]string, quoted 
 			start, end = n.StartByte(), n.EndByte()
 		}
 		if step.As != "" {
-			caps[step.As] = string(source[start:end])
+			bindCapture(caps, step.As, start, end)
 		}
 		return true, next - pos, nil
 
@@ -315,7 +319,7 @@ func matchStep(tokens []tok, pos int, step Node, caps map[string]string, quoted 
 			return false, 0, nil
 		}
 		if step.As != "" {
-			caps[step.As] = t.text
+			bindCapture(caps, step.As, t.start, t.end)
 		}
 		return true, 1, nil
 
@@ -324,25 +328,21 @@ func matchStep(tokens []tok, pos int, step Node, caps map[string]string, quoted 
 			return false, 0, nil
 		}
 		if step.As != "" {
-			caps[step.As] = selectorText(tokens, pos)
+			ss, se := selectorSpan(tokens, pos)
+			bindCapture(caps, step.As, ss, se)
 		}
 		return true, 1, nil
 
 	case "capture":
 		if step.As != "" {
-			caps[step.As] = t.text
+			bindCapture(caps, step.As, t.start, t.end)
 		}
 		return true, 1, nil
 
 	case "string":
 		// /regex/ and "equals" apply to token text. For quoted string lits, match
 		// against unquoted content; for idents (e.g. TestFoo), match raw text.
-		content := t.text
-		uqOK := false
-		if uq, ok := unquoteLiteral(t.text); ok {
-			content = uq
-			uqOK = true
-		}
+		content, srcOf, closeOff, _ := tokenContentMap(t.text)
 		if step.Equals != "" {
 			if content != step.Equals {
 				return false, 0, nil
@@ -353,32 +353,38 @@ func matchStep(tokens []tok, pos int, step Node, caps map[string]string, quoted 
 			if err != nil {
 				return false, 0, err
 			}
-			m := re.FindStringSubmatch(content)
-			if m == nil {
+			idx := re.FindStringSubmatchIndex(content)
+			if idx == nil {
 				return false, 0, nil
 			}
-			// Named groups (?P<rest>…) become extra captures (e.g. $rest).
-			// The outer $name still holds the full token text.
-			bindNamedGroups(caps, re, m)
+			// Named groups require a mapped source range; skip the name if unmappable
+			// (should not happen for normal tokens). Outer $name always gets a span.
+			if !bindNamedGroups(caps, re, idx, t.start, srcOf, closeOff) {
+				return false, 0, nil
+			}
 			if step.As != "" {
-				// Full token in Captures (lock A for string lits)
-				caps[step.As] = t.text
-				if uqOK {
-					quoted[step.As] = true
-					// Fixture stretch: group 1 as emit override on the same name
-					// when no named group is used (A1-style strip).
-					if step.CaptureGroup > 0 && step.CaptureGroup < len(m) && !hasNamedGroup(re) {
-						override[step.As] = quoteString(m[step.CaptureGroup])
+				// CaptureGroup N (unnamed groups only): bind outer name to that
+				// group's source range (A1 strip = re-emit the group span, often
+				// with quotes supplied by the template / string IR node).
+				// Otherwise bind the full token.
+				start, end := t.start, t.end
+				if step.CaptureGroup > 0 && !hasNamedGroup(re) {
+					gi := step.CaptureGroup
+					if 2*gi+1 >= len(idx) || idx[2*gi] < 0 {
+						return false, 0, nil
 					}
+					ss, se, ok := contentSpanToSource(t.start, srcOf, closeOff, idx[2*gi], idx[2*gi+1])
+					if !ok {
+						return false, 0, nil
+					}
+					start, end = ss, se
 				}
+				bindCapture(caps, step.As, start, end)
 			}
 			return true, 1, nil
 		}
 		if step.As != "" {
-			caps[step.As] = t.text
-			if uqOK {
-				quoted[step.As] = true
-			}
+			bindCapture(caps, step.As, t.start, t.end)
 		}
 		return true, 1, nil
 
@@ -387,16 +393,33 @@ func matchStep(tokens []tok, pos int, step Node, caps map[string]string, quoted 
 	}
 }
 
-// bindNamedGroups sets caps[name] for each (?P<name>…) subexpression.
-// Group 0 is the whole match and is skipped (no name). Empty names are skipped.
-func bindNamedGroups(caps map[string]string, re *regexp.Regexp, sub []string) {
+func bindCapture(caps map[string]Capture, name string, start, end uint32) {
+	if name == "" {
+		return
+	}
+	caps[name] = Capture{StartByte: start, EndByte: end}
+}
+
+// bindNamedGroups binds each (?P<name>…) subexpression to its source span.
+// Unmatched groups (-1) and empty names are skipped. Returns false if a named
+// group matched in content but could not be mapped to trustworthy source offsets.
+func bindNamedGroups(caps map[string]Capture, re *regexp.Regexp, idx []int, tokenStart uint32, srcOf []int, closeOff int) bool {
 	names := re.SubexpNames()
 	for i, name := range names {
-		if i == 0 || name == "" || i >= len(sub) {
+		if i == 0 || name == "" {
 			continue
 		}
-		caps[name] = sub[i]
+		if 2*i+1 >= len(idx) || idx[2*i] < 0 {
+			continue
+		}
+		cs, ce := idx[2*i], idx[2*i+1]
+		ss, se, ok := contentSpanToSource(tokenStart, srcOf, closeOff, cs, ce)
+		if !ok {
+			return false
+		}
+		bindCapture(caps, name, ss, se)
 	}
+	return true
 }
 
 func hasNamedGroup(re *regexp.Regexp) bool {
@@ -428,24 +451,17 @@ func quoteString(s string) string {
 	return b.String()
 }
 
-func selectorText(tokens []tok, pos int) string {
-	start := pos
-	for start >= 2 && tokens[start-1].text == "." {
-		start -= 2
-	}
-	var b strings.Builder
-	for i := start; i <= pos; i++ {
-		b.WriteString(tokens[i].text)
-	}
-	return b.String()
+func selectorStart(tokens []tok, pos int) uint32 {
+	ss, _ := selectorSpan(tokens, pos)
+	return ss
 }
 
-func selectorStart(tokens []tok, pos int) uint32 {
-	start := pos
-	for start >= 2 && tokens[start-1].text == "." {
-		start -= 2
+func selectorSpan(tokens []tok, pos int) (start, end uint32) {
+	i := pos
+	for i >= 2 && tokens[i-1].text == "." {
+		i -= 2
 	}
-	return tokens[start].start
+	return tokens[i].start, tokens[pos].end
 }
 
 func coveringNode(root *grammar.Node, start, end uint32) *grammar.Node {
@@ -577,49 +593,112 @@ func isSpaceText(s string) bool {
 	return s != ""
 }
 
-func unquoteLiteral(raw string) (string, bool) {
+// tokenContentMap returns the match surface for a token (unquoted content for
+// string lits, raw text otherwise), a per-content-byte map into raw token
+// offsets, the exclusive raw offset of the content end (closing quote index for
+// strings, len(raw) for bare tokens), and whether the token was a string lit.
+func tokenContentMap(raw string) (content string, srcOf []int, closeOff int, quoted bool) {
+	if content, srcOf, closeOff, ok := unquoteLiteralMap(raw); ok {
+		return content, srcOf, closeOff, true
+	}
+	srcOf = make([]int, len(raw))
+	for i := range raw {
+		srcOf[i] = i
+	}
+	return raw, srcOf, len(raw), false
+}
+
+// unquoteLiteralMap unquotes a string token and records, for each content byte,
+// the starting raw offset of the source bytes that produced it. closeOff is the
+// raw index of the closing quote (exclusive end of content in the token).
+func unquoteLiteralMap(raw string) (content string, srcOf []int, closeOff int, ok bool) {
 	if len(raw) < 2 {
-		return "", false
+		return "", nil, 0, false
 	}
 	q := raw[0]
 	if (q != '"' && q != '\'' && q != '`') || raw[len(raw)-1] != q {
-		return "", false
+		return "", nil, 0, false
 	}
-	inner := raw[1 : len(raw)-1]
+	closeOff = len(raw) - 1
 	if q == '`' {
-		return inner, true
+		inner := raw[1:closeOff]
+		srcOf = make([]int, len(inner))
+		for i := range inner {
+			srcOf[i] = 1 + i
+		}
+		return inner, srcOf, closeOff, true
 	}
 	var b strings.Builder
-	for i := 0; i < len(inner); i++ {
-		if inner[i] == '\\' && i+1 < len(inner) {
+	i := 1
+	for i < closeOff {
+		if raw[i] == '\\' && i+1 < closeOff {
+			escStart := i
 			i++
-			switch inner[i] {
+			switch raw[i] {
 			case 'n':
 				b.WriteByte('\n')
+				srcOf = append(srcOf, escStart)
 			case 't':
 				b.WriteByte('\t')
+				srcOf = append(srcOf, escStart)
 			case '\\', '"', '\'':
-				b.WriteByte(inner[i])
+				b.WriteByte(raw[i])
+				srcOf = append(srcOf, escStart)
 			default:
+				// Preserve unknown escapes as two content bytes, both mapped.
 				b.WriteByte('\\')
-				b.WriteByte(inner[i])
+				srcOf = append(srcOf, escStart)
+				b.WriteByte(raw[i])
+				srcOf = append(srcOf, i)
 			}
+			i++
 			continue
 		}
-		b.WriteByte(inner[i])
+		srcOf = append(srcOf, i)
+		b.WriteByte(raw[i])
+		i++
 	}
-	return b.String(), true
+	return b.String(), srcOf, closeOff, true
 }
 
-func cloneStr(m map[string]string) map[string]string {
-	o := make(map[string]string, len(m))
-	for k, v := range m {
-		o[k] = v
-	}
-	return o
+// unquoteLiteral is the content-only helper (no offset map).
+func unquoteLiteral(raw string) (string, bool) {
+	content, _, _, ok := unquoteLiteralMap(raw)
+	return content, ok
 }
-func cloneBool(m map[string]bool) map[string]bool {
-	o := make(map[string]bool, len(m))
+
+// contentSpanToSource maps a half-open range in unquoted/raw content into
+// absolute source offsets using srcOf (content byte → raw token offset) and
+// tokenStart. closeOff is the exclusive raw end of content (closing quote or
+// len(token)). Returns ok=false when the content range is out of bounds.
+func contentSpanToSource(tokenStart uint32, srcOf []int, closeOff, cs, ce int) (start, end uint32, ok bool) {
+	if cs < 0 || ce < cs || ce > len(srcOf) {
+		return 0, 0, false
+	}
+	if cs == ce {
+		// Empty match: zero-width at cs (or at content end before closeOff).
+		if cs < len(srcOf) {
+			s := tokenStart + uint32(srcOf[cs])
+			return s, s, true
+		}
+		s := tokenStart + uint32(closeOff)
+		return s, s, true
+	}
+	start = tokenStart + uint32(srcOf[cs])
+	if ce < len(srcOf) {
+		// Exclusive end is the start of the next content byte's source.
+		end = tokenStart + uint32(srcOf[ce])
+	} else {
+		end = tokenStart + uint32(closeOff)
+	}
+	if end < start {
+		return 0, 0, false
+	}
+	return start, end, true
+}
+
+func cloneCaptures(m map[string]Capture) map[string]Capture {
+	o := make(map[string]Capture, len(m))
 	for k, v := range m {
 		o[k] = v
 	}

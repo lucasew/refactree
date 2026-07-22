@@ -3,7 +3,7 @@
   "lang": "go",
   "description": "A1: strip leading \"failed to \" from fmt.Errorf format strings via capture group",
   "pattern": "$F:@go:fmt::Errorf($MSG:/(?i)^failed to\\s+(.*)/, $ERR)",
-  "replacement": "$F($MSG, $ERR)",
+  "replacement": "$F(\"$MSG\", $ERR)",
   "pattern_ir": {
     "kind": "call",
     "as": "ROOT",
@@ -44,8 +44,8 @@
   },
   "notes": [
     "pattern/replacement are CLI strings; pattern_ir/replacement_ir are fixture truth.",
-    "$MSG:/(?i)^failed to\\s+(.*)/ matches the format literal; capture_group 1 rebinds $MSG to the suffix (\"open image: %w\").",
-    "replacement $F($MSG, $ERR) re-emits that suffix as the new string literal — \"failed to \" is matched out, not hardcoded away.",
+    "$MSG:/(?i)^failed to\\s+(.*)/ matches the format literal; capture_group 1 binds $MSG to the suffix source range (open image: %w, no quotes).",
+    "CLI replacement $F(\"$MSG\", $ERR) re-quotes that span; replacement_ir string/from_capture also quotes non-lit spans.",
     "ok() has no failed-to prefix — must stay unchanged."
   ]
 }

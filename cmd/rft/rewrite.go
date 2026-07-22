@@ -93,7 +93,7 @@ via regex with a capture group re-emit the group text as a string literal.`,
 			editCount := 0
 			err = pattern.Stream(root, op, pattern.StreamOptions{
 				Paths: paths,
-				OnFile: func(rel string, matches []pattern.Match, fileEdits []ingest.Edit) bool {
+				OnFile: func(rel string, matches []pattern.Match, fileEdits []ingest.Edit, _ []byte) bool {
 					if len(fileEdits) == 0 {
 						return true
 					}

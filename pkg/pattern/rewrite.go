@@ -10,19 +10,27 @@ import (
 )
 
 // Instantiate builds replacement text from a template node or call-shaped emit IR.
-func Instantiate(repl Node, m Match) (string, error) {
+// source is the file content that produced m (for Capture.Text).
+func Instantiate(repl Node, m Match, source []byte) (string, error) {
 	switch repl.Kind {
 	case "template":
-		return expandTemplate(repl.Text, m)
+		return expandTemplate(repl.Text, m, source)
 	case "call":
-		return instantiateCall(repl, m)
+		return instantiateCall(repl, m, source)
 	case "token", "type_token", "lit":
 		return repl.Text, nil
 	case "capture", "ref":
-		return captureText(m, repl.As), nil
+		return captureText(m, repl.As, source), nil
 	case "string":
 		if repl.FromCapture != "" {
-			return captureText(m, repl.FromCapture), nil
+			v := captureText(m, repl.FromCapture, source)
+			// String IR holes always emit a string literal. If the capture is
+			// already quoted source, keep it; otherwise quote the raw span text
+			// (A1: CaptureGroup binds the unquoted interior).
+			if _, ok := unquoteLiteral(v); ok {
+				return v, nil
+			}
+			return quoteString(v), nil
 		}
 		if repl.Equals != "" {
 			return quoteString(repl.Equals), nil
@@ -31,27 +39,20 @@ func Instantiate(repl Node, m Match) (string, error) {
 	default:
 		// Fallback: if Text looks like a template
 		if repl.Text != "" {
-			return expandTemplate(repl.Text, m)
+			return expandTemplate(repl.Text, m, source)
 		}
 		return "", fmt.Errorf("replacement: unsupported kind %q", repl.Kind)
 	}
 }
 
-func captureText(m Match, name string) string {
-	if name == "" {
+func captureText(m Match, name string, source []byte) string {
+	if name == "" || m.Captures == nil {
 		return ""
 	}
-	if m.emitOverride != nil {
-		if v, ok := m.emitOverride[name]; ok {
-			return v
-		}
-	}
-	v := m.Captures[name]
-	// Captures for strings already include quotes when from string holes.
-	return v
+	return m.Captures[name].Text(source)
 }
 
-func expandTemplate(tmpl string, m Match) (string, error) {
+func expandTemplate(tmpl string, m Match, source []byte) (string, error) {
 	var b strings.Builder
 	i := 0
 	for i < len(tmpl) {
@@ -70,7 +71,7 @@ func expandTemplate(tmpl string, m Match) (string, error) {
 				b.WriteByte('$')
 				continue
 			}
-			b.WriteString(captureText(m, name))
+			b.WriteString(captureText(m, name, source))
 			continue
 		}
 		b.WriteByte(tmpl[i])
@@ -79,27 +80,27 @@ func expandTemplate(tmpl string, m Match) (string, error) {
 	return b.String(), nil
 }
 
-func instantiateCall(n Node, m Match) (string, error) {
+func instantiateCall(n Node, m Match, source []byte) (string, error) {
 	if n.Callee == nil {
 		return "", fmt.Errorf("call replacement missing callee")
 	}
-	fn, err := Instantiate(*n.Callee, m)
+	fn, err := Instantiate(*n.Callee, m, source)
 	if err != nil {
 		return "", err
 	}
 	// If callee is capture/ref, Instantiate handles it
 	if n.Callee.Kind == "capture" || n.Callee.Kind == "ref" {
-		fn = captureText(m, n.Callee.As)
+		fn = captureText(m, n.Callee.As, source)
 	}
 	var parts []string
 	for _, a := range n.Args {
 		if a.Kind == "rest" {
-			if v := m.Captures[a.As]; v != "" {
+			if v := captureText(m, a.As, source); v != "" {
 				parts = append(parts, v)
 			}
 			continue
 		}
-		p, err := Instantiate(a, m)
+		p, err := Instantiate(a, m, source)
 		if err != nil {
 			return "", err
 		}
@@ -109,10 +110,11 @@ func instantiateCall(n Node, m Match) (string, error) {
 }
 
 // EditsForMatches turns matches + replacement into ingest.Edit values.
-func EditsForMatches(matches []Match, repl Node) ([]ingest.Edit, error) {
+// source is the file content for all matches (one file per call).
+func EditsForMatches(matches []Match, repl Node, source []byte) ([]ingest.Edit, error) {
 	var edits []ingest.Edit
 	for _, m := range matches {
-		text, err := Instantiate(repl, m)
+		text, err := Instantiate(repl, m, source)
 		if err != nil {
 			return nil, err
 		}

@@ -64,25 +64,29 @@ func CaptureNames(pat Node) []string {
 	return names
 }
 
-// CaptureValues returns capture values for a match in the order of names
+// CaptureValues returns capture display texts for a match in the order of names
 // (missing binds are empty strings). Skips ROOT/empty keys in m.Captures when
-// names is built from CaptureNames.
-func CaptureValues(names []string, m Match) []string {
+// names is built from CaptureNames. source is the file bytes used for matching.
+func CaptureValues(names []string, m Match, source []byte) []string {
 	out := make([]string, len(names))
 	for i, name := range names {
-		out[i] = m.Captures[name]
+		if m.Captures == nil {
+			continue
+		}
+		out[i] = m.Captures[name].Text(source)
 	}
 	return out
 }
 
 // PublicCaptures filters match captures for display (no ROOT/empty).
-func PublicCaptures(m Match) map[string]string {
+// Values are Capture.Text(source) for each name.
+func PublicCaptures(m Match, source []byte) map[string]string {
 	out := make(map[string]string)
-	for name, val := range m.Captures {
+	for name, c := range m.Captures {
 		if name == "" || name == "ROOT" {
 			continue
 		}
-		out[name] = val
+		out[name] = c.Text(source)
 	}
 	return out
 }

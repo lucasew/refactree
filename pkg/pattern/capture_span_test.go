@@ -1,0 +1,252 @@
+package pattern
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/lucasew/refactree/pkg/ingest"
+	_ "github.com/lucasew/refactree/pkg/ingest/go"
+)
+
+func TestUnquoteLiteralMap_Escapes(t *testing.T) {
+	raw := `"a\tb\n\\"`
+	content, srcOf, closeOff, ok := unquoteLiteralMap(raw)
+	if !ok {
+		t.Fatal("unquote failed")
+	}
+	wantContent := "a\tb\n\\"
+	if content != wantContent {
+		t.Fatalf("content=%q want %q", content, wantContent)
+	}
+	if closeOff != len(raw)-1 {
+		t.Fatalf("closeOff=%d want %d", closeOff, len(raw)-1)
+	}
+	if len(srcOf) != len(content) {
+		t.Fatalf("srcOf len=%d content len=%d", len(srcOf), len(content))
+	}
+	if srcOf[0] != 1 {
+		t.Fatalf("srcOf[0]=%d want 1", srcOf[0])
+	}
+	if srcOf[1] != 2 {
+		t.Fatalf("srcOf[1]=%d want 2 (start of \\t)", srcOf[1])
+	}
+	if srcOf[2] != 4 {
+		t.Fatalf("srcOf[2]=%d want 4", srcOf[2])
+	}
+}
+
+func TestContentSpanToSource_IdentAndQuoted(t *testing.T) {
+	raw := "TestFoo"
+	content, srcOf, closeOff, quoted := tokenContentMap(raw)
+	if quoted || content != raw {
+		t.Fatalf("ident map: content=%q quoted=%v", content, quoted)
+	}
+	ss, se, ok := contentSpanToSource(100, srcOf, closeOff, 4, 7) // "Foo"
+	if !ok || ss != 104 || se != 107 {
+		t.Fatalf("ident Foo span [%d,%d) ok=%v", ss, se, ok)
+	}
+
+	raw = `"pre\tpost"`
+	content, srcOf, closeOff, quoted = tokenContentMap(raw)
+	if !quoted || content != "pre\tpost" {
+		t.Fatalf("quoted content=%q quoted=%v", content, quoted)
+	}
+	ss, se, ok = contentSpanToSource(50, srcOf, closeOff, 3, 4)
+	if !ok {
+		t.Fatal("tab span map failed")
+	}
+	if ss != 50+4 {
+		t.Fatalf("tab start=%d want %d", ss, 50+4)
+	}
+	if se != 50+6 {
+		t.Fatalf("tab end=%d want %d", se, 50+6)
+	}
+	ss, se, ok = contentSpanToSource(50, srcOf, closeOff, 0, len(content))
+	if !ok || ss != 51 || se != 50+uint32(closeOff) {
+		t.Fatalf("full interior [%d,%d) closeOff=%d", ss, se, closeOff)
+	}
+}
+
+func TestContentSpanToSource_EmptyAndOOB(t *testing.T) {
+	raw := "abc"
+	_, srcOf, closeOff, _ := tokenContentMap(raw)
+	ss, se, ok := contentSpanToSource(0, srcOf, closeOff, 1, 1)
+	if !ok || ss != 1 || se != 1 {
+		t.Fatalf("empty mid [%d,%d) ok=%v", ss, se, ok)
+	}
+	ss, se, ok = contentSpanToSource(0, srcOf, closeOff, 3, 3)
+	if !ok || ss != 3 || se != 3 {
+		t.Fatalf("empty end [%d,%d) ok=%v", ss, se, ok)
+	}
+	if _, _, ok = contentSpanToSource(0, srcOf, closeOff, -1, 1); ok {
+		t.Fatal("want OOB fail")
+	}
+	if _, _, ok = contentSpanToSource(0, srcOf, closeOff, 0, 99); ok {
+		t.Fatal("want OOB fail")
+	}
+}
+
+func TestNamedRegexSpan_Ident(t *testing.T) {
+	dir := t.TempDir()
+	src := []byte("package p\n\nfunc TestFoo() {}\n")
+	path := filepath.Join(dir, "x.go")
+	if err := os.WriteFile(path, src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pat, err := ParsePattern(`func $name:{/^Test(?P<rest>.*)/}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms := mustMatchFile(t, dir, path, "x.go", src, pat)
+	if len(ms) != 1 {
+		t.Fatalf("matches=%d", len(ms))
+	}
+	name := ms[0].Captures["name"]
+	rest := ms[0].Captures["rest"]
+	if name.Text(src) != "TestFoo" {
+		t.Fatalf("name=%q", name.Text(src))
+	}
+	if string(src[name.StartByte:name.EndByte]) != "TestFoo" {
+		t.Fatalf("name span %q", src[name.StartByte:name.EndByte])
+	}
+	if rest.Text(src) != "Foo" {
+		t.Fatalf("rest=%q", rest.Text(src))
+	}
+	if string(src[rest.StartByte:rest.EndByte]) != "Foo" {
+		t.Fatalf("rest span %q [%d:%d]", src[rest.StartByte:rest.EndByte], rest.StartByte, rest.EndByte)
+	}
+	if rest.StartByte < name.StartByte || rest.EndByte > name.EndByte {
+		t.Fatalf("rest not inside name: name=[%d:%d) rest=[%d:%d)",
+			name.StartByte, name.EndByte, rest.StartByte, rest.EndByte)
+	}
+}
+
+func TestNamedRegexSpan_StringEscapes(t *testing.T) {
+	dir := t.TempDir()
+	src := []byte("package p\n\nvar s = \"pre\\tPOST\"\n")
+	path := filepath.Join(dir, "x.go")
+	if err := os.WriteFile(path, src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pat, err := ParsePattern(`$s:/(?P<head>pre)(?P<tail>.*)/`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms := mustMatchFile(t, dir, path, "x.go", src, pat)
+	if len(ms) != 1 {
+		t.Fatalf("matches=%d caps=%v", len(ms), PublicCaptures(ms[0], src))
+	}
+	sCap := ms[0].Captures["s"]
+	head := ms[0].Captures["head"]
+	tail := ms[0].Captures["tail"]
+	// Outer $s is full token (no CaptureGroup rebind with named groups).
+	if sCap.Text(src) != `"pre\tPOST"` {
+		t.Fatalf("s=%q", sCap.Text(src))
+	}
+	if head.Text(src) != "pre" {
+		t.Fatalf("head=%q", head.Text(src))
+	}
+	// Text is always source bytes — escape stays as \t in the file.
+	if got := tail.Text(src); got != `\tPOST` {
+		t.Fatalf("tail text=%q want \\tPOST", got)
+	}
+	if got := string(src[tail.StartByte:tail.EndByte]); got != `\tPOST` {
+		t.Fatalf("tail span %q", got)
+	}
+}
+
+func TestNamedRegexSpan_RawString(t *testing.T) {
+	dir := t.TempDir()
+	src := []byte("package p\n\nvar s = `hello_world`\n")
+	path := filepath.Join(dir, "x.go")
+	if err := os.WriteFile(path, src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pat, err := ParsePattern(`$s:/hello_(?P<rest>.*)/`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms := mustMatchFile(t, dir, path, "x.go", src, pat)
+	if len(ms) != 1 {
+		t.Fatalf("matches=%d", len(ms))
+	}
+	rest := ms[0].Captures["rest"]
+	if rest.Text(src) != "world" {
+		t.Fatalf("rest=%q", rest.Text(src))
+	}
+}
+
+func TestCaptureGroup_BindsGroupSourceSpan(t *testing.T) {
+	dir := t.TempDir()
+	src := []byte("package p\n\nimport \"fmt\"\n\nfunc f(err error) error {\n\treturn fmt.Errorf(\"failed to open: %w\", err)\n}\n")
+	path := filepath.Join(dir, "x.go")
+	if err := os.WriteFile(path, src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pat, err := ParsePattern(`$F:@go:fmt::Errorf($MSG:/(?i)^failed to\s+(.*)/, $ERR)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms := mustMatchFile(t, dir, path, "x.go", src, pat)
+	if len(ms) != 1 {
+		t.Fatalf("matches=%d", len(ms))
+	}
+	msg := ms[0].Captures["MSG"]
+	// CaptureGroup 1 → outer name is the group span (no quotes).
+	if got := msg.Text(src); got != "open: %w" {
+		t.Fatalf("MSG.Text=%q want open: %%w", got)
+	}
+	if string(src[msg.StartByte:msg.EndByte]) != "open: %w" {
+		t.Fatalf("MSG span %q", src[msg.StartByte:msg.EndByte])
+	}
+	// string IR from_capture re-quotes
+	got, err := Instantiate(Node{Kind: "string", FromCapture: "MSG"}, ms[0], src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != `"open: %w"` {
+		t.Fatalf("quoted emit=%q", got)
+	}
+}
+
+func TestRefSelectorSpan(t *testing.T) {
+	dir := t.TempDir()
+	src := []byte("package p\n\nimport \"context\"\n\nfunc f() { _ = context.Background() }\n")
+	path := filepath.Join(dir, "x.go")
+	if err := os.WriteFile(path, src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pat, err := ParsePattern(`$c:@go:context::Background`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms := mustMatchFile(t, dir, path, "x.go", src, pat)
+	if len(ms) != 1 {
+		t.Fatalf("matches=%d", len(ms))
+	}
+	c := ms[0].Captures["c"]
+	if c.Text(src) != "context.Background" {
+		t.Fatalf("c=%q", c.Text(src))
+	}
+}
+
+func mustMatchFile(t *testing.T, dir, abs, rel string, src []byte, pat Node) []Match {
+	t.Helper()
+	pf, err := ingest.ParseSourceFile(abs, "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pf.Close()
+	result, err := ingest.MaterializeSource(ingest.ExtractSource{
+		Kind: ingest.ExtractHop, Root: dir, Paths: []string{abs},
+	}, ingest.MaterializeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms, err := MatchFile(dir, rel, src, pf.Root, pat, result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ms
+}

@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -83,8 +82,8 @@ Exit status is 0 if any match, 1 if none, 2 on error.`,
 			matchCount := 0
 			err = pattern.Stream(root, op, pattern.StreamOptions{
 				Paths: paths,
-				OnMatch: func(m pattern.Match) bool {
-					line, col, snippet, err := matchDisplay(root, m)
+				OnMatch: func(m pattern.Match, source []byte) bool {
+					line, col, snippet, err := matchDisplay(source, m)
 					if err != nil {
 						fmt.Fprintf(cmd.ErrOrStderr(), "display %s: %v\n", m.File, err)
 						return true
@@ -94,7 +93,7 @@ Exit status is 0 if any match, 1 if none, 2 on error.`,
 						Line:     line,
 						Col:      col,
 						Match:    snippet,
-						Captures: pattern.PublicCaptures(m),
+						Captures: pattern.PublicCaptures(m, source),
 					}
 					if err := enc.Format(w, hit, varNames); err != nil {
 						return false
@@ -123,12 +122,7 @@ Exit status is 0 if any match, 1 if none, 2 on error.`,
 	return cmd
 }
 
-func matchDisplay(root string, m pattern.Match) (line, col int, snippet string, err error) {
-	abs := filepath.Join(root, filepath.FromSlash(m.File))
-	src, err := os.ReadFile(abs)
-	if err != nil {
-		return 0, 0, "", err
-	}
+func matchDisplay(src []byte, m pattern.Match) (line, col int, snippet string, err error) {
 	if int(m.EndByte) > len(src) || m.StartByte > m.EndByte {
 		return 0, 0, "", fmt.Errorf("match span out of range in %s", m.File)
 	}
