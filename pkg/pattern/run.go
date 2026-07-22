@@ -2,9 +2,10 @@ package pattern
 
 import (
 	"fmt"
-	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/lucasew/refactree/pkg/ingest"
 )
@@ -18,7 +19,7 @@ type RunResult struct {
 // RunOptions controls which files are scanned under Root.
 type RunOptions struct {
 	// Paths are optional file or directory paths (absolute or relative to Root).
-	// Empty means walk the whole Root.
+	// Empty means walk the whole Root via ingest.WalkExtracts (ExtractDir).
 	Paths []string
 }
 
@@ -31,7 +32,7 @@ type StreamOptions struct {
 	OnMatch func(Match) bool
 
 	// OnFile is invoked after a file is matched (and, for rewrite, after its edits
-	// are computed). fileEdits is nil/empty for pure grep. Return false to stop.
+	// are computed). Return false to stop.
 	OnFile func(rel string, matches []Match, fileEdits []ingest.Edit) bool
 }
 
@@ -82,7 +83,8 @@ func RunWithOptions(root string, op Op, opts RunOptions) (RunResult, error) {
 	return out, err
 }
 
-// Stream processes one file at a time (map): hop-materialize → match → callbacks.
+// Stream processes files via ingest.WalkExtracts (same skip rules / walk policy as
+// ls, mv, serve). Per file: optional materialize for @ref, parse AST, match.
 func Stream(root string, op Op, opts StreamOptions) error {
 	if op.PatternIR.Kind == "" {
 		return fmt.Errorf("pattern: empty pattern_ir")
@@ -96,30 +98,53 @@ func Stream(root string, op Op, opts StreamOptions) error {
 		return err
 	}
 
-	return forEachSourceFile(rootAbs, op.Lang, opts.Paths, func(abs, lang string) error {
-		rel, err := filepath.Rel(rootAbs, abs)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
+	needLinks := PatternNeedsLinks(op.PatternIR)
+	stop := false
 
-		fileResult, err := ingest.MaterializeSource(ingest.ExtractSource{
-			Kind:  ingest.ExtractHop,
-			Root:  rootAbs,
-			Paths: []string{abs},
-		}, ingest.MaterializeOptions{ExpandImports: false})
-		if err != nil {
-			return fmt.Errorf("materialize %s: %w", rel, err)
+	return walkExtractSources(rootAbs, opts.Paths, func(fe *ingest.FileExtract) error {
+		if stop {
+			return nil
 		}
+		if fe == nil {
+			return nil
+		}
+		if op.Lang != "" && fe.Language != op.Lang {
+			return nil
+		}
+
+		rel := strings.TrimPrefix(filepath.ToSlash(fe.Path), "./")
+		abs := filepath.Join(rootAbs, filepath.FromSlash(rel))
+
+		// Soft size guard on walk-discovered files only (not explicit single-file hops
+		// when caller listed that path as a file — walkExtractSources marks that).
+		// Here we only know extracts from WalkExtracts; size-check every walk path.
+		if st, err := os.Stat(abs); err == nil && st.Size() > maxGrepFileBytes {
+			// Explicit hop of a single huge file: still process if Paths named it.
+			if !isExplicitFilePath(rootAbs, opts.Paths, abs) {
+				slog.Debug("pattern skip large file", "path", rel, "size", st.Size())
+				return nil
+			}
+		}
+
+		slog.Debug("pattern visit", "path", rel, "lang", fe.Language)
 
 		source, err := os.ReadFile(abs)
 		if err != nil {
 			return err
 		}
-		pf, err := ingest.ParseSourceFile(abs, lang)
+		pf, err := ingest.ParseSourceFile(abs, fe.Language)
 		if err != nil {
 			return fmt.Errorf("parse %s: %w", rel, err)
 		}
+
+		var fileResult *ingest.Result
+		if needLinks {
+			// Reuse the extract we already have from WalkExtracts (no second hop walk).
+			fileResult = ingest.Materialize(rootAbs, []*ingest.FileExtract{fe}, ingest.MaterializeOptions{
+				ExpandImports: false,
+			})
+		}
+
 		ms, err := MatchFile(rootAbs, rel, source, pf.Root, op.PatternIR, fileResult)
 		pf.Close()
 		if err != nil {
@@ -128,6 +153,7 @@ func Stream(root string, op Op, opts StreamOptions) error {
 
 		for _, m := range ms {
 			if opts.OnMatch != nil && !opts.OnMatch(m) {
+				stop = true
 				return nil
 			}
 		}
@@ -140,6 +166,7 @@ func Stream(root string, op Op, opts StreamOptions) error {
 			}
 		}
 		if opts.OnFile != nil && !opts.OnFile(rel, ms, fileEdits) {
+			stop = true
 			return nil
 		}
 		return nil
@@ -182,18 +209,44 @@ func ApplyWithOptions(root string, op Op, opts RunOptions) (RunResult, error) {
 	return out, applyErr
 }
 
-func forEachSourceFile(rootAbs, langFilter string, paths []string, fn func(abs, lang string) error) error {
+// maxGrepFileBytes soft-skips very large sources during recursive walks.
+// Explicit file path arguments still process those files.
+const maxGrepFileBytes = 256 << 10 // 256 KiB
+
+// walkExtractSources streams FileExtract values using ingest.WalkExtracts —
+// same directory skip rules and parse path as the rest of the system.
+func walkExtractSources(rootAbs string, paths []string, fn func(*ingest.FileExtract) error) error {
 	if len(paths) == 0 {
-		return walkSourceFiles(rootAbs, langFilter, fn)
+		var walkErr error
+		err := ingest.WalkExtracts(ingest.ExtractSource{
+			Kind:      ingest.ExtractDir,
+			Root:      rootAbs,
+			Recursive: true,
+		}, func(fe *ingest.FileExtract) bool {
+			if walkErr != nil {
+				return false
+			}
+			if err := fn(fe); err != nil {
+				walkErr = err
+				return false
+			}
+			return true
+		})
+		if err != nil {
+			return err
+		}
+		return walkErr
 	}
-	seen := map[string]bool{}
+
+	// Partition paths into files vs directories; each uses Hop or Dir on WalkExtracts.
+	var filePaths []string
+	var dirPaths []string
 	for _, p := range paths {
 		abs := p
 		if !filepath.IsAbs(abs) {
 			abs = filepath.Join(rootAbs, p)
 		}
-		var err error
-		abs, err = filepath.Abs(abs)
+		abs, err := filepath.Abs(abs)
 		if err != nil {
 			return err
 		}
@@ -202,54 +255,73 @@ func forEachSourceFile(rootAbs, langFilter string, paths []string, fn func(abs, 
 			return err
 		}
 		if st.IsDir() {
-			if err := walkSourceFiles(abs, langFilter, func(f, lang string) error {
-				if seen[f] {
-					return nil
-				}
-				seen[f] = true
-				return fn(f, lang)
-			}); err != nil {
-				return err
-			}
-			continue
-		}
-		lang, ok := ingest.LanguageForFile(abs)
-		if !ok {
-			continue
-		}
-		if langFilter != "" && lang != langFilter {
-			continue
-		}
-		if seen[abs] {
-			continue
-		}
-		seen[abs] = true
-		if err := fn(abs, lang); err != nil {
-			return err
+			dirPaths = append(dirPaths, abs)
+		} else {
+			filePaths = append(filePaths, abs)
 		}
 	}
-	return nil
-}
 
-func walkSourceFiles(root, langFilter string, fn func(abs, lang string) error) error {
-	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
+	var walkErr error
+	yield := func(fe *ingest.FileExtract) bool {
+		if walkErr != nil {
+			return false
+		}
+		if err := fn(fe); err != nil {
+			walkErr = err
+			return false
+		}
+		return true
+	}
+
+	if len(filePaths) > 0 {
+		if err := ingest.WalkExtracts(ingest.ExtractSource{
+			Kind:  ingest.ExtractHop,
+			Root:  rootAbs,
+			Paths: filePaths,
+		}, yield); err != nil {
 			return err
 		}
-		if d.IsDir() {
-			base := d.Name()
-			if base == ".git" || base == "vendor" || base == "node_modules" {
-				return filepath.SkipDir
+		if walkErr != nil {
+			return walkErr
+		}
+	}
+	for _, dirAbs := range dirPaths {
+		// Dir may be outside rootAbs; Root stays project root for path relativity.
+		// WalkExtracts ExtractDir uses Root for parse cache and Dir for walk start.
+		relDir := dirAbs
+		if r, err := filepath.Rel(rootAbs, dirAbs); err == nil && r != ".." && !strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+			relDir = r
+		}
+		if err := ingest.WalkExtracts(ingest.ExtractSource{
+			Kind:      ingest.ExtractDir,
+			Root:      rootAbs,
+			Dir:       relDir,
+			Recursive: true,
+		}, yield); err != nil {
+			return err
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+	}
+	return walkErr
+}
+
+func isExplicitFilePath(rootAbs string, paths []string, abs string) bool {
+	for _, p := range paths {
+		cand := p
+		if !filepath.IsAbs(cand) {
+			cand = filepath.Join(rootAbs, p)
+		}
+		cand, err := filepath.Abs(cand)
+		if err != nil {
+			continue
+		}
+		if cand == abs {
+			if st, err := os.Stat(cand); err == nil && !st.IsDir() {
+				return true
 			}
-			return nil
 		}
-		lang, ok := ingest.LanguageForFile(path)
-		if !ok {
-			return nil
-		}
-		if langFilter != "" && lang != langFilter {
-			return nil
-		}
-		return fn(path, lang)
-	})
+	}
+	return false
 }

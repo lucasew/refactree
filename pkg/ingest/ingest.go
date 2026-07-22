@@ -123,9 +123,10 @@ func listSourceFilesInDir(absDir string) []string {
 	return out
 }
 
-// isSkippedDirName reports dependency/build trees that must not be walked for
-// inspection BFS or full ingest (still parse a file if it is an explicit seed).
-func isSkippedDirName(name string) bool {
+// IsSkippedDirName reports dependency/build trees that must not be walked for
+// inspection BFS, full ingest, or project-wide grep/rewrite (still parse a file
+// if it is an explicit seed path).
+func IsSkippedDirName(name string) bool {
 	switch strings.ToLower(name) {
 	case "node_modules", ".git", "vendor", "dist", "build", "out", "coverage",
 		".svelte-kit", ".next", ".nuxt", ".venv", "venv", "__pycache__",
@@ -135,6 +136,9 @@ func isSkippedDirName(name string) bool {
 		return false
 	}
 }
+
+// isSkippedDirName is the historical unexported name; keep call sites working.
+func isSkippedDirName(name string) bool { return IsSkippedDirName(name) }
 
 // isVendoredPath reports whether abs is under a skipped dependency/build dir
 // relative to rootAbs (or absolute path containing those segments).

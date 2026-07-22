@@ -5,6 +5,27 @@ import (
 	"sort"
 )
 
+// PatternNeedsLinks reports whether matching requires ingest hyperlink targets
+// (any @ref / kind "ref" in the pattern). Pure token patterns skip materialize.
+func PatternNeedsLinks(pat Node) bool {
+	var walk func(Node) bool
+	walk = func(n Node) bool {
+		if n.Kind == "ref" || n.Ref != "" {
+			return true
+		}
+		if n.Callee != nil && walk(*n.Callee) {
+			return true
+		}
+		for _, a := range n.Args {
+			if walk(a) {
+				return true
+			}
+		}
+		return false
+	}
+	return walk(pat)
+}
+
 // CaptureNames returns the statically known capture variable names declared by
 // the pattern IR, in stable sorted order. Includes:
 //   - $name / $name:@ref / $name:/re/ / $name:{…}  (Node.As)
