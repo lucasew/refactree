@@ -1,0 +1,67 @@
+// Package pattern implements structural match/rewrite against pattern IR
+// (testdata/pattern fixtures; future rft grep / rft rewrite).
+package pattern
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+)
+
+// Op is the fixture/CLI operation description (op.json).
+type Op struct {
+	Mode              string  `json:"mode"` // grep | rewrite
+	Lang              string  `json:"lang"`
+	Description       string  `json:"description,omitempty"`
+	Pattern           string  `json:"pattern,omitempty"`
+	Replacement       *string `json:"replacement"` // null for grep
+	PatternIR         Node    `json:"pattern_ir"`
+	ReplacementIR     *Node   `json:"replacement_ir"`
+	ExpectMatchCount  *int    `json:"expect_match_count,omitempty"`
+	Notes             []string `json:"notes,omitempty"`
+}
+
+// Node is one pattern/replacement IR node.
+type Node struct {
+	Kind string `json:"kind"`
+
+	As  string `json:"as,omitempty"`
+	Ref string `json:"ref,omitempty"`
+
+	// type_token / lit
+	Text string `json:"text,omitempty"`
+
+	// string
+	Equals       string `json:"equals,omitempty"`
+	Regex        string `json:"regex,omitempty"`
+	CaptureGroup int    `json:"capture_group,omitempty"`
+	FromCapture  string `json:"from_capture,omitempty"`
+
+	// call
+	Callee *Node  `json:"callee,omitempty"`
+	Args   []Node `json:"args,omitempty"`
+}
+
+// LoadOp reads and validates an op.json file.
+func LoadOp(path string) (Op, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return Op{}, err
+	}
+	var op Op
+	if err := json.Unmarshal(b, &op); err != nil {
+		return Op{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if op.Mode != "grep" && op.Mode != "rewrite" {
+		return Op{}, fmt.Errorf("%s: mode must be grep or rewrite, got %q", path, op.Mode)
+	}
+	if op.PatternIR.Kind == "" {
+		return Op{}, fmt.Errorf("%s: pattern_ir.kind required", path)
+	}
+	if op.Mode == "rewrite" {
+		if op.ReplacementIR == nil {
+			return Op{}, fmt.Errorf("%s: rewrite requires replacement_ir", path)
+		}
+	}
+	return op, nil
+}

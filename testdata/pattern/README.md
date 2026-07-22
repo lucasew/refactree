@@ -2,7 +2,12 @@
 
 Same shape as `testdata/mv/`: **input tree**, optional **expected tree**, **op.json**.
 
-There is **no engine yet**. Harness later: copy `input/` → temp, run pattern op, compare to `expected/` (rewrite) or count matches (grep).
+Engine + harness: `pkg/pattern` (`go test ./pkg/pattern/`).
+
+- copy `input/` → temp
+- match `pattern_ir` (Go tree-sitter + ingest uses for `@ref`)
+- **rewrite:** instantiate `replacement_ir`, `ApplyEdits`, compare to `expected/`
+- **grep:** assert `expect_match_count`
 
 ## Layout
 
