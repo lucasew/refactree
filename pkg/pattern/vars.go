@@ -30,6 +30,7 @@ func PatternNeedsLinks(pat Node) bool {
 // the pattern IR, in stable sorted order. Includes:
 //   - $name / $name:@ref / $name:/re/ / $name:{…}  (Node.As)
 //   - named regex groups (?P<rest>…) inside /regex/
+//
 // Excludes empty names and the internal "ROOT" binder.
 func CaptureNames(pat Node) []string {
 	seen := map[string]struct{}{}
