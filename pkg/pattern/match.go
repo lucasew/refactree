@@ -43,10 +43,23 @@ type Match struct {
 
 type span struct{ start, end uint32 }
 
+// tok is a significant leaf in the source file as a half-open UTF-8 byte range.
+// Text is always derived: string(source[start:end]). target is a hyperlink ref if any.
 type tok struct {
 	start, end uint32
-	text       string
 	target     string
+}
+
+func tokBytes(src []byte, t tok) []byte {
+	if src == nil || t.end > uint32(len(src)) || t.start > t.end {
+		return nil
+	}
+	return src[t.start:t.end]
+}
+
+func tokEq(src []byte, t tok, want string) bool {
+	b := tokBytes(src, t)
+	return len(b) == len(want) && string(b) == want
 }
 
 type linkIndex map[span]string
@@ -159,7 +172,7 @@ func matchSeq(tokens []tok, startIdx int, seq []Node, source []byte, root *gramm
 			break
 		}
 
-		for pos < len(tokens) && isSpaceText(tokens[pos].text) {
+		for pos < len(tokens) && isSpaceSpan(source, tokens[pos]) {
 			pos++
 		}
 		if pos >= len(tokens) {
@@ -172,7 +185,7 @@ func matchSeq(tokens []tok, startIdx int, seq []Node, source []byte, root *gramm
 		}
 
 		if si == 0 && step.Kind == "ref" {
-			matchStart = selectorStart(tokens, pos)
+			matchStart = selectorStart(tokens, pos, source)
 		} else if si == 0 {
 			matchStart = tokens[pos].start
 		}
@@ -258,7 +271,7 @@ func matchSeqFrom(tokens []tok, startIdx int, seq []Node, caps map[string]Captur
 			}
 			return Match{StartByte: matchStart, EndByte: matchEnd, Captures: caps}, next, true, nil
 		}
-		for pos < len(tokens) && isSpaceText(tokens[pos].text) {
+		for pos < len(tokens) && isSpaceSpan(source, tokens[pos]) {
 			pos++
 		}
 		if pos >= len(tokens) {
@@ -315,7 +328,7 @@ func matchStep(tokens []tok, pos int, step Node, caps map[string]Capture, source
 		return true, next - pos, nil
 
 	case "lit", "token", "type_token":
-		if t.text != step.Text {
+		if !tokEq(source, t, step.Text) {
 			return false, 0, nil
 		}
 		if step.As != "" {
@@ -328,7 +341,7 @@ func matchStep(tokens []tok, pos int, step Node, caps map[string]Capture, source
 			return false, 0, nil
 		}
 		if step.As != "" {
-			ss, se := selectorSpan(tokens, pos)
+			ss, se := selectorSpan(tokens, pos, source)
 			bindCapture(caps, step.As, ss, se)
 		}
 		return true, 1, nil
@@ -340,9 +353,10 @@ func matchStep(tokens []tok, pos int, step Node, caps map[string]Capture, source
 		return true, 1, nil
 
 	case "string":
-		// /regex/ and "equals" apply to token text. For quoted string lits, match
-		// against unquoted content; for idents (e.g. TestFoo), match raw text.
-		content, srcOf, closeOff, _ := tokenContentMap(t.text)
+		// /regex/ and "equals" apply to content derived from the token's source
+		// span (unquoted interior for string lits; raw bytes for idents).
+		// Regex indexes map back to absolute source offsets via srcOf.
+		content, srcOf, closeOff, _ := tokenContentMap(source, t)
 		if step.Equals != "" {
 			if content != step.Equals {
 				return false, 0, nil
@@ -357,16 +371,13 @@ func matchStep(tokens []tok, pos int, step Node, caps map[string]Capture, source
 			if idx == nil {
 				return false, 0, nil
 			}
-			// Named groups require a mapped source range; skip the name if unmappable
-			// (should not happen for normal tokens). Outer $name always gets a span.
+			// Named groups require a mapped source range; fail if unmappable.
 			if !bindNamedGroups(caps, re, idx, t.start, srcOf, closeOff) {
 				return false, 0, nil
 			}
 			if step.As != "" {
 				// CaptureGroup N (unnamed groups only): bind outer name to that
-				// group's source range (A1 strip = re-emit the group span, often
-				// with quotes supplied by the template / string IR node).
-				// Otherwise bind the full token.
+				// group's source range. Otherwise bind the full token span.
 				start, end := t.start, t.end
 				if step.CaptureGroup > 0 && !hasNamedGroup(re) {
 					gi := step.CaptureGroup
@@ -451,14 +462,14 @@ func quoteString(s string) string {
 	return b.String()
 }
 
-func selectorStart(tokens []tok, pos int) uint32 {
-	ss, _ := selectorSpan(tokens, pos)
+func selectorStart(tokens []tok, pos int, source []byte) uint32 {
+	ss, _ := selectorSpan(tokens, pos, source)
 	return ss
 }
 
-func selectorSpan(tokens []tok, pos int) (start, end uint32) {
+func selectorSpan(tokens []tok, pos int, source []byte) (start, end uint32) {
 	i := pos
-	for i >= 2 && tokens[i-1].text == "." {
+	for i >= 2 && tokEq(source, tokens[i-1], ".") {
 		i -= 2
 	}
 	return tokens[i].start, tokens[pos].end
@@ -504,14 +515,14 @@ func buildTokens(root *grammar.Node, source []byte, links linkIndex) []tok {
 				break
 			}
 		}
-		if !found && int(s.end) <= len(source) {
-			raw = append(raw, tok{start: s.start, end: s.end, text: string(source[s.start:s.end]), target: target})
+		if !found && int(s.end) <= len(source) && s.start < s.end {
+			raw = append(raw, tok{start: s.start, end: s.end, target: target})
 		}
 	}
 	// Prefer innermost: drop tokens that strictly contain another
 	var candidates []tok
 	for _, a := range raw {
-		if a.text == "" || isSpaceText(a.text) {
+		if a.start >= a.end || isSpaceSpan(source, a) {
 			continue
 		}
 		candidates = append(candidates, a)
@@ -556,26 +567,26 @@ func collectLeaves(n *grammar.Node, source []byte, out *[]tok) {
 	if n == nil || n.IsNull() {
 		return
 	}
-	text := ingest.NodeText(n, source)
+	start, end := n.StartByte(), n.EndByte()
 	typ := n.Type()
 
 	// Keep string literals as one token (not quote/content/quote pieces).
 	switch typ {
 	case "interpreted_string_literal", "raw_string_literal", "string_literal", "string", "template_string":
-		if text != "" {
-			*out = append(*out, tok{start: n.StartByte(), end: n.EndByte(), text: text})
+		if start < end {
+			*out = append(*out, tok{start: start, end: end})
 		}
 		return
 	}
 
 	// Composite grammar tokens (e.g. empty interface{}) — whole span, no children.
-	if text == "interface{}" || (len(text) > 2 && strings.HasSuffix(text, "{}") && !strings.Contains(text, " ") && !strings.Contains(text, "\t") && !strings.Contains(text, "\n")) {
-		*out = append(*out, tok{start: n.StartByte(), end: n.EndByte(), text: text})
+	if isCompositeTokenSpan(source, start, end) {
+		*out = append(*out, tok{start: start, end: end})
 		return
 	}
 	if n.ChildCount() == 0 {
-		if text != "" {
-			*out = append(*out, tok{start: n.StartByte(), end: n.EndByte(), text: text})
+		if start < end {
+			*out = append(*out, tok{start: start, end: end})
 		}
 		return
 	}
@@ -584,20 +595,46 @@ func collectLeaves(n *grammar.Node, source []byte, out *[]tok) {
 	}
 }
 
-func isSpaceText(s string) bool {
-	for _, r := range s {
+// isCompositeTokenSpan reports grammar spans like interface{} kept as one token.
+func isCompositeTokenSpan(src []byte, start, end uint32) bool {
+	if start >= end || int(end) > len(src) {
+		return false
+	}
+	b := src[start:end]
+	if string(b) == "interface{}" {
+		return true
+	}
+	if len(b) > 2 && b[len(b)-2] == '{' && b[len(b)-1] == '}' {
+		for _, c := range b[:len(b)-2] {
+			if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func isSpaceSpan(src []byte, t tok) bool {
+	b := tokBytes(src, t)
+	if len(b) == 0 {
+		return false
+	}
+	for _, r := range string(b) {
 		if !unicode.IsSpace(r) {
 			return false
 		}
 	}
-	return s != ""
+	return true
 }
 
-// tokenContentMap returns the match surface for a token (unquoted content for
-// string lits, raw text otherwise), a per-content-byte map into raw token
-// offsets, the exclusive raw offset of the content end (closing quote index for
-// strings, len(raw) for bare tokens), and whether the token was a string lit.
-func tokenContentMap(raw string) (content string, srcOf []int, closeOff int, quoted bool) {
+// tokenContentMap derives the regex/equals match surface from a token span in
+// source. For string lits, content is unquoted; for other tokens, content is
+// the raw source slice. srcOf maps each content byte to an offset within the
+// token (0-based); closeOff is the exclusive end of content within the token.
+// Absolute source offset = t.start + srcOf[i].
+func tokenContentMap(src []byte, t tok) (content string, srcOf []int, closeOff int, quoted bool) {
+	raw := tokBytes(src, t)
 	if content, srcOf, closeOff, ok := unquoteLiteralMap(raw); ok {
 		return content, srcOf, closeOff, true
 	}
@@ -605,13 +642,13 @@ func tokenContentMap(raw string) (content string, srcOf []int, closeOff int, quo
 	for i := range raw {
 		srcOf[i] = i
 	}
-	return raw, srcOf, len(raw), false
+	return string(raw), srcOf, len(raw), false
 }
 
 // unquoteLiteralMap unquotes a string token and records, for each content byte,
-// the starting raw offset of the source bytes that produced it. closeOff is the
-// raw index of the closing quote (exclusive end of content in the token).
-func unquoteLiteralMap(raw string) (content string, srcOf []int, closeOff int, ok bool) {
+// the starting offset within the raw token of the source bytes that produced it.
+// closeOff is the raw index of the closing quote.
+func unquoteLiteralMap(raw []byte) (content string, srcOf []int, closeOff int, ok bool) {
 	if len(raw) < 2 {
 		return "", nil, 0, false
 	}
@@ -626,7 +663,7 @@ func unquoteLiteralMap(raw string) (content string, srcOf []int, closeOff int, o
 		for i := range inner {
 			srcOf[i] = 1 + i
 		}
-		return inner, srcOf, closeOff, true
+		return string(inner), srcOf, closeOff, true
 	}
 	var b strings.Builder
 	i := 1
@@ -663,7 +700,7 @@ func unquoteLiteralMap(raw string) (content string, srcOf []int, closeOff int, o
 
 // unquoteLiteral is the content-only helper (no offset map).
 func unquoteLiteral(raw string) (string, bool) {
-	content, _, _, ok := unquoteLiteralMap(raw)
+	content, _, _, ok := unquoteLiteralMap([]byte(raw))
 	return content, ok
 }
 

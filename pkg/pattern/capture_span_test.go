@@ -10,7 +10,7 @@ import (
 )
 
 func TestUnquoteLiteralMap_Escapes(t *testing.T) {
-	raw := `"a\tb\n\\"`
+	raw := []byte(`"a\tb\n\\"`)
 	content, srcOf, closeOff, ok := unquoteLiteralMap(raw)
 	if !ok {
 		t.Fatal("unquote failed")
@@ -37,9 +37,12 @@ func TestUnquoteLiteralMap_Escapes(t *testing.T) {
 }
 
 func TestContentSpanToSource_IdentAndQuoted(t *testing.T) {
-	raw := "TestFoo"
-	content, srcOf, closeOff, quoted := tokenContentMap(raw)
-	if quoted || content != raw {
+	ident := []byte("TestFoo")
+	buf := make([]byte, 100+len(ident))
+	copy(buf[100:], ident)
+	tk := tok{start: 100, end: 100 + uint32(len(ident))}
+	content, srcOf, closeOff, quoted := tokenContentMap(buf, tk)
+	if quoted || content != "TestFoo" {
 		t.Fatalf("ident map: content=%q quoted=%v", content, quoted)
 	}
 	ss, se, ok := contentSpanToSource(100, srcOf, closeOff, 4, 7) // "Foo"
@@ -47,8 +50,11 @@ func TestContentSpanToSource_IdentAndQuoted(t *testing.T) {
 		t.Fatalf("ident Foo span [%d,%d) ok=%v", ss, se, ok)
 	}
 
-	raw = `"pre\tpost"`
-	content, srcOf, closeOff, quoted = tokenContentMap(raw)
+	raw := []byte(`"pre\tpost"`)
+	buf = make([]byte, 50+len(raw))
+	copy(buf[50:], raw)
+	tk = tok{start: 50, end: 50 + uint32(len(raw))}
+	content, srcOf, closeOff, quoted = tokenContentMap(buf, tk)
 	if !quoted || content != "pre\tpost" {
 		t.Fatalf("quoted content=%q quoted=%v", content, quoted)
 	}
@@ -69,8 +75,9 @@ func TestContentSpanToSource_IdentAndQuoted(t *testing.T) {
 }
 
 func TestContentSpanToSource_EmptyAndOOB(t *testing.T) {
-	raw := "abc"
-	_, srcOf, closeOff, _ := tokenContentMap(raw)
+	src := []byte("abc")
+	tk := tok{start: 0, end: 3}
+	_, srcOf, closeOff, _ := tokenContentMap(src, tk)
 	ss, se, ok := contentSpanToSource(0, srcOf, closeOff, 1, 1)
 	if !ok || ss != 1 || se != 1 {
 		t.Fatalf("empty mid [%d,%d) ok=%v", ss, se, ok)
