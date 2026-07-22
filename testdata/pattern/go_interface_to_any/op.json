@@ -1,0 +1,20 @@
+{
+  "mode": "rewrite",
+  "lang": "go",
+  "description": "A2: interface{} type token → any",
+  "pattern": "interface{}",
+  "replacement": "any",
+  "pattern_ir": {
+    "kind": "type_token",
+    "as": "ROOT",
+    "text": "interface{}"
+  },
+  "replacement_ir": {
+    "kind": "type_token",
+    "text": "any"
+  },
+  "notes": [
+    "rft rewrite 'interface{}' 'any'",
+    "pattern_ir / replacement_ir mirror the two CLI strings."
+  ]
+}

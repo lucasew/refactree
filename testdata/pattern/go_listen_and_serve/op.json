@@ -1,0 +1,32 @@
+{
+  "mode": "grep",
+  "lang": "go",
+  "description": "B4: find http.ListenAndServe (not other http symbols)",
+  "pattern": "$F:@go:net/http::ListenAndServe($ADDR, $HANDLER)",
+  "replacement": null,
+  "pattern_ir": {
+    "kind": "call",
+    "as": "ROOT",
+    "callee": {
+      "kind": "ref",
+      "ref": "go:net/http::ListenAndServe",
+      "as": "F"
+    },
+    "args": [
+      {
+        "kind": "capture",
+        "as": "ADDR"
+      },
+      {
+        "kind": "capture",
+        "as": "HANDLER"
+      }
+    ]
+  },
+  "expect_match_count": 1,
+  "notes": [
+    "No expected/ \u2014 grep only.",
+    "Multi-line Server{timeouts} rewrite is a later rewrite fixture."
+  ],
+  "replacement_ir": null
+}

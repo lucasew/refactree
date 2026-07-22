@@ -1,0 +1,51 @@
+{
+  "mode": "rewrite",
+  "lang": "go",
+  "description": "A1: strip leading \"failed to \" from fmt.Errorf format strings via capture group",
+  "pattern": "$F:@go:fmt::Errorf($MSG:/(?i)^failed to\\s+(.*)/, $ERR)",
+  "replacement": "$F($MSG, $ERR)",
+  "pattern_ir": {
+    "kind": "call",
+    "as": "ROOT",
+    "callee": {
+      "kind": "ref",
+      "ref": "go:fmt::Errorf",
+      "as": "F"
+    },
+    "args": [
+      {
+        "kind": "string",
+        "as": "MSG",
+        "regex": "(?i)^failed to\\s+(.*)",
+        "capture_group": 1
+      },
+      {
+        "kind": "capture",
+        "as": "ERR"
+      }
+    ]
+  },
+  "replacement_ir": {
+    "kind": "call",
+    "callee": {
+      "kind": "capture",
+      "as": "F"
+    },
+    "args": [
+      {
+        "kind": "string",
+        "from_capture": "MSG"
+      },
+      {
+        "kind": "capture",
+        "as": "ERR"
+      }
+    ]
+  },
+  "notes": [
+    "pattern/replacement are CLI strings; pattern_ir/replacement_ir are fixture truth.",
+    "$MSG:/(?i)^failed to\\s+(.*)/ matches the format literal; capture_group 1 rebinds $MSG to the suffix (\"open image: %w\").",
+    "replacement $F($MSG, $ERR) re-emits that suffix as the new string literal — \"failed to \" is matched out, not hardcoded away.",
+    "ok() has no failed-to prefix — must stay unchanged."
+  ]
+}

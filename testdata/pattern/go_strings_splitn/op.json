@@ -1,0 +1,37 @@
+{
+  "mode": "grep",
+  "lang": "go",
+  "description": "A3: find strings.SplitN(..., 2) only (N=3 must not match)",
+  "pattern": "$F:@go:strings::SplitN($S, $SEP, 2)",
+  "replacement": null,
+  "pattern_ir": {
+    "kind": "call",
+    "as": "ROOT",
+    "callee": {
+      "kind": "ref",
+      "ref": "go:strings::SplitN",
+      "as": "F"
+    },
+    "args": [
+      {
+        "kind": "capture",
+        "as": "S"
+      },
+      {
+        "kind": "capture",
+        "as": "SEP"
+      },
+      {
+        "kind": "lit",
+        "as": "N",
+        "text": "2"
+      }
+    ]
+  },
+  "expect_match_count": 1,
+  "notes": [
+    "No expected/ \u2014 grep does not rewrite (mv-style expected is for rewrite only).",
+    "Full Cut modernize is multi-stmt; out of this fixture."
+  ],
+  "replacement_ir": null
+}
