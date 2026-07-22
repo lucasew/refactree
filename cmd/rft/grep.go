@@ -20,10 +20,15 @@ func newGrepCmd() *cobra.Command {
 		Short: "Search for structural pattern matches",
 		Long: `Search source files for matches of a structural pattern.
 
+Processing is per-file (map): each file is hop-parsed and matched independently,
+and matches are printed as soon as that file is done (streaming; no full-tree
+barrier before output).
+
 Patterns use a small code-shaped dialect:
   interface{}
   $F:@go:fmt::Errorf($MSG:/(?i)^failed to\s+(.*)/, $ERR)
   $F:@go:strings::SplitN($S, $SEP, 2)
+  $F:@go:testing::T
 
 @provider:path::Symbol is a hyperlink hole (same targets as the code view).
 
@@ -40,21 +45,29 @@ Exit status is 0 if any match, 1 if none, 2 on error.`,
 			if err != nil {
 				return errExit{code: 2, err: err}
 			}
-			res, err := pattern.RunWithOptions(root, op, pattern.RunOptions{Paths: paths})
+
+			w := cmd.OutOrStdout()
+			matchCount := 0
+			err = pattern.Stream(root, op, pattern.StreamOptions{
+				Paths: paths,
+				OnMatch: func(m pattern.Match) bool {
+					line, col, snippet, err := matchDisplay(root, m)
+					if err != nil {
+						// Can't return error from callback cleanly; print and continue.
+						fmt.Fprintf(cmd.ErrOrStderr(), "display %s: %v\n", m.File, err)
+						return true
+					}
+					if _, err := fmt.Fprintf(w, "%s:%d:%d: %s\n", m.File, line, col, snippet); err != nil {
+						return false
+					}
+					matchCount++
+					return true
+				},
+			})
 			if err != nil {
 				return errExit{code: 2, err: err}
 			}
-			w := cmd.OutOrStdout()
-			for _, m := range res.Matches {
-				line, col, snippet, err := matchDisplay(root, m)
-				if err != nil {
-					return errExit{code: 2, err: err}
-				}
-				if _, err := fmt.Fprintf(w, "%s:%d:%d: %s\n", m.File, line, col, snippet); err != nil {
-					return errExit{code: 2, err: err}
-				}
-			}
-			if len(res.Matches) == 0 {
+			if matchCount == 0 {
 				return errExit{code: 1, err: fmt.Errorf("")}
 			}
 			return nil
@@ -78,7 +91,6 @@ func matchDisplay(root string, m pattern.Match) (line, col int, snippet string, 
 	li := grammar.NewLineIndexBytes(src)
 	l, c0 := li.LineColumnAtU32(m.StartByte)
 	text := string(src[m.StartByte:m.EndByte])
-	// Single-line snippet for display.
 	if i := strings.IndexByte(text, '\n'); i >= 0 {
 		text = text[:i] + "…"
 	}

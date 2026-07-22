@@ -22,6 +22,9 @@ func newRewriteCmd() *cobra.Command {
 		Long: `Find matches of a structural pattern and replace each match root with the
 replacement template.
 
+Processing is per-file (map): each file is hop-parsed, matched, and (unless
+dry-run) written as soon as that file is done — no full-tree materialize barrier.
+
 Example:
   rft rewrite 'interface{}' 'any'
   rft rewrite \
@@ -42,16 +45,18 @@ via regex with a capture group re-emit the group text as a string literal.`,
 			if err != nil {
 				return err
 			}
-			res, err := pattern.RunWithOptions(root, op, pattern.RunOptions{Paths: paths})
-			if err != nil {
-				return err
-			}
-			if len(res.Edits) == 0 {
-				return fmt.Errorf("no matches")
-			}
 
-			w := cmd.ErrOrStderr()
+			// Interactive / dry-run: collect all edits first so the plan is complete
+			// before any write (or only print). Fast path: still per-file map under the hood.
 			if interactive || dryRun {
+				res, err := pattern.RunWithOptions(root, op, pattern.RunOptions{Paths: paths})
+				if err != nil {
+					return err
+				}
+				if len(res.Edits) == 0 {
+					return fmt.Errorf("no matches")
+				}
+				w := cmd.ErrOrStderr()
 				if _, err := fmt.Fprintf(w, "Edit plan (%d edits):\n", len(res.Edits)); err != nil {
 					return err
 				}
@@ -60,11 +65,9 @@ via regex with a capture group re-emit the group text as a string literal.`,
 						return err
 					}
 				}
-			}
-			if dryRun {
-				return nil
-			}
-			if interactive {
+				if dryRun {
+					return nil
+				}
 				if _, err := fmt.Fprint(w, "Apply? [y/N] "); err != nil {
 					return err
 				}
@@ -75,16 +78,50 @@ via regex with a capture group re-emit the group text as a string literal.`,
 				if answer != "y" && answer != "Y" {
 					return fmt.Errorf("cancelled")
 				}
-			}
-			if backup {
-				if err := createBackups(root, res.Edits); err != nil {
+				if backup {
+					if err := createBackups(root, res.Edits); err != nil {
+						return err
+					}
+				}
+				if err := ensureEditFiles(root, res.Edits); err != nil {
 					return err
 				}
+				return ingest.ApplyEdits(root, res.Edits)
 			}
-			if err := ensureEditFiles(root, res.Edits); err != nil {
+
+			// Default: stream apply per file (map-reduce: no global barrier).
+			editCount := 0
+			err = pattern.Stream(root, op, pattern.StreamOptions{
+				Paths: paths,
+				OnFile: func(rel string, matches []pattern.Match, fileEdits []ingest.Edit) bool {
+					if len(fileEdits) == 0 {
+						return true
+					}
+					editCount += len(fileEdits)
+					if backup {
+						if err := createBackups(root, fileEdits); err != nil {
+							fmt.Fprintln(cmd.ErrOrStderr(), err)
+							return false
+						}
+					}
+					if err := ensureEditFiles(root, fileEdits); err != nil {
+						fmt.Fprintln(cmd.ErrOrStderr(), err)
+						return false
+					}
+					if err := ingest.ApplyEdits(root, fileEdits); err != nil {
+						fmt.Fprintln(cmd.ErrOrStderr(), err)
+						return false
+					}
+					return true
+				},
+			})
+			if err != nil {
 				return err
 			}
-			return ingest.ApplyEdits(root, res.Edits)
+			if editCount == 0 {
+				return fmt.Errorf("no matches")
+			}
+			return nil
 		},
 	}
 
