@@ -1,5 +1,5 @@
-// Package pattern implements structural match/rewrite against pattern IR
-// (testdata/pattern fixtures; future rft grep / rft rewrite).
+// Package pattern implements structural match/rewrite for rft grep / rft rewrite
+// (pattern IR, string dialect parser, and testdata/pattern fixtures).
 package pattern
 
 import (
