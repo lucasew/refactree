@@ -33,14 +33,14 @@ func MarkEntityRelationSpans(result *Result, sourceSet map[string]bool) map[stri
 		}
 		occupied[file][[2]uint32{start, end}] = true
 	}
-	for _, ent := range result.Entities {
+	for _, ent := range result.Atoms {
 		if !sourceSet[ent.Reference] {
 			continue
 		}
 		ref := ParseReference(ent.Reference)
 		mark(ref.Path, ent.StartByte, ent.EndByte)
 	}
-	for _, rel := range result.Relations {
+	for _, rel := range result.Uses {
 		if !sourceSet[rel.Target] {
 			continue
 		}

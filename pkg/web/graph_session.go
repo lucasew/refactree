@@ -474,7 +474,7 @@ func (s *Server) handleGraphSession(w http.ResponseWriter, r *http.Request) {
 				ref = "path:./"
 			}
 			// Focus immediately; expand runs on the visit worker without stopping crawl.
-			sess.emitPackageFocus(ctx, ref, outbox)
+			sess.emitNodeFocus(ctx, ref, outbox)
 			enqueueStr(visitCh, ref)
 		case "project":
 			if !sess.crawlOn.Load() {
@@ -516,7 +516,7 @@ func (s *graphExploreSession) runVisit(
 	_ = sendOut(ctx, outbox, graphSessionOut{Type: "done", Incomplete: &inc, VisitRef: ref})
 }
 
-func (s *graphExploreSession) emitPackageFocus(ctx context.Context, ref string, outbox chan<- graphSessionOut) {
+func (s *graphExploreSession) emitNodeFocus(ctx context.Context, ref string, outbox chan<- graphSessionOut) {
 	n := graphql.LookupNode(s.root, ref)
 	if n == nil {
 		return

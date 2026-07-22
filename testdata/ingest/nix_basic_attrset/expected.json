@@ -5,7 +5,7 @@
       "path": "default.nix"
     }
   ],
-  "entities": [
+  "atoms": [
     {
       "reference": "path:./default.nix::id",
       "start_byte": 4,
@@ -17,7 +17,7 @@
       "end_byte": 21
     }
   ],
-  "relations": [
+  "uses": [
     {
       "reference": "path:./default.nix::main",
       "start_byte": 24,

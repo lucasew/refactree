@@ -31,7 +31,7 @@ func TestCanonicalizeReference_ReexportChain(t *testing.T) {
 func TestCanonicalizeInResult_UsesOnlyGraph(t *testing.T) {
 	// Minimal hand-built Result — no filesystem.
 	result := &Result{
-		Entities: []Entity{
+		Atoms: []Atom{
 			{Reference: "path:./impl.js::real"},
 		},
 		Aliases: []Alias{
@@ -91,7 +91,7 @@ func TestCanonicalizePathReference_StillDirectoryOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := CanonicalizePathReference(root, ParseReference("path:./mod.js"))
-	if got.Symbol != "" {
+	if got.Name != "" {
 		t.Fatalf("path-only canonicalize should not set symbol, got %q", got.String())
 	}
 }

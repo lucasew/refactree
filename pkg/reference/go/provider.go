@@ -16,8 +16,8 @@ import (
 
 // SymbolTarget represents a provider-backed symbol location.
 type SymbolTarget struct {
-	Dir    string
-	Symbol string
+	Dir  string
+	Name string
 }
 
 // ResolveImport resolves a Go import path into a canonical reference string.
@@ -41,8 +41,8 @@ func ResolveSymbolTarget(pkgPath, symbol, workDir string) (SymbolTarget, bool, e
 	}
 
 	return SymbolTarget{
-		Dir:    pkgDir,
-		Symbol: symbol,
+		Dir:  pkgDir,
+		Name: symbol,
 	}, true, nil
 }
 

@@ -82,7 +82,7 @@ func TestExtractDeclVarConstFromGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	off := uint32(strings.Index(src, "ErrNoGoVersions"))
-	decl, err := moveDriver{}.ExtractDecl(path, ingest.Entity{
+	decl, err := moveDriver{}.ExtractDecl(path, ingest.Atom{
 		Reference: "path:./src.go::ErrNoGoVersions",
 		StartByte: off,
 		EndByte:   off + uint32(len("ErrNoGoVersions")),
@@ -100,7 +100,7 @@ func TestExtractDeclVarConstFromGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	off2 := uint32(strings.Index(src2, "B"))
-	decl2, err := moveDriver{}.ExtractDecl(path2, ingest.Entity{StartByte: off2, EndByte: off2 + 1})
+	decl2, err := moveDriver{}.ExtractDecl(path2, ingest.Atom{StartByte: off2, EndByte: off2 + 1})
 	if err != nil {
 		t.Fatalf("const group: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestExtractDeclVarConstFromGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	off3 := uint32(strings.Index(src3, "Single"))
-	decl3, err := moveDriver{}.ExtractDecl(path3, ingest.Entity{StartByte: off3, EndByte: off3 + 6})
+	decl3, err := moveDriver{}.ExtractDecl(path3, ingest.Atom{StartByte: off3, EndByte: off3 + 6})
 	if err != nil {
 		t.Fatalf("single var: %v", err)
 	}

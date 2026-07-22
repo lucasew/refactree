@@ -5,7 +5,7 @@
       "path": "Main.java"
     }
   ],
-  "entities": [
+  "atoms": [
     {
       "reference": "path:./Main.java::Main",
       "start_byte": 52,
@@ -25,7 +25,7 @@
       "target": "java:java.util.List::List"
     }
   ],
-  "relations": [
+  "uses": [
     {
       "reference": "path:./Main.java::Main.main",
       "start_byte": 112,

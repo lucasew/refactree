@@ -64,10 +64,10 @@ export function GraphPanel({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   /**
-   * package = collapse to one node per package (path:./cmd/rft once)
-   * reference = full refs (path:./cmd/rft::Main distinct)
+   * module = one node per module (path:./cmd/rft once)
+   * atom = full atom refs (path:./cmd/rft::Main distinct)
    */
-  const [viewMode, setViewMode] = useState<GraphViewMode>("reference");
+  const [viewMode, setViewMode] = useState<GraphViewMode>("atom");
   /** Full-tree crawl of the project (DiscoverDir recursive; skip list in ingest). */
   const [crawlRepo, setCrawlRepo] = useState(!!streamProject);
   const lastVisit = useRef<string>("");
@@ -368,19 +368,19 @@ export function GraphPanel({
         <div className="join" role="group" aria-label="Graph view mode">
           <button
             type="button"
-            className={`btn btn-xs join-item ${viewMode === "package" ? "btn-active" : ""}`}
-            title="Packages only (no symbols)"
-            onClick={() => setViewMode("package")}
+            className={`btn btn-xs join-item ${viewMode === "module" ? "btn-active" : ""}`}
+            title="Modules only (import graph)"
+            onClick={() => setViewMode("module")}
           >
-            package
+            module
           </button>
           <button
             type="button"
-            className={`btn btn-xs join-item ${viewMode === "reference" ? "btn-active" : ""}`}
-            title="Symbol references only (no package nodes)"
-            onClick={() => setViewMode("reference")}
+            className={`btn btn-xs join-item ${viewMode === "atom" ? "btn-active" : ""}`}
+            title="Atoms only (use graph)"
+            onClick={() => setViewMode("atom")}
           >
-            reference
+            atom
           </button>
         </div>
         <label
@@ -413,7 +413,7 @@ export function GraphPanel({
             return `${pretty} [${lang} · ${scope} · used by ${u}]${tip}`;
           }}
           backgroundColor={BG}
-          linkWidth={viewMode === "package" ? 1.5 : 1.25}
+          linkWidth={viewMode === "module" ? 1.5 : 1.25}
           linkColor={(l: any) => {
             const kind = l.kind as string;
             if (kind === "IMPORTS") return "#7a8aaa";
@@ -421,21 +421,21 @@ export function GraphPanel({
             return "#8aaa7a";
           }}
           // Package view: clear directed imports (importer → importee).
-          linkDirectionalArrowLength={viewMode === "package" ? 7 : 4}
+          linkDirectionalArrowLength={viewMode === "module" ? 7 : 4}
           linkDirectionalArrowRelPos={1}
           linkDirectionalArrowColor={() =>
-            viewMode === "package" ? "#a8b8d8" : "#8aaa7a"
+            viewMode === "module" ? "#a8b8d8" : "#8aaa7a"
           }
-          linkCurvature={viewMode === "package" ? 0.15 : 0.05}
-          linkDirectionalParticles={viewMode === "package" ? 1 : 0}
-          linkDirectionalParticleWidth={viewMode === "package" ? 2 : 0}
+          linkCurvature={viewMode === "module" ? 0.15 : 0.05}
+          linkDirectionalParticles={viewMode === "module" ? 1 : 0}
+          linkDirectionalParticleWidth={viewMode === "module" ? 2 : 0}
           linkDirectionalParticleSpeed={0.004}
           nodeCanvasObjectMode={() => "replace"}
           nodeCanvasObject={(node: any, ctx, globalScale) => {
             const label = formatGraphLabel(node.id, viewMode);
             const fontSize = Math.max(10 / globalScale, 2);
             const baseR =
-              viewMode === "package"
+              viewMode === "module"
                 ? 7
                 : node.kind === "ATOM"
                   ? 4
@@ -478,7 +478,7 @@ export function GraphPanel({
               ctx.textBaseline = "top";
               let yy = y + r + 2;
               lines.forEach((line: string, i: number) => {
-                // package line muted when reference shows two lines
+                // module line muted when atom view shows two lines
                 if (lines.length > 1 && i === 0) {
                   ctx.font = `${Math.max(fontSize * 0.85, 1.5)}px sans-serif`;
                   ctx.fillStyle = "rgba(232,224,208,0.7)";

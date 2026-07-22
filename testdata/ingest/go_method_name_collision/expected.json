@@ -5,7 +5,7 @@
       "path": "main.go"
     }
   ],
-  "entities": [
+  "atoms": [
     {
       "reference": "path:./main.go::A",
       "start_byte": 19,
@@ -27,7 +27,7 @@
       "end_byte": 98
     }
   ],
-  "relations": [
+  "uses": [
     {
       "reference": "path:./main.go::A.Run",
       "start_byte": 55,

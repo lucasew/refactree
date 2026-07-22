@@ -78,7 +78,7 @@ func TestLSP_DefinitionCompletionHover(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		snap := srv.session.snapshot()
-		if snap != nil && snap.Result != nil && len(snap.Result.Entities) > 0 {
+		if snap != nil && snap.Result != nil && len(snap.Result.Atoms) > 0 {
 			break
 		}
 		if time.Now().After(deadline) {

@@ -44,7 +44,7 @@ func (languageDriver) ResolveImport(sourcePath string, ctx ingest.ImportResolveC
 	return "python:" + sourcePath
 }
 
-func (languageDriver) AllowListSymbol(name string, opts ingest.SymbolListOptions) bool {
+func (languageDriver) AllowListAtom(name string, opts ingest.AtomListOptions) bool {
 	if opts.IncludeHidden {
 		return true
 	}
@@ -91,11 +91,11 @@ func (referenceProvider) ResolveScopeTarget(ref ingest.Reference, rootDir string
 }
 
 func (referenceProvider) ResolveSymbolTarget(ref ingest.Reference, rootDir string) (ingest.ProviderSymbolTarget, bool, error) {
-	target, ok, err := pythonref.ResolveSymbolTarget(ref.Path, ref.Symbol, rootDir)
+	target, ok, err := pythonref.ResolveSymbolTarget(ref.Path, ref.Name, rootDir)
 	if !ok || err != nil {
 		return ingest.ProviderSymbolTarget{}, ok, err
 	}
-	return ingest.ProviderSymbolTarget{Dir: target.Dir, Symbol: target.Symbol}, true, nil
+	return ingest.ProviderSymbolTarget{Dir: target.Dir, Name: target.Name}, true, nil
 }
 
 func (referenceProvider) ListIngestRecursive(_ ingest.Reference, opts ingest.ListOptions) bool {
@@ -116,7 +116,7 @@ func (referenceProvider) AllowListEntity(ref ingest.Reference, _ ingest.Referenc
 }
 
 func (referenceProvider) ListOutputReference(ref ingest.Reference, entRef ingest.Reference) ingest.Reference {
-	return ingest.Reference{Provider: ref.Provider, Path: ref.Path, Symbol: entRef.Symbol}
+	return ingest.Reference{Provider: ref.Provider, Path: ref.Path, Name: entRef.Name}
 }
 
 func (referenceProvider) DocIngestRecursive(ingest.Reference) bool { return false }
@@ -334,7 +334,7 @@ func extractPythonAssign(fe *ingest.FileExtract, assign *grammar.Node, source []
 		if scope != "" {
 			short := ingest.NodeText(left, source)
 			full := scope + "." + short
-			fe.Entities = append(fe.Entities, ingest.EntityDef{
+			fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 				Name:      full,
 				StartByte: left.StartByte(),
 				EndByte:   left.EndByte(),
@@ -463,7 +463,7 @@ func pythonIsIdentifier(s string) bool {
 
 func appendPythonEntity(fe *ingest.FileExtract, nameNode *grammar.Node, source []byte) {
 	name := ingest.NodeText(nameNode, source)
-	fe.Entities = append(fe.Entities, ingest.EntityDef{
+	fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 		Name:      name,
 		StartByte: nameNode.StartByte(),
 		EndByte:   nameNode.EndByte(),
@@ -478,7 +478,7 @@ func extractPythonFunc(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 	}
 	name := ingest.NodeText(nameNode, source)
 
-	fe.Entities = append(fe.Entities, ingest.EntityDef{
+	fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 		Name:      name,
 		StartByte: nameNode.StartByte(),
 		EndByte:   nameNode.EndByte(),
@@ -514,7 +514,7 @@ func extractPythonClass(fe *ingest.FileExtract, n *grammar.Node, source []byte, 
 		className = scope + "." + shortName
 	}
 
-	fe.Entities = append(fe.Entities, ingest.EntityDef{
+	fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 		Name:      className,
 		StartByte: nameNode.StartByte(),
 		EndByte:   nameNode.EndByte(),
@@ -563,7 +563,7 @@ func extractPythonMethod(fe *ingest.FileExtract, n *grammar.Node, source []byte,
 	methodShort := ingest.NodeText(methodNameNode, source)
 	methodName := className + "." + methodShort
 
-	fe.Entities = append(fe.Entities, ingest.EntityDef{
+	fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 		Name:      methodName,
 		StartByte: methodNameNode.StartByte(),
 		EndByte:   methodNameNode.EndByte(),

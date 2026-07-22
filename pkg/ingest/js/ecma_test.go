@@ -50,15 +50,15 @@ export const variant = "primary"
 	}
 
 	names := map[string]bool{}
-	for _, e := range result.Entities {
+	for _, e := range result.Atoms {
 		ref := ingest.ParseReference(e.Reference)
-		if ref.Symbol != "" {
-			names[ref.Symbol] = true
+		if ref.Name != "" {
+			names[ref.Name] = true
 		}
 	}
 	for _, want := range []string{"User", "ID", "greet", "Button", "variant"} {
 		if !names[want] {
-			t.Fatalf("missing entity %q in %#v (entities=%d files=%d)", want, names, len(result.Entities), len(result.Files))
+			t.Fatalf("missing entity %q in %#v (entities=%d files=%d)", want, names, len(result.Atoms), len(result.Files))
 		}
 	}
 }

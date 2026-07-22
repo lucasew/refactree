@@ -44,7 +44,7 @@ func (languageDriver) ResolveImport(sourcePath string, ctx ingest.ImportResolveC
 	return goref.ResolveImport(sourcePath, ctx.KnownDirs)
 }
 
-func (languageDriver) AllowListSymbol(name string, opts ingest.SymbolListOptions) bool {
+func (languageDriver) AllowListAtom(name string, opts ingest.AtomListOptions) bool {
 	if opts.IncludeHidden {
 		return true
 	}
@@ -81,11 +81,11 @@ func (referenceProvider) ResolveScopeTarget(ref ingest.Reference, rootDir string
 }
 
 func (referenceProvider) ResolveSymbolTarget(ref ingest.Reference, rootDir string) (ingest.ProviderSymbolTarget, bool, error) {
-	target, ok, err := goref.ResolveSymbolTarget(ref.Path, ref.Symbol, rootDir)
+	target, ok, err := goref.ResolveSymbolTarget(ref.Path, ref.Name, rootDir)
 	if !ok || err != nil {
 		return ingest.ProviderSymbolTarget{}, ok, err
 	}
-	return ingest.ProviderSymbolTarget{Dir: target.Dir, Symbol: target.Symbol}, true, nil
+	return ingest.ProviderSymbolTarget{Dir: target.Dir, Name: target.Name}, true, nil
 }
 
 func (referenceProvider) ListScopeChildren(ref ingest.Reference, rootDir string, includeHidden bool) ([]refpkg.ScopeChild, bool, error) {
@@ -135,7 +135,7 @@ func (referenceProvider) AllowListEntity(_ ingest.Reference, _ ingest.Reference,
 }
 
 func (referenceProvider) ListOutputReference(ref ingest.Reference, entRef ingest.Reference) ingest.Reference {
-	return ingest.Reference{Provider: ref.Provider, Path: ref.Path, Symbol: entRef.Symbol}
+	return ingest.Reference{Provider: ref.Provider, Path: ref.Path, Name: entRef.Name}
 }
 
 func (referenceProvider) DocIngestRecursive(ingest.Reference) bool { return false }
@@ -212,11 +212,11 @@ func extractGoTypeSpec(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 	}
 	name := ingest.NodeText(nameNode, source)
 
-	fe.Entities = append(fe.Entities, ingest.EntityDef{
+	fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 		Name:      name,
 		StartByte: nameNode.StartByte(),
 		EndByte:   nameNode.EndByte(),
-		Exported:  languageDriver{}.AllowListSymbol(name, ingest.SymbolListOptions{}),
+		Exported:  languageDriver{}.AllowListAtom(name, ingest.AtomListOptions{}),
 	})
 
 	// Interface methods as first-class path entities (Worker.Helper) so renames can
@@ -273,11 +273,11 @@ func extractGoStructFields(fe *ingest.FileExtract, structType *grammar.Node, sou
 				continue
 			}
 			full := typeName + "." + fieldName
-			fe.Entities = append(fe.Entities, ingest.EntityDef{
+			fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 				Name:      full,
 				StartByte: c.StartByte(),
 				EndByte:   c.EndByte(),
-				Exported:  languageDriver{}.AllowListSymbol(fieldName, ingest.SymbolListOptions{}),
+				Exported:  languageDriver{}.AllowListAtom(fieldName, ingest.AtomListOptions{}),
 			})
 		}
 	}
@@ -304,11 +304,11 @@ func extractGoInterfaceMethods(fe *ingest.FileExtract, iface *grammar.Node, sour
 			continue
 		}
 		methodName := typeName + "." + short
-		fe.Entities = append(fe.Entities, ingest.EntityDef{
+		fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 			Name:      methodName,
 			StartByte: nameNode.StartByte(),
 			EndByte:   nameNode.EndByte(),
-			Exported:  languageDriver{}.AllowListSymbol(short, ingest.SymbolListOptions{}),
+			Exported:  languageDriver{}.AllowListAtom(short, ingest.AtomListOptions{}),
 		})
 	}
 }
@@ -328,11 +328,11 @@ func extractGoTypeAlias(fe *ingest.FileExtract, n *grammar.Node, source []byte) 
 		return
 	}
 	name := ingest.NodeText(nameNode, source)
-	fe.Entities = append(fe.Entities, ingest.EntityDef{
+	fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 		Name:      name,
 		StartByte: nameNode.StartByte(),
 		EndByte:   nameNode.EndByte(),
-		Exported:  languageDriver{}.AllowListSymbol(name, ingest.SymbolListOptions{}),
+		Exported:  languageDriver{}.AllowListAtom(name, ingest.AtomListOptions{}),
 	})
 	// Usages: everything after the alias name (RHS type, possibly pointer/qualified).
 	// Alias-to-interface: `type Worker = interface { Helper() }` — method_elem names
@@ -362,11 +362,11 @@ func extractGoFunc(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 		name = receiver + "." + name
 	}
 
-	fe.Entities = append(fe.Entities, ingest.EntityDef{
+	fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 		Name:      name,
 		StartByte: nameNode.StartByte(),
 		EndByte:   nameNode.EndByte(),
-		Exported:  languageDriver{}.AllowListSymbol(name, ingest.SymbolListOptions{}),
+		Exported:  languageDriver{}.AllowListAtom(name, ingest.AtomListOptions{}),
 	})
 
 	// Signature types (params/results/receiver) carry package.Type refs.
@@ -432,11 +432,11 @@ func extractGoVarOrConstSpec(fe *ingest.FileExtract, n *grammar.Node, source []b
 
 func appendGoNamedEntity(fe *ingest.FileExtract, nameNode *grammar.Node, source []byte) {
 	name := ingest.NodeText(nameNode, source)
-	fe.Entities = append(fe.Entities, ingest.EntityDef{
+	fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 		Name:      name,
 		StartByte: nameNode.StartByte(),
 		EndByte:   nameNode.EndByte(),
-		Exported:  languageDriver{}.AllowListSymbol(name, ingest.SymbolListOptions{}),
+		Exported:  languageDriver{}.AllowListAtom(name, ingest.AtomListOptions{}),
 	})
 }
 

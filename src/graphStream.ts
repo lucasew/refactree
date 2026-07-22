@@ -116,11 +116,11 @@ class GraphExploreClient {
   }
 
   visit(ref: string) {
-    // Visit the package scope so the graph stays package-centric (not per-file).
+    // Visit the module scope so the graph stays module-centric (not per-file).
     const id = graphScopeId(ref || "path:./");
     applyNode(stubFromId(id), true);
     getGraphSession().focusId = id;
-    // Server still accepts file refs; send package id for dir-module langs.
+    // Server still accepts file refs; send module id for dir-module langs.
     this.send({ op: "visit", ref: id });
   }
 
@@ -182,7 +182,7 @@ function stubFromId(rawId: string): IncomingNode {
   const external = isExternalId(id);
   let kind = "MODULE";
   if (id.includes("::")) kind = "ATOM";
-  const label = formatGraphLabel(id, "reference");
+  const label = formatGraphLabel(id, "atom");
   return { id, kind, label, external, expandable: external, language: inferLanguageFromId(id) };
 }
 
@@ -191,7 +191,7 @@ function applyNode(n: IncomingNode, _markResolved = true) {
   upsertSessionNode({
     id,
     kind: n.kind,
-    name: formatGraphLabel(id, "reference"),
+    name: formatGraphLabel(id, "atom"),
     external: n.external ?? undefined,
     expandable: n.expandable ?? undefined,
     language: n.language || inferLanguageFromId(id),
@@ -287,7 +287,7 @@ function runOp(
 
 /** Visit a ref in the shared session; only new edges are pushed. */
 export function sessionVisit(ref: string, handlers: StreamHandlers = {}): Promise<void> {
-  // Match package-scoped id the client actually sends (graphScopeId).
+  // Match module-scoped id the client actually sends (graphScopeId).
   const want = graphScopeId(ref || "path:./");
   return runOp(
     () => client.visit(want),
@@ -360,7 +360,7 @@ export function mergeCodeLinksIntoGraph(
   focusRef: string,
   links: ReadonlyArray<{ reference?: string | null; isLink?: boolean | null } | null | undefined>
 ) {
-  // Collapse file paths → packages (path:./pkg/web/server.go → path:./pkg/web).
+  // Collapse file paths → modules (path:./pkg/web/server.go → path:./pkg/web).
   const from = graphScopeId(focusRef || "");
   if (!from || from === "path:./" || from === "path:.") return;
   ensureGraphSession();

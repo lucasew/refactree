@@ -9,7 +9,7 @@
       "path": "helpers.py"
     }
   ],
-  "entities": [
+  "atoms": [
     {
       "reference": "path:./app.py::main",
       "start_byte": 33,
@@ -29,7 +29,7 @@
       "target": "path:./helpers.py::helper"
     }
   ],
-  "relations": [
+  "uses": [
     {
       "reference": "path:./app.py::main",
       "start_byte": 45,

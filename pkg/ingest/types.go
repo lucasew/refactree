@@ -2,10 +2,10 @@ package ingest
 
 // Result is the output of ingesting a directory of source files.
 type Result struct {
-	Files     []File     `json:"files"`
-	Entities  []Entity   `json:"entities"`
-	Aliases   []Alias    `json:"aliases,omitempty"`
-	Relations []Relation `json:"relations"`
+	Files   []File  `json:"files"`
+	Atoms   []Atom  `json:"atoms"`
+	Aliases []Alias `json:"aliases,omitempty"`
+	Uses    []Use   `json:"uses"`
 }
 
 // File records a source file and its language.
@@ -14,8 +14,8 @@ type File struct {
 	Path     string `json:"path"`
 }
 
-// Entity is a named symbol definition (function, class, type).
-type Entity struct {
+// Atom is a named symbol definition (function, class, type).
+type Atom struct {
 	Reference string `json:"reference"`
 	StartByte uint32 `json:"start_byte"`
 	EndByte   uint32 `json:"end_byte"`
@@ -32,8 +32,8 @@ type Alias struct {
 	Target    string `json:"target"`
 }
 
-// Relation is a usage of a symbol at a specific source location.
-type Relation struct {
+// Use is a usage of a symbol at a specific source location.
+type Use struct {
 	Reference      string `json:"reference"`
 	StartByte      uint32 `json:"start_byte"`
 	EndByte        uint32 `json:"end_byte"`
@@ -49,7 +49,7 @@ type FileExtract struct {
 	Path     string
 	Package  string // Go package name; empty for Python/JS
 
-	Entities  []EntityDef
+	Atoms     []AtomDef
 	Imports   []ImportDef
 	Usages    []UsageDef
 	Reexports []ReexportDef // language-neutral forwarding hops (barrels / re-exports)
@@ -74,8 +74,8 @@ type ReexportDef struct {
 	SourceEndByte   uint32
 }
 
-// EntityDef is a symbol definition found during extraction.
-type EntityDef struct {
+// AtomDef is a symbol definition found during extraction.
+type AtomDef struct {
 	Name      string
 	StartByte uint32
 	EndByte   uint32

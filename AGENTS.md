@@ -13,3 +13,7 @@
 # Suggestions
 ## For Janitor
 Focus on the `rft-fuzzy-*` skills and in keeping things sane.
+
+# Product lattice
+Organisation/structure product names: **Module**, **File**, **Atom** (see SPEC.md Domain levels). Prefer these over package/symbol as graph levels. Ingest types are `Atom` and `Use`.
+

@@ -41,7 +41,7 @@ func (languageDriver) ResolveImport(sourcePath string, ctx ingest.ImportResolveC
 	return js.ResolveECMAImport(sourcePath, ctx)
 }
 
-func (languageDriver) AllowListSymbol(string, ingest.SymbolListOptions) bool { return true }
+func (languageDriver) AllowListAtom(string, ingest.AtomListOptions) bool { return true }
 
 func (languageDriver) DestinationFileInDirectory(dstDirRel string, srcRef ingest.Reference) string {
 	srcPath := strings.TrimPrefix(srcRef.Path, "./")
@@ -153,10 +153,10 @@ func mergeScript(fe *ingest.FileExtract, scriptEl *grammar.Node, source []byte, 
 	if err != nil || sub == nil {
 		return
 	}
-	for _, e := range sub.Entities {
+	for _, e := range sub.Atoms {
 		e.StartByte += start
 		e.EndByte += start
-		fe.Entities = append(fe.Entities, e)
+		fe.Atoms = append(fe.Atoms, e)
 	}
 	for _, im := range sub.Imports {
 		im.StartByte += start

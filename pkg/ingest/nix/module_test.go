@@ -61,8 +61,8 @@ func TestWalkSymbols_NixProviderScope(t *testing.T) {
 	}
 
 	out := []string{}
-	err := ingest.WalkSymbols(".", "nix:nixpkgs/lib", ingest.ListOptions{IncludeHidden: true}, func(sym ingest.SymbolInfo) bool {
-		out = append(out, sym.Entity.Reference)
+	err := ingest.WalkAtoms(".", "nix:nixpkgs/lib", ingest.ListOptions{IncludeHidden: true}, func(sym ingest.AtomInfo) bool {
+		out = append(out, sym.Atom.Reference)
 		return true
 	})
 	if err != nil {

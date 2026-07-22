@@ -74,7 +74,7 @@ func (languageDriver) ResolveImport(sourcePath string, ctx ingest.ImportResolveC
 	return nodeSymbolicRef(sourcePath)
 }
 
-func (languageDriver) AllowListSymbol(string, ingest.SymbolListOptions) bool { return true }
+func (languageDriver) AllowListAtom(string, ingest.AtomListOptions) bool { return true }
 
 func (languageDriver) DestinationFileInDirectory(dstDirRel string, _ ingest.Reference) string {
 	_ = dstDirRel
@@ -229,7 +229,7 @@ func extractTSNamedType(fe *ingest.FileExtract, n *grammar.Node, source []byte) 
 	if typeName == "" {
 		return
 	}
-	fe.Entities = append(fe.Entities, ingest.EntityDef{
+	fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 		Name:      typeName,
 		StartByte: nameNode.StartByte(),
 		EndByte:   nameNode.EndByte(),
@@ -302,7 +302,7 @@ func appendTSOwnerMember(fe *ingest.FileExtract, owner string, nameNode *grammar
 	if short == "" {
 		return
 	}
-	fe.Entities = append(fe.Entities, ingest.EntityDef{
+	fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 		Name:      owner + "." + short,
 		StartByte: nameNode.StartByte(),
 		EndByte:   nameNode.EndByte(),
@@ -461,7 +461,7 @@ func extractJSVarDecl(fe *ingest.FileExtract, n *grammar.Node, source []byte, sc
 		var localName string
 		if nameNode != nil && nameNode.Type() == "identifier" {
 			localName = ingest.NodeText(nameNode, source)
-			fe.Entities = append(fe.Entities, ingest.EntityDef{
+			fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 				Name:      localName,
 				StartByte: nameNode.StartByte(),
 				EndByte:   nameNode.EndByte(),
@@ -539,7 +539,7 @@ func extractJSFunc(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 	}
 	name := ingest.NodeText(nameNode, source)
 
-	fe.Entities = append(fe.Entities, ingest.EntityDef{
+	fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 		Name:      name,
 		StartByte: nameNode.StartByte(),
 		EndByte:   nameNode.EndByte(),
@@ -562,7 +562,7 @@ func extractJSClass(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 	}
 	className := ingest.NodeText(nameNode, source)
 
-	fe.Entities = append(fe.Entities, ingest.EntityDef{
+	fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 		Name:      className,
 		StartByte: nameNode.StartByte(),
 		EndByte:   nameNode.EndByte(),
@@ -603,7 +603,7 @@ func extractJSClassMembers(fe *ingest.FileExtract, n *grammar.Node, source []byt
 					short := ingest.NodeText(prop, source)
 					if short != "" {
 						fieldName := ownerName + "." + short
-						fe.Entities = append(fe.Entities, ingest.EntityDef{
+						fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 							Name:      fieldName,
 							StartByte: prop.StartByte(),
 							EndByte:   prop.EndByte(),
@@ -635,7 +635,7 @@ func extractJSClassMembers(fe *ingest.FileExtract, n *grammar.Node, source []byt
 
 			methodShort := ingest.NodeText(methodNameNode, source)
 			methodName := ownerName + "." + methodShort
-			fe.Entities = append(fe.Entities, ingest.EntityDef{
+			fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 				Name:      methodName,
 				StartByte: methodNameNode.StartByte(),
 				EndByte:   methodNameNode.EndByte(),
@@ -681,7 +681,7 @@ func extractJSObjectMembers(fe *ingest.FileExtract, n *grammar.Node, source []by
 			}
 			methodShort := ingest.NodeText(methodNameNode, source)
 			methodName := ownerName + "." + methodShort
-			fe.Entities = append(fe.Entities, ingest.EntityDef{
+			fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 				Name:      methodName,
 				StartByte: methodNameNode.StartByte(),
 				EndByte:   methodNameNode.EndByte(),
@@ -706,7 +706,7 @@ func extractJSObjectMembers(fe *ingest.FileExtract, n *grammar.Node, source []by
 			case "function_expression", "function", "arrow_function", "generator_function":
 				methodShort := ingest.NodeText(key, source)
 				methodName := ownerName + "." + methodShort
-				fe.Entities = append(fe.Entities, ingest.EntityDef{
+				fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 					Name:      methodName,
 					StartByte: key.StartByte(),
 					EndByte:   key.EndByte(),

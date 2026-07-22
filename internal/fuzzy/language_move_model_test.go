@@ -13,7 +13,7 @@ func TestGoMoveModelGrainsAndSameModule(t *testing.T) {
 		t.Fatal(err)
 	}
 	grains := m.Grains()
-	if len(grains) != 2 || grains[0] != GrainDeclaration || grains[1] != GrainPackage {
+	if len(grains) != 2 || grains[0] != GrainAtom || grains[1] != GrainPackage {
 		t.Fatalf("go grains: %v", grains)
 	}
 	if !m.SameModule("./pkg/a.go", "./pkg/b.go") {
@@ -80,9 +80,9 @@ func TestListDeclarationAndPackageNodes(t *testing.T) {
 		t.Fatalf("ingest: %v %v", err, fails)
 	}
 	m, _ := moveModelForLanguage("go")
-	decls := m.ListNodes(result, GrainDeclaration, "go")
+	decls := m.ListNodes(result, GrainAtom, "go")
 	if len(decls) < 2 {
-		t.Fatalf("expected declaration nodes, got %d", len(decls))
+		t.Fatalf("expected atom nodes, got %d", len(decls))
 	}
 	pkgs := m.ListNodes(result, GrainPackage, "go")
 	if len(pkgs) != 1 || pkgs[0].Path != "./pkg" {

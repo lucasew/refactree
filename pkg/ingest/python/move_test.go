@@ -22,7 +22,7 @@ func applyRemove(src string, decl ingest.DeclExtract) string {
 	return src[:decl.RemoveStart] + src[decl.RemoveEnd:]
 }
 
-func entityAt(t *testing.T, content, name string) ingest.Entity {
+func entityAt(t *testing.T, content, name string) ingest.Atom {
 	t.Helper()
 	// name starts at first occurrence of "def name" or "async def name"
 	idx := strings.Index(content, "def "+name)
@@ -31,7 +31,7 @@ func entityAt(t *testing.T, content, name string) ingest.Entity {
 	}
 	// point at the name identifier, not "def "
 	start := uint32(idx + len("def "))
-	return ingest.Entity{
+	return ingest.Atom{
 		Reference: "path:./mod.py::C." + name,
 		StartByte: start,
 		EndByte:   start + uint32(len(name)),

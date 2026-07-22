@@ -20,8 +20,8 @@ type ModuleTarget struct {
 }
 
 type SymbolTarget struct {
-	Dir    string
-	Symbol string
+	Dir  string
+	Name string
 }
 
 var moduleTargetCache sync.Map
@@ -142,7 +142,7 @@ func ResolveSymbolTarget(spec, symbol, workDir string) (SymbolTarget, bool, erro
 	if err != nil {
 		return SymbolTarget{}, true, err
 	}
-	return SymbolTarget{Dir: target.Dir, Symbol: symbol}, true, nil
+	return SymbolTarget{Dir: target.Dir, Name: symbol}, true, nil
 }
 
 // MatchesEntityPath reports whether entPath (relative to target.Dir) belongs to

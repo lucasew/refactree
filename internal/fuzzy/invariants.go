@@ -52,7 +52,7 @@ func CheckInvariants(dir string, result *ingest.Result, opts InvariantOptions) [
 	}
 
 	entityKeys := map[string]bool{}
-	for _, e := range result.Entities {
+	for _, e := range result.Atoms {
 		entityRefs[e.Reference] = true
 		key := fmt.Sprintf("%s\x00%d\x00%d", e.Reference, e.StartByte, e.EndByte)
 		if entityKeys[key] {
@@ -63,11 +63,11 @@ func CheckInvariants(dir string, result *ingest.Result, opts InvariantOptions) [
 		ref := ingest.ParseReference(e.Reference)
 		rel := strings.TrimPrefix(ref.Path, "./")
 		fails = append(fails, checkSpan("entity_span", e.Reference, e.StartByte, e.EndByte, fileSizes[rel])...)
-		if ref.Symbol != "" {
-			if text, ok := readSpan(dir, rel, e.StartByte, e.EndByte); ok && text != ingest.SymbolLeaf(ref.Symbol) {
+		if ref.Name != "" {
+			if text, ok := readSpan(dir, rel, e.StartByte, e.EndByte); ok && text != ingest.AtomName(ref.Name) {
 				fails = append(fails, InvariantFailure{
 					Check:   "entity_text",
-					Message: fmt.Sprintf("%s span %q != symbol leaf %q (from %q)", e.Reference, text, ingest.SymbolLeaf(ref.Symbol), ref.Symbol),
+					Message: fmt.Sprintf("%s span %q != symbol leaf %q (from %q)", e.Reference, text, ingest.AtomName(ref.Name), ref.Name),
 				})
 			}
 		}
@@ -100,7 +100,7 @@ func CheckInvariants(dir string, result *ingest.Result, opts InvariantOptions) [
 			})
 		}
 	}
-	for _, r := range result.Relations {
+	for _, r := range result.Uses {
 		ref := ingest.ParseReference(r.Reference)
 		rel := strings.TrimPrefix(ref.Path, "./")
 		fails = append(fails, checkSpan("relation_span", r.Reference, r.StartByte, r.EndByte, fileSizes[rel])...)
@@ -156,12 +156,12 @@ func CheckIdempotentIngest(dir string, first *ingest.Result) []InvariantFailure 
 // CheckWalkSymbolsSubset ensures listed symbols are present as entities.
 func CheckWalkSymbolsSubset(dir string, result *ingest.Result) []InvariantFailure {
 	entityRefs := map[string]bool{}
-	for _, e := range result.Entities {
+	for _, e := range result.Atoms {
 		entityRefs[e.Reference] = true
 	}
 	var fails []InvariantFailure
-	err := ingest.WalkSymbols(dir, "path:./", ingest.ListOptions{IncludeHidden: true, Recursive: true}, func(info ingest.SymbolInfo) bool {
-		ref := info.Entity.Reference
+	err := ingest.WalkAtoms(dir, "path:./", ingest.ListOptions{IncludeHidden: true, Recursive: true}, func(info ingest.AtomInfo) bool {
+		ref := info.Atom.Reference
 		if !entityRefs[ref] {
 			fails = append(fails, InvariantFailure{
 				Check:   "walk_symbols_subset",
@@ -210,9 +210,9 @@ func cloneSorted(r *ingest.Result) *ingest.Result {
 	}
 	cp := *r
 	cp.Files = append([]ingest.File(nil), r.Files...)
-	cp.Entities = append([]ingest.Entity(nil), r.Entities...)
+	cp.Atoms = append([]ingest.Atom(nil), r.Atoms...)
 	cp.Aliases = append([]ingest.Alias(nil), r.Aliases...)
-	cp.Relations = append([]ingest.Relation(nil), r.Relations...)
+	cp.Uses = append([]ingest.Use(nil), r.Uses...)
 	ingest.SortResult(&cp)
 	return &cp
 }

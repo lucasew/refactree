@@ -6,7 +6,7 @@ import "strings"
 type Reference struct {
 	Provider string // e.g. "path", "go", "python", "node"
 	Path     string // e.g. "./main.go", "fmt"
-	Symbol   string // e.g. "main", "Println"; empty for file/package refs
+	Name     string // e.g. "main", "Println"; empty for file/package refs
 }
 
 // Parse splits a "provider:path::symbol" string.
@@ -15,7 +15,7 @@ func Parse(s string) Reference {
 
 	base := s
 	if j := strings.Index(base, "::"); j >= 0 {
-		r.Symbol = base[j+2:]
+		r.Name = base[j+2:]
 		base = base[:j]
 	}
 
@@ -26,7 +26,7 @@ func Parse(s string) Reference {
 	}
 
 	// Shorthand reference: <path>::<symbol> or <path>
-	if r.Symbol != "" || strings.Contains(base, "/") || strings.HasPrefix(base, ".") {
+	if r.Name != "" || strings.Contains(base, "/") || strings.HasPrefix(base, ".") {
 		r.Provider = "path"
 		if strings.HasPrefix(base, "./") || strings.HasPrefix(base, "../") || strings.HasPrefix(base, "/") {
 			r.Path = base
@@ -47,8 +47,8 @@ func (r Reference) String() string {
 	if r.Provider != "" {
 		base = strings.ToLower(r.Provider) + ":" + r.Path
 	}
-	if r.Symbol != "" {
-		return base + "::" + r.Symbol
+	if r.Name != "" {
+		return base + "::" + r.Name
 	}
 	return base
 }
@@ -58,8 +58,8 @@ func FileRef(path string) string {
 	return "path:" + path
 }
 
-// SymbolRef builds a path-provider symbol reference: path:./file::symbol
-func SymbolRef(path, symbol string) string {
+// AtomRef builds a path-provider symbol reference: path:./file::symbol
+func AtomRef(path, symbol string) string {
 	return "path:" + path + "::" + symbol
 }
 

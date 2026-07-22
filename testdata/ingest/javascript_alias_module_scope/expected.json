@@ -9,7 +9,7 @@
       "path": "helper.js"
     }
   ],
-  "entities": [
+  "atoms": [
     {
       "reference": "path:./main.js::main",
       "start_byte": 50,
@@ -29,7 +29,7 @@
       "target": "path:./helper.js"
     }
   ],
-  "relations": [
+  "uses": [
     {
       "reference": "path:./main.js::main",
       "start_byte": 61,

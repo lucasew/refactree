@@ -9,14 +9,14 @@ import (
 // CanonicalizeReference turns a reference into the preferred form for navigation
 // and inspection. It is provider-agnostic at the logic layer: after a small
 // filesystem prelude for path dirs, it ingests a Result and walks only
-// Entities / Aliases (the ingestor graph), which any provider/language shares.
+// Atoms / Aliases (the ingestor graph), which any provider/language shares.
 //
 // Prelude (path only, to obtain a concrete seed file):
 //   - normalize ./ prefix
 //   - directory → module entry via DirectoryModuleResolver
 //
 // Graph walk (any provider, via Result — see CanonicalizeInResult):
-//   - exact Entity hit
+//   - exact Atom hit
 //   - module/file ref with no symbol → sole entity in that path (default/primary export)
 //   - symbol not defined at this path → Alias forwards from this scope (re-exports/barrels)
 //   - else sole entity with that symbol anywhere in the Result
@@ -66,7 +66,7 @@ func CanonicalizeReference(rootDir string, ref Reference) Reference {
 	return projectToInputProvider(origProvider, origPath, ref)
 }
 
-// CanonicalizeInResult walks only the provider-agnostic ingest graph (Entities,
+// CanonicalizeInResult walks only the provider-agnostic ingest graph (Atoms,
 // Aliases). No filesystem or language driver calls — callers supply an already
 // built Result (e.g. from MaterializeSource / Seed / Dir drivers).
 //
@@ -95,7 +95,7 @@ func CanonicalizeInResult(result *Result, ref Reference) Reference {
 			return ParseReference(ent.Reference)
 		}
 
-		if ref.Symbol == "" {
+		if ref.Name == "" {
 			// Module/file ref: prefer an alias hop to a same-scope symbol (drivers
 			// record primary/default export this way). Sole entity is fallback only.
 			if next, ok := followSameScopeSymbolAlias(result, ref); ok {
@@ -120,9 +120,9 @@ func CanonicalizeInResult(result *Result, ref Reference) Reference {
 
 		// ESM "default" often means the module's primary export (DefaultExport alias
 		// or sole entity), not a symbol literally named "default".
-		if ref.Symbol == "default" {
+		if ref.Name == "default" {
 			bare := ref
-			bare.Symbol = ""
+			bare.Name = ""
 			if next, ok := followSameScopeSymbolAlias(result, bare); ok {
 				ref = next
 				continue
@@ -133,7 +133,7 @@ func CanonicalizeInResult(result *Result, ref Reference) Reference {
 			}
 		}
 
-		if ent, ok := soleEntityNamed(result, ref.Symbol); ok {
+		if ent, ok := soleEntityNamed(result, ref.Name); ok {
 			return ParseReference(ent.Reference)
 		}
 
@@ -151,7 +151,7 @@ func projectToInputProvider(origProvider, origPath string, out Reference) Refere
 	return Reference{
 		Provider: origProvider,
 		Path:     origPath,
-		Symbol:   out.Symbol,
+		Name:     out.Name,
 	}
 }
 
@@ -195,7 +195,7 @@ func canonicalizeDirectoryModule(rootAbs string, ref Reference) Reference {
 }
 
 // ingestForCanonicalize builds a Result via Hop/Seed/Dir drivers + Materialize
-// (no ExpandImports) so Entities/Aliases include the target neighborhood.
+// (no ExpandImports) so Atoms/Aliases include the target neighborhood.
 func ingestForCanonicalize(rootAbs string, ref Reference) (*Result, bool) {
 	if ref.Provider == "" || ref.Provider == "path" {
 		rel := strings.TrimPrefix(ref.Path, "./")
@@ -243,31 +243,31 @@ func ingestForCanonicalize(rootAbs string, ref Reference) (*Result, bool) {
 	return result, err == nil
 }
 
-func entityExact(result *Result, refStr string) (Entity, bool) {
-	for _, ent := range result.Entities {
+func entityExact(result *Result, refStr string) (Atom, bool) {
+	for _, ent := range result.Atoms {
 		if ent.Reference == refStr {
 			return ent, true
 		}
 	}
-	return Entity{}, false
+	return Atom{}, false
 }
 
-func entityAtPathSymbol(result *Result, ref Reference) (Entity, bool) {
-	for _, ent := range result.Entities {
+func entityAtPathSymbol(result *Result, ref Reference) (Atom, bool) {
+	for _, ent := range result.Atoms {
 		er := ParseReference(ent.Reference)
-		if er.Symbol != ref.Symbol {
+		if er.Name != ref.Name {
 			continue
 		}
 		if sameScopePath(ref, er) {
 			return ent, true
 		}
 	}
-	return Entity{}, false
+	return Atom{}, false
 }
 
 func soleEntityInScope(result *Result, ref Reference) (Reference, bool) {
-	var matches []Entity
-	for _, ent := range result.Entities {
+	var matches []Atom
+	for _, ent := range result.Atoms {
 		er := ParseReference(ent.Reference)
 		if sameScopePath(ref, er) {
 			matches = append(matches, ent)
@@ -279,18 +279,18 @@ func soleEntityInScope(result *Result, ref Reference) (Reference, bool) {
 	return Reference{}, false
 }
 
-func soleEntityNamed(result *Result, symbol string) (Entity, bool) {
-	var matches []Entity
-	for _, ent := range result.Entities {
+func soleEntityNamed(result *Result, symbol string) (Atom, bool) {
+	var matches []Atom
+	for _, ent := range result.Atoms {
 		er := ParseReference(ent.Reference)
-		if er.Symbol == symbol {
+		if er.Name == symbol {
 			matches = append(matches, ent)
 		}
 	}
 	if len(matches) == 1 {
 		return matches[0], true
 	}
-	return Entity{}, false
+	return Atom{}, false
 }
 
 // followSameScopeSymbolAlias finds an alias on this scope whose target is a
@@ -303,7 +303,7 @@ func followSameScopeSymbolAlias(result *Result, ref Reference) (Reference, bool)
 			continue
 		}
 		tr := ParseReference(a.Target)
-		if tr.Symbol == "" {
+		if tr.Name == "" {
 			continue
 		}
 		if sameScopePath(ref, tr) {
@@ -325,8 +325,8 @@ func followAliasForward(result *Result, ref Reference) (Reference, bool) {
 			continue
 		}
 		// Named reexport/import binding: alias reference carries the local export name.
-		if ar.Symbol != "" {
-			if ref.Symbol == "" || ar.Symbol != ref.Symbol {
+		if ar.Name != "" {
+			if ref.Name == "" || ar.Name != ref.Name {
 				continue
 			}
 			return ParseReference(a.Target), true
@@ -334,14 +334,14 @@ func followAliasForward(result *Result, ref Reference) (Reference, bool) {
 		tr := ParseReference(a.Target)
 		// Legacy/module-level alias whose target already names the requested symbol
 		// (e.g. file → other::Search).
-		if ref.Symbol != "" && tr.Symbol == ref.Symbol {
+		if ref.Name != "" && tr.Name == ref.Name {
 			return tr, true
 		}
 		// Star re-export only: zero-span module→module forward (export * from).
 		// Import bindings also use file-scoped aliases with spans — do not treat
 		// those as star hops for arbitrary symbols (would send default→wrong module).
-		if ref.Symbol != "" && ar.Symbol == "" && tr.Symbol == "" && a.StartByte == 0 && a.EndByte == 0 {
-			tr.Symbol = ref.Symbol
+		if ref.Name != "" && ar.Name == "" && tr.Name == "" && a.StartByte == 0 && a.EndByte == 0 {
+			tr.Name = ref.Name
 			if !hasStar {
 				starHop = tr
 				hasStar = true

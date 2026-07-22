@@ -55,7 +55,7 @@ func TestExpandRenameSourceSet_UsesModuleImportPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := &Result{
-		Relations: []Relation{
+		Uses: []Use{
 			{Target: "go:example/pkg/db::FromContext"},
 			{Target: "go:example/other/db::FromContext"}, // wrong package, same leaf
 			{Target: "go:fmt::FromContext"},              // single-segment false friend

@@ -1,5 +1,5 @@
 // Package annotate turns ingested source into ordered HTML segments.
-// Relations and entities become hyperlinks/anchors keyed by reference strings.
+// Uses and entities become hyperlinks/anchors keyed by reference strings.
 package annotate
 
 import (
@@ -60,7 +60,7 @@ func BuildWithOptions(source []byte, filePath string, result *ingest.Result, cod
 	normPath := normalizePath(filePath)
 	var spans []Span
 
-	for _, ent := range result.Entities {
+	for _, ent := range result.Atoms {
 		ref := ingest.ParseReference(ent.Reference)
 		if normalizePath(ref.Path) != normPath {
 			continue
@@ -114,7 +114,7 @@ func BuildWithOptions(source []byte, filePath string, result *ingest.Result, cod
 		})
 	}
 
-	for _, rel := range result.Relations {
+	for _, rel := range result.Uses {
 		ref := ingest.ParseReference(rel.Reference)
 		if normalizePath(ref.Path) != normPath {
 			continue

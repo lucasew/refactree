@@ -103,7 +103,7 @@ func TestWalkSymbols_StopEarly(t *testing.T) {
 	mustWrite(t, filepath.Join(dir, "a.go"), "package main\n\nfunc A() {}\nfunc B() {}\n")
 
 	count := 0
-	err := ingest.WalkSymbols(dir, "path:./", ingest.ListOptions{IncludeHidden: true}, func(sym ingest.SymbolInfo) bool {
+	err := ingest.WalkAtoms(dir, "path:./", ingest.ListOptions{IncludeHidden: true}, func(sym ingest.AtomInfo) bool {
 		_ = sym
 		count++
 		return false
@@ -216,8 +216,8 @@ func mustWrite(t *testing.T, file, content string) {
 
 func collectRefs(dir, ref string, opts ingest.ListOptions) ([]string, error) {
 	out := []string{}
-	err := ingest.WalkSymbols(dir, ref, opts, func(sym ingest.SymbolInfo) bool {
-		out = append(out, sym.Entity.Reference)
+	err := ingest.WalkAtoms(dir, ref, opts, func(sym ingest.AtomInfo) bool {
+		out = append(out, sym.Atom.Reference)
 		return true
 	})
 	return out, err
@@ -235,7 +235,7 @@ func containsRef(refs []string, needle string) bool {
 func containsSymbol(refs []string, symbol string) bool {
 	for _, r := range refs {
 		ref := ingest.ParseReference(strings.TrimSpace(r))
-		if ref.Symbol == symbol {
+		if ref.Name == symbol {
 			return true
 		}
 	}

@@ -20,7 +20,7 @@ func BuildNeighborhood(root, refStr string) (*Neighborhood, error) {
 	nodes := map[string]*GraphNode{focusID: focus}
 	var edges []*GraphEdge
 
-	if parsed.Symbol != "" {
+	if parsed.Name != "" {
 		result, err := seedForRef(root, parsed)
 		if err != nil {
 			return &Neighborhood{Focus: focus, Nodes: []*GraphNode{focus}, Edges: nil, Incomplete: true}, nil
@@ -70,7 +70,7 @@ func BuildNeighborhood(root, refStr string) (*Neighborhood, error) {
 		// Atoms under this module.
 		localAtoms := map[string]bool{}
 		modID := projectScopeID(root, parsed)
-		for _, ent := range result.Entities {
+		for _, ent := range result.Atoms {
 			er := ingest.ParseReference(ent.Reference)
 			eid := graphRefIDString(root, ingest.CanonicalizeReference(root, er).String())
 			em := projectScopeID(root, scopeRef(ingest.ParseReference(eid)))
@@ -131,7 +131,7 @@ func addRelationEdges(
 	if result == nil {
 		return
 	}
-	for _, rel := range result.Relations {
+	for _, rel := range result.Uses {
 		from := graphRefIDString(root, ingest.CanonicalizeReference(root, ingest.ParseReference(rel.Reference)).String())
 		to := graphRefIDString(root, ingest.CanonicalizeReference(root, ingest.ParseReference(rel.Target)).String())
 		if from == "" || to == "" || from == to {
@@ -232,9 +232,9 @@ func seedForRef(root string, parsed ingest.Reference) (*ingest.Result, error) {
 		if err != nil {
 			return nil, err
 		}
-		for _, ent := range result.Entities {
+		for _, ent := range result.Atoms {
 			er := ingest.ParseReference(ent.Reference)
-			if er.Symbol == parsed.Symbol {
+			if er.Name == parsed.Name {
 				abs := filepath.Join(scope.Dir, filepath.FromSlash(strings.TrimPrefix(er.Path, "./")))
 				if s, err := ingest.SeedResult(scope.Dir, abs); err == nil {
 					return s, nil
@@ -271,12 +271,12 @@ func graphNodeForRef(root string, ref ingest.Reference) *GraphNode {
 	var parent *string
 	var label string
 
-	if ref.Symbol != "" {
+	if ref.Name != "" {
 		kind = NodeKindAtom
 		// Two-line label: module\nsymbol (canvas splits on newline).
-		label = moduleName + "\n" + ref.Symbol
+		label = moduleName + "\n" + ref.Name
 		p := ref
-		p.Symbol = ""
+		p.Name = ""
 		ps := p.String()
 		parent = &ps
 	} else {
@@ -296,10 +296,10 @@ func graphRefID(root string, ref ingest.Reference) string {
 	if loc, ok := tryLocalizeProviderToPath(root, ref); ok {
 		ref = loc
 	}
-	if ref.Symbol != "" {
+	if ref.Name != "" {
 		modID := projectScopeID(root, scopeRef(ref))
 		mod := ingest.ParseReference(modID)
-		mod.Symbol = ref.Symbol
+		mod.Name = ref.Name
 		return mod.String()
 	}
 	return projectScopeID(root, ref)
@@ -332,7 +332,7 @@ func moduleDisplayName(root string, ref ingest.Reference) string {
 }
 
 func isModuleRef(root string, ref ingest.Reference) bool {
-	if ref.Symbol != "" {
+	if ref.Name != "" {
 		return false
 	}
 	if ref.Provider != "" && ref.Provider != "path" {
@@ -381,7 +381,7 @@ func sameScope(a, b ingest.Reference) bool {
 }
 
 func scopeRef(r ingest.Reference) ingest.Reference {
-	r.Symbol = ""
+	r.Name = ""
 	return r
 }
 

@@ -65,7 +65,7 @@ type CodeDocument {
   warning: String
   focusId: String
   files: [FsEntry!]!
-  symbols: [FsEntry!]!
+  atoms: [FsEntry!]!
   parentHref: String
 }
 

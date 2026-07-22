@@ -13,10 +13,10 @@
     <aside class="rail" aria-label="Files">
       <div class="rail-tabs">
         <input type="radio" name="rail-tab-index" id="tab-files-idx" class="rail-tab-input" checked>
-        <input type="radio" name="rail-tab-index" id="tab-symbols-idx" class="rail-tab-input">
+        <input type="radio" name="rail-tab-index" id="tab-atoms-idx" class="rail-tab-input">
         <div class="rail-tab-labels" role="tablist">
           <label for="tab-files-idx" class="rail-tab-label" role="tab">Files</label>
-          <label for="tab-symbols-idx" class="rail-tab-label" role="tab">Symbols</label>
+          <label for="tab-atoms-idx" class="rail-tab-label" role="tab">Atoms</label>
         </div>
         <div class="rail-tab-panel rail-tab-files">
           {{if .Error}}
@@ -33,8 +33,8 @@
           </ul>
           {{end}}
         </div>
-        <div class="rail-tab-panel rail-tab-symbols">
-          <p class="muted">Open a file to list symbols.</p>
+        <div class="rail-tab-panel rail-tab-atoms">
+          <p class="muted">Open a file to list atoms.</p>
         </div>
       </div>
     </aside>

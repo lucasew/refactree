@@ -18,7 +18,7 @@ type CodeDocument struct {
 	Warning    *string        `json:"warning,omitempty"`
 	FocusID    *string        `json:"focusId,omitempty"`
 	Files      []*FsEntry     `json:"files"`
-	Symbols    []*FsEntry     `json:"symbols"`
+	Atoms      []*FsEntry     `json:"atoms"`
 	ParentHref *string        `json:"parentHref,omitempty"`
 }
 

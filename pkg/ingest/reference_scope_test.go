@@ -38,7 +38,7 @@ func TestNormalizeReferenceForScope_PathInsideScope(t *testing.T) {
 	ref := ingest.ParseReference(file + "::newDocCmd")
 	norm := ingest.NormalizeReferenceForScope(dir, dir, ref)
 
-	if norm.Provider != "path" || norm.Path != "./doc.go" || norm.Symbol != "newDocCmd" {
+	if norm.Provider != "path" || norm.Path != "./doc.go" || norm.Name != "newDocCmd" {
 		t.Fatalf("unexpected normalized ref: %+v", norm)
 	}
 }
@@ -64,7 +64,7 @@ func TestAbsolutePathReferenceForScope(t *testing.T) {
 	absRef := ingest.AbsolutePathReferenceForScope(scope)
 
 	want := filepath.Join(tmp, "file.go")
-	if absRef.Provider != "path" || absRef.Path != want || absRef.Symbol != "name" {
+	if absRef.Provider != "path" || absRef.Path != want || absRef.Name != "name" {
 		t.Fatalf("unexpected absolute ref: %+v", absRef)
 	}
 }

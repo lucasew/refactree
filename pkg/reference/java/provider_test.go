@@ -56,7 +56,7 @@ func TestResolvePackageDirAndSymbol(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("symbol target: ok=%v err=%v", ok, err)
 	}
-	if target.Dir != dir || target.Symbol != "Helper" {
+	if target.Dir != dir || target.Name != "Helper" {
 		t.Fatalf("unexpected target %#v", target)
 	}
 }

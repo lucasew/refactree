@@ -42,8 +42,8 @@ func TestWalkExtracts_DirStreamsThenMaterialize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Entities) < 2 {
-		t.Fatalf("expected entities, got %+v", res.Entities)
+	if len(res.Atoms) < 2 {
+		t.Fatalf("expected entities, got %+v", res.Atoms)
 	}
 }
 
@@ -99,7 +99,7 @@ func TestProjectResult_UsesSpine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Entities) == 0 {
+	if len(got.Atoms) == 0 {
 		t.Fatal("expected entities from ProjectResult")
 	}
 	_ = os.ErrNotExist
@@ -115,14 +115,14 @@ func TestSeedResult_BFSNeighbors(t *testing.T) {
 		t.Fatal(err)
 	}
 	refs := map[string]bool{}
-	for _, e := range res.Entities {
+	for _, e := range res.Atoms {
 		refs[e.Reference] = true
 	}
 	if !refs["path:./a.go::A"] {
-		t.Fatalf("missing A: %+v", res.Entities)
+		t.Fatalf("missing A: %+v", res.Atoms)
 	}
 	if !refs["path:./b.go::B"] {
-		t.Fatalf("seed BFS should include sibling B: %+v", res.Entities)
+		t.Fatalf("seed BFS should include sibling B: %+v", res.Atoms)
 	}
 }
 
@@ -134,18 +134,18 @@ func TestDirResult_NonRecursive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, e := range res.Entities {
+	for _, e := range res.Atoms {
 		if e.Reference == "path:./sub/nested.go::Nested" {
-			t.Fatalf("non-recursive should omit nested: %+v", res.Entities)
+			t.Fatalf("non-recursive should omit nested: %+v", res.Atoms)
 		}
 	}
 	found := false
-	for _, e := range res.Entities {
+	for _, e := range res.Atoms {
 		if e.Reference == "path:./root.go::Root" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("expected root entity: %+v", res.Entities)
+		t.Fatalf("expected root entity: %+v", res.Atoms)
 	}
 }

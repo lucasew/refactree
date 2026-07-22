@@ -39,9 +39,9 @@ function handleSearch(event: Event) {
 		t.Fatalf("files=%#v", result.Files)
 	}
 	names := map[string]bool{}
-	for _, e := range result.Entities {
+	for _, e := range result.Atoms {
 		ref := ingest.ParseReference(e.Reference)
-		names[ref.Symbol] = true
+		names[ref.Name] = true
 	}
 	for _, want := range []string{"initialQuery", "query", "handleSearch"} {
 		if !names[want] {
@@ -51,18 +51,18 @@ function handleSearch(event: Event) {
 
 	// Markup usages should resolve to script symbols (or component import).
 	usageTargets := map[string]bool{}
-	for _, r := range result.Relations {
+	for _, r := range result.Uses {
 		ref := ingest.ParseReference(r.Reference)
 		// usage site path
 		tgt := ingest.ParseReference(r.Target)
-		usageTargets[tgt.Symbol] = true
+		usageTargets[tgt.Name] = true
 		_ = ref
 	}
 	for _, want := range []string{"handleSearch", "query", "Search"} {
 		if !usageTargets[want] {
 			// dump for debug
 			var dump []string
-			for _, r := range result.Relations {
+			for _, r := range result.Uses {
 				dump = append(dump, r.Reference+" -> "+r.Target)
 			}
 			t.Fatalf("missing markup relation to %q; relations=%v", want, dump)

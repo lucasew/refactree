@@ -10,12 +10,12 @@ import (
 	refpkg "github.com/lucasew/refactree/pkg/reference"
 )
 
-type entityCandidate struct {
+type atomCandidate struct {
 	Ref      Reference
 	Language string
 }
 
-func allowDirectorySymbolRef(language string) bool {
+func allowDirectoryAtomRef(language string) bool {
 	return LanguageUsesDirectoryModule(language)
 }
 
@@ -35,7 +35,7 @@ func languageForRefPath(result *Result, pathRef string) string {
 
 func canonicalSourceReference(dir string, result *Result, ref Reference) (Reference, error) {
 	ref = normalizePathReference(ref)
-	if ref.Provider != "path" || ref.Symbol == "" {
+	if ref.Provider != "path" || ref.Name == "" {
 		return ref, nil
 	}
 
@@ -60,11 +60,11 @@ func canonicalSourceReference(dir string, result *Result, ref Reference) (Refere
 		langByPath[f.Path] = f.Language
 	}
 
-	candidates := []entityCandidate{}
-	for _, ent := range result.Entities {
+	candidates := []atomCandidate{}
+	for _, ent := range result.Atoms {
 		entRef := ParseReference(ent.Reference)
 		entPath := strings.TrimPrefix(entRef.Path, "./")
-		if entRef.Symbol != ref.Symbol {
+		if entRef.Name != ref.Name {
 			continue
 		}
 		if prefix != "" {
@@ -72,16 +72,16 @@ func canonicalSourceReference(dir string, result *Result, ref Reference) (Refere
 				continue
 			}
 		}
-		candidates = append(candidates, entityCandidate{
+		candidates = append(candidates, atomCandidate{
 			Ref:      entRef,
 			Language: langByPath[entPath],
 		})
 	}
 
 	if len(candidates) == 0 {
-		return ref, fmt.Errorf("no entity %q found under directory %q", ref.Symbol, ref.Path)
+		return ref, fmt.Errorf("no entity %q found under directory %q", ref.Name, ref.Path)
 	}
-	if !hasDirectorySymbolCandidates(candidates) {
+	if !hasDirectoryAtomCandidates(candidates) {
 		return ref, fmt.Errorf("directory symbol reference %q is not supported for this language; use a file reference", ref.String())
 	}
 	if len(candidates) == 1 {
@@ -99,7 +99,7 @@ func canonicalSourceReference(dir string, result *Result, ref Reference) (Refere
 	return ref, fmt.Errorf("ambiguous directory reference %q, matches: %s", ref.String(), strings.Join(refs, ", "))
 }
 
-func pickPreferredDirectoryEntity(candidates []entityCandidate, dirRel string) (Reference, bool) {
+func pickPreferredDirectoryEntity(candidates []atomCandidate, dirRel string) (Reference, bool) {
 	direct := []Reference{}
 	for _, c := range candidates {
 		if !LanguageUsesDirectoryModule(c.Language) {
@@ -117,9 +117,9 @@ func pickPreferredDirectoryEntity(candidates []entityCandidate, dirRel string) (
 	return Reference{}, false
 }
 
-func hasDirectorySymbolCandidates(candidates []entityCandidate) bool {
+func hasDirectoryAtomCandidates(candidates []atomCandidate) bool {
 	for _, c := range candidates {
-		if allowDirectorySymbolRef(c.Language) {
+		if allowDirectoryAtomRef(c.Language) {
 			return true
 		}
 	}
@@ -128,7 +128,7 @@ func hasDirectorySymbolCandidates(candidates []entityCandidate) bool {
 
 func canonicalDestinationReference(dir string, result *Result, srcRef, dstRef Reference) (Reference, error) {
 	dstRef = normalizePathReference(dstRef)
-	if dstRef.Provider != "path" || dstRef.Symbol == "" {
+	if dstRef.Provider != "path" || dstRef.Name == "" {
 		return dstRef, nil
 	}
 
@@ -146,7 +146,7 @@ func canonicalDestinationReference(dir string, result *Result, srcRef, dstRef Re
 	if srcLang == "" {
 		return dstRef, fmt.Errorf("could not determine language for source %s", srcRef.String())
 	}
-	if !allowDirectorySymbolRef(srcLang) {
+	if !allowDirectoryAtomRef(srcLang) {
 		return dstRef, fmt.Errorf("directory destination %q is not supported for language %q; use a file path", dstRef.Path, srcLang)
 	}
 	driver, ok := languageDriverForName(srcLang)

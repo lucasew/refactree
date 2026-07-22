@@ -91,7 +91,7 @@ func NavigateReference(root string, fsys projectfs.FS, base *Result, ref Referen
 
 		// Prefer graph walk on what we already have.
 		next := CanonicalizeInResult(out, ref)
-		if entityExactOK(out, next.String()) || (next.Symbol != "" && entityAtPathSymbolOK(out, next)) {
+		if entityExactOK(out, next.String()) || (next.Name != "" && entityAtPathSymbolOK(out, next)) {
 			return out, next
 		}
 
@@ -161,11 +161,11 @@ func firstAliasTarget(result *Result, ref Reference) (Reference, bool) {
 	}
 	key := ref.String()
 	scope := FileRef("./" + strings.TrimPrefix(ref.Path, "./"))
-	if ref.Symbol != "" {
+	if ref.Name != "" {
 		scope = ref.String()
 	}
 	for _, a := range result.Aliases {
-		if a.Reference == key || a.Reference == scope || (ref.Symbol == "" && a.Reference == FileRef("./"+strings.TrimPrefix(ref.Path, "./"))) {
+		if a.Reference == key || a.Reference == scope || (ref.Name == "" && a.Reference == FileRef("./"+strings.TrimPrefix(ref.Path, "./"))) {
 			if a.Target != "" {
 				return ParseReference(a.Target), true
 			}
@@ -176,8 +176,8 @@ func firstAliasTarget(result *Result, ref Reference) (Reference, bool) {
 		ar := ParseReference(a.Reference)
 		if sameScopePath(ref, ar) && a.Target != "" {
 			t := ParseReference(a.Target)
-			if ref.Symbol != "" && t.Symbol == "" {
-				t.Symbol = ref.Symbol
+			if ref.Name != "" && t.Name == "" {
+				t.Name = ref.Name
 			}
 			return t, true
 		}
@@ -204,13 +204,13 @@ func MergeResults(parts ...*Result) *Result {
 			seenFile[k] = true
 			out.Files = append(out.Files, f)
 		}
-		for _, e := range p.Entities {
+		for _, e := range p.Atoms {
 			k := e.Reference + "\x00" + strconv.FormatUint(uint64(e.StartByte), 10) + "\x00" + strconv.FormatUint(uint64(e.EndByte), 10)
 			if seenEnt[k] {
 				continue
 			}
 			seenEnt[k] = true
-			out.Entities = append(out.Entities, e)
+			out.Atoms = append(out.Atoms, e)
 		}
 		for _, a := range p.Aliases {
 			k := a.Reference + "\x00" + a.Target + "\x00" + strconv.FormatUint(uint64(a.StartByte), 10)
@@ -220,13 +220,13 @@ func MergeResults(parts ...*Result) *Result {
 			seenAlias[k] = true
 			out.Aliases = append(out.Aliases, a)
 		}
-		for _, r := range p.Relations {
+		for _, r := range p.Uses {
 			k := r.Reference + "\x00" + r.Target + "\x00" + strconv.FormatUint(uint64(r.StartByte), 10)
 			if seenRel[k] {
 				continue
 			}
 			seenRel[k] = true
-			out.Relations = append(out.Relations, r)
+			out.Uses = append(out.Uses, r)
 		}
 	}
 	return out

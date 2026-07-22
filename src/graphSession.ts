@@ -2,12 +2,12 @@ import {
   formatGraphLabel,
   graphScopeId,
   normalizeRef,
-  packageScopeId,
+  moduleScopeId,
   type GraphViewMode,
 } from "./routes";
 
 /**
- * Session-wide graph facts + dual projections for package / reference views.
+ * Session-wide graph facts + dual projections for module / atom views.
  *
  * Facts (nodes/links) are always full graph ids. Projections are maintained
  * incrementally on upsert so snapshotGraphData is O(mode size), not a full
@@ -36,15 +36,15 @@ export type FGLinkFact = {
 };
 
 export type GraphSession = {
-  /** Full fact store (packages + atoms). */
+  /** Full fact store (modules + atoms). */
   nodes: Map<string, FGNode>;
   links: Map<FGLinkKey, FGLinkFact>;
-  /** Incremental package projection (stable node objects). */
-  packageNodes: Map<string, FGNode>;
-  packageLinks: Map<FGLinkKey, FGLinkFact>;
-  /** Incremental reference/atom projection (subset of nodes + atom↔atom links). */
-  referenceNodes: Map<string, FGNode>;
-  referenceLinks: Map<FGLinkKey, FGLinkFact>;
+  /** Incremental module projection (stable node objects). */
+  moduleNodes: Map<string, FGNode>;
+  moduleLinks: Map<FGLinkKey, FGLinkFact>;
+  /** Incremental atom projection (subset of nodes + atom↔atom links). */
+  atomNodes: Map<string, FGNode>;
+  atomLinks: Map<FGLinkKey, FGLinkFact>;
   expanded: Set<string>;
   focusId: string;
   incomplete: boolean;
@@ -55,10 +55,10 @@ export type GraphSession = {
 const session: GraphSession = {
   nodes: new Map(),
   links: new Map(),
-  packageNodes: new Map(),
-  packageLinks: new Map(),
-  referenceNodes: new Map(),
-  referenceLinks: new Map(),
+  moduleNodes: new Map(),
+  moduleLinks: new Map(),
+  atomNodes: new Map(),
+  atomLinks: new Map(),
   expanded: new Set(),
   focusId: "",
   incomplete: true,
@@ -103,11 +103,11 @@ export function isExternalId(id: string): boolean {
   return prov !== "path";
 }
 
-export function isReferenceId(id: string): boolean {
+export function isAtomId(id: string): boolean {
   return (id ?? "").includes("::");
 }
 
-export function isPackageId(id: string): boolean {
+export function isModuleId(id: string): boolean {
   const s = id ?? "";
   return s !== "" && !s.includes("::");
 }
@@ -116,28 +116,28 @@ function bumpVersion() {
   session.version++;
 }
 
-/** Ensure package projection has a stable node for packageScopeId(id). */
-function ensurePackageNode(fromFact: FGNode): FGNode {
-  const pid = packageScopeId(fromFact.id);
-  let p = session.packageNodes.get(pid);
+/** Ensure module projection has a stable node for moduleScopeId(id). */
+function ensureModuleNode(fromFact: FGNode): FGNode {
+  const pid = moduleScopeId(fromFact.id);
+  let p = session.moduleNodes.get(pid);
   if (!p) {
     const seed = session.nodes.get(pid);
-    if (seed && isPackageId(seed.id)) {
+    if (seed && isModuleId(seed.id)) {
       p = seed;
     } else {
       p = {
         id: pid,
-        name: formatGraphLabel(pid, "package"),
+        name: formatGraphLabel(pid, "module"),
         kind: "MODULE",
         external: !!fromFact.external,
         expandable: !!fromFact.expandable && !!fromFact.external,
         language: fromFact.language,
       };
     }
-    session.packageNodes.set(pid, p);
+    session.moduleNodes.set(pid, p);
   }
   p.id = pid;
-  p.name = formatGraphLabel(pid, "package");
+  p.name = formatGraphLabel(pid, "module");
   p.kind = "MODULE";
   if (fromFact.external) p.external = true;
   if (fromFact.expandable && fromFact.external) p.expandable = true;
@@ -146,7 +146,7 @@ function ensurePackageNode(fromFact: FGNode): FGNode {
 }
 
 /**
- * Upsert a fact node and maintain package/reference projections incrementally.
+ * Upsert a fact node and maintain module/atom projections incrementally.
  */
 export function upsertSessionNode(partial: {
   id: string;
@@ -157,42 +157,42 @@ export function upsertSessionNode(partial: {
   language?: string;
 }): FGNode {
   const id = graphScopeId(partial.id);
-  const isAtom = isReferenceId(id);
+  const isAtom = isAtomId(id);
   const existing = session.nodes.get(id);
   if (existing) {
     if (partial.name) existing.name = partial.name;
-    else existing.name = formatGraphLabel(id, "reference");
+    else existing.name = formatGraphLabel(id, "atom");
     if (partial.kind) existing.kind = isAtom ? partial.kind : "MODULE";
     else if (!isAtom) existing.kind = "MODULE";
     if (partial.external != null) existing.external = partial.external;
     if (partial.expandable != null) existing.expandable = partial.expandable;
     if (partial.language) existing.language = partial.language;
-    ensurePackageNode(existing);
+    ensureModuleNode(existing);
     if (isAtom) {
-      session.referenceNodes.set(id, existing);
+      session.atomNodes.set(id, existing);
     }
     bumpVersion();
     return existing;
   }
   const node: FGNode = {
     id,
-    name: partial.name || formatGraphLabel(id, "reference"),
+    name: partial.name || formatGraphLabel(id, "atom"),
     kind: isAtom ? partial.kind || "ATOM" : "MODULE",
     external: !!partial.external,
     expandable: !!partial.expandable,
     language: partial.language,
   };
   session.nodes.set(id, node);
-  ensurePackageNode(node);
+  ensureModuleNode(node);
   if (isAtom) {
-    session.referenceNodes.set(id, node);
+    session.atomNodes.set(id, node);
   }
   bumpVersion();
   return node;
 }
 
 /**
- * Upsert a fact edge and maintain package/reference link projections.
+ * Upsert a fact edge and maintain module/atom link projections.
  */
 export function upsertSessionLink(fromRaw: string, toRaw: string, kind: string): boolean {
   const from = graphScopeId(fromRaw);
@@ -208,41 +208,41 @@ export function upsertSessionLink(fromRaw: string, toRaw: string, kind: string):
 
   // Ensure endpoint facts exist (stubs).
   if (!session.nodes.has(from)) {
-    upsertSessionNode({ id: from, kind: isReferenceId(from) ? "ATOM" : "MODULE" });
+    upsertSessionNode({ id: from, kind: isAtomId(from) ? "ATOM" : "MODULE" });
   } else {
-    ensurePackageNode(session.nodes.get(from)!);
+    ensureModuleNode(session.nodes.get(from)!);
   }
   if (!session.nodes.has(to)) {
-    upsertSessionNode({ id: to, kind: isReferenceId(to) ? "ATOM" : "MODULE" });
+    upsertSessionNode({ id: to, kind: isAtomId(to) ? "ATOM" : "MODULE" });
   } else {
-    ensurePackageNode(session.nodes.get(to)!);
+    ensureModuleNode(session.nodes.get(to)!);
   }
 
-  // Package projection: only directed IMPORTS between packages
+  // Module projection: only directed IMPORTS between modules
   // (A imports B → A→B). Do not rewire USES/USED_BY — those blur direction.
   if (kind === "IMPORTS") {
-    const pf = packageScopeId(from);
-    const pt = packageScopeId(to);
-    if (pf && pt && pf !== pt && isPackageId(pf) && isPackageId(pt)) {
+    const pf = moduleScopeId(from);
+    const pt = moduleScopeId(to);
+    if (pf && pt && pf !== pt && isModuleId(pf) && isModuleId(pt)) {
       const pk = linkKey(pf, pt, kind);
-      if (!session.packageLinks.has(pk)) {
-        session.packageLinks.set(pk, { source: pf, target: pt, kind: "IMPORTS" });
+      if (!session.moduleLinks.has(pk)) {
+        session.moduleLinks.set(pk, { source: pf, target: pt, kind: "IMPORTS" });
         added = true;
       }
     }
   }
 
   // Reference projection: only atom ↔ atom.
-  if (isReferenceId(from) && isReferenceId(to)) {
+  if (isAtomId(from) && isAtomId(to)) {
     const rk = linkKey(from, to, kind);
-    if (!session.referenceLinks.has(rk)) {
-      session.referenceLinks.set(rk, { source: from, target: to, kind });
+    if (!session.atomLinks.has(rk)) {
+      session.atomLinks.set(rk, { source: from, target: to, kind });
       added = true;
     }
     const a = session.nodes.get(from);
     const b = session.nodes.get(to);
-    if (a) session.referenceNodes.set(from, a);
-    if (b) session.referenceNodes.set(to, b);
+    if (a) session.atomNodes.set(from, a);
+    if (b) session.atomNodes.set(to, b);
   }
 
   if (added) bumpVersion();
@@ -264,7 +264,7 @@ export function mergeNeighborhood(
     upsertSessionNode({
       id: n.id,
       kind: n.kind,
-      name: formatGraphLabel(graphScopeId(n.id), "reference"),
+      name: formatGraphLabel(graphScopeId(n.id), "atom"),
       external: n.external ?? undefined,
       expandable: n.expandable ?? undefined,
       language: n.language ?? undefined,
@@ -288,7 +288,7 @@ export function markExpanded(id: string) {
   session.expanded.add(nid);
   const n = session.nodes.get(nid);
   if (n) n.expandable = false;
-  const p = session.packageNodes.get(packageScopeId(nid));
+  const p = session.moduleNodes.get(moduleScopeId(nid));
   if (p) p.expandable = false;
 }
 
@@ -296,19 +296,19 @@ export function markExpanded(id: string) {
  * O(projection size) snapshot — projections are maintained on upsert.
  */
 export function snapshotGraphData(
-  mode: GraphViewMode = "reference"
+  mode: GraphViewMode = "atom"
 ): { nodes: FGNode[]; links: { source: string; target: string; kind: string }[] } {
-  if (mode === "package") {
-    const nodes = Array.from(session.packageNodes.values());
+  if (mode === "module") {
+    const nodes = Array.from(session.moduleNodes.values());
     const links: { source: string; target: string; kind: string }[] = [];
-    for (const l of session.packageLinks.values()) {
+    for (const l of session.moduleLinks.values()) {
       links.push({ source: l.source, target: l.target, kind: l.kind });
     }
     return { nodes, links };
   }
-  const nodes = Array.from(session.referenceNodes.values());
+  const nodes = Array.from(session.atomNodes.values());
   const links: { source: string; target: string; kind: string }[] = [];
-  for (const l of session.referenceLinks.values()) {
+  for (const l of session.atomLinks.values()) {
     links.push({ source: l.source, target: l.target, kind: l.kind });
   }
   return { nodes, links };
@@ -318,6 +318,6 @@ export function snapshotGraphData(
 export function viewFocusId(focusId: string, mode: GraphViewMode): string {
   const id = normalizeRef(focusId || "");
   if (!id) return id;
-  if (mode === "package") return packageScopeId(id);
-  return isReferenceId(id) ? graphScopeId(id) : "";
+  if (mode === "module") return moduleScopeId(id);
+  return isAtomId(id) ? graphScopeId(id) : "";
 }

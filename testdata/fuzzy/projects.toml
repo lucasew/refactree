@@ -8,7 +8,7 @@ preserve_globs = []
 
 [projects.workspaced.mv]
 enabled = true
-grains = ["declaration", "package"]
+grains = ["atom", "package"]
 
 [projects.workspaced.isolate]
 setup_network = true
@@ -35,7 +35,7 @@ preserve_globs = [".venv", ".uv"]
 
 [projects.boltons.mv]
 enabled = true
-grains = ["declaration", "module", "package"]
+grains = ["atom", "module", "package"]
 
 [projects.boltons.isolate]
 setup_network = true
@@ -69,7 +69,7 @@ preserve_globs = ["node_modules", ".pnpm-store"]
 
 [projects.astro.mv]
 enabled = true
-grains = ["declaration", "module"]
+grains = ["atom", "module"]
 
 [projects.astro.isolate]
 setup_network = true
@@ -116,7 +116,7 @@ preserve_globs = ["node_modules"]
 
 [projects.pesquisarr.mv]
 enabled = true
-grains = ["declaration", "module"]
+grains = ["atom", "module"]
 
 [projects.pesquisarr.isolate]
 setup_network = true
@@ -164,7 +164,7 @@ preserve_globs = ["node_modules"]
 
 [projects.margea.mv]
 enabled = true
-grains = ["declaration", "module"]
+grains = ["atom", "module"]
 
 [projects.margea.isolate]
 setup_network = true
@@ -202,7 +202,7 @@ preserve_globs = []
 
 [projects.gson.mv]
 enabled = true
-grains = ["declaration", "package"]
+grains = ["atom", "package"]
 
 [projects.gson.isolate]
 setup_network = true

@@ -29,7 +29,7 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		return nil
 	}
 	src := ingest.ParseReference(sourceRefs[0])
-	if !strings.Contains(src.Symbol, ".") {
+	if !strings.Contains(src.Name, ".") {
 		return nil
 	}
 
@@ -39,13 +39,13 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 	for _, s := range sourceRefs {
 		sourceSet[s] = true
 		ref := ingest.ParseReference(s)
-		if t, m, ok := javaSplitTypeMethod(ref.Symbol); ok && m == oldLeaf {
+		if t, m, ok := javaSplitTypeMethod(ref.Name); ok && m == oldLeaf {
 			ourTypes[t] = true
 			if i := strings.LastIndex(t, "."); i >= 0 {
 				ourTypes[t[i+1:]] = true
 			}
 		}
-		if recv, ok := javaMemberReceiver(ref.Symbol); ok {
+		if recv, ok := javaMemberReceiver(ref.Name); ok {
 			ourReceivers[recv] = true
 		}
 	}
@@ -96,12 +96,12 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 	// (new Type() { m() {} }) which share the constructed type's simple name
 	// but live on a different path — no implements edge is recorded for them.
 	if len(alsoTypes) > 0 || len(ourTypes) > 0 {
-		for _, ent := range result.Entities {
+		for _, ent := range result.Atoms {
 			if sourceSet[ent.Reference] {
 				continue
 			}
 			ref := ingest.ParseReference(ent.Reference)
-			t, m, ok := javaSplitTypeMethod(ref.Symbol)
+			t, m, ok := javaSplitTypeMethod(ref.Name)
 			if !ok || m != oldLeaf {
 				continue
 			}
@@ -134,15 +134,15 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 	// method_reference (and complex receivers).
 	if len(ourReceivers) > 0 {
 		foreignReceivers := map[string]bool{}
-		for _, ent := range result.Entities {
+		for _, ent := range result.Atoms {
 			if sourceSet[ent.Reference] {
 				continue
 			}
 			ref := ingest.ParseReference(ent.Reference)
-			if ingest.SymbolLeaf(ref.Symbol) != oldLeaf {
+			if ingest.AtomName(ref.Name) != oldLeaf {
 				continue
 			}
-			if recv, ok := javaMemberReceiver(ref.Symbol); ok && !ourReceivers[recv] {
+			if recv, ok := javaMemberReceiver(ref.Name); ok && !ourReceivers[recv] {
 				// Expanded hierarchy types are ours; don't treat their same-leaf
 				// methods as foreign just because the entity ref isn't in sourceSet.
 				recvLeaf := recv
@@ -270,7 +270,7 @@ func javaTypeNamesInClause(n *grammar.Node, source []byte) []string {
 	return names
 }
 
-func (moveDriver) ExtractDecl(filePath string, entity ingest.Entity) (ingest.DeclExtract, error) {
+func (moveDriver) ExtractDecl(filePath string, entity ingest.Atom) (ingest.DeclExtract, error) {
 	pf, err := ingest.ParseSourceFile(filePath, "java")
 	if err != nil {
 		return ingest.DeclExtract{}, err
@@ -578,12 +578,12 @@ func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ing
 		return nil
 	}
 
-	if oldRef.Symbol != "" {
-		if strings.Contains(oldRef.Symbol, ".") {
+	if oldRef.Name != "" {
+		if strings.Contains(oldRef.Name, ".") {
 			return nil
 		}
-		oldType := joinJavaName(packageNameForJavaFile(oldPath), oldRef.Symbol)
-		newType := joinJavaName(packageNameForJavaFile(newPath), newRef.Symbol)
+		oldType := joinJavaName(packageNameForJavaFile(oldPath), oldRef.Name)
+		newType := joinJavaName(packageNameForJavaFile(newPath), newRef.Name)
 		if oldType == "" || newType == "" || oldType == newType {
 			return nil
 		}
@@ -871,7 +871,7 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			}
 		case "switch_label":
 			// case HELPER -> … / case HELPER: — bare enum constant labels.
-			// Relations cover Color.HELPER field_access but not switch labels.
+			// Uses cover Color.HELPER field_access but not switch labels.
 			if len(foreignSimple) == 0 || swHere {
 				for i := uint32(0); i < n.ChildCount(); i++ {
 					ch := n.Child(i)

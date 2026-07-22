@@ -15,8 +15,8 @@ func FileRef(path string) string {
 	return refpkg.FileRef(path)
 }
 
-func SymbolRef(path, symbol string) string {
-	return refpkg.SymbolRef(path, symbol)
+func AtomRef(path, symbol string) string {
+	return refpkg.AtomRef(path, symbol)
 }
 
 // LastPathComponent returns the final slash-separated path segment.

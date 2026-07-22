@@ -328,8 +328,8 @@ func TestSymbolLeaf(t *testing.T) {
 		{"Outer.Inner.'.md'", "'.md'"},
 	}
 	for _, tc := range cases {
-		if got := ingest.SymbolLeaf(tc.in); got != tc.want {
-			t.Errorf("SymbolLeaf(%q) = %q, want %q", tc.in, got, tc.want)
+		if got := ingest.AtomName(tc.in); got != tc.want {
+			t.Errorf("AtomName(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }

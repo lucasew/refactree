@@ -135,7 +135,7 @@ pre {
   color: var(--muted);
 }
 
-/* Files | Symbols tabs — pure CSS radio tabs (no JS). */
+/* Files | Atoms tabs — pure CSS radio tabs (no JS). */
 .rail-tabs {
   display: flex;
   flex-direction: column;
@@ -178,9 +178,9 @@ pre {
 }
 
 #tab-files:checked ~ .rail-tab-labels label[for="tab-files"],
-#tab-symbols:checked ~ .rail-tab-labels label[for="tab-symbols"],
+#tab-atoms:checked ~ .rail-tab-labels label[for="tab-atoms"],
 #tab-files-idx:checked ~ .rail-tab-labels label[for="tab-files-idx"],
-#tab-symbols-idx:checked ~ .rail-tab-labels label[for="tab-symbols-idx"] {
+#tab-atoms-idx:checked ~ .rail-tab-labels label[for="tab-atoms-idx"] {
   color: var(--primary);
   background: var(--surface-2);
 }
@@ -190,9 +190,9 @@ pre {
 }
 
 #tab-files:checked ~ .rail-tab-files,
-#tab-symbols:checked ~ .rail-tab-symbols,
+#tab-atoms:checked ~ .rail-tab-atoms,
 #tab-files-idx:checked ~ .rail-tab-files,
-#tab-symbols-idx:checked ~ .rail-tab-symbols {
+#tab-atoms-idx:checked ~ .rail-tab-atoms {
   display: block;
 }
 

@@ -19,7 +19,7 @@ type moveDriver struct{}
 
 func (moveDriver) Language() string { return "python" }
 
-func (moveDriver) ExtractDecl(filePath string, entity ingest.Entity) (ingest.DeclExtract, error) {
+func (moveDriver) ExtractDecl(filePath string, entity ingest.Atom) (ingest.DeclExtract, error) {
 	pf, err := ingest.ParseSourceFile(filePath, "")
 	if err != nil {
 		return ingest.DeclExtract{}, err
@@ -48,7 +48,7 @@ func (moveDriver) ExtractDecl(filePath string, entity ingest.Entity) (ingest.Dec
 	// Qualified entity names (Class.method) need a class shell when inserted into a
 	// new module; stash the outer class in Preamble for InsertDecl.
 	preamble := ""
-	if className := pythonOuterClass(ingest.ParseReference(entity.Reference).Symbol); className != "" && nested {
+	if className := pythonOuterClass(ingest.ParseReference(entity.Reference).Name); className != "" && nested {
 		preamble = className
 		// Last method (or only body stmt) would leave `class C:` with no body —
 		// a SyntaxError. Drop the whole empty class instead.
@@ -128,10 +128,10 @@ func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src
 	}
 	// Nested symbols (Class.method) are not expressible as a simple
 	// "from mod import leaf" for residual uses; leave those for method extract.
-	if strings.Contains(src.Symbol, ".") {
+	if strings.Contains(src.Name, ".") {
 		return nil, nil
 	}
-	leaf := src.Symbol
+	leaf := src.Name
 	if leaf == "" {
 		return nil, nil
 	}
@@ -179,7 +179,7 @@ func pythonFileUsesTargetOutside(result *ingest.Result, fileRel, targetRef strin
 	if result == nil {
 		return false
 	}
-	for _, rel := range result.Relations {
+	for _, rel := range result.Uses {
 		if rel.Target != targetRef {
 			continue
 		}
@@ -204,23 +204,23 @@ func pythonLocalDepsForDecl(result *ingest.Result, src ingest.Reference, decl in
 	srcRef := src.String()
 	srcPath := src.Path
 	localEntities := map[string]bool{}
-	for _, ent := range result.Entities {
+	for _, ent := range result.Atoms {
 		ref := ingest.ParseReference(ent.Reference)
 		if ref.Path != srcPath || ent.Reference == srcRef {
 			continue
 		}
 		// Only top-level names (no Class.method) for simple imports.
-		if ref.Symbol == "" || strings.Contains(ref.Symbol, ".") {
+		if ref.Name == "" || strings.Contains(ref.Name, ".") {
 			continue
 		}
-		localEntities[ref.Symbol] = true
+		localEntities[ref.Name] = true
 	}
 	if len(localEntities) == 0 {
 		return nil
 	}
 	var deps []string
 	seen := map[string]bool{}
-	for _, rel := range result.Relations {
+	for _, rel := range result.Uses {
 		ref := ingest.ParseReference(rel.Reference)
 		if ref.Path != srcPath {
 			continue
@@ -232,8 +232,8 @@ func pythonLocalDepsForDecl(result *ingest.Result, src ingest.Reference, decl in
 		if targetRef.Path != srcPath {
 			continue
 		}
-		sym := targetRef.Symbol
-		if sym == "" || seen[sym] || sym == src.Symbol || strings.Contains(sym, ".") {
+		sym := targetRef.Name
+		if sym == "" || seen[sym] || sym == src.Name || strings.Contains(sym, ".") {
 			continue
 		}
 		if localEntities[sym] {
@@ -422,7 +422,7 @@ func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ing
 	// For symbol-level moves, find the import statement in this consumer file
 	// that references the source module and rewrite it to point to the
 	// destination module.
-	if oldRef.Symbol != "" {
+	if oldRef.Name != "" {
 		return rewritePythonSymbolImport(fileRelPath, content, result, oldRef, oldPath, newPath)
 	}
 
@@ -695,7 +695,7 @@ func rewritePythonSymbolImport(fileRelPath string, content []byte, result *inges
 	text := string(content)
 	var edits []ingest.Edit
 
-	movedSymbol := oldRef.Symbol
+	movedSymbol := oldRef.Name
 
 	// Scan for "from <module> import" statements and rewrite when the module
 	// matches a known import module string AND the imported names include the
@@ -937,7 +937,7 @@ func findImportModulesForFile(consumerFile string, result *ingest.Result, oldPat
 			continue
 		}
 		targetRef := ingest.ParseReference(alias.Target)
-		if targetRef.Symbol == "" {
+		if targetRef.Name == "" {
 			continue
 		}
 
@@ -1303,7 +1303,7 @@ func pythonFindClass(n *grammar.Node, source []byte, className string) *grammar.
 }
 
 // ExtraRenameEdits rewrites attribute call sites when renaming a method
-// (Class.method → Class.new_name). Relation-based rename only covers class-
+// (Class.method → Class.new_name). Use-based rename only covers class-
 // qualified calls (Box.get_value) because instance receivers (self/params)
 // are not entities. Mirror Go ExtraRenameEdits for Python attributes.
 func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, sourceRefs []string, oldLeaf, newLeaf string) []ingest.Edit {
@@ -1311,7 +1311,7 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		return nil
 	}
 	src := ingest.ParseReference(sourceRefs[0])
-	if !strings.Contains(src.Symbol, ".") {
+	if !strings.Contains(src.Name, ".") {
 		return nil // only methods / nested symbols
 	}
 
@@ -1321,7 +1321,7 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 	for _, s := range sourceRefs {
 		sourceSet[s] = true
 		ref := ingest.ParseReference(s)
-		if recv, ok := pythonMethodReceiver(ref.Symbol); ok {
+		if recv, ok := pythonMethodReceiver(ref.Name); ok {
 			ourReceivers[recv] = true
 			ourTypes[recv] = true
 		}
@@ -1353,15 +1353,15 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 	// Other classes that define the same method leaf — do not rewrite their calls.
 	// Hierarchy-expanded types are ours, not foreign.
 	foreignReceivers := map[string]bool{}
-	for _, ent := range result.Entities {
+	for _, ent := range result.Atoms {
 		if sourceSet[ent.Reference] {
 			continue
 		}
 		ref := ingest.ParseReference(ent.Reference)
-		if ingest.SymbolLeaf(ref.Symbol) != oldLeaf {
+		if ingest.AtomName(ref.Name) != oldLeaf {
 			continue
 		}
-		if recv, ok := pythonMethodReceiver(ref.Symbol); ok && !ourReceivers[recv] {
+		if recv, ok := pythonMethodReceiver(ref.Name); ok && !ourReceivers[recv] {
 			foreignReceivers[recv] = true
 		}
 	}
@@ -1379,13 +1379,13 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 
 	// Rename override / related-type method declarations (Protocol/ABC ↔ implementor).
 	if len(alsoTypes) > 0 {
-		for _, ent := range result.Entities {
+		for _, ent := range result.Atoms {
 			if sourceSet[ent.Reference] {
 				continue
 			}
 			ref := ingest.ParseReference(ent.Reference)
-			recv, ok := pythonMethodReceiver(ref.Symbol)
-			if !ok || ingest.SymbolLeaf(ref.Symbol) != oldLeaf {
+			recv, ok := pythonMethodReceiver(ref.Name)
+			if !ok || ingest.AtomName(ref.Name) != oldLeaf {
 				continue
 			}
 			if !alsoTypes[recv] && !ourTypes[recv] {
@@ -1433,12 +1433,12 @@ func pythonSourcesAreMethodStubs(rootDir string, result *ingest.Result, sourceSe
 		return false
 	}
 	saw := false
-	for _, ent := range result.Entities {
+	for _, ent := range result.Atoms {
 		if !sourceSet[ent.Reference] {
 			continue
 		}
 		ref := ingest.ParseReference(ent.Reference)
-		if !strings.Contains(ref.Symbol, ".") {
+		if !strings.Contains(ref.Name, ".") {
 			continue
 		}
 		saw = true

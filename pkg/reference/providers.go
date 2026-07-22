@@ -23,8 +23,8 @@ type Provider interface {
 // SymbolTarget points to a directory that can be ingested for provider-backed
 // symbol lookup.
 type SymbolTarget struct {
-	Dir    string
-	Symbol string
+	Dir  string
+	Name string
 }
 
 // ScopeTarget points to a directory that can be ingested for provider-backed

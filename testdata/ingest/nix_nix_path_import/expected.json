@@ -5,7 +5,7 @@
       "path": "default.nix"
     }
   ],
-  "entities": [],
+  "atoms": [],
   "aliases": [
     {
       "reference": "path:./default.nix",
@@ -14,7 +14,7 @@
       "target": "nix:nixpkgs/lib"
     }
   ],
-  "relations": [
+  "uses": [
     {
       "reference": "path:./default.nix",
       "start_byte": 37,

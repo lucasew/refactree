@@ -1,5 +1,5 @@
 /**
- * @generated SignedSource<<b07bf93135a0fb35ca1ba4d77480aff7>>
+ * @generated SignedSource<<f1ef75864348b6cff5944b5fcca4caf7>>
  * @lightSyntaxTransform
  * @nogrep
  */
@@ -14,6 +14,11 @@ export type AppCodeQuery$variables = {
 };
 export type AppCodeQuery$data = {
   readonly code: {
+    readonly atoms: ReadonlyArray<{
+      readonly isDir: boolean;
+      readonly name: string;
+      readonly reference: string;
+    }>;
     readonly error: string | null | undefined;
     readonly files: ReadonlyArray<{
       readonly isDir: boolean;
@@ -32,11 +37,6 @@ export type AppCodeQuery$data = {
       readonly isLink: boolean;
       readonly reference: string | null | undefined;
       readonly text: string;
-    }>;
-    readonly symbols: ReadonlyArray<{
-      readonly isDir: boolean;
-      readonly name: string;
-      readonly reference: string;
     }>;
     readonly warning: string | null | undefined;
   };
@@ -198,7 +198,7 @@ v3 = [
         "args": null,
         "concreteType": "FsEntry",
         "kind": "LinkedField",
-        "name": "symbols",
+        "name": "atoms",
         "plural": true,
         "selections": (v2/*: any*/),
         "storageKey": null
@@ -225,16 +225,16 @@ return {
     "selections": (v3/*: any*/)
   },
   "params": {
-    "cacheID": "a1feb9a30bf8a304e73d00eb309005be",
+    "cacheID": "782a530525e9b7acb7f43bc33b904bdb",
     "id": null,
     "metadata": {},
     "name": "AppCodeQuery",
     "operationKind": "query",
-    "text": "query AppCodeQuery(\n  $focus: ID!\n) {\n  code(ref: $focus) {\n    reference\n    language\n    nonText\n    error\n    warning\n    focusId\n    parentHref\n    segments {\n      text\n      href\n      anchorId\n      isLink\n      isDef\n      reference\n    }\n    files {\n      name\n      reference\n      isDir\n    }\n    symbols {\n      name\n      reference\n      isDir\n    }\n  }\n}\n"
+    "text": "query AppCodeQuery(\n  $focus: ID!\n) {\n  code(ref: $focus) {\n    reference\n    language\n    nonText\n    error\n    warning\n    focusId\n    parentHref\n    segments {\n      text\n      href\n      anchorId\n      isLink\n      isDef\n      reference\n    }\n    files {\n      name\n      reference\n      isDir\n    }\n    atoms {\n      name\n      reference\n      isDir\n    }\n  }\n}\n"
   }
 };
 })();
 
-(node as any).hash = "212a6d20e57d2b3c56a5645643b9f023";
+(node as any).hash = "61ad5d9288d572b8decb542343a8465e";
 
 export default node;
