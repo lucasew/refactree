@@ -341,13 +341,17 @@ func matchStep(tokens []tok, pos int, step Node, caps map[string]string, quoted 
 			if m == nil {
 				return false, 0, nil
 			}
+			// Named groups (?P<rest>…) become extra captures (e.g. $rest).
+			// The outer $name still holds the full token text.
+			bindNamedGroups(caps, re, m)
 			if step.As != "" {
 				// Full token in Captures (lock A for string lits)
 				caps[step.As] = t.text
 				if uqOK {
 					quoted[step.As] = true
-					// Fixture stretch: group 1 as emit override (re-quoted content)
-					if step.CaptureGroup > 0 && step.CaptureGroup < len(m) {
+					// Fixture stretch: group 1 as emit override on the same name
+					// when no named group is used (A1-style strip).
+					if step.CaptureGroup > 0 && step.CaptureGroup < len(m) && !hasNamedGroup(re) {
 						override[step.As] = quoteString(m[step.CaptureGroup])
 					}
 				}
@@ -365,6 +369,27 @@ func matchStep(tokens []tok, pos int, step Node, caps map[string]string, quoted 
 	default:
 		return false, 0, fmt.Errorf("unsupported step kind %q", step.Kind)
 	}
+}
+
+// bindNamedGroups sets caps[name] for each (?P<name>…) subexpression.
+// Group 0 is the whole match and is skipped (no name). Empty names are skipped.
+func bindNamedGroups(caps map[string]string, re *regexp.Regexp, sub []string) {
+	names := re.SubexpNames()
+	for i, name := range names {
+		if i == 0 || name == "" || i >= len(sub) {
+			continue
+		}
+		caps[name] = sub[i]
+	}
+}
+
+func hasNamedGroup(re *regexp.Regexp) bool {
+	for i, name := range re.SubexpNames() {
+		if i > 0 && name != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func quoteString(s string) string {

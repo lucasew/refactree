@@ -58,12 +58,20 @@ Examples:
 
 No extra `$pkg` is required for rewrite of the callee name chain.
 
-### String holes `/regex/`
+### String / text holes `/regex/`
 
-- Regex **filters** which string tokens match.
-- Bound capture is the **full string token** (including quotes), e.g. `"failed to open image: %w"`.
-- A capturing group inside `/…(…)/` does **not** redefine the capture span by default (locked: full token).
-- Fixture **go_failed_to_prefix** still encodes a **strip** expected rewrite; that is a **stretch** beyond pure full-token template fill (kept as-is).
+- Regex **filters** which tokens match (string lits: match unquoted content; idents: raw text).
+- Outer bind `$name` is still the **full token** (including quotes for strings), e.g. `"failed to open image: %w"` or `TestFoo`.
+- **Named groups** `(?P<rest>…)` (Go syntax) become **extra captures** available in the template as `$rest`, without changing `$name`:
+
+  ```text
+  $name:{/^Test(?P<rest>.*)/}
+  # $name = TestFoo
+  # $rest = Foo
+  ```
+
+- Unnamed group 1 may still override emit for the same name on string lits (A1 stretch strip).
+- Fixture **go_failed_to_prefix** keeps its strip expected rewrite (stretch).
 
 ### Tokens like `interface{}` / `any`
 
