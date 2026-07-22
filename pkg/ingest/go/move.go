@@ -19,7 +19,7 @@ type moveDriver struct{}
 
 func (moveDriver) Language() string { return "go" }
 
-func (moveDriver) ExtractDecl(filePath string, entity ingest.Entity) (ingest.DeclExtract, error) {
+func (moveDriver) ExtractDecl(filePath string, entity ingest.Atom) (ingest.DeclExtract, error) {
 	pf, err := ingest.ParseSourceFile(filePath, "")
 	if err != nil {
 		return ingest.DeclExtract{}, err
@@ -463,7 +463,7 @@ func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ing
 	// For symbol-level moves (cross-file), use the parent directories.
 	oldDir := oldPath
 	newDir := newPath
-	if oldRef.Symbol != "" {
+	if oldRef.Name != "" {
 		oldDir = dirOf(oldPath)
 		newDir = dirOf(newPath)
 	}
@@ -498,7 +498,7 @@ func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ing
 	// For cross-file symbol moves, also update the qualifier (e.g. pkga.Helper -> pkgb.Helper).
 	// For package moves, the qualifier comes from the `package` directive and is handled
 	// separately by planPackageMove's declaredName logic.
-	if oldRef.Symbol != "" {
+	if oldRef.Name != "" {
 		oldQual := ingest.LastPathComponent(oldDir)
 		newQual := ingest.LastPathComponent(newDir)
 		if oldQual != newQual {
@@ -676,11 +676,11 @@ func goSpecNameStartsAt(spec *grammar.Node, nameStart uint32) bool {
 
 func (moveDriver) ExpandRenameSources(rootDir string, result *ingest.Result, sourceRef string) []string {
 	src := ingest.ParseReference(sourceRef)
-	if src.Symbol == "" {
+	if src.Name == "" {
 		return nil
 	}
-	leaf := ingest.SymbolLeaf(src.Symbol)
-	recv, isMethod := receiverTypeName(src.Symbol)
+	leaf := ingest.AtomName(src.Name)
+	recv, isMethod := receiverTypeName(src.Name)
 	if leaf == "" {
 		return nil
 	}
@@ -691,19 +691,19 @@ func (moveDriver) ExpandRenameSources(rootDir string, result *ingest.Result, sou
 	// in the package tree so concrete defs and call sites rename together.
 	ifaceExpand := isMethod && goTypeIsInterface(rootDir, result, srcPkgDir, recv)
 	var extra []string
-	for _, ent := range result.Entities {
+	for _, ent := range result.Atoms {
 		ref := ingest.ParseReference(ent.Reference)
-		if ref.Provider != "path" || ref.Symbol == "" {
+		if ref.Provider != "path" || ref.Name == "" {
 			continue
 		}
 		rel := strings.TrimPrefix(ref.Path, "./")
 		entPkgDir := dirOf(rel)
-		entLeaf := ingest.SymbolLeaf(ref.Symbol)
+		entLeaf := ingest.AtomName(ref.Name)
 		if entLeaf != leaf {
 			continue
 		}
 		if isMethod {
-			entRecv, entMethod := receiverTypeName(ref.Symbol)
+			entRecv, entMethod := receiverTypeName(ref.Name)
 			if entMethod {
 				if ifaceExpand {
 					// Any Type.leaf in the package / sibling scope under the iface tree.
@@ -718,7 +718,7 @@ func (moveDriver) ExpandRenameSources(rootDir string, result *ingest.Result, sou
 					// Same impl package or sibling packages under the interface tree.
 					continue
 				}
-			} else if ref.Symbol == leaf {
+			} else if ref.Name == leaf {
 				// Facade free function in the interface package (e.g. wallpaper.SetStatic).
 				// Bare path entities also cover types/vars/consts with the same leaf
 				// (type Helper vs Box.Helper) — only free funcs may co-rename.
@@ -738,9 +738,9 @@ func (moveDriver) ExpandRenameSources(rootDir string, result *ingest.Result, sou
 			} else {
 				continue
 			}
-		} else if ref.Symbol != src.Symbol && ref.Symbol != leaf {
+		} else if ref.Name != src.Name && ref.Name != leaf {
 			continue
-		} else if ref.Symbol == leaf && entPkgDir != srcPkgDir && entPkgDir != scopePrefix {
+		} else if ref.Name == leaf && entPkgDir != srcPkgDir && entPkgDir != scopePrefix {
 			continue
 		}
 		if ent.Reference != sourceRef {
@@ -752,9 +752,9 @@ func (moveDriver) ExpandRenameSources(rootDir string, result *ingest.Result, sou
 
 // goEntityIsFreeFunc reports whether ent is a package-level function (no receiver),
 // as opposed to a type/var/const/method that shares a bare symbol leaf.
-func goEntityIsFreeFunc(rootDir string, ent ingest.Entity) bool {
+func goEntityIsFreeFunc(rootDir string, ent ingest.Atom) bool {
 	ref := ingest.ParseReference(ent.Reference)
-	if ref.Symbol == "" || strings.Contains(ref.Symbol, ".") {
+	if ref.Name == "" || strings.Contains(ref.Name, ".") {
 		return false
 	}
 	rel := strings.TrimPrefix(ref.Path, "./")
@@ -877,7 +877,7 @@ func receiverTypeName(symbol string) (string, bool) {
 	if recv == "" {
 		return "", false
 	}
-	// Entity symbols for generic methods use Box[T] / Map[K,V]; AST type
+	// Atom symbols for generic methods use Box[T] / Map[K,V]; AST type
 	// analysis and local bindings use the bare name Box / Map. Normalize so
 	// ExtraRename does not treat the same receiver as foreign.
 	recv = stripGoTypeParams(recv)
@@ -930,7 +930,7 @@ func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src
 		return nil, nil
 	}
 
-	leaf := ingest.SymbolLeaf(src.Symbol)
+	leaf := ingest.AtomName(src.Name)
 	if leaf == "" {
 		return nil, nil
 	}
@@ -969,7 +969,7 @@ func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src
 	seenFiles := map[string]bool{dstRel: true}
 	needImport := map[string]bool{}
 
-	for _, rel := range result.Relations {
+	for _, rel := range result.Uses {
 		if rel.Target != srcRef || rel.ViaImportAlias {
 			continue
 		}
@@ -1014,13 +1014,13 @@ func packageHasMethodsOf(result *ingest.Result, pkgDir, typeName string) bool {
 	if result == nil || typeName == "" {
 		return false
 	}
-	for _, ent := range result.Entities {
+	for _, ent := range result.Atoms {
 		ref := ingest.ParseReference(ent.Reference)
 		rel := strings.TrimPrefix(ref.Path, "./")
 		if dirOf(rel) != pkgDir {
 			continue
 		}
-		if methodReceiverType(ref.Symbol) == typeName {
+		if methodReceiverType(ref.Name) == typeName {
 			return true
 		}
 	}
@@ -1059,13 +1059,13 @@ func packageLocalDepInDecl(result *ingest.Result, pkgDir, movedLeaf, declText st
 	}
 	// Stable order: scan entities as listed.
 	seen := map[string]bool{movedLeaf: true}
-	for _, ent := range result.Entities {
+	for _, ent := range result.Atoms {
 		ref := ingest.ParseReference(ent.Reference)
 		rel := strings.TrimPrefix(ref.Path, "./")
 		if dirOf(rel) != pkgDir {
 			continue
 		}
-		sym := ref.Symbol
+		sym := ref.Name
 		if sym == "" || strings.Contains(sym, ".") {
 			continue // skip empty and method symbols
 		}
@@ -1087,9 +1087,9 @@ func packageLocalDepFromRelations(result *ingest.Result, pkgDir, movedLeaf strin
 	if result == nil || movedLeaf == "" {
 		return ""
 	}
-	for _, rel := range result.Relations {
+	for _, rel := range result.Uses {
 		src := ingest.ParseReference(rel.Reference)
-		if ingest.SymbolLeaf(src.Symbol) != movedLeaf {
+		if ingest.AtomName(src.Name) != movedLeaf {
 			continue
 		}
 		srcRel := strings.TrimPrefix(src.Path, "./")
@@ -1097,14 +1097,14 @@ func packageLocalDepFromRelations(result *ingest.Result, pkgDir, movedLeaf strin
 			continue
 		}
 		tgt := ingest.ParseReference(rel.Target)
-		if tgt.Symbol == "" || strings.Contains(tgt.Symbol, ".") {
+		if tgt.Name == "" || strings.Contains(tgt.Name, ".") {
 			continue
 		}
 		tgtRel := strings.TrimPrefix(tgt.Path, "./")
 		if dirOf(tgtRel) != pkgDir {
 			continue
 		}
-		name := strings.TrimPrefix(tgt.Symbol, "*")
+		name := strings.TrimPrefix(tgt.Name, "*")
 		if name == "" || name == movedLeaf {
 			continue
 		}
@@ -1286,7 +1286,7 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		return nil
 	}
 	src := ingest.ParseReference(sourceRefs[0])
-	_, isMethod := receiverTypeName(src.Symbol)
+	_, isMethod := receiverTypeName(src.Name)
 	if !isMethod {
 		// Type (or other non-method) rename: rewrite embedded-field selectors
 		// (struct { Base }; b.Base) when the package embeds oldLeaf.
@@ -1317,7 +1317,7 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		d := dirOf(rel)
 		pkgDirs[d] = true
 		ourPkgDirs[d] = true
-		if recv, ok := receiverTypeName(ref.Symbol); ok {
+		if recv, ok := receiverTypeName(ref.Name); ok {
 			ourReceivers[recv] = true
 		}
 	}
@@ -1327,15 +1327,15 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 	// via findInterfaceMethodEdits, not competing foreign receivers — treating
 	// them as foreign would skip interface-typed selectors (var d Driver; d.M()).
 	foreignReceivers := map[string]bool{}
-	for _, ent := range result.Entities {
+	for _, ent := range result.Atoms {
 		if sourceSet[ent.Reference] {
 			continue
 		}
 		ref := ingest.ParseReference(ent.Reference)
-		if ingest.SymbolLeaf(ref.Symbol) != oldLeaf {
+		if ingest.AtomName(ref.Name) != oldLeaf {
 			continue
 		}
-		if recv, ok := receiverTypeName(ref.Symbol); ok && !ourReceivers[recv] {
+		if recv, ok := receiverTypeName(ref.Name); ok && !ourReceivers[recv] {
 			entPkg := dirOf(strings.TrimPrefix(ref.Path, "./"))
 			if goTypeIsInterface(rootDir, result, entPkg, recv) {
 				continue
@@ -1365,7 +1365,7 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 
 	occupied := ingest.MarkEntityRelationSpans(result, sourceSet)
 	relatedFiles := map[string]bool{}
-	for _, rel := range result.Relations {
+	for _, rel := range result.Uses {
 		if !sourceSet[rel.Target] {
 			continue
 		}
@@ -2076,7 +2076,7 @@ func compositeKeyIdent(n *grammar.Node) *grammar.Node {
 func embeddedTypeFieldSelectorEdits(rootDir string, result *ingest.Result, sourceRefs []string, oldLeaf, newLeaf string) []ingest.Edit {
 	src := ingest.ParseReference(sourceRefs[0])
 	// Only plain type/func-like leaves (no dots); skip package moves.
-	if src.Symbol == "" || strings.Contains(src.Symbol, ".") {
+	if src.Name == "" || strings.Contains(src.Name, ".") {
 		return nil
 	}
 	srcPkgDir := dirOf(strings.TrimPrefix(src.Path, "./"))

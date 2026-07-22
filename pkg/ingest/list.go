@@ -14,18 +14,18 @@ type ListOptions struct {
 	Recursive     bool
 }
 
-// SymbolInfo is one listed symbol with extracted metadata.
-type SymbolInfo struct {
-	Entity    Entity
+// AtomInfo is one listed symbol with extracted metadata.
+type AtomInfo struct {
+	Atom      Atom
 	Reference Reference
 	Language  string
 }
 
-// WalkSymbols iterates symbols in a reference scope, invoking yield for each
+// WalkAtoms iterates symbols in a reference scope, invoking yield for each
 // matching symbol. Returning false from yield stops iteration early.
 //
 // Thin convenience over WalkExtracts (no Materialize, no ExpandImports).
-func WalkSymbols(dir, reference string, opts ListOptions, yield func(SymbolInfo) bool) error {
+func WalkAtoms(dir, reference string, opts ListOptions, yield func(AtomInfo) bool) error {
 	ref := ParseReference(reference)
 	ingestDir := dir
 	refPath := ""
@@ -63,7 +63,7 @@ func WalkSymbols(dir, reference string, opts ListOptions, yield func(SymbolInfo)
 			Root:  ingestDir,
 			Paths: []string{abs},
 		}, func(fe *FileExtract) bool {
-			return yieldEntitiesFromExtract(fe, ref, refPath, refIsDir, recursive, opts, yield)
+			return yieldAtomsFromExtract(fe, ref, refPath, refIsDir, recursive, opts, yield)
 		})
 	}
 
@@ -73,49 +73,49 @@ func WalkSymbols(dir, reference string, opts ListOptions, yield func(SymbolInfo)
 		Root:      ingestDir,
 		Recursive: recursive,
 	}, func(fe *FileExtract) bool {
-		return yieldEntitiesFromExtract(fe, ref, refPath, refIsDir, recursive, opts, yield)
+		return yieldAtomsFromExtract(fe, ref, refPath, refIsDir, recursive, opts, yield)
 	})
 }
 
-// yieldEntitiesFromExtract returns false if the caller should stop WalkExtracts.
-func yieldEntitiesFromExtract(fe *FileExtract, ref Reference, refPath string, refIsDir, recursive bool, opts ListOptions, yield func(SymbolInfo) bool) bool {
+// yieldAtomsFromExtract returns false if the caller should stop WalkExtracts.
+func yieldAtomsFromExtract(fe *FileExtract, ref Reference, refPath string, refIsDir, recursive bool, opts ListOptions, yield func(AtomInfo) bool) bool {
 	if fe == nil {
 		return true
 	}
-	for _, entDef := range fe.Entities {
+	for _, entDef := range fe.Atoms {
 		entPath := strings.TrimPrefix(filepath.ToSlash(fe.Path), "./")
-		entRef := ParseReference(SymbolRef("./"+entPath, entDef.Name))
+		entRef := ParseReference(AtomRef("./"+entPath, entDef.Name))
 
-		if ref.Symbol != "" && entRef.Symbol != ref.Symbol {
+		if ref.Name != "" && entRef.Name != ref.Name {
 			continue
 		}
 		if !matchesListPathScope(entPath, refPath, refIsDir, recursive) {
 			continue
 		}
 
-		ent := Entity{
+		ent := Atom{
 			Reference: entRef.String(),
 			StartByte: entDef.StartByte,
 			EndByte:   entDef.EndByte,
 			Exported:  entDef.Exported,
 		}
 		language := fe.Language
-		if !providerAllowListEntity(ref, entRef, entPath, language, opts) {
+		if !providerAllowListAtom(ref, entRef, entPath, language, opts) {
 			continue
 		}
-		if !allowListedEntity(ent, language, SymbolListOptions{
+		if !allowListedAtom(ent, language, AtomListOptions{
 			IncludeHidden: opts.IncludeHidden,
 		}) {
 			continue
 		}
 
-		out := SymbolInfo{
-			Entity:    ent,
+		out := AtomInfo{
+			Atom:      ent,
 			Reference: entRef,
 			Language:  language,
 		}
 		out.Reference = providerListOutputReference(ref, entRef)
-		out.Entity.Reference = out.Reference.String()
+		out.Atom.Reference = out.Reference.String()
 
 		if !yield(out) {
 			return false
@@ -172,7 +172,7 @@ func matchesListPathScope(entPath, refPath string, refIsDir, recursive bool) boo
 	return entPath == refPath
 }
 
-func allowListedEntity(ent Entity, language string, opts SymbolListOptions) bool {
+func allowListedAtom(ent Atom, language string, opts AtomListOptions) bool {
 	if opts.IncludeHidden {
 		return true
 	}
@@ -184,5 +184,5 @@ func allowListedEntity(ent Entity, language string, opts SymbolListOptions) bool
 		return ent.Exported
 	}
 	entRef := ParseReference(ent.Reference)
-	return driver.AllowListSymbol(entRef.Symbol, opts)
+	return driver.AllowListAtom(entRef.Name, opts)
 }

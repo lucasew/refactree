@@ -5,7 +5,7 @@
       "path": "Types.java"
     }
   ],
-  "entities": [
+  "atoms": [
     {
       "reference": "path:./Types.java::A",
       "start_byte": 28,
@@ -27,5 +27,5 @@
       "end_byte": 89
     }
   ],
-  "relations": []
+  "uses": []
 }

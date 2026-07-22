@@ -108,9 +108,9 @@ func ValidateStagedProject(dir string, fsys projectfs.FS) error {
 	if err != nil {
 		return err
 	}
-	for _, ent := range result.Entities {
+	for _, ent := range result.Atoms {
 		ref := ParseReference(ent.Reference)
-		if ref.Symbol == "" {
+		if ref.Name == "" {
 			continue
 		}
 		rel := strings.TrimPrefix(ref.Path, "./")
@@ -123,7 +123,7 @@ func ValidateStagedProject(dir string, fsys projectfs.FS) error {
 			return fmt.Errorf("staged bad span for %s", ent.Reference)
 		}
 		got := string(data[ent.StartByte:ent.EndByte])
-		want := SymbolLeaf(ref.Symbol)
+		want := AtomName(ref.Name)
 		if got != want {
 			return fmt.Errorf("staged entity text mismatch %s: %q != %q", ent.Reference, got, want)
 		}

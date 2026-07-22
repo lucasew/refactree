@@ -78,7 +78,7 @@ func TestLoadFile_PathStillWorks(t *testing.T) {
 	if len(v.Segments) == 0 {
 		t.Fatal("expected segments")
 	}
-	if len(v.Symbols) == 0 {
+	if len(v.Atoms) == 0 {
 		t.Fatal("expected symbols tab entries for main")
 	}
 	idx := l.LoadIndex()

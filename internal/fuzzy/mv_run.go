@@ -145,7 +145,7 @@ func placementMenu(grain Grain, model languageMoveModel, result *ingest.Result, 
 		return []Placement{PlacementPackage}
 	case GrainModule:
 		return []Placement{PlacementModule, PlacementNewModule}
-	case GrainDeclaration:
+	case GrainAtom:
 		var menu []Placement
 		menu = append(menu, PlacementRename)
 		// layout: only when the language can place a declaration in another file
@@ -160,7 +160,7 @@ func placementMenu(grain Grain, model languageMoveModel, result *ingest.Result, 
 			// Python declaration lives in a file-module; moving to another file is module placement.
 		} else {
 			// go / jvm: layout within package
-			menu = append(menu, PlacementLayout)
+			menu = append(menu, PlacementFile)
 		}
 		if len(modulesOtherThan(result, model, projectFamily, modKey)) > 0 || len(sameFiles) > 1 {
 			menu = append(menu, PlacementModule)
@@ -180,7 +180,7 @@ func materializeMovePlan(in PlanInput, model languageMoveModel, result *ingest.R
 		return materializePackagePlan(in, source, placement)
 	case GrainModule:
 		return materializeModuleFilePlan(in, result, model, projectFamily, source, placement)
-	case GrainDeclaration:
+	case GrainAtom:
 		return materializeDeclarationPlan(in, model, result, projectFamily, source, placement)
 	default:
 		return movePlan{}, fmt.Errorf("unsupported grain %s", source.Grain)
@@ -239,11 +239,11 @@ func materializeModuleFilePlan(in PlanInput, result *ingest.Result, model langua
 func materializeDeclarationPlan(in PlanInput, model languageMoveModel, result *ingest.Result, projectFamily string, source MoveNode, placement Placement) (movePlan, error) {
 	symbolNames := map[string]bool{}
 	for _, n := range listDeclarationNodes(result, projectFamily) {
-		symbolNames[n.Symbol] = true
+		symbolNames[n.Name] = true
 	}
 
 	srcPath := source.Path
-	srcSymbol := source.Symbol
+	srcSymbol := source.Name
 	modKey := model.ModuleKey(srcPath)
 
 	switch placement {
@@ -260,10 +260,10 @@ func materializeDeclarationPlan(in PlanInput, model languageMoveModel, result *i
 		return movePlan{
 			Placement:   PlacementRename,
 			Source:      source.Reference,
-			Destination: ingest.SymbolRef(srcPath, name),
+			Destination: ingest.AtomRef(srcPath, name),
 		}, nil
 
-	case PlacementLayout:
+	case PlacementFile:
 		// Same module, different layout file, keep name.
 		sameFiles := filesInModule(result, model, projectFamily, modKey)
 		dstPath := peerFileInModule(sameFiles, srcPath, in.PeerIndex)
@@ -271,9 +271,9 @@ func materializeDeclarationPlan(in PlanInput, model languageMoveModel, result *i
 			dstPath = newLayoutFileInModule(srcPath, in.Entropy)
 		}
 		return movePlan{
-			Placement:   PlacementLayout,
+			Placement:   PlacementFile,
 			Source:      source.Reference,
-			Destination: ingest.SymbolRef(dstPath, srcSymbol),
+			Destination: ingest.AtomRef(dstPath, srcSymbol),
 		}, nil
 
 	case PlacementModule:
@@ -301,7 +301,7 @@ func materializeDeclarationPlan(in PlanInput, model languageMoveModel, result *i
 		return movePlan{
 			Placement:   PlacementModule,
 			Source:      source.Reference,
-			Destination: ingest.SymbolRef(dstPath, srcSymbol),
+			Destination: ingest.AtomRef(dstPath, srcSymbol),
 		}, nil
 
 	case PlacementNewModule:
@@ -309,11 +309,11 @@ func materializeDeclarationPlan(in PlanInput, model languageMoveModel, result *i
 		return movePlan{
 			Placement:   PlacementNewModule,
 			Source:      source.Reference,
-			Destination: ingest.SymbolRef(dstPath, srcSymbol),
+			Destination: ingest.AtomRef(dstPath, srcSymbol),
 		}, nil
 
 	default:
-		return movePlan{}, fmt.Errorf("placement %s not valid for declaration grain", placement)
+		return movePlan{}, fmt.Errorf("placement %s not valid for atom grain", placement)
 	}
 }
 
@@ -409,22 +409,22 @@ func postMvInvariants(root string, plan movePlan, strict bool) []InvariantFailur
 	}
 	fails := CheckInvariants(root, result, InvariantOptions{StrictRefs: strict})
 	entityRefs := map[string]bool{}
-	for _, e := range result.Entities {
+	for _, e := range result.Atoms {
 		entityRefs[e.Reference] = true
 	}
 	dst := ingest.ParseReference(plan.Destination)
 	// Package/module file relocate (no symbol): skip declaration presence checks.
-	if plan.Placement == PlacementPackage || dst.Symbol == "" {
+	if plan.Placement == PlacementPackage || dst.Name == "" {
 		return fails
 	}
 	if entityRefs[plan.Source] {
 		fails = append(fails, InvariantFailure{Check: "source_removed", Message: plan.Source + " still present"})
 	}
-	if dst.Symbol != "" && !entityRefs[plan.Destination] {
+	if dst.Name != "" && !entityRefs[plan.Destination] {
 		found := false
 		for ref := range entityRefs {
 			r := ingest.ParseReference(ref)
-			if r.Symbol == dst.Symbol && strings.TrimPrefix(r.Path, "./") == strings.TrimPrefix(dst.Path, "./") {
+			if r.Name == dst.Name && strings.TrimPrefix(r.Path, "./") == strings.TrimPrefix(dst.Path, "./") {
 				found = true
 				break
 			}

@@ -38,7 +38,7 @@ func encodeCodeURLRef(ref string) string {
 	}
 	path := CodePathPrefix + url.PathEscape(ref)
 	parsed := ingest.ParseReference(ref)
-	if parsed.Symbol != "" {
+	if parsed.Name != "" {
 		path += "#" + annotate.AnchorID(ref)
 	}
 	return path
@@ -105,7 +105,7 @@ func canonicalizeDecodedRef(ref string) string {
 // ScopeReferenceForView returns the scope-level reference (symbol stripped).
 func ScopeReferenceForView(ref string) ingest.Reference {
 	r := ingest.ParseReference(ref)
-	r.Symbol = ""
+	r.Name = ""
 	if r.Provider == "" {
 		r.Provider = "path"
 	}

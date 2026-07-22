@@ -6,10 +6,10 @@ import (
 	"strings"
 )
 
-// entityLoc pairs an EntityDef with its file and language metadata.
+// entityLoc pairs an AtomDef with its file and language metadata.
 type entityLoc struct {
 	File     string
-	Entity   EntityDef
+	Atom     AtomDef
 	Package  string
 	Language string
 }
@@ -31,9 +31,9 @@ func resolve(rootDir string, extracts []*FileExtract) *Result {
 	}
 
 	res := &Result{
-		Files:     []File{},
-		Entities:  []Entity{},
-		Relations: []Relation{},
+		Files: []File{},
+		Atoms: []Atom{},
+		Uses:  []Use{},
 	}
 
 	// Collect known files and directories for import resolution.
@@ -50,10 +50,10 @@ func resolve(rootDir string, extracts []*FileExtract) *Result {
 	// Index all entities by name for scope lookups.
 	allEntities := map[string][]entityLoc{}
 	for _, fe := range extracts {
-		for _, ent := range fe.Entities {
+		for _, ent := range fe.Atoms {
 			allEntities[ent.Name] = append(allEntities[ent.Name], entityLoc{
 				File:     fe.Path,
-				Entity:   ent,
+				Atom:     ent,
 				Package:  fe.Package,
 				Language: fe.Language,
 			})
@@ -151,13 +151,13 @@ func resolve(rootDir string, extracts []*FileExtract) *Result {
 			target := FileRef(baseRef.Path)
 			if sourceName != "" {
 				// export { default as Search } → target …::default (or file::SourceName).
-				target = SymbolRef(baseRef.Path, sourceName)
+				target = AtomRef(baseRef.Path, sourceName)
 			}
 			// Prefer the source-name token span so rename rewrites export { name } from
 			// without inserting at [0:0]. Zero-span when the driver did not record it
 			// (canonicalize-only hop).
 			res.Aliases = append(res.Aliases, Alias{
-				Reference: SymbolRef("./"+fe.Path, exportName),
+				Reference: AtomRef("./"+fe.Path, exportName),
 				StartByte: re.SourceStartByte,
 				EndByte:   re.SourceEndByte,
 				Target:    target,
@@ -169,7 +169,7 @@ func resolve(rootDir string, extracts []*FileExtract) *Result {
 		if fe.DefaultExport != "" {
 			res.Aliases = append(res.Aliases, Alias{
 				Reference: FileRef("./" + fe.Path),
-				Target:    SymbolRef("./"+fe.Path, fe.DefaultExport),
+				Target:    AtomRef("./"+fe.Path, fe.DefaultExport),
 			})
 		}
 	}
@@ -180,9 +180,9 @@ func resolve(rootDir string, extracts []*FileExtract) *Result {
 			Language: fe.Language,
 			Path:     fe.Path,
 		})
-		for _, ent := range fe.Entities {
-			res.Entities = append(res.Entities, Entity{
-				Reference: SymbolRef("./"+fe.Path, ent.Name),
+		for _, ent := range fe.Atoms {
+			res.Atoms = append(res.Atoms, Atom{
+				Reference: AtomRef("./"+fe.Path, ent.Name),
 				StartByte: ent.StartByte,
 				EndByte:   ent.EndByte,
 				Exported:  ent.Exported,
@@ -195,7 +195,7 @@ func resolve(rootDir string, extracts []*FileExtract) *Result {
 		imports := importTables[fe.Path]
 		stars := starModules[fe.Path]
 		for _, u := range fe.Usages {
-			scopeRef := SymbolRef("./"+fe.Path, u.Scope)
+			scopeRef := AtomRef("./"+fe.Path, u.Scope)
 			if u.Scope == "" {
 				scopeRef = FileRef("./" + fe.Path)
 			}
@@ -250,7 +250,7 @@ func resolveQualifiedUsage(res *Result, imports map[string]resolvedImport, scope
 		qualTarget = baseTarget
 	}
 
-	res.Relations = append(res.Relations, Relation{
+	res.Uses = append(res.Uses, Use{
 		Reference: scopeRef,
 		StartByte: u.QualStartByte,
 		EndByte:   u.QualEndByte,
@@ -259,7 +259,7 @@ func resolveQualifiedUsage(res *Result, imports map[string]resolvedImport, scope
 
 	memberTarget := resolveQualifiedMemberTarget(baseTarget, importMember, u.Name, allEntities)
 
-	res.Relations = append(res.Relations, Relation{
+	res.Uses = append(res.Uses, Use{
 		Reference: scopeRef,
 		StartByte: u.StartByte,
 		EndByte:   u.EndByte,
@@ -272,8 +272,8 @@ func resolveQualifiedMemberTarget(baseTarget, importMember, member string, allEn
 	memberTarget := baseTarget + "::" + member
 	file := strings.TrimPrefix(baseRef.Path, "./")
 
-	if baseRef.Symbol != "" {
-		qualified := baseRef.Symbol + "." + member
+	if baseRef.Name != "" {
+		qualified := baseRef.Name + "." + member
 		if baseRef.Provider == "path" {
 			if target, ok := entityInFile(allEntities, qualified, file); ok {
 				return target
@@ -302,7 +302,7 @@ func resolveQualifiedMemberTarget(baseTarget, importMember, member string, allEn
 	dirPrefix := file
 	for _, loc := range allEntities[member] {
 		if strings.HasPrefix(loc.File, dirPrefix+"/") || loc.File == dirPrefix {
-			return SymbolRef("./"+loc.File, loc.Entity.Name)
+			return AtomRef("./"+loc.File, loc.Atom.Name)
 		}
 	}
 	suffix := "." + member
@@ -312,7 +312,7 @@ func resolveQualifiedMemberTarget(baseTarget, importMember, member string, allEn
 		}
 		for _, loc := range locs {
 			if loc.File == dirPrefix || strings.HasPrefix(loc.File, dirPrefix+"/") {
-				return SymbolRef("./"+loc.File, loc.Entity.Name)
+				return AtomRef("./"+loc.File, loc.Atom.Name)
 			}
 		}
 	}
@@ -322,7 +322,7 @@ func resolveQualifiedMemberTarget(baseTarget, importMember, member string, allEn
 func entityInFile(allEntities map[string][]entityLoc, name, file string) (string, bool) {
 	for _, loc := range allEntities[name] {
 		if loc.File == file {
-			return SymbolRef("./"+loc.File, loc.Entity.Name), true
+			return AtomRef("./"+loc.File, loc.Atom.Name), true
 		}
 	}
 	return "", false
@@ -341,7 +341,7 @@ func resolveJavaNestedMember(fe *FileExtract, scope, leaf string, allEntities ma
 	qualified := typeName + "." + leaf
 	for _, loc := range allEntities[qualified] {
 		if loc.File == fe.Path {
-			return SymbolRef("./"+loc.File, loc.Entity.Name)
+			return AtomRef("./"+loc.File, loc.Atom.Name)
 		}
 	}
 	return ""
@@ -369,12 +369,12 @@ func resolveEntityName(fe *FileExtract, name string, allEntities map[string][]en
 					continue
 				}
 			}
-			return SymbolRef("./"+loc.File, loc.Entity.Name)
+			return AtomRef("./"+loc.File, loc.Atom.Name)
 		}
 	}
 	for _, loc := range allEntities[name] {
 		if fe == nil || loc.File == fe.Path {
-			return SymbolRef("./"+loc.File, loc.Entity.Name)
+			return AtomRef("./"+loc.File, loc.Atom.Name)
 		}
 	}
 	return ""
@@ -425,7 +425,7 @@ func resolveDirectUsage(res *Result, fe *FileExtract, u UsageDef, imports map[st
 	}
 
 	if target != "" {
-		res.Relations = append(res.Relations, Relation{
+		res.Uses = append(res.Uses, Use{
 			Reference:      scopeRef,
 			StartByte:      u.StartByte,
 			EndByte:        u.EndByte,

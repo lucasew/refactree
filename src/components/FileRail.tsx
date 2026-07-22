@@ -9,20 +9,20 @@ type Entry = {
 
 type Props = {
   files: ReadonlyArray<Entry | null | undefined>;
-  symbols: ReadonlyArray<Entry | null | undefined>;
+  atoms: ReadonlyArray<Entry | null | undefined>;
   activeRef: string;
   onSelect: (ref: string) => void;
-  symbolsLoading?: boolean;
+  atomsLoading?: boolean;
 };
 
 export function FileRail({
   files,
-  symbols,
+  atoms,
   activeRef,
   onSelect,
-  symbolsLoading,
+  atomsLoading,
 }: Props) {
-  const [tab, setTab] = useState<"files" | "symbols">("files");
+  const [tab, setTab] = useState<"files" | "atoms">("files");
 
   return (
     <div className="p-2 flex flex-col gap-2">
@@ -38,11 +38,11 @@ export function FileRail({
         <button
           type="button"
           role="tab"
-          className={`tab flex-1 ${tab === "symbols" ? "tab-active" : ""}`}
-          onClick={() => setTab("symbols")}
+          className={`tab flex-1 ${tab === "atoms" ? "tab-active" : ""}`}
+          onClick={() => setTab("atoms")}
         >
-          Symbols
-          {symbolsLoading ? (
+          Atoms
+          {atomsLoading ? (
             <span className="loading loading-spinner loading-xs ml-1" />
           ) : null}
         </button>
@@ -78,7 +78,7 @@ export function FileRail({
         </ul>
       ) : (
         <ul className="menu menu-sm bg-base-200 rounded-box w-full p-0">
-          {symbols.filter(Boolean).map((s) => {
+          {atoms.filter(Boolean).map((s) => {
             const ref = normalizeRef(s!.reference);
             return (
             <li key={ref + s!.name}>
@@ -92,10 +92,10 @@ export function FileRail({
             </li>
             );
           })}
-          {!symbols.length ? (
+          {!atoms.length ? (
             <li className="menu-disabled">
               <span className="text-base-content/50">
-                {symbolsLoading ? "Loading symbols…" : "Open a file to list symbols."}
+                {atomsLoading ? "Loading atoms…" : "Open a file to list atoms."}
               </span>
             </li>
           ) : null}

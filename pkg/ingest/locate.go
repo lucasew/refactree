@@ -37,7 +37,7 @@ func HitAtByte(result *Result, fileRel string, byteOff int) (Hit, bool) {
 		}
 	}
 
-	for _, ent := range result.Entities {
+	for _, ent := range result.Atoms {
 		er := ParseReference(ent.Reference)
 		rel := strings.TrimPrefix(filepath.ToSlash(er.Path), "./")
 		if rel != fileRel {
@@ -45,8 +45,8 @@ func HitAtByte(result *Result, fileRel string, byteOff int) (Hit, bool) {
 		}
 		consider(ent.Reference, ent.StartByte, ent.EndByte, true)
 	}
-	for _, reln := range result.Relations {
-		// Relation.Reference is often path::usage site; Target is the entity.
+	for _, reln := range result.Uses {
+		// Use.Reference is often path::usage site; Target is the entity.
 		rr := ParseReference(reln.Reference)
 		rel := strings.TrimPrefix(filepath.ToSlash(rr.Path), "./")
 		if rel != fileRel {

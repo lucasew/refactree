@@ -14,8 +14,8 @@ type Target struct {
 }
 
 type SymbolTarget struct {
-	Dir    string
-	Symbol string
+	Dir  string
+	Name string
 }
 
 // ResolveTarget resolves a nix:<spec> path through NIX_PATH.
@@ -63,8 +63,8 @@ func ResolveSymbolTarget(spec, symbol string) (SymbolTarget, bool, error) {
 	}
 
 	return SymbolTarget{
-		Dir:    target.Dir,
-		Symbol: symbol,
+		Dir:  target.Dir,
+		Name: symbol,
 	}, true, nil
 }
 

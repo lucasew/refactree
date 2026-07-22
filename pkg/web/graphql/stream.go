@@ -112,9 +112,9 @@ func ProjectFocusNode(root string) *GraphNode {
 	return focus
 }
 
-// EmitProjectBatch materializes a small set of extracts and emits package IMPORTS,
-// atom USES, and atom→package USED_BY edges. Wire-level dedupe is the emitter's job
-// (session seen map). Returns false if emit cancels.
+// EmitProjectBatch materializes a small set of extracts and emits module IMPORTS
+// and atom USES edges. Containment is parentId structure, not USED_BY.
+// Wire-level dedupe is the emitter's job (session seen map). Returns false if emit cancels.
 func (c *SessionCorpus) EmitProjectBatch(
 	ctx context.Context,
 	batch map[string]*ingest.FileExtract,
@@ -146,24 +146,8 @@ func (c *SessionCorpus) EmitProjectBatch(
 			return false
 		}
 	}
-	for _, rel := range result.Relations {
+	for _, rel := range result.Uses {
 		if !emitEdge(rel.Reference, rel.Target, EdgeKindUses) {
-			return false
-		}
-	}
-	for _, ent := range result.Entities {
-		if err := ctx.Err(); err != nil {
-			return false
-		}
-		atom := graphRefIDString(c.root, ent.Reference)
-		if atom == "" || !strings.Contains(atom, "::") {
-			continue
-		}
-		pkg := projectScopeID(c.root, scopeRef(ingest.ParseReference(atom)))
-		if pkg == "" || pkg == atom {
-			continue
-		}
-		if !emitEdge(atom, pkg, EdgeKindUsedBy) {
 			return false
 		}
 	}
@@ -258,7 +242,7 @@ func (c *SessionCorpus) discoverVisit(parsed ingest.Reference, visit map[string]
 	}
 
 	// Module (dir or file-as-module): hop all direct source files in that package.
-	if parsed.Symbol == "" {
+	if parsed.Name == "" {
 		var seeds []string
 		if isDir {
 			seeds, err = directSourceFilesAbs(abs)
@@ -353,7 +337,7 @@ func visitEdges(root string, focusRef ingest.Reference, focusID string, result *
 	var edges []*GraphEdge
 	nodes := map[string]*GraphNode{}
 
-	if focusRef.Symbol != "" {
+	if focusRef.Name != "" {
 		addRelationEdges(root, result, nodes, &edges, func(from, to string) bool {
 			if from == focusID || to == focusID {
 				return true
@@ -368,7 +352,7 @@ func visitEdges(root string, focusRef ingest.Reference, focusID string, result *
 	modID := projectScopeID(root, scopeRef(focusRef))
 	modFocus := scopeRef(focusRef)
 	localAtoms := map[string]bool{}
-	for _, ent := range result.Entities {
+	for _, ent := range result.Atoms {
 		er := ingest.ParseReference(ent.Reference)
 		eid := graphRefIDString(root, ingest.CanonicalizeReference(root, er).String())
 		if projectScopeID(root, scopeRef(ingest.ParseReference(eid))) != modID {

@@ -5,7 +5,7 @@
       "path": "app.py"
     }
   ],
-  "entities": [
+  "atoms": [
     {
       "reference": "path:./app.py::logger",
       "start_byte": 16,
@@ -25,7 +25,7 @@
       "target": "python:logging"
     }
   ],
-  "relations": [
+  "uses": [
     {
       "reference": "path:./app.py",
       "start_byte": 25,

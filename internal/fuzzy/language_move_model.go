@@ -13,9 +13,9 @@ import (
 type Grain string
 
 const (
-	GrainDeclaration Grain = "declaration"
-	GrainModule      Grain = "module"
-	GrainPackage     Grain = "package"
+	GrainAtom    Grain = "atom"
+	GrainModule  Grain = "module"
+	GrainPackage Grain = "package"
 )
 
 // Placement is where a node goes after a move.
@@ -23,7 +23,7 @@ type Placement string
 
 const (
 	PlacementRename    Placement = "rename"
-	PlacementLayout    Placement = "layout"
+	PlacementFile      Placement = "file"
 	PlacementModule    Placement = "module"
 	PlacementNewModule Placement = "new_module"
 	PlacementPackage   Placement = "package"
@@ -32,12 +32,12 @@ const (
 // MoveNode is an enumerable source at a grain.
 type MoveNode struct {
 	Grain Grain
-	// Reference is a full path reference (with symbol for declaration grain).
+	// Reference is a full path reference (with symbol for atom grain).
 	Reference string
 	// Path is the slash path with leading ./ (file or directory).
 	Path string
-	// Symbol is non-empty for declaration grain.
-	Symbol string
+	// Name is non-empty for atom grain.
+	Name string
 }
 
 // languageMoveModel describes grains and module boundaries for one language.
@@ -112,7 +112,7 @@ func grainAllowedForFamily(family string, grain Grain) bool {
 type goMoveModel struct{}
 
 func (goMoveModel) Grains() []Grain {
-	return []Grain{GrainDeclaration, GrainPackage}
+	return []Grain{GrainAtom, GrainPackage}
 }
 
 func (goMoveModel) ModuleKey(filePath string) string {
@@ -125,7 +125,7 @@ func (m goMoveModel) SameModule(pathA, pathB string) bool {
 
 func (goMoveModel) ListNodes(result *ingest.Result, grain Grain, projectFamily string) []MoveNode {
 	switch grain {
-	case GrainDeclaration:
+	case GrainAtom:
 		return listDeclarationNodes(result, projectFamily)
 	case GrainPackage:
 		return listPackageNodes(result, projectFamily)
@@ -140,7 +140,7 @@ func (goMoveModel) ListNodes(result *ingest.Result, grain Grain, projectFamily s
 type jvmMoveModel struct{}
 
 func (jvmMoveModel) Grains() []Grain {
-	return []Grain{GrainDeclaration, GrainPackage}
+	return []Grain{GrainAtom, GrainPackage}
 }
 
 func (jvmMoveModel) ModuleKey(filePath string) string {
@@ -153,7 +153,7 @@ func (m jvmMoveModel) SameModule(pathA, pathB string) bool {
 
 func (jvmMoveModel) ListNodes(result *ingest.Result, grain Grain, projectFamily string) []MoveNode {
 	switch grain {
-	case GrainDeclaration:
+	case GrainAtom:
 		return listDeclarationNodes(result, projectFamily)
 	case GrainPackage:
 		return listPackageNodes(result, projectFamily)
@@ -167,7 +167,7 @@ func (jvmMoveModel) ListNodes(result *ingest.Result, grain Grain, projectFamily 
 type pythonMoveModel struct{}
 
 func (pythonMoveModel) Grains() []Grain {
-	return []Grain{GrainDeclaration, GrainModule, GrainPackage}
+	return []Grain{GrainAtom, GrainModule, GrainPackage}
 }
 
 func (pythonMoveModel) ModuleKey(filePath string) string {
@@ -180,7 +180,7 @@ func (m pythonMoveModel) SameModule(pathA, pathB string) bool {
 
 func (pythonMoveModel) ListNodes(result *ingest.Result, grain Grain, projectFamily string) []MoveNode {
 	switch grain {
-	case GrainDeclaration:
+	case GrainAtom:
 		return listDeclarationNodes(result, projectFamily)
 	case GrainModule:
 		return listModuleFileNodes(result, projectFamily)
@@ -196,7 +196,7 @@ func (pythonMoveModel) ListNodes(result *ingest.Result, grain Grain, projectFami
 type ecmaMoveModel struct{}
 
 func (ecmaMoveModel) Grains() []Grain {
-	return []Grain{GrainDeclaration, GrainModule}
+	return []Grain{GrainAtom, GrainModule}
 }
 
 func (ecmaMoveModel) ModuleKey(filePath string) string {
@@ -209,7 +209,7 @@ func (m ecmaMoveModel) SameModule(pathA, pathB string) bool {
 
 func (ecmaMoveModel) ListNodes(result *ingest.Result, grain Grain, projectFamily string) []MoveNode {
 	switch grain {
-	case GrainDeclaration:
+	case GrainAtom:
 		return listDeclarationNodes(result, projectFamily)
 	case GrainModule:
 		return listModuleFileNodes(result, projectFamily)
@@ -222,9 +222,9 @@ func (ecmaMoveModel) ListNodes(result *ingest.Result, grain Grain, projectFamily
 
 func listDeclarationNodes(result *ingest.Result, projectFamily string) []MoveNode {
 	var out []MoveNode
-	for _, e := range result.Entities {
+	for _, e := range result.Atoms {
 		ref := ingest.ParseReference(e.Reference)
-		if ref.Provider != "path" || ref.Symbol == "" {
+		if ref.Provider != "path" || ref.Name == "" {
 			continue
 		}
 		rel := strings.TrimPrefix(ref.Path, "./")
@@ -232,13 +232,13 @@ func listDeclarationNodes(result *ingest.Result, projectFamily string) []MoveNod
 		if !ok || !ingest.LanguageInFamily(lang, projectFamily) {
 			continue
 		}
-		if isFuzzSymbol(ref.Symbol) {
+		if isFuzzSymbol(ref.Name) {
 			continue
 		}
 		// Go init() functions are runtime-invoked, cannot be called directly,
 		// and multiple init()s coexist per package. They must not be renamed
 		// or moved as ordinary declarations.
-		if projectFamily == ingest.FamilyGo && ref.Symbol == "init" {
+		if projectFamily == ingest.FamilyGo && ref.Name == "init" {
 			continue
 		}
 		path := ref.Path
@@ -246,10 +246,10 @@ func listDeclarationNodes(result *ingest.Result, projectFamily string) []MoveNod
 			path = "./" + path
 		}
 		out = append(out, MoveNode{
-			Grain:     GrainDeclaration,
+			Grain:     GrainAtom,
 			Reference: e.Reference,
 			Path:      path,
-			Symbol:    ref.Symbol,
+			Name:      ref.Name,
 		})
 	}
 	return out

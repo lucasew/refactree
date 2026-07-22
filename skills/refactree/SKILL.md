@@ -1,18 +1,18 @@
 ---
 name: refactree
-description: Teach the model how to use refactree, a CLI tool for structural refactoring and symbol querying.
+description: Teach the model how to use refactree, a CLI tool for structural refactoring and atom querying.
 license: MIT
 ---
 
 # refactree (rft) Skill
 
-`refactree` (CLI: `rft`) is a structural refactoring and symbol querying tool. It operates on code structure using tree-sitter parsers rather than plain text search, allowing for precise queries and safe structural changes like renaming and moving items while automatically updating references and imports.
+`refactree` (CLI: `rft`) is a structural refactoring and atom querying tool. It operates on code structure using tree-sitter parsers rather than plain text search, allowing for precise queries and safe structural changes like renaming and moving atoms while automatically updating references and imports.
 
 ## Progressive Disclosure & Best Practices
 
 When using `refactree`, follow a progressive approach to ensure safety and correctness:
 
-1. **Discover First**: Always use `rft ls` to verify the structure, discover symbols, and ensure exact spelling.
+1. **Discover First**: Always use `rft ls` to verify the structure, discover atoms, and ensure exact spelling.
 2. **Review Documentation**: Use `rft doc` to review the symbol's contract and documentation before deciding to refactor.
 3. **Plan & Review**: When preparing to move or rename with `rft mv`, always pass the `-i` flag to generate and review the edit plan before applying.
 4. **Execute Safely**: Pass the `-b` (backup) flag when applying structural changes to allow easy rollbacks if needed.
@@ -24,7 +24,8 @@ When using `refactree`, follow a progressive approach to ensure safety and corre
 All operations in `rft` target **references**, which point to specific symbols.
 Format: `[provider:]where::what`
 - `provider`: (Optional) The lookup strategy. Defaults to `path`. Examples: `node` (node_modules), `python` (site_packages), `go` (GOPATH/vendor).
-- `where`: The file path or module.
+- `where`: The file or module path.
+- Product lattice: **Module** / **File** / **Atom** (see SPEC.md). `rft ls` lists atoms.
 - `what`: The symbol name (e.g., function, class, variable).
 
 **Example:**

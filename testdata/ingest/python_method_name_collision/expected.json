@@ -5,7 +5,7 @@
       "path": "app.py"
     }
   ],
-  "entities": [
+  "atoms": [
     {
       "reference": "path:./app.py::A",
       "start_byte": 6,
@@ -27,5 +27,5 @@
       "end_byte": 66
     }
   ],
-  "relations": []
+  "uses": []
 }

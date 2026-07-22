@@ -74,8 +74,8 @@ func TestResolveSymbolTarget(t *testing.T) {
 	if !ok {
 		t.Fatal("expected symbol target to resolve")
 	}
-	if target.Symbol != "path" {
-		t.Fatalf("unexpected symbol: %q", target.Symbol)
+	if target.Name != "path" {
+		t.Fatalf("unexpected symbol: %q", target.Name)
 	}
 	if target.Dir == "" {
 		t.Fatal("expected non-empty target dir")

@@ -22,15 +22,15 @@ func newLsCmd() *cobra.Command {
 
 			w := cmd.OutOrStdout()
 			var writeErr error
-			err := ingest.WalkSymbols(dir, ref.String(), ingest.ListOptions{
+			err := ingest.WalkAtoms(dir, ref.String(), ingest.ListOptions{
 				IncludeHidden: all,
 				Recursive:     recursive,
-			}, func(sym ingest.SymbolInfo) bool {
+			}, func(sym ingest.AtomInfo) bool {
 				if long {
 					_, writeErr = fmt.Fprintf(w, "%s\t%d\t%d\n",
-						sym.Entity.Reference, sym.Entity.StartByte, sym.Entity.EndByte)
+						sym.Atom.Reference, sym.Atom.StartByte, sym.Atom.EndByte)
 				} else {
-					_, writeErr = fmt.Fprintln(w, sym.Reference.Symbol)
+					_, writeErr = fmt.Fprintln(w, sym.Reference.Name)
 				}
 				return writeErr == nil
 			})

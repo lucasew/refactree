@@ -29,8 +29,8 @@ func TestResolveSymbolTarget_StdlibPackage(t *testing.T) {
 	if !ok {
 		t.Fatal("expected symbol target to resolve")
 	}
-	if target.Symbol != "Printf" {
-		t.Fatalf("unexpected symbol: %q", target.Symbol)
+	if target.Name != "Printf" {
+		t.Fatalf("unexpected symbol: %q", target.Name)
 	}
 
 	suffix := filepath.ToSlash(filepath.Join("src", "fmt"))

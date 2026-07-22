@@ -6,9 +6,11 @@ product
 
 ## Users & Purpose
 
-Developers exploring code structure and symbol relationships in a local tree. They open a directory, click through definitions and usages, and jump between files via the same `provider:path::symbol` references the CLI uses.
+Developers exploring code structure as **modules**, **files**, and **atoms**. They open a directory, click through definitions and usages, and jump between files via the same `provider:path::name` references the CLI uses.
 
-Primary task on any screen: read source with every resolved symbol clickable, and land on the definition (anchor) in the target file.
+Primary task on any screen: read source with every resolved atom clickable, and land on the definition (anchor) in the target file.
+
+Graph zoom: **module** (import edges) and **atom** (use edges). Files stay on the filesystem rail.
 
 ## Brand Personality
 
@@ -24,4 +26,4 @@ SaaS cream dashboards, glassmorphism, gradient text, hero metrics, card grids, t
 
 ## Accessibility
 
-WCAG AA contrast on body text and links; keyboard-focusable symbol links; respect `prefers-reduced-motion`
+WCAG AA contrast on body text and links; keyboard-focusable atom links; respect `prefers-reduced-motion`

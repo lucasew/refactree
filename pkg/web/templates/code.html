@@ -18,10 +18,10 @@
 
       <div class="rail-tabs">
         <input type="radio" name="rail-tab" id="tab-files" class="rail-tab-input" checked>
-        <input type="radio" name="rail-tab" id="tab-symbols" class="rail-tab-input">
+        <input type="radio" name="rail-tab" id="tab-atoms" class="rail-tab-input">
         <div class="rail-tab-labels" role="tablist">
           <label for="tab-files" class="rail-tab-label" role="tab">Files</label>
-          <label for="tab-symbols" class="rail-tab-label" role="tab">Symbols</label>
+          <label for="tab-atoms" class="rail-tab-label" role="tab">Atoms</label>
         </div>
 
         <div class="rail-tab-panel rail-tab-files">
@@ -42,10 +42,10 @@
           {{end}}
         </div>
 
-        <div class="rail-tab-panel rail-tab-symbols">
-          {{if .Symbols}}
+        <div class="rail-tab-panel rail-tab-atoms">
+          {{if .Atoms}}
           <ul class="sym-list">
-            {{range .Symbols}}
+            {{range .Atoms}}
             <li>
               {{if .Href}}
               <a href="{{.Href}}" class="sym-nav kind-{{.Kind}}" title="{{.Title}}">
@@ -62,7 +62,7 @@
             {{end}}
           </ul>
           {{else}}
-          <p class="muted">No symbols for this file.</p>
+          <p class="muted">No atoms for this file.</p>
           {{end}}
         </div>
       </div>

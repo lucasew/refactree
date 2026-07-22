@@ -50,7 +50,7 @@ const CodeQuery = graphql`
         reference
         isDir
       }
-      symbols {
+      atoms {
         name
         reference
         isDir
@@ -100,7 +100,7 @@ function CodeBrowser({ path, onPathChange }: { path: string; onPathChange: () =>
     return fs.data?.filesystem ?? [];
   }, [codeData?.files, fs.data?.filesystem]);
 
-  const symbols = codeData?.symbols ?? [];
+  const atoms = codeData?.atoms ?? [];
 
   // File browser → graph: paint the same hyperlinks the code pane just resolved
   // without waiting for the WS visit worker (shared server corpus still primes cache).
@@ -110,7 +110,7 @@ function CodeBrowser({ path, onPathChange }: { path: string; onPathChange: () =>
     for (const s of codeData.segments ?? []) {
       if (s?.isLink && s.reference) links.push({ reference: s.reference, isLink: true });
     }
-    for (const s of codeData.symbols ?? []) {
+    for (const s of codeData.atoms ?? []) {
       if (s?.reference) links.push({ reference: s.reference, isLink: true });
     }
     if (links.length) mergeCodeLinksIntoGraph(codeFocus, links);
@@ -169,10 +169,10 @@ function CodeBrowser({ path, onPathChange }: { path: string; onPathChange: () =>
           ) : (
             <FileRail
               files={files}
-              symbols={symbols}
+              atoms={atoms}
               activeRef={focus}
               onSelect={onSelect}
-              symbolsLoading={code.loading && !codeData}
+              atomsLoading={code.loading && !codeData}
             />
           )}
         </aside>

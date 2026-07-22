@@ -24,7 +24,7 @@ type Edit struct {
 func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 	src := ParseReference(sourceRef)
 	dst := ParseReference(destRef)
-	if (src.Symbol == "") != (dst.Symbol == "") {
+	if (src.Name == "") != (dst.Name == "") {
 		return nil, fmt.Errorf("source and destination references must both include symbols or both omit them (for package moves)")
 	}
 
@@ -44,7 +44,7 @@ func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 
 	sourceRef = src.String()
 
-	if src.Symbol == "" && dst.Symbol == "" {
+	if src.Name == "" && dst.Name == "" {
 		// package/dir move (no symbol); canonical* already short-circuit+normalize for Symbol==""
 		return planPackageMove(dir, result, src, dst)
 	}
@@ -55,7 +55,7 @@ func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 	}
 
 	if src.Path != dst.Path {
-		if src.Symbol != dst.Symbol {
+		if src.Name != dst.Name {
 			return nil, fmt.Errorf("cross-file move with symbol rename is not supported yet")
 		}
 		srcLang := languageForRefPath(result, src.Path)
@@ -76,7 +76,7 @@ func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 			}
 		}
 	}
-	return planSymbolRename(dir, result, sourceRefs, dst.Symbol)
+	return planSymbolRename(dir, result, sourceRefs, dst.Name)
 }
 
 func uniqueStrings(in []string) []string {
@@ -92,31 +92,31 @@ func uniqueStrings(in []string) []string {
 	return out
 }
 
-func findEntityByReference(result *Result, ref string) (Entity, bool) {
-	for _, ent := range result.Entities {
+func findEntityByReference(result *Result, ref string) (Atom, bool) {
+	for _, ent := range result.Atoms {
 		if ent.Reference == ref {
 			return ent, true
 		}
 	}
-	return Entity{}, false
+	return Atom{}, false
 }
 
 func planSymbolRename(dir string, result *Result, sourceRefs []string, destSymbol string) ([]Edit, error) {
 	if len(sourceRefs) == 0 {
 		return nil, fmt.Errorf("no source references to rename")
 	}
-	// Relations often target language providers (go:mod/pkg::Sym) while entities
+	// Uses often target language providers (go:mod/pkg::Sym) while entities
 	// are path:./pkg/file.go::Sym. Expand so cross-package qualified calls rename.
 	sourceSet := expandRenameSourceSet(dir, result, sourceRefs)
 	var edits []Edit
 	// Spans store the identifier leaf (e.g. "toJson"), while references may be
 	// qualified ("Gson.toJson"). Always rewrite source text with the leaf.
-	newText := SymbolLeaf(destSymbol)
-	oldLeaf := SymbolLeaf(ParseReference(sourceRefs[0]).Symbol)
+	newText := AtomName(destSymbol)
+	oldLeaf := AtomName(ParseReference(sourceRefs[0]).Name)
 
 	// 1. Rename each related entity definition. Destination symbol qualifiers
 	// stay aligned with each source entity's receiver prefix.
-	for _, ent := range result.Entities {
+	for _, ent := range result.Atoms {
 		if !sourceSet[ent.Reference] {
 			continue
 		}
@@ -130,7 +130,7 @@ func planSymbolRename(dir string, result *Result, sourceRefs []string, destSymbo
 	}
 
 	// 2. Rename at every call site that targets any expanded entity.
-	for _, rel := range result.Relations {
+	for _, rel := range result.Uses {
 		if !sourceSet[rel.Target] {
 			continue
 		}
@@ -271,8 +271,8 @@ func expandRenameSourceSet(rootDir string, result *Result, sourceRefs []string) 
 		if pkgDir == "." {
 			pkgDir = ""
 		}
-		w := want{pkgDir: pkgDir, symbol: ref.Symbol}
-		if ref.Symbol == "" || seenWant[w] {
+		w := want{pkgDir: pkgDir, symbol: ref.Name}
+		if ref.Name == "" || seenWant[w] {
 			continue
 		}
 		seenWant[w] = true
@@ -287,11 +287,11 @@ func expandRenameSourceSet(rootDir string, result *Result, sourceRefs []string) 
 			return
 		}
 		t := ParseReference(target)
-		if t.Symbol == "" {
+		if t.Name == "" {
 			return
 		}
 		for _, w := range wants {
-			if t.Symbol != w.symbol {
+			if t.Name != w.symbol {
 				continue
 			}
 			if targetMatchesPackageSymbol(t, w.pkgDir, modulePath) {
@@ -300,7 +300,7 @@ func expandRenameSourceSet(rootDir string, result *Result, sourceRefs []string) 
 			}
 		}
 	}
-	for _, rel := range result.Relations {
+	for _, rel := range result.Uses {
 		add(rel.Target)
 	}
 	for _, a := range result.Aliases {
@@ -363,13 +363,13 @@ func readModulePathForRename(rootDir string) string {
 	}
 }
 
-// SymbolLeaf returns the identifier text written at a definition/use span.
+// AtomName returns the identifier text written at a definition/use span.
 // Qualified symbols use "." separators; pointer receivers may prefix "*".
 //
 // String-keyed members keep their quotes in the symbol path (e.g. Type.'.md'
 // for a TS property named '.md'). A naive last-dot split would peel inside the
 // quotes ("md'"); treat a trailing single- or double-quoted segment as the leaf.
-func SymbolLeaf(symbol string) string {
+func AtomName(symbol string) string {
 	leaf := symbol
 	if q := quotedSymbolLeaf(leaf); q != "" {
 		return q
@@ -425,7 +425,7 @@ func applyEditsToString(content string, edits []Edit) string {
 // planCrossFileMove orchestrates a cross-file move using the MoveDriver interface.
 // It extracts the declaration, inserts it at the destination, and if the source
 // and destination are in different directories, rewrites imports in consumer files.
-func planCrossFileMove(dir string, result *Result, src, dst Reference, sourceEntity Entity, driver MoveDriver) ([]Edit, error) {
+func planCrossFileMove(dir string, result *Result, src, dst Reference, sourceEntity Atom, driver MoveDriver) ([]Edit, error) {
 	srcRel := strings.TrimPrefix(src.Path, "./")
 	dstRel := strings.TrimPrefix(dst.Path, "./")
 
@@ -497,7 +497,7 @@ func planCrossFileMoveImportRewrites(dir string, result *Result, src, dst Refere
 		}
 	}
 	// Also check relations targeting the source.
-	for _, rel := range result.Relations {
+	for _, rel := range result.Uses {
 		if srcTargets[rel.Target] {
 			ref := ParseReference(rel.Reference)
 			consumerFile := strings.TrimPrefix(ref.Path, "./")
@@ -552,16 +552,16 @@ func buildSourceTargetSet(result *Result, src Reference) map[string]bool {
 		if ref.Provider == "path" {
 			continue // already covered by the direct matches above
 		}
-		if aliasTargetMatchesFile(result, alias.Target, ref, srcRel, src.Symbol) {
+		if aliasTargetMatchesFile(result, alias.Target, ref, srcRel, src.Name) {
 			targets[alias.Target] = true
 		}
 	}
-	for _, rel := range result.Relations {
+	for _, rel := range result.Uses {
 		ref := ParseReference(rel.Target)
 		if ref.Provider == "path" {
 			continue
 		}
-		if aliasTargetMatchesFile(result, rel.Target, ref, srcRel, src.Symbol) {
+		if aliasTargetMatchesFile(result, rel.Target, ref, srcRel, src.Name) {
 			targets[rel.Target] = true
 		}
 	}
@@ -576,11 +576,11 @@ func aliasTargetMatchesFile(result *Result, targetStr string, targetRef Referenc
 	if srcSymbol != "" {
 		// For symbol-level matches, check if there's an entity in the source
 		// file with matching symbol name.
-		wantEntRef := SymbolRef("./"+srcFileRel, srcSymbol)
-		for _, ent := range result.Entities {
+		wantEntRef := AtomRef("./"+srcFileRel, srcSymbol)
+		for _, ent := range result.Atoms {
 			if ent.Reference == wantEntRef {
 				// Now check: does targetRef reference the same symbol?
-				if targetRef.Symbol == srcSymbol {
+				if targetRef.Name == srcSymbol {
 					return true
 				}
 			}

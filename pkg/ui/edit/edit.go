@@ -20,7 +20,7 @@ type Options struct {
 	Editor Editor
 	Picker Picker
 	Getenv func(string) string
-	// StreamRefs yields entity reference strings under ref; nil uses WalkSymbols.
+	// StreamRefs yields entity reference strings under ref; nil uses WalkAtoms.
 	StreamRefs func(baseDir string, ref ingest.Reference, includeHidden bool, emit func(string) error) error
 }
 
@@ -67,7 +67,7 @@ func Run(opts Options) error {
 	ref = ingest.CoerceLocalPathReference(baseDir, ref)
 	ref = refpkg.NormalizePathReference(ref)
 
-	if ref.Symbol != "" {
+	if ref.Name != "" {
 		ref = ingest.CanonicalizeReference(baseDir, ref)
 		loc, err := locateDefinition(baseDir, ref)
 		if err != nil {
@@ -110,11 +110,11 @@ func streamEntityRefs(baseDir string, ref ingest.Reference, includeHidden bool, 
 	seen := map[string]struct{}{}
 	var n int
 	var emitErr error
-	err := ingest.WalkSymbols(scope.Dir, scope.Reference.String(), ingest.ListOptions{
+	err := ingest.WalkAtoms(scope.Dir, scope.Reference.String(), ingest.ListOptions{
 		IncludeHidden: includeHidden,
 		Recursive:     true,
-	}, func(sym ingest.SymbolInfo) bool {
-		line := sym.Entity.Reference
+	}, func(sym ingest.AtomInfo) bool {
+		line := sym.Atom.Reference
 		if _, ok := seen[line]; ok {
 			return true
 		}

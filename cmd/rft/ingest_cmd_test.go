@@ -54,7 +54,7 @@ func TestRenderExpectedIngestText(t *testing.T) {
 	if !strings.Contains(text, "- main.go [go]") {
 		t.Fatalf("expected file entry, got:\n%s", text)
 	}
-	if !strings.Contains(text, "Entities (1):") {
+	if !strings.Contains(text, "Atoms (1):") {
 		t.Fatalf("expected entities header, got:\n%s", text)
 	}
 }

@@ -9,7 +9,7 @@
       "path": "main.jsx"
     }
   ],
-  "entities": [
+  "atoms": [
     {
       "reference": "path:./helper.jsx::Greeting",
       "start_byte": 16,
@@ -29,7 +29,7 @@
       "target": "path:./helper.jsx::Greeting"
     }
   ],
-  "relations": [
+  "uses": [
     {
       "reference": "path:./main.jsx::App",
       "start_byte": 65,

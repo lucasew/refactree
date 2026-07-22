@@ -37,7 +37,7 @@ func New(options Options) (*UI, error) {
 			ref.Path = "./"
 		}
 	}
-	ref.Symbol = ""
+	ref.Name = ""
 
 	model, err := newBrowseModelFromReference(ref, options.IncludeHidden)
 	if err != nil {
@@ -709,16 +709,16 @@ func (m *browseModel) symbolItems() ([]list.Item, error) {
 	options := ingest.ListOptions{IncludeHidden: m.includeHidden}
 	out := make([]list.Item, 0, 64)
 
-	err := ingest.WalkSymbols(dir, ref, options, func(sym ingest.SymbolInfo) bool {
+	err := ingest.WalkAtoms(dir, ref, options, func(sym ingest.AtomInfo) bool {
 		path := strings.TrimPrefix(sym.Reference.Path, "./")
 		if path == "" {
 			path = "."
 		}
 		out = append(out, browseItem{
 			kind:      browseItemSymbol,
-			title:     sym.Reference.Symbol,
+			title:     sym.Reference.Name,
 			desc:      fmt.Sprintf("%s [%s]", path, sym.Language),
-			symbolRef: sym.Entity.Reference,
+			symbolRef: sym.Atom.Reference,
 		})
 		return true
 	})
@@ -796,7 +796,7 @@ func (m *browseModel) updatePreviewForSelection() {
 func (m *browseModel) updatePreviewForOpenedSymbol() {
 	ref := m.openedSymbol
 	parsed := ingest.ParseReference(ref)
-	name := parsed.Symbol
+	name := parsed.Name
 	if name == "" {
 		name = ref
 	}
@@ -845,7 +845,7 @@ func (m *browseModel) activateSelection() error {
 				return nil
 			}
 			ref := ingest.ParseReference(item.targetRef)
-			ref.Symbol = ""
+			ref.Name = ""
 			scope, ok, err := m.refs().ResolveScopeTarget(ref)
 			if err != nil {
 				return err

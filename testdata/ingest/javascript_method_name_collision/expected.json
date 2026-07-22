@@ -5,7 +5,7 @@
       "path": "main.js"
     }
   ],
-  "entities": [
+  "atoms": [
     {
       "reference": "path:./main.js::A",
       "start_byte": 6,
@@ -27,5 +27,5 @@
       "end_byte": 56
     }
   ],
-  "relations": []
+  "uses": []
 }

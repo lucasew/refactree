@@ -39,7 +39,7 @@ func newMvCmd() *cobra.Command {
 			// original scope logic for symbol operations.
 			srcParsed := ingest.ParseReference(source)
 			dstParsed := ingest.ParseReference(destination)
-			if srcParsed.Symbol == "" && dstParsed.Symbol == "" && (srcParsed.Path == "./" || srcParsed.Path == ".") {
+			if srcParsed.Name == "" && dstParsed.Name == "" && (srcParsed.Path == "./" || srcParsed.Path == ".") {
 				parent := filepath.Dir(dir)
 				if parent == "" || parent == "." || parent == dir {
 					parent = "."

@@ -9,7 +9,7 @@
       "path": "Main.java"
     }
   ],
-  "entities": [
+  "atoms": [
     {
       "reference": "path:./Helper.java::Helper",
       "start_byte": 28,
@@ -31,7 +31,7 @@
       "end_byte": 62
     }
   ],
-  "relations": [
+  "uses": [
     {
       "reference": "path:./Main.java::Main.main",
       "start_byte": 88,

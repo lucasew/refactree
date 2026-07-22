@@ -412,8 +412,8 @@ func TestBrowseSymbolItems_UsesWalkSymbolsOrder(t *testing.T) {
 	}
 
 	want := []string{}
-	err = ingest.WalkSymbols(dir, "path:./", ingest.ListOptions{}, func(sym ingest.SymbolInfo) bool {
-		want = append(want, sym.Entity.Reference)
+	err = ingest.WalkAtoms(dir, "path:./", ingest.ListOptions{}, func(sym ingest.AtomInfo) bool {
+		want = append(want, sym.Atom.Reference)
 		return true
 	})
 	if err != nil {
@@ -458,8 +458,8 @@ func TestBrowseSymbols_PathCmdRft_ContainsExecuteLikeLs(t *testing.T) {
 	}
 
 	want := []string{}
-	err = ingest.WalkSymbols(target, "path:./", ingest.ListOptions{}, func(sym ingest.SymbolInfo) bool {
-		want = append(want, sym.Entity.Reference)
+	err = ingest.WalkAtoms(target, "path:./", ingest.ListOptions{}, func(sym ingest.AtomInfo) bool {
+		want = append(want, sym.Atom.Reference)
 		return true
 	})
 	if err != nil {

@@ -128,7 +128,7 @@ func tryLocalizeProviderToPath(root string, ref ingest.Reference) (ingest.Refere
 	if rel != "." {
 		path = "./" + rel
 	}
-	return ingest.Reference{Provider: "path", Path: path, Symbol: ref.Symbol}, true
+	return ingest.Reference{Provider: "path", Path: path, Name: ref.Name}, true
 }
 
 // projectScopeID maps a ref to a stable graph id for the project map.
@@ -138,7 +138,7 @@ func projectScopeID(root string, ref ingest.Reference) string {
 	if loc, ok := tryLocalizeProviderToPath(root, ref); ok {
 		ref = loc
 	}
-	ref.Symbol = ""
+	ref.Name = ""
 	if isExternalRef(ref) {
 		return ingest.Reference{Provider: ref.Provider, Path: ref.Path}.String()
 	}

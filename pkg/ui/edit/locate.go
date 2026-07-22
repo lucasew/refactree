@@ -13,18 +13,18 @@ import (
 // locateDefinition resolves a symbol reference to an editor Location.
 // ref should already be canonicalized (barrels / aliases followed).
 func locateDefinition(baseDir string, ref ingest.Reference) (Location, error) {
-	if ref.Symbol == "" {
+	if ref.Name == "" {
 		return Location{}, fmt.Errorf("no definition for %s", ref.String())
 	}
 
 	scope := ingest.ResolveReferenceScope(baseDir, ref)
-	var found ingest.Entity
+	var found ingest.Atom
 	var ok bool
-	err := ingest.WalkSymbols(scope.Dir, scope.Reference.String(), ingest.ListOptions{
+	err := ingest.WalkAtoms(scope.Dir, scope.Reference.String(), ingest.ListOptions{
 		IncludeHidden: true,
 		Recursive:     true,
-	}, func(sym ingest.SymbolInfo) bool {
-		found = sym.Entity
+	}, func(sym ingest.AtomInfo) bool {
+		found = sym.Atom
 		ok = true
 		return false
 	})
@@ -36,7 +36,7 @@ func locateDefinition(baseDir string, ref ingest.Reference) (Location, error) {
 	}
 
 	entRef := ingest.ParseReference(found.Reference)
-	// Entity paths from WalkSymbols are relative to scope.Dir, not baseDir.
+	// Atom paths from WalkAtoms are relative to scope.Dir, not baseDir.
 	path, err := absoluteRefPath(scope.Dir, entRef)
 	if err != nil {
 		return Location{}, err

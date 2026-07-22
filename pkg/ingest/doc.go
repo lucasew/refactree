@@ -22,7 +22,7 @@ type DocResult struct {
 func DocFor(dir, reference string) (*DocResult, error) {
 	rawRef := ParseReference(reference)
 	if rawRef.Provider != "" && rawRef.Provider != "path" {
-		if rawRef.Symbol != "" {
+		if rawRef.Name != "" {
 			target, ok, err := NewResolver("").ResolveSymbolTarget(rawRef)
 			if err != nil {
 				return nil, err
@@ -90,18 +90,18 @@ func DocFor(dir, reference string) (*DocResult, error) {
 
 func docForResultEntity(dir string, result *Result, ref Reference) (*DocResult, error) {
 	reference := ref.String()
-	var entity *Entity
-	for i := range result.Entities {
-		if result.Entities[i].Reference == reference {
-			entity = &result.Entities[i]
+	var entity *Atom
+	for i := range result.Atoms {
+		if result.Atoms[i].Reference == reference {
+			entity = &result.Atoms[i]
 			break
 		}
 	}
-	if entity == nil && ref.Symbol != "" {
-		for i := range result.Entities {
-			er := ParseReference(result.Entities[i].Reference)
-			if er.Symbol == ref.Symbol && sameScopePath(ref, er) {
-				entity = &result.Entities[i]
+	if entity == nil && ref.Name != "" {
+		for i := range result.Atoms {
+			er := ParseReference(result.Atoms[i].Reference)
+			if er.Name == ref.Name && sameScopePath(ref, er) {
+				entity = &result.Atoms[i]
 				ref = er
 				break
 			}
@@ -124,19 +124,19 @@ func docForProviderSymbol(ref Reference, target ProviderSymbolTarget) (*DocResul
 		langOf[f.Path] = f.Language
 	}
 
-	symbol := target.Symbol
+	symbol := target.Name
 	if symbol == "" {
-		symbol = ref.Symbol
+		symbol = ref.Name
 	}
 
 	matches := make([]int, 0, 1)
-	for i := range result.Entities {
-		entityRef := ParseReference(result.Entities[i].Reference)
+	for i := range result.Atoms {
+		entityRef := ParseReference(result.Atoms[i].Reference)
 		entPath := strings.TrimPrefix(entityRef.Path, "./")
 		if !providerAllowDocEntity(ref, entityRef, entPath, langOf[entPath]) {
 			continue
 		}
-		if entityRef.Symbol == symbol {
+		if entityRef.Name == symbol {
 			matches = append(matches, i)
 		}
 	}
@@ -147,17 +147,17 @@ func docForProviderSymbol(ref Reference, target ProviderSymbolTarget) (*DocResul
 	if len(matches) > 1 {
 		candidates := make([]string, 0, len(matches))
 		for _, idx := range matches {
-			candidates = append(candidates, result.Entities[idx].Reference)
+			candidates = append(candidates, result.Atoms[idx].Reference)
 		}
 		return nil, fmt.Errorf("ambiguous symbol %q in %q package %q, matches: %s", symbol, ref.Provider, ref.Path, strings.Join(candidates, ", "))
 	}
 
-	entity := &result.Entities[matches[0]]
+	entity := &result.Atoms[matches[0]]
 	entityRef := ParseReference(entity.Reference)
 	return docForEntity(target.Dir, result, entityRef, entity)
 }
 
-func docForEntity(dir string, result *Result, ref Reference, entity *Entity) (*DocResult, error) {
+func docForEntity(dir string, result *Result, ref Reference, entity *Atom) (*DocResult, error) {
 	relPath := strings.TrimPrefix(ref.Path, "./")
 	filePath := filepath.Join(dir, relPath)
 
@@ -188,7 +188,7 @@ func docForEntity(dir string, result *Result, ref Reference, entity *Entity) (*D
 	}
 	defer pf.Close()
 
-	return extractDocFromAST(pf.Root, pf.Source, entity.StartByte, ref.Symbol, language)
+	return extractDocFromAST(pf.Root, pf.Source, entity.StartByte, ref.Name, language)
 }
 
 func extractDocFromAST(root *grammar.Node, source []byte, nameStart uint32, name, language string) (*DocResult, error) {

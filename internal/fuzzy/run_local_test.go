@@ -251,7 +251,7 @@ ingest_roots = ["."]
 
 [projects.local_go.mv]
 enabled = true
-grains = ["declaration"]
+grains = ["atom"]
 
 [projects.local_go.isolate]
 setup_network = true

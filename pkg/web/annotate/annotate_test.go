@@ -10,10 +10,10 @@ import (
 func TestBuild_LinksUsageAndAnchorsDef(t *testing.T) {
 	source := []byte("package main\n\nfunc main() {\n\thelper()\n}\n")
 	result := &ingest.Result{
-		Entities: []ingest.Entity{
+		Atoms: []ingest.Atom{
 			{Reference: "path:./main.go::main", StartByte: 19, EndByte: 23},
 		},
-		Relations: []ingest.Relation{
+		Uses: []ingest.Use{
 			{Reference: "path:./main.go::main", StartByte: 29, EndByte: 35, Target: "path:./helper.go::helper"},
 		},
 	}
@@ -60,16 +60,16 @@ func TestAnchorID_Sanitizes(t *testing.T) {
 func TestBuildWithOptions_RemapsProviderRefs(t *testing.T) {
 	source := []byte("package main\n\nfunc main() {\n\thelper()\n}\n")
 	result := &ingest.Result{
-		Entities: []ingest.Entity{
+		Atoms: []ingest.Atom{
 			{Reference: "path:./main.go::main", StartByte: 19, EndByte: 23},
 		},
-		Relations: []ingest.Relation{
+		Uses: []ingest.Use{
 			{Reference: "path:./main.go::main", StartByte: 29, EndByte: 35, Target: "path:./helper.go::helper"},
 		},
 	}
 	remap := func(ref string) string {
 		r := ingest.ParseReference(ref)
-		return ingest.Reference{Provider: "go", Path: "example", Symbol: r.Symbol}.String()
+		return ingest.Reference{Provider: "go", Path: "example", Name: r.Name}.String()
 	}
 	segs := BuildWithOptions(source, "main.go", result, func(ref string) string {
 		return "/code/" + ref

@@ -1,7 +1,7 @@
 // Discovery and graph materialization for package ingest.
 //
 // Call sites should use:
-//   - WalkExtracts / WalkSymbols for lazy listing (no graph)
+//   - WalkExtracts / WalkAtoms for lazy listing (no graph)
 //   - ProjectResult / DirResult / SeedResult or MaterializeSource for a *Result
 //
 // Do not reintroduce a second WalkDir+parse path beside WalkExtracts.
@@ -211,7 +211,7 @@ func normalizeSourcePaths(rootAbs string, paths []string) ([]string, error) {
 			abs = p
 		} else {
 			// Prefer cwd-absolute when the path already resolves under root
-			// (e.g. join(relRoot, file) from WalkSymbols). Else join to rootAbs.
+			// (e.g. join(relRoot, file) from WalkAtoms). Else join to rootAbs.
 			if cand, err := filepath.Abs(p); err == nil {
 				if rel, err := filepath.Rel(rootAbs, cand); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 					abs = cand

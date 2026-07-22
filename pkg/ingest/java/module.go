@@ -47,7 +47,7 @@ func (languageDriver) ResolveImport(sourcePath string, ctx ingest.ImportResolveC
 	return "java:" + sourcePath
 }
 
-func (languageDriver) AllowListSymbol(string, ingest.SymbolListOptions) bool { return true }
+func (languageDriver) AllowListAtom(string, ingest.AtomListOptions) bool { return true }
 
 func (languageDriver) UseExportedFlag() bool { return true }
 
@@ -89,11 +89,11 @@ func (referenceProvider) ResolveScopeTarget(ref ingest.Reference, rootDir string
 }
 
 func (referenceProvider) ResolveSymbolTarget(ref ingest.Reference, rootDir string) (ingest.ProviderSymbolTarget, bool, error) {
-	target, ok, err := javaref.ResolveSymbolTarget(ref.Path, ref.Symbol, rootDir)
+	target, ok, err := javaref.ResolveSymbolTarget(ref.Path, ref.Name, rootDir)
 	if !ok || err != nil {
 		return ingest.ProviderSymbolTarget{}, ok, err
 	}
-	return ingest.ProviderSymbolTarget{Dir: target.Dir, Symbol: target.Symbol}, true, nil
+	return ingest.ProviderSymbolTarget{Dir: target.Dir, Name: target.Name}, true, nil
 }
 
 func (referenceProvider) ListScopeChildren(ref ingest.Reference, rootDir string, includeHidden bool) ([]refpkg.ScopeChild, bool, error) {
@@ -152,7 +152,7 @@ func (referenceProvider) AllowListEntity(_ ingest.Reference, _ ingest.Reference,
 }
 
 func (referenceProvider) ListOutputReference(ref ingest.Reference, entRef ingest.Reference) ingest.Reference {
-	return ingest.Reference{Provider: ref.Provider, Path: ref.Path, Symbol: entRef.Symbol}
+	return ingest.Reference{Provider: ref.Provider, Path: ref.Path, Name: entRef.Name}
 }
 
 func (referenceProvider) DocIngestRecursive(ingest.Reference) bool { return false }
@@ -316,7 +316,7 @@ func extractJavaType(fe *ingest.FileExtract, n *grammar.Node, source []byte) {
 	typeName := ingest.NodeText(nameNode, source)
 	exported := javaNodeIsPublic(n)
 
-	fe.Entities = append(fe.Entities, ingest.EntityDef{
+	fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 		Name:      typeName,
 		StartByte: nameNode.StartByte(),
 		EndByte:   nameNode.EndByte(),
@@ -367,7 +367,7 @@ func extractJavaRecordComponents(fe *ingest.FileExtract, n *grammar.Node, source
 			continue
 		}
 		short := ingest.NodeText(nameNode, source)
-		fe.Entities = append(fe.Entities, ingest.EntityDef{
+		fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 			Name:      typeName + "." + short,
 			StartByte: nameNode.StartByte(),
 			EndByte:   nameNode.EndByte(),
@@ -416,7 +416,7 @@ func extractJavaNestedType(fe *ingest.FileExtract, n *grammar.Node, source []byt
 	}
 	short := ingest.NodeText(nameNode, source)
 	full := outer + "." + short
-	fe.Entities = append(fe.Entities, ingest.EntityDef{
+	fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 		Name:      full,
 		StartByte: nameNode.StartByte(),
 		EndByte:   nameNode.EndByte(),
@@ -446,7 +446,7 @@ func extractJavaMethod(fe *ingest.FileExtract, n *grammar.Node, source []byte, t
 	}
 	short := ingest.NodeText(nameNode, source)
 	full := typeName + "." + short
-	fe.Entities = append(fe.Entities, ingest.EntityDef{
+	fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 		Name:      full,
 		StartByte: nameNode.StartByte(),
 		EndByte:   nameNode.EndByte(),
@@ -519,7 +519,7 @@ func extractJavaTypedDeclarators(fe *ingest.FileExtract, n *grammar.Node, source
 			continue
 		}
 		short := ingest.NodeText(nameNode, source)
-		fe.Entities = append(fe.Entities, ingest.EntityDef{
+		fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 			Name:      typeName + "." + short,
 			StartByte: nameNode.StartByte(),
 			EndByte:   nameNode.EndByte(),
@@ -545,7 +545,7 @@ func extractJavaEnumConstant(fe *ingest.FileExtract, n *grammar.Node, source []b
 		return
 	}
 	short := ingest.NodeText(nameNode, source)
-	fe.Entities = append(fe.Entities, ingest.EntityDef{
+	fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 		Name:      typeName + "." + short,
 		StartByte: nameNode.StartByte(),
 		EndByte:   nameNode.EndByte(),

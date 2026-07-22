@@ -9,8 +9,8 @@ import (
 
 // SymbolTarget points at a directory to ingest for a java: type reference.
 type SymbolTarget struct {
-	Dir    string
-	Symbol string
+	Dir  string
+	Name string
 }
 
 // ModuleTarget is a resolved package or compilation unit on disk.
@@ -77,7 +77,7 @@ func ResolveSymbolTarget(spec, symbol, rootDir string) (SymbolTarget, bool, erro
 	}
 
 	if file, ok := resolveTypeFileOnDisk(spec, rootDir); ok {
-		return SymbolTarget{Dir: filepath.Dir(file), Symbol: symbol}, true, nil
+		return SymbolTarget{Dir: filepath.Dir(file), Name: symbol}, true, nil
 	}
 
 	pkg := spec
@@ -91,7 +91,7 @@ func ResolveSymbolTarget(spec, symbol, rootDir string) (SymbolTarget, bool, erro
 			return SymbolTarget{}, true, err
 		}
 	}
-	return SymbolTarget{Dir: dir, Symbol: symbol}, true, nil
+	return SymbolTarget{Dir: dir, Name: symbol}, true, nil
 }
 
 // ResolveModuleTarget resolves java:<spec> to a package dir and optional file.

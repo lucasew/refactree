@@ -42,7 +42,7 @@ type MoveDriver interface {
 
 	// ExtractDecl extracts a top-level declaration containing the entity
 	// from the file at filePath (absolute).
-	ExtractDecl(filePath string, entity Entity) (DeclExtract, error)
+	ExtractDecl(filePath string, entity Atom) (DeclExtract, error)
 
 	// InsertDecl produces an edit that inserts a declaration into dstRelPath.
 	// dstContent is the current file content, or nil if the file doesn't exist.

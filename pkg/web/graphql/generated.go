@@ -46,6 +46,7 @@ type DirectiveRoot struct {
 
 type ComplexityRoot struct {
 	CodeDocument struct {
+		Atoms      func(childComplexity int) int
 		Error      func(childComplexity int) int
 		Files      func(childComplexity int) int
 		FocusID    func(childComplexity int) int
@@ -54,7 +55,6 @@ type ComplexityRoot struct {
 		ParentHref func(childComplexity int) int
 		Reference  func(childComplexity int) int
 		Segments   func(childComplexity int) int
-		Symbols    func(childComplexity int) int
 		Warning    func(childComplexity int) int
 	}
 
@@ -144,6 +144,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 	_ = ec
 	switch typeName + "." + field {
 
+	case "CodeDocument.atoms":
+		if e.complexity.CodeDocument.Atoms == nil {
+			break
+		}
+
+		return e.complexity.CodeDocument.Atoms(childComplexity), true
 	case "CodeDocument.error":
 		if e.complexity.CodeDocument.Error == nil {
 			break
@@ -192,12 +198,6 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.CodeDocument.Segments(childComplexity), true
-	case "CodeDocument.symbols":
-		if e.complexity.CodeDocument.Symbols == nil {
-			break
-		}
-
-		return e.complexity.CodeDocument.Symbols(childComplexity), true
 	case "CodeDocument.warning":
 		if e.complexity.CodeDocument.Warning == nil {
 			break
@@ -937,14 +937,14 @@ func (ec *executionContext) fieldContext_CodeDocument_files(_ context.Context, f
 	return fc, nil
 }
 
-func (ec *executionContext) _CodeDocument_symbols(ctx context.Context, field graphql.CollectedField, obj *CodeDocument) (ret graphql.Marshaler) {
+func (ec *executionContext) _CodeDocument_atoms(ctx context.Context, field graphql.CollectedField, obj *CodeDocument) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
 		ec.OperationContext,
 		field,
-		ec.fieldContext_CodeDocument_symbols,
+		ec.fieldContext_CodeDocument_atoms,
 		func(ctx context.Context) (any, error) {
-			return obj.Symbols, nil
+			return obj.Atoms, nil
 		},
 		nil,
 		ec.marshalNFsEntry2ᚕᚖgithubᚗcomᚋlucasewᚋrefactreeᚋpkgᚋwebᚋgraphqlᚐFsEntryᚄ,
@@ -953,7 +953,7 @@ func (ec *executionContext) _CodeDocument_symbols(ctx context.Context, field gra
 	)
 }
 
-func (ec *executionContext) fieldContext_CodeDocument_symbols(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+func (ec *executionContext) fieldContext_CodeDocument_atoms(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	fc = &graphql.FieldContext{
 		Object:     "CodeDocument",
 		Field:      field,
@@ -2006,8 +2006,8 @@ func (ec *executionContext) fieldContext_Query_code(ctx context.Context, field g
 				return ec.fieldContext_CodeDocument_focusId(ctx, field)
 			case "files":
 				return ec.fieldContext_CodeDocument_files(ctx, field)
-			case "symbols":
-				return ec.fieldContext_CodeDocument_symbols(ctx, field)
+			case "atoms":
+				return ec.fieldContext_CodeDocument_atoms(ctx, field)
 			case "parentHref":
 				return ec.fieldContext_CodeDocument_parentHref(ctx, field)
 			}
@@ -3792,8 +3792,8 @@ func (ec *executionContext) _CodeDocument(ctx context.Context, sel ast.Selection
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
-		case "symbols":
-			out.Values[i] = ec._CodeDocument_symbols(ctx, field, obj)
+		case "atoms":
+			out.Values[i] = ec._CodeDocument_atoms(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}

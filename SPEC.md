@@ -17,7 +17,7 @@ Tool to do queries on symbols and some refactorings like move and rename items i
 Structural spine for discovery and graphs. Goal: one walk/parse path, no duplicated WalkDir + parse collectors. Lookup is lazy by default; only jobs that need a closed graph go eager.
 
 ### Shared bottom
-- Per-file unit: parse (tree-sitter / `ParseSource*`) → `FileExtract` (entities, imports, usages, reexports)
+- Per-file unit: parse (tree-sitter / `ParseSource*`) → `FileExtract` (atoms, imports, usages, reexports)
 - Disk entry: `parseFileCached` (root + path + mtime). No second ad-hoc parser for listing vs mv vs serve
 - Language drivers only implement extract/import rules; they do not own project walks
 
@@ -33,24 +33,24 @@ Structural spine for discovery and graphs. Goal: one walk/parse path, no duplica
 ### Materialize
 - Input: a **closed** set of extracts (drained stream or explicit collect)
 - Optional **ExpandImports** (one-hop import/reexport targets under root, same idea as today’s append-import-targets)
-- Then **Resolve** → `*Result` (files, entities, aliases, relations)
+- Then **Resolve** → `*Result` (files, atoms, aliases, uses)
 - ExpandImports is **not** the default and is **not** part of WalkExtracts
 - ExpandImports is **only** for full-Dir project-complete loads (mv / “whole project graph”)
 - Seed and Hop materialize with ExpandImports **off** (Seed already grew the set via BFS; Hop is minimal)
 - Resolve never runs on an open-ended live stream; no incremental half-graph visible to mv
 
-### WalkSymbols
-- Thin convenience over WalkExtracts (Dir or single-file scope) + visibility/provider filters → yield `SymbolInfo`
+### WalkAtoms
+- Thin convenience over WalkExtracts (Dir or single-file scope) + visibility/provider filters → yield `AtomInfo`
 - Must not reimplement walk/parse. No Materialize, no ExpandImports, no relations
 - Used by `ls` and `edit` picker
 
 ### Canonical public API (migrate all consumers)
 - Prefer spine names: `WalkExtracts`, `Materialize`, drivers Dir/Seed/Hop
 - Drop `Ingest` / `IngestWithRecursion` / `IngestForFile` as the long-term brand (call sites move to spine)
-- `WalkSymbols` stays as the list convenience only
+- `WalkAtoms` stays as the list convenience only
 
 ### Entry points (who is lazy vs eager)
-- **ls**, **edit** picker: lazy — WalkExtracts / WalkSymbols only; stream entities as files parse
+- **ls**, **edit** picker: lazy — WalkExtracts / WalkAtoms only; stream atoms as files parse
 - **edit** open / navigation canonicalize: Hop → Materialize(ExpandImports=false) or equivalent minimal result → `CanonicalizeInResult`; not full Dir
 - **doc**: minimal file/hop extract; not full project Materialize
 - **mv**: eager on purpose — Dir WalkExtracts over project root (skip rules) → Materialize(**ExpandImports=true**) → plan from full `*Result`. Must not use list-only path
@@ -60,13 +60,13 @@ Structural spine for discovery and graphs. Goal: one walk/parse path, no duplica
 
 ### Non-goals / hard rules
 - Do not put import expansion inside the list stream
-- Do not make “lookup” or WalkSymbols full-project by default
+- Do not make “lookup” or WalkAtoms full-project by default
 - Do not maintain a second WalkDir implementation beside WalkExtracts
 - Micro-dedup (shared ParseSource helpers, path joiners, etc.) stacks under this spine; it does not replace it
 - Language-specific logic stays in language packages behind interfaces; LSP package has none
 
 ### Subcommand: ls
-- Lists symbols in a reference (WalkSymbols / lazy extract stream)
+- Lists atoms in a reference (WalkAtoms / lazy extract stream)
 - `-a`: List symbols normally hidden symbols, like symbols that start lower case on Golang or start with _ in python
 - `-l`: Use text/table
 - Equivalent semantic of ls in general, make sure to not be confusing, add flags on demand, don't invent useless flags or use flags that  dont make sense in the problem
@@ -90,20 +90,20 @@ Structural spine for discovery and graphs. Goal: one walk/parse path, no duplica
   - no args: interactive picker over all entities under cwd, then open the selection
   - symbol ref (`::what`): canonicalize (barrels, re-exports, aliases — same as navigation elsewhere) then open the defining entity
   - file ref (no symbol): open that file at line 1 column 1
-  - directory / module ref (no symbol): interactive picker scoped to entities under that container, then open the selection
+  - directory / module ref (no symbol): interactive picker scoped to atoms under that container, then open the selection
 - Interactive picker:
   - default backend shells out to `fzf` (must be on PATH); pluggable later
-  - candidates are streamed into fzf stdin as symbols are discovered (parse each file on demand; not a full-module ingest first)
+  - candidates are streamed into fzf stdin as atoms are discovered (parse each file on demand; not a full-module ingest first)
   - each candidate line is the full reference string (e.g. `path:./pkg/foo.go::Bar`)
   - `-a`: include normally hidden symbols (same idea as `ls`)
 - `-C` / `--dir`: project root (default `.`), same idea as `serve`
 - Editor selection (first wins): `--editor` flag, `RFT_EDITOR`, `$VISUAL`, `$EDITOR`; hard error if none
 - Editor argv (default, swappable via interface later): single argument `path:line:column`
   - line is 1-based; column is 1-based for the editor
-  - definition position: entity `StartByte` converted with `grammar.LineIndex` from ccgo-tree-sitter (`LineColumnAt` is 1-based line / 0-based byte column; pass column+1 to the editor)
+  - definition position: atom `StartByte` converted with `grammar.LineIndex` from ccgo-tree-sitter (`LineColumnAt` is 1-based line / 0-based byte column; pass column+1 to the editor)
   - file-only open: `path:1:1`
 - Success is silent on stdout; propagate the editor process exit code
-- Hard errors (non-zero, clear stderr): unresolvable symbol after canonicalize, missing file, missing editor, missing `fzf` when a picker is required
+- Hard errors (non-zero, clear stderr): unresolvable atom after canonicalize, missing file, missing editor, missing `fzf` when a picker is required
 - Equivalent semantic of opening a target for editing in general; add flags on demand, don't invent useless flags
 
 ### Subcommand: serve
@@ -167,7 +167,7 @@ Identity: **code intelligence**, not a linter. Diagnostics at most high-confiden
 | Capability | Behavior |
 |------------|----------|
 | `textDocument/definition` | Same as CLI navigation: symbol under cursor → real reference → **canonicalize** → definition location. Empty when unknown (no fake first-mention jump) |
-| `textDocument/references` | Graph resolve for that entity (same rules as CLI/ref plumbing) |
+| `textDocument/references` | Graph resolve for that atom (same rules as CLI/ref plumbing) |
 | `textDocument/documentSymbol` | Entities from current file extract |
 | `workspace/symbol` | Symbols from last-good project snapshot (prefix query) |
 | `textDocument/hover` | Signature + docstring only (same truth as `rft doc`) |
@@ -272,16 +272,30 @@ Shared **perception** means shared **ids, schema, and relation facts** — not s
 
 ### Domain levels (existing lattice; product wording)
 
-Three levels already exist in ingest/browse (`DirectoryModule`, path vs `::symbol`, scope navigation). Product names:
+### Glossary
+
+| Term | Meaning |
+|------|---------|
+| **Module** | Language loadable unit |
+| **File** | One parse unit (filesystem / structure; not a force-graph edge kind) |
+| **Atom** | One defined named thing; id `provider:path::name` |
+| **Reference** | Canonical id string for any level |
+| **Name** | The `::` segment of a reference (`Reference.Name`) |
+| **Use** | Use-site → target atom fact (ingest `Use`; graph `USES`) |
+| **Alias** | Import/reexport binding (feeds module `IMPORTS`) |
+
+Do not use **package** or **symbol** as product lattice levels (package remains a Go/Java language unit / fuzzer grain; LSP protocol keeps `*Symbol*` names).
+
+Three levels already exist in ingest/browse (`DirectoryModule`, path vs `::name`, scope navigation). Product names:
 
 | Level | Meaning | Graph edges at this zoom |
 |-------|---------|---------------------------|
 | **Module** | Language loadable unit (Go/Java: package dir when `DirectoryModule`; Python/JS: often the file — driver decides; collapse when module ≡ file) | Import / depends-on between modules |
 | **File** | One source/parse unit | **None** — filesystem list/rail (today-like), not a force graph |
-| **Atom** | One defined entity (`provider:path::symbol` / `Entity`) | Uses / used-by from `Relation` (and reverse as query direction) |
+| **Atom** | One defined thing (`provider:path::name` / ingest `Atom`) | Uses / used-by from `Use` (and reverse as query direction) |
 
 - **Drill up/down** between levels (zoom), not three permanent node layers drawn at once.
-- **Containment** (module→file→atom) is **structure** (parent / cluster / hull), **not** a default walk edge. Do not treat “lives in file” as a relation that pollutes the force graph.
+- **Containment** (module→file→atom) is **structure** (parent / cluster / hull), **not** a default walk edge. Do not treat “lives in file” as a use edge that pollutes the force graph.
 - Language-specific module boundaries stay in language packages / providers (`LanguageUsesDirectoryModule`, `ResolveScopeTarget`, …).
 
 ### UX shell
@@ -352,7 +366,7 @@ Same spine rules as the rest of the product: lazy by default; eager only when a 
 | File-level force graph | Forbidden (fs view only) |
 | Full-repo graph as homepage | Forbidden as default |
 | sigma.js / other renderers | Upgrade path if 2d force-graph limits hit; not day one |
-| Product wording janitor | Standardize atom/file/module in UI, docs, GraphQL names (map from Entity/Relation/…) without drive-by renames of core ingest types |
+| ~~Product wording janitor~~ | **Done:** Module/File/Atom + `Use` across core, GraphQL, UI, fixtures |
 
 ### Architecture seams
 

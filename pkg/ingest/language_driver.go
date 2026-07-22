@@ -7,8 +7,8 @@ import (
 	"github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar"
 )
 
-// SymbolListOptions controls per-language symbol visibility policy.
-type SymbolListOptions struct {
+// AtomListOptions controls per-language symbol visibility policy.
+type AtomListOptions struct {
 	IncludeHidden bool
 }
 
@@ -21,7 +21,7 @@ type LanguageDriver interface {
 	TreeSitterGrammar(filename string) (grammar.Language, bool)
 	Extract(root *grammar.Node, source []byte, relPath string) *FileExtract
 	ResolveImport(sourcePath string, ctx ImportResolveContext) string
-	AllowListSymbol(name string, opts SymbolListOptions) bool
+	AllowListAtom(name string, opts AtomListOptions) bool
 
 	// DestinationFileInDirectory maps a destination directory reference to a
 	// concrete file path for this language.

@@ -22,7 +22,7 @@ type FileView struct {
 	Language   string
 	Segments   []annotate.Segment
 	Files      []NavItem // Files tab: dirs and files nearby
-	Symbols    []SymItem // Symbols tab: defs + imports in current file
+	Atoms      []SymItem // Atoms tab: defs + imports in current file
 	ParentHref string
 	Error      string // hard failure (no usable page body)
 	Warning    string // soft failure (still show source when possible)
@@ -39,7 +39,7 @@ type NavItem struct {
 	IsDir  bool
 }
 
-// SymItem is a link in the Symbols tab (definition or import).
+// SymItem is a link in the Atoms tab (definition or import).
 type SymItem struct {
 	Name  string
 	Href  string
@@ -140,7 +140,7 @@ func (l *Loader) LoadFile(refStr string) FileView {
 		RootDir:   l.RootDir,
 		Provider:  scopeRef.Provider,
 	}
-	if parsed.Symbol != "" {
+	if parsed.Name != "" {
 		v.FocusID = annotate.AnchorID(focusRef)
 	}
 
@@ -177,8 +177,8 @@ func (l *Loader) loadPathView(v FileView, scopeRef ingest.Reference, focusRef st
 		v.Files = l.listPathDir(abs, rel)
 		v.ParentHref = l.pathParentHref(rel)
 		// Graph nodes are module-scoped (path:./pkg/web::New). Open the defining file.
-		if parsed.Symbol != "" {
-			return l.openPathPackageSymbol(v, abs, rel, focusRef, parsed.Symbol)
+		if parsed.Name != "" {
+			return l.openPathModuleAtom(v, abs, rel, focusRef, parsed.Name)
 		}
 		return v
 	}
@@ -212,18 +212,18 @@ func (l *Loader) loadPathView(v FileView, scopeRef ingest.Reference, focusRef st
 	v.Segments = annotate.Build(source, rel, result, func(r string) string {
 		return EncodeCodeURLInRoot(l.RootDir, r)
 	})
-	v.Symbols = symbolsForFile(rel, result, EncodeCodeURLInRoot, l.RootDir)
+	v.Atoms = atomsForFile(rel, result, EncodeCodeURLInRoot, l.RootDir)
 	// Anchor ids are file-scoped (path:./file.go::Sym); match focusId to a real def span.
-	if parsed.Symbol != "" {
-		v.FocusID = focusAnchorForSymbol(result, rel, parsed.Symbol, focusRef)
+	if parsed.Name != "" {
+		v.FocusID = focusAnchorForAtom(result, rel, parsed.Name, focusRef)
 	}
 	return v
 }
 
-// openPathPackageSymbol resolves path:./pkg::Sym to the file that defines Sym and
+// openPathModuleAtom resolves path:./pkg::Sym to the file that defines Sym and
 // loads source with a scrollable definition anchor (graph click → code pane).
-func (l *Loader) openPathPackageSymbol(v FileView, dirAbs, dirRel, focusRef, symbol string) FileView {
-	seeds, err := packageSourceFiles(dirAbs)
+func (l *Loader) openPathModuleAtom(v FileView, dirAbs, dirRel, focusRef, symbol string) FileView {
+	seeds, err := moduleSourceFiles(dirAbs)
 	if err != nil {
 		v.Error = err.Error()
 		return v
@@ -241,9 +241,9 @@ func (l *Loader) openPathPackageSymbol(v FileView, dirAbs, dirRel, focusRef, sym
 		v.Error = err.Error()
 		return v
 	}
-	fileRel := findEntityFile(result, symbol)
+	fileRel := findAtomFile(result, symbol)
 	if fileRel == "" {
-		v.Error = fmt.Sprintf("symbol %q not found in %s", symbol, dirRel)
+		v.Error = fmt.Sprintf("atom %q not found in %s", symbol, dirRel)
 		return v
 	}
 	fileAbs, fileRel, err := l.resolveEntityFileAbs(fileRel, dirAbs, dirRel)
@@ -275,14 +275,14 @@ func (l *Loader) openPathPackageSymbol(v FileView, dirAbs, dirRel, focusRef, sym
 	v.Segments = annotate.Build(source, fileRel, focused, func(r string) string {
 		return EncodeCodeURLInRoot(l.RootDir, r)
 	})
-	v.Symbols = symbolsForFile(fileRel, focused, EncodeCodeURLInRoot, l.RootDir)
-	v.FocusID = focusAnchorForSymbol(focused, fileRel, symbol, focusRef)
+	v.Atoms = atomsForFile(fileRel, focused, EncodeCodeURLInRoot, l.RootDir)
+	v.FocusID = focusAnchorForAtom(focused, fileRel, symbol, focusRef)
 	v.Title = focusRef
 	v.Reference = focusRef
 	return v
 }
 
-func packageSourceFiles(dirAbs string) ([]string, error) {
+func moduleSourceFiles(dirAbs string) ([]string, error) {
 	entries, err := os.ReadDir(dirAbs)
 	if err != nil {
 		return nil, err
@@ -324,23 +324,23 @@ func (l *Loader) resolveEntityFileAbs(fileRel, dirAbs, dirRel string) (abs strin
 	return "", "", fmt.Errorf("definition file %q not found under %s", fileRel, dirRel)
 }
 
-// focusAnchorForSymbol picks an element id that exists on a definition span in the page.
-func focusAnchorForSymbol(result *ingest.Result, fileRel, symbol, focusRef string) string {
+// focusAnchorForAtom picks an element id that exists on a definition span in the page.
+func focusAnchorForAtom(result *ingest.Result, fileRel, symbol, focusRef string) string {
 	if symbol == "" {
 		return ""
 	}
 	fileRel = normalizeRel(fileRel)
 	if result != nil {
 		// Prefer entity in the opened file (matches annotate.Build anchors).
-		for _, ent := range result.Entities {
+		for _, ent := range result.Atoms {
 			r := ingest.ParseReference(ent.Reference)
-			if r.Symbol == symbol && normalizeRel(r.Path) == fileRel {
+			if r.Name == symbol && normalizeRel(r.Path) == fileRel {
 				return annotate.AnchorID(ent.Reference)
 			}
 		}
-		for _, ent := range result.Entities {
+		for _, ent := range result.Atoms {
 			r := ingest.ParseReference(ent.Reference)
-			if r.Symbol == symbol {
+			if r.Name == symbol {
 				return annotate.AnchorID(ent.Reference)
 			}
 		}
@@ -377,14 +377,14 @@ func (l *Loader) loadProviderView(v FileView, scopeRef ingest.Reference, focusRe
 	v.ParentHref = providerParentHref(scopeRef)
 
 	// Scope-only ref (no symbol): overview, no source pane.
-	if parsed.Symbol == "" {
+	if parsed.Name == "" {
 		return v
 	}
 
 	// Symbol ref: open the file that defines it.
-	fileRel := findEntityFile(result, parsed.Symbol)
+	fileRel := findAtomFile(result, parsed.Name)
 	if fileRel == "" {
-		v.Error = fmt.Sprintf("symbol %q not found in %s", parsed.Symbol, scopeRef.String())
+		v.Error = fmt.Sprintf("atom %q not found in %s", parsed.Name, scopeRef.String())
 		return v
 	}
 
@@ -416,10 +416,10 @@ func (l *Loader) loadProviderView(v FileView, scopeRef ingest.Reference, focusRe
 	v.Segments = annotate.BuildWithOptions(source, fileRel, focused, EncodeCodeURL, annotate.Options{
 		MapRef: mapRef,
 	})
-	v.Symbols = symbolsForFileMapped(fileRel, focused, EncodeCodeURL, mapRef)
+	v.Atoms = atomsForFileMapped(fileRel, focused, EncodeCodeURL, mapRef)
 	// Match focusId to a painted def span (provider-mapped anchors, not path:./file).
-	if parsed.Symbol != "" {
-		v.FocusID = focusAnchorFromSegments(v.Segments, parsed.Symbol, focusRef)
+	if parsed.Name != "" {
+		v.FocusID = focusAnchorFromSegments(v.Segments, parsed.Name, focusRef)
 	}
 	markActiveHref(&v.Files, EncodeCodeURL(focusRef))
 	v.Title = focusRef
@@ -437,7 +437,7 @@ func focusAnchorFromSegments(segs []annotate.Segment, symbol, focusRef string) s
 			continue
 		}
 		r := ingest.ParseReference(seg.Reference)
-		if r.Symbol == symbol {
+		if r.Name == symbol {
 			return seg.ID
 		}
 	}
@@ -459,38 +459,38 @@ func providerRefMapper(scopeRef ingest.Reference, result *ingest.Result) func(st
 		if r.Provider != "" && r.Provider != "path" {
 			return ref
 		}
-		if r.Symbol == "" {
+		if r.Name == "" {
 			return ref
 		}
 		p := normalizeRel(r.Path)
 		if !local[p] {
 			return ref
 		}
-		return ingest.Reference{Provider: scopeRef.Provider, Path: scopeRef.Path, Symbol: r.Symbol}.String()
+		return ingest.Reference{Provider: scopeRef.Provider, Path: scopeRef.Path, Name: r.Name}.String()
 	}
 }
 
-func findEntityFile(result *ingest.Result, symbol string) string {
+func findAtomFile(result *ingest.Result, symbol string) string {
 	if result == nil || symbol == "" {
 		return ""
 	}
-	for _, ent := range result.Entities {
+	for _, ent := range result.Atoms {
 		r := ingest.ParseReference(ent.Reference)
-		if r.Symbol == symbol {
+		if r.Name == symbol {
 			return normalizeRel(r.Path)
 		}
 	}
 	return ""
 }
 
-// symbolsForFile builds a ctags-ish list of defs + imports for one file (source order).
-func symbolsForFile(fileRel string, result *ingest.Result, codeURL func(root, ref string) string, rootDir string) []SymItem {
-	return symbolsForFileMapped(fileRel, result, func(ref string) string {
+// atomsForFile builds a ctags-ish list of defs + imports for one file (source order).
+func atomsForFile(fileRel string, result *ingest.Result, codeURL func(root, ref string) string, rootDir string) []SymItem {
+	return atomsForFileMapped(fileRel, result, func(ref string) string {
 		return codeURL(rootDir, ref)
 	}, nil)
 }
 
-func symbolsForFileMapped(fileRel string, result *ingest.Result, codeURL func(ref string) string, mapRef func(string) string) []SymItem {
+func atomsForFileMapped(fileRel string, result *ingest.Result, codeURL func(ref string) string, mapRef func(string) string) []SymItem {
 	if result == nil {
 		return nil
 	}
@@ -505,13 +505,13 @@ func symbolsForFileMapped(fileRel string, result *ingest.Result, codeURL func(re
 	}
 	var rows []row
 
-	for _, ent := range result.Entities {
+	for _, ent := range result.Atoms {
 		r := ingest.ParseReference(ent.Reference)
-		if normalizeRel(r.Path) != norm || r.Symbol == "" {
+		if normalizeRel(r.Path) != norm || r.Name == "" {
 			continue
 		}
 		display := mapRef(ent.Reference)
-		name := r.Symbol
+		name := r.Name
 		href := codeURL(display)
 		rows = append(rows, row{
 			start: ent.StartByte,
@@ -530,7 +530,7 @@ func symbolsForFileMapped(fileRel string, result *ingest.Result, codeURL func(re
 			continue
 		}
 		display := mapRef(alias.Reference)
-		name := r.Symbol
+		name := r.Name
 		if name == "" {
 			// Import of whole module: use last path segment or raw ref tail.
 			name = aliasLocalName(alias, display)
@@ -570,8 +570,8 @@ func symbolsForFileMapped(fileRel string, result *ingest.Result, codeURL func(re
 
 func aliasLocalName(alias ingest.Alias, displayRef string) string {
 	r := ingest.ParseReference(alias.Reference)
-	if r.Symbol != "" {
-		return r.Symbol
+	if r.Name != "" {
+		return r.Name
 	}
 	// path:./file with no symbol — binding name often is the last component of target.
 	if alias.Target != "" {
@@ -692,7 +692,7 @@ func (l *Loader) listProviderFiles(scopeRef ingest.Reference, scope refpkg.Scope
 				href = EncodeCodeURL(ingest.Reference{
 					Provider: scopeRef.Provider,
 					Path:     scopeRef.Path,
-					Symbol:   sym,
+					Name:     sym,
 				}.String())
 			}
 			items = append(items, NavItem{
@@ -714,13 +714,13 @@ func firstEntitySymbolInFile(result *ingest.Result, fileRel string) string {
 	var best string
 	var bestStart uint32
 	found := false
-	for _, ent := range result.Entities {
+	for _, ent := range result.Atoms {
 		r := ingest.ParseReference(ent.Reference)
-		if normalizeRel(r.Path) != norm || r.Symbol == "" {
+		if normalizeRel(r.Path) != norm || r.Name == "" {
 			continue
 		}
 		if !found || ent.StartByte < bestStart {
-			best = r.Symbol
+			best = r.Name
 			bestStart = ent.StartByte
 			found = true
 		}

@@ -10,10 +10,10 @@ export function normalizeRef(ref: string): string {
   if (!s) return "path:./";
 
   // Symbol first (same as Go Parse): provider:path::symbol
-  let symbol = "";
+  let atom = "";
   const symIdx = s.indexOf("::");
   if (symIdx >= 0) {
-    symbol = s.slice(symIdx + 2);
+    atom = s.slice(symIdx + 2);
     s = s.slice(0, symIdx);
   }
 
@@ -43,7 +43,7 @@ export function normalizeRef(ref: string): string {
     base = "path:./" + s.replace(/^\.\//, "");
   }
 
-  return symbol !== "" ? base + "::" + symbol : base;
+  return symbol !== "" ? base + "::" + atom : base;
 }
 
 /** Parse browser path into a focus reference (canonical id). Hash is ignored. */
@@ -142,23 +142,23 @@ export function displayModulePath(refOrLabel: string): string {
 }
 
 /** Split a ref id into module + optional symbol. Module line keeps path:./. */
-export function refDisplayParts(id: string): { module: string; symbol: string } {
+export function refDisplayParts(id: string): { module: string; atom: string } {
   const raw = normalizeRef(id ?? "");
   let base = raw;
-  let symbol = "";
+  let atom = "";
   const symIdx = raw.indexOf("::");
   if (symIdx >= 0) {
-    symbol = raw.slice(symIdx + 2);
+    atom = raw.slice(symIdx + 2);
     base = raw.slice(0, symIdx);
   }
-  return { module: base || "path:./", symbol };
+  return { module: base || "path:./", atom };
 }
 
 /**
- * Package/module scope id: strip ::symbol so path:./cmd/rft::Main → path:./cmd/rft.
- * Used by package graph view (one node per package).
+ * Module scope id: strip ::symbol so path:./cmd/rft::Main → path:./cmd/rft.
+ * Used by module graph view (one node per module).
  */
-export function packageScopeId(ref: string): string {
+export function moduleScopeId(ref: string): string {
   const id = normalizeRef(ref);
   const i = id.indexOf("::");
   return i >= 0 ? id.slice(0, i) : id;
@@ -176,21 +176,21 @@ const DIRECTORY_MODULE_EXT = new Set([
 /**
  * Graph node id: same idea as backend graphRefID / projectScopeID.
  * Collapses file paths for directory-module languages so the canvas shows
- * packages (path:./pkg/web) not files (path:./pkg/web/server.go).
+ * modules (path:./pkg/web) not files (path:./pkg/web/server.go).
  */
 export function graphScopeId(ref: string): string {
   const id = normalizeRef(ref);
   let base = id;
-  let symbol = "";
+  let atom = "";
   const symIdx = id.indexOf("::");
   if (symIdx >= 0) {
-    symbol = id.slice(symIdx + 2);
+    atom = id.slice(symIdx + 2);
     base = id.slice(0, symIdx);
   }
 
   const colon = base.indexOf(":");
   if (colon <= 0) {
-    return symbol ? base + "::" + symbol : base;
+    return atom ? base + "::" + atom : base;
   }
   const prov = base.slice(0, colon).toLowerCase();
   let path = base.slice(colon + 1);
@@ -213,20 +213,17 @@ export function graphScopeId(ref: string): string {
     }
   }
   // external go:fmt / go:fmt::Println — keep provider path as module
-  return symbol ? base + "::" + symbol : base;
+  return atom ? base + "::" + atom : base;
 }
 
-export type GraphViewMode = "package" | "reference";
-/** @deprecated use GraphViewMode */
-export type GraphLabelMode = GraphViewMode;
-
+export type GraphViewMode = "module" | "atom";
 /**
  * Canvas / tooltip label for a node — always shows canonical path:./…
- * package: one line (path:./cmd/rft)
- * reference: two lines when a symbol exists (path:./cmd/rft\\nname)
+ * module: one line (path:./cmd/rft)
+ * atom: two lines when an atom name exists (path:./cmd/rft\\nname)
  */
 export function formatGraphLabel(id: string, mode: GraphViewMode): string {
-  const { module, symbol } = refDisplayParts(id);
-  if (mode === "package" || !symbol) return module;
-  return `${module}\n${symbol}`;
+  const { module, atom } = refDisplayParts(id);
+  if (mode === "module" || !atom) return module;
+  return `${module}\n${atom}`;
 }

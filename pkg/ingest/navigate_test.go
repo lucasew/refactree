@@ -42,7 +42,7 @@ func TestNavigateAround_NodeModulesReexport(t *testing.T) {
 		t.Fatal("nil nav result")
 	}
 	found := false
-	for _, e := range nav.Entities {
+	for _, e := range nav.Atoms {
 		if strings.Contains(e.Reference, "lib.js") && strings.Contains(e.Reference, "helper") {
 			found = true
 			break
@@ -53,7 +53,7 @@ func TestNavigateAround_NodeModulesReexport(t *testing.T) {
 		if !strings.Contains(got.Path, "lib.js") && !strings.Contains(got.String(), "helper") {
 			// dump for debug
 			var ents []string
-			for _, e := range nav.Entities {
+			for _, e := range nav.Atoms {
 				ents = append(ents, e.Reference)
 			}
 			t.Fatalf("expected helper in lib.js via on-demand nav, got ref=%s entities=%v", got.String(), ents)

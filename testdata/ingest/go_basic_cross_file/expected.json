@@ -9,7 +9,7 @@
       "path": "main.go"
     }
   ],
-  "entities": [
+  "atoms": [
     {
       "reference": "path:./helper.go::helper",
       "start_byte": 19,
@@ -21,7 +21,7 @@
       "end_byte": 23
     }
   ],
-  "relations": [
+  "uses": [
     {
       "reference": "path:./main.go::main",
       "start_byte": 29,

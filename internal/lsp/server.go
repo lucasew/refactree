@@ -198,34 +198,34 @@ func (s *Server) hitFromIdentifier(path, text string, off int) string {
 		return ""
 	}
 	rel := s.session.relPath(path)
-	return ingest.SymbolRef("./"+strings.TrimPrefix(rel, "./"), tok)
+	return ingest.AtomRef("./"+strings.TrimPrefix(rel, "./"), tok)
 }
 
 func (s *Server) definitionLocation(root string, result *ingest.Result, ref ingest.Reference) (*protocol.Location, error) {
 	canon := ref.String()
-	var ent *ingest.Entity
-	for i := range result.Entities {
-		if result.Entities[i].Reference == canon {
-			ent = &result.Entities[i]
+	var ent *ingest.Atom
+	for i := range result.Atoms {
+		if result.Atoms[i].Reference == canon {
+			ent = &result.Atoms[i]
 			break
 		}
 	}
-	if ent == nil && ref.Symbol != "" {
-		for i := range result.Entities {
-			er := ingest.ParseReference(result.Entities[i].Reference)
-			if er.Symbol == ref.Symbol && (ref.Path == "" || samePath(ref, er)) {
-				ent = &result.Entities[i]
+	if ent == nil && ref.Name != "" {
+		for i := range result.Atoms {
+			er := ingest.ParseReference(result.Atoms[i].Reference)
+			if er.Name == ref.Name && (ref.Path == "" || samePath(ref, er)) {
+				ent = &result.Atoms[i]
 				ref = er
 				break
 			}
 		}
 	}
-	if ent == nil && ref.Symbol != "" {
+	if ent == nil && ref.Name != "" {
 		// last resort: unique symbol name in navigated result
-		for i := range result.Entities {
-			er := ingest.ParseReference(result.Entities[i].Reference)
-			if er.Symbol == ref.Symbol {
-				ent = &result.Entities[i]
+		for i := range result.Atoms {
+			er := ingest.ParseReference(result.Atoms[i].Reference)
+			if er.Name == ref.Name {
+				ent = &result.Atoms[i]
 				ref = er
 				break
 			}
@@ -282,7 +282,7 @@ func (s *Server) References(_ context.Context, params *protocol.ReferenceParams)
 			locs = append(locs, *loc)
 		}
 	}
-	for _, reln := range result.Relations {
+	for _, reln := range result.Uses {
 		t := reln.Target
 		if t != target {
 			ct := ingest.CanonicalizeInResult(result, ingest.ParseReference(reln.Target))
@@ -397,16 +397,16 @@ func (s *Server) Completion(_ context.Context, params *protocol.CompletionParams
 	fe := s.session.fastExtract[path]
 	s.session.mu.RUnlock()
 	if fe != nil {
-		for _, e := range fe.Entities {
+		for _, e := range fe.Atoms {
 			add(e.Name)
 		}
 	}
 
 	snap := s.session.snapshot()
 	if snap != nil && snap.Result != nil {
-		for _, ent := range snap.Result.Entities {
+		for _, ent := range snap.Result.Atoms {
 			r := ingest.ParseReference(ent.Reference)
-			add(ingest.SymbolLeaf(r.Symbol))
+			add(ingest.AtomName(r.Name))
 			if len(items) >= maxItems {
 				break
 			}
@@ -433,7 +433,7 @@ func (s *Server) DocumentSymbol(_ context.Context, params *protocol.DocumentSymb
 		return protocol.DocumentSymbolSlice{}, nil
 	}
 	var out protocol.DocumentSymbolSlice
-	for _, e := range fe.Entities {
+	for _, e := range fe.Atoms {
 		r := rangeFromBytes(text, int(e.StartByte), int(e.EndByte), nil)
 		out = append(out, protocol.DocumentSymbol{
 			Name:           e.Name,
@@ -452,9 +452,9 @@ func (s *Server) WorkspaceSymbol(_ context.Context, params *protocol.WorkspaceSy
 	}
 	q := strings.ToLower(params.Query)
 	var out protocol.SymbolInformationSlice
-	for _, ent := range snap.Result.Entities {
+	for _, ent := range snap.Result.Atoms {
 		ref := ingest.ParseReference(ent.Reference)
-		name := ingest.SymbolLeaf(ref.Symbol)
+		name := ingest.AtomName(ref.Name)
 		if q != "" && !strings.Contains(strings.ToLower(name), q) && !strings.Contains(strings.ToLower(ent.Reference), q) {
 			continue
 		}
@@ -502,16 +502,16 @@ func (s *Server) Rename(_ context.Context, params *protocol.RenameParams) (*prot
 	// Refactor: closed project graph only (no on-demand vendor expansion).
 	// Rename planner uses ProjectResult semantics via ingest.Rename.
 	srcRef := ingest.CanonicalizeInResult(snap.Result, ingest.ParseReference(hit.Reference))
-	if srcRef.Symbol == "" {
+	if srcRef.Name == "" {
 		return nil, fmt.Errorf("cannot rename non-symbol")
 	}
 	dstRef := srcRef
-	dstRef.Symbol = params.NewName
+	dstRef.Name = params.NewName
 	// leaf rename keeps path
-	if leaf := ingest.SymbolLeaf(srcRef.Symbol); leaf != srcRef.Symbol {
+	if leaf := ingest.AtomName(srcRef.Name); leaf != srcRef.Name {
 		// preserve qualifier prefix if any
-		if i := strings.LastIndex(srcRef.Symbol, "."); i >= 0 {
-			dstRef.Symbol = srcRef.Symbol[:i+1] + params.NewName
+		if i := strings.LastIndex(srcRef.Name, "."); i >= 0 {
+			dstRef.Name = srcRef.Name[:i+1] + params.NewName
 		}
 	}
 

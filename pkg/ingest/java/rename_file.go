@@ -26,11 +26,11 @@ func (moveDriver) RenameFileMoves(result *ingest.Result, sourceRefs []string, ol
 	seen := map[string]bool{}
 	for _, refStr := range sourceRefs {
 		ref := ingest.ParseReference(refStr)
-		if ingest.SymbolLeaf(ref.Symbol) != oldLeaf {
+		if ingest.AtomName(ref.Name) != oldLeaf {
 			continue
 		}
 		// Skip nested type entities (Outer.Inner).
-		if strings.Contains(ref.Symbol, ".") {
+		if strings.Contains(ref.Name, ".") {
 			continue
 		}
 		rel := strings.TrimPrefix(ref.Path, "./")

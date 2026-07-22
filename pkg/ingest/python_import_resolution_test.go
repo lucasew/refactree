@@ -35,7 +35,7 @@ func TestIngest_PythonRelativeImportResolvesToLocalFile(t *testing.T) {
 			hasAlias = true
 		}
 	}
-	for _, rel := range result.Relations {
+	for _, rel := range result.Uses {
 		if rel.Reference == "path:./pkg/app.py::main" && rel.Target == "path:./pkg/localmod.py::helper" {
 			hasRelation = true
 		}
@@ -45,7 +45,7 @@ func TestIngest_PythonRelativeImportResolvesToLocalFile(t *testing.T) {
 		t.Fatalf("expected relative import alias target path:./pkg/localmod.py::helper, got aliases: %+v", result.Aliases)
 	}
 	if !hasRelation {
-		t.Fatalf("expected helper callsite target path:./pkg/localmod.py::helper, got relations: %+v", result.Relations)
+		t.Fatalf("expected helper callsite target path:./pkg/localmod.py::helper, got relations: %+v", result.Uses)
 	}
 }
 
@@ -76,7 +76,7 @@ func TestIngest_PythonAbsoluteDottedImportResolvesToLocalFile(t *testing.T) {
 			hasAlias = true
 		}
 	}
-	for _, rel := range result.Relations {
+	for _, rel := range result.Uses {
 		if rel.Reference == "path:./app.py::main" && rel.Target == "path:./pkg/sub.py::helper" {
 			hasRelation = true
 		}
@@ -86,6 +86,6 @@ func TestIngest_PythonAbsoluteDottedImportResolvesToLocalFile(t *testing.T) {
 		t.Fatalf("expected absolute dotted import alias target path:./pkg/sub.py::helper, got aliases: %+v", result.Aliases)
 	}
 	if !hasRelation {
-		t.Fatalf("expected helper callsite target path:./pkg/sub.py::helper, got relations: %+v", result.Relations)
+		t.Fatalf("expected helper callsite target path:./pkg/sub.py::helper, got relations: %+v", result.Uses)
 	}
 }

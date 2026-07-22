@@ -69,7 +69,7 @@ func providerListIngestRecursive(ref Reference, opts ListOptions) bool {
 	return policy.ListIngestRecursive(ref, opts)
 }
 
-func providerAllowListEntity(ref Reference, entRef Reference, entPath, language string, opts ListOptions) bool {
+func providerAllowListAtom(ref Reference, entRef Reference, entPath, language string, opts ListOptions) bool {
 	if ref.Provider == "" || ref.Provider == "path" {
 		return true
 	}
@@ -97,7 +97,7 @@ func providerListOutputReference(ref Reference, entRef Reference) Reference {
 	return Reference{
 		Provider: ref.Provider,
 		Path:     ref.Path,
-		Symbol:   entRef.Symbol,
+		Name:     entRef.Name,
 	}
 }
 

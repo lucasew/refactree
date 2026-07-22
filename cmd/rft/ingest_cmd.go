@@ -78,8 +78,8 @@ func renderExpectedIngestText(dir string) ([]byte, error) {
 	}
 	fmt.Fprintln(&buf)
 
-	fmt.Fprintf(&buf, "Entities (%d):\n", len(result.Entities))
-	for _, e := range result.Entities {
+	fmt.Fprintf(&buf, "Atoms (%d):\n", len(result.Atoms))
+	for _, e := range result.Atoms {
 		fmt.Fprintf(&buf, "- %s [%d:%d]\n", e.Reference, e.StartByte, e.EndByte)
 	}
 	fmt.Fprintln(&buf)
@@ -90,8 +90,8 @@ func renderExpectedIngestText(dir string) ([]byte, error) {
 	}
 	fmt.Fprintln(&buf)
 
-	fmt.Fprintf(&buf, "Relations (%d):\n", len(result.Relations))
-	for _, r := range result.Relations {
+	fmt.Fprintf(&buf, "Uses (%d):\n", len(result.Uses))
+	for _, r := range result.Uses {
 		via := ""
 		if r.ViaImportAlias {
 			via = " (via import alias)"

@@ -148,7 +148,7 @@ func (s *GraphStore) Code(ref string) (*gql.CodeDocument, error) {
 		id := fsEntryRef(f.Href, f.Name, "")
 		doc.Files = append(doc.Files, &gql.FsEntry{Name: f.Name, Reference: id, IsDir: f.IsDir})
 	}
-	for _, sym := range v.Symbols {
+	for _, sym := range v.Atoms {
 		id := stripCodeURL(sym.Href)
 		if id == "" && sym.Name != "" {
 			// Fallback: symbol on the current file/module ref.
@@ -158,7 +158,7 @@ func (s *GraphStore) Code(ref string) (*gql.CodeDocument, error) {
 		if id == "" {
 			id = sym.Name
 		}
-		doc.Symbols = append(doc.Symbols, &gql.FsEntry{Name: sym.Name, Reference: id, IsDir: false})
+		doc.Atoms = append(doc.Atoms, &gql.FsEntry{Name: sym.Name, Reference: id, IsDir: false})
 	}
 	return doc, nil
 }
@@ -274,7 +274,7 @@ func canonicalFSRef(ref string) string {
 	r := ingest.ParseReference(ref)
 	if r.Provider == "" {
 		// Bare token or path-like without provider → path.
-		if r.Symbol != "" || strings.Contains(r.Path, "/") || strings.HasPrefix(r.Path, ".") || r.Path != "" {
+		if r.Name != "" || strings.Contains(r.Path, "/") || strings.HasPrefix(r.Path, ".") || r.Path != "" {
 			r.Provider = "path"
 			if r.Path != "" && !strings.HasPrefix(r.Path, "./") && !strings.HasPrefix(r.Path, "../") && !strings.HasPrefix(r.Path, "/") {
 				r.Path = "./" + strings.TrimPrefix(r.Path, "./")

@@ -20,7 +20,7 @@ func TestPlanInputDeterministicPick(t *testing.T) {
 	p := Project{
 		ID:     "unit",
 		Family: "go",
-		Mv:     MvConfig{Enabled: true, Grains: []string{"declaration"}},
+		Mv:     MvConfig{Enabled: true, Grains: []string{"atom"}},
 	}
 	result, fails, err := RunIngestOnRoot(work, InvariantOptions{})
 	if err != nil || len(fails) > 0 {
@@ -89,7 +89,7 @@ setup_task = "-"
 ingest_roots = ["."]
 [projects.alpha.mv]
 enabled = true
-grains = ["declaration"]
+grains = ["atom"]
 [projects.alpha.isolate]
 setup_network = true
 check_network = false
@@ -104,7 +104,7 @@ setup_task = "-"
 ingest_roots = ["."]
 [projects.beta.mv]
 enabled = true
-grains = ["declaration"]
+grains = ["atom"]
 [projects.beta.isolate]
 setup_network = true
 check_network = false

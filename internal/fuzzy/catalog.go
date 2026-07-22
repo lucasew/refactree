@@ -199,7 +199,7 @@ func validateProject(p *Project) error {
 	}
 	for _, grain := range p.Mv.Grains {
 		switch Grain(grain) {
-		case GrainDeclaration, GrainModule, GrainPackage:
+		case GrainAtom, GrainModule, GrainPackage:
 		default:
 			return fmt.Errorf("unknown mv grain %q", grain)
 		}
@@ -209,7 +209,7 @@ func validateProject(p *Project) error {
 	}
 	for _, placement := range p.Mv.Placements {
 		switch Placement(placement) {
-		case PlacementRename, PlacementLayout, PlacementModule, PlacementNewModule, PlacementPackage:
+		case PlacementRename, PlacementFile, PlacementModule, PlacementNewModule, PlacementPackage:
 		default:
 			return fmt.Errorf("unknown mv placement %q", placement)
 		}

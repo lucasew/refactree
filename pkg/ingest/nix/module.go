@@ -48,7 +48,7 @@ func (languageDriver) ResolveImport(sourcePath string, ctx ingest.ImportResolveC
 	return "nix:" + sourcePath
 }
 
-func (languageDriver) AllowListSymbol(name string, opts ingest.SymbolListOptions) bool {
+func (languageDriver) AllowListAtom(name string, opts ingest.AtomListOptions) bool {
 	if opts.IncludeHidden {
 		return true
 	}
@@ -97,11 +97,11 @@ func (referenceProvider) ResolveScopeTarget(ref ingest.Reference, _ string) (ing
 }
 
 func (referenceProvider) ResolveSymbolTarget(ref ingest.Reference, _ string) (ingest.ProviderSymbolTarget, bool, error) {
-	target, ok, err := nixref.ResolveSymbolTarget(ref.Path, ref.Symbol)
+	target, ok, err := nixref.ResolveSymbolTarget(ref.Path, ref.Name)
 	if !ok || err != nil {
 		return ingest.ProviderSymbolTarget{}, ok, err
 	}
-	return ingest.ProviderSymbolTarget{Dir: target.Dir, Symbol: target.Symbol}, true, nil
+	return ingest.ProviderSymbolTarget{Dir: target.Dir, Name: target.Name}, true, nil
 }
 
 func (referenceProvider) ListScopeChildren(ref ingest.Reference, _ string, includeHidden bool) ([]refpkg.ScopeChild, bool, error) {
@@ -165,7 +165,7 @@ func (referenceProvider) AllowListEntity(ref ingest.Reference, _ ingest.Referenc
 }
 
 func (referenceProvider) ListOutputReference(ref ingest.Reference, entRef ingest.Reference) ingest.Reference {
-	return ingest.Reference{Provider: ref.Provider, Path: ref.Path, Symbol: entRef.Symbol}
+	return ingest.Reference{Provider: ref.Provider, Path: ref.Path, Name: entRef.Name}
 }
 
 func (referenceProvider) DocIngestRecursive(ingest.Reference) bool { return false }
@@ -242,11 +242,11 @@ func extractNixBindingSet(fe *ingest.FileExtract, bindings *grammar.Node, source
 		scope := ""
 		if exportBindings {
 			scope = name
-			fe.Entities = append(fe.Entities, ingest.EntityDef{
+			fe.Atoms = append(fe.Atoms, ingest.AtomDef{
 				Name:      name,
 				StartByte: attrpath.StartByte(),
 				EndByte:   attrpath.EndByte(),
-				Exported:  languageDriver{}.AllowListSymbol(name, ingest.SymbolListOptions{}),
+				Exported:  languageDriver{}.AllowListAtom(name, ingest.AtomListOptions{}),
 			})
 		}
 

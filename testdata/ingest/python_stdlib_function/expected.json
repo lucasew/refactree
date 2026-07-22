@@ -5,7 +5,7 @@
       "path": "app.py"
     }
   ],
-  "entities": [
+  "atoms": [
     {
       "reference": "path:./app.py::main",
       "start_byte": 16,
@@ -20,7 +20,7 @@
       "target": "python:os"
     }
   ],
-  "relations": [
+  "uses": [
     {
       "reference": "path:./app.py::main",
       "start_byte": 28,

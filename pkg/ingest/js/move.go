@@ -27,11 +27,11 @@ func (moveDriver) Language() string { return "javascript" }
 // Type-alias object types are structural — no expand (call sites use ExtraRename).
 func (moveDriver) ExpandRenameSources(rootDir string, result *ingest.Result, sourceRef string) []string {
 	src := ingest.ParseReference(sourceRef)
-	if src.Symbol == "" || !strings.Contains(src.Symbol, ".") {
+	if src.Name == "" || !strings.Contains(src.Name, ".") {
 		return nil
 	}
-	leaf := ingest.SymbolLeaf(src.Symbol)
-	recv, ok := jsMethodReceiver(src.Symbol)
+	leaf := ingest.AtomName(src.Name)
+	recv, ok := jsMethodReceiver(src.Name)
 	if !ok || leaf == "" || recv == "" || result == nil {
 		return nil
 	}
@@ -52,18 +52,18 @@ func (moveDriver) ExpandRenameSources(rootDir string, result *ingest.Result, sou
 	}
 
 	var extra []string
-	for _, ent := range result.Entities {
+	for _, ent := range result.Atoms {
 		if ent.Reference == sourceRef {
 			continue
 		}
 		ref := ingest.ParseReference(ent.Reference)
-		if ref.Provider != "path" || ref.Symbol == "" {
+		if ref.Provider != "path" || ref.Name == "" {
 			continue
 		}
-		if ingest.SymbolLeaf(ref.Symbol) != leaf {
+		if ingest.AtomName(ref.Name) != leaf {
 			continue
 		}
-		entRecv, isMethod := jsMethodReceiver(ref.Symbol)
+		entRecv, isMethod := jsMethodReceiver(ref.Name)
 		if !isMethod || !related[entRecv] {
 			continue
 		}
@@ -280,7 +280,7 @@ func jsClassImplementsNames(class *grammar.Node, content []byte) map[string]bool
 	return out
 }
 
-func (moveDriver) ExtractDecl(filePath string, entity ingest.Entity) (ingest.DeclExtract, error) {
+func (moveDriver) ExtractDecl(filePath string, entity ingest.Atom) (ingest.DeclExtract, error) {
 	pf, err := ingest.ParseSourceFile(filePath, "")
 	if err != nil {
 		return ingest.DeclExtract{}, err
@@ -409,7 +409,7 @@ func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ing
 	// For symbol-level moves (cross-file), replace the full import path.
 	// JS imports reference file paths directly, so replace the old file path
 	// with the new one in the import string.
-	if oldRef.Symbol != "" {
+	if oldRef.Name != "" {
 		if oldPath != "" && newPath != "" && oldPath != newPath {
 			return ingest.FindAllOccurrences(fileRelPath, content, oldPath, newPath)
 		}
@@ -434,7 +434,7 @@ func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ing
 func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src, dst ingest.Reference, decl ingest.DeclExtract) ([]ingest.Edit, error) {
 	srcRel := strings.TrimPrefix(src.Path, "./")
 	dstRel := strings.TrimPrefix(dst.Path, "./")
-	leaf := src.Symbol
+	leaf := src.Name
 	if leaf == "" {
 		return nil, nil
 	}
@@ -461,7 +461,7 @@ func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src
 	//    If so, add an import for it from the destination.
 	srcRef := src.String()
 	srcUsesMovedSymbol := false
-	for _, rel := range result.Relations {
+	for _, rel := range result.Uses {
 		if rel.Target != srcRef {
 			continue
 		}
@@ -515,10 +515,10 @@ func findLocalDepsForDecl(result *ingest.Result, src ingest.Reference, decl inge
 	srcPath := src.Path
 	// Build set of entity names defined in the source file.
 	localEntities := map[string]string{} // symbol -> reference
-	for _, ent := range result.Entities {
+	for _, ent := range result.Atoms {
 		ref := ingest.ParseReference(ent.Reference)
 		if ref.Path == srcPath && ent.Reference != srcRef {
-			localEntities[ref.Symbol] = ent.Reference
+			localEntities[ref.Name] = ent.Reference
 		}
 	}
 	if len(localEntities) == 0 {
@@ -527,7 +527,7 @@ func findLocalDepsForDecl(result *ingest.Result, src ingest.Reference, decl inge
 	// Check which of these are referenced inside the declaration being moved.
 	var deps []string
 	seen := map[string]bool{}
-	for _, rel := range result.Relations {
+	for _, rel := range result.Uses {
 		ref := ingest.ParseReference(rel.Reference)
 		if ref.Path != srcPath {
 			continue
@@ -540,8 +540,8 @@ func findLocalDepsForDecl(result *ingest.Result, src ingest.Reference, decl inge
 		if targetRef.Path != srcPath {
 			continue
 		}
-		sym := targetRef.Symbol
-		if sym == "" || seen[sym] || sym == src.Symbol {
+		sym := targetRef.Name
+		if sym == "" || seen[sym] || sym == src.Name {
 			continue
 		}
 		if _, ok := localEntities[sym]; ok {
@@ -886,14 +886,14 @@ func findJSDecl(root *grammar.Node, nameStart uint32) (decl *grammar.Node, expor
 }
 
 // ExtraRenameEdits rewrites member-expression call sites when renaming a method
-// (Class.method → Class.newName). Relation-based rename only covers entity/
+// (Class.method → Class.newName). Use-based rename only covers entity/
 // relation spans; instance receivers (this/params/locals) are not entities.
 func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, sourceRefs []string, oldLeaf, newLeaf string) []ingest.Edit {
 	if oldLeaf == "" || oldLeaf == newLeaf || len(sourceRefs) == 0 || rootDir == "" || result == nil {
 		return nil
 	}
 	src := ingest.ParseReference(sourceRefs[0])
-	if !strings.Contains(src.Symbol, ".") {
+	if !strings.Contains(src.Name, ".") {
 		return jsShorthandPropertyAccessEdits(rootDir, result, sourceRefs, oldLeaf, newLeaf)
 	}
 
@@ -902,7 +902,7 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 	for _, s := range sourceRefs {
 		sourceSet[s] = true
 		ref := ingest.ParseReference(s)
-		if recv, ok := jsMethodReceiver(ref.Symbol); ok {
+		if recv, ok := jsMethodReceiver(ref.Name); ok {
 			ourReceivers[recv] = true
 		}
 	}
@@ -911,15 +911,15 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 	}
 
 	foreignReceivers := map[string]bool{}
-	for _, ent := range result.Entities {
+	for _, ent := range result.Atoms {
 		if sourceSet[ent.Reference] {
 			continue
 		}
 		ref := ingest.ParseReference(ent.Reference)
-		if ingest.SymbolLeaf(ref.Symbol) != oldLeaf {
+		if ingest.AtomName(ref.Name) != oldLeaf {
 			continue
 		}
-		if recv, ok := jsMethodReceiver(ref.Symbol); ok && !ourReceivers[recv] {
+		if recv, ok := jsMethodReceiver(ref.Name); ok && !ourReceivers[recv] {
 			foreignReceivers[recv] = true
 		}
 	}
@@ -958,7 +958,7 @@ func jsShorthandPropertyAccessEdits(rootDir string, result *ingest.Result, sourc
 	}
 	// Only when relation rename actually touches a shorthand use of this symbol.
 	hasShorthandUse := false
-	for _, reln := range result.Relations {
+	for _, reln := range result.Uses {
 		if !sourceSet[reln.Target] {
 			continue
 		}
