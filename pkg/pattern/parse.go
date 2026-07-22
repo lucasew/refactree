@@ -74,7 +74,7 @@ func (p *parser) errf(format string, args ...any) error {
 // parseSequenceAsNode reads atoms until end or unmatched ')'.
 // If single atom, return it; if callee + ( args ), return call sugar; else seq.
 func (p *parser) parseSequenceAsNode() (Node, error) {
-	atoms, err := p.parseAtomList(false)
+	atoms, err := p.parseAtomList(')')
 	if err != nil {
 		return Node{}, err
 	}
@@ -131,19 +131,21 @@ func splitArgs(atoms []Node) []Node {
 	return args
 }
 
-// parseAtomList reads atoms. If inParen, stop before ')'.
-func (p *parser) parseAtomList(inParen bool) ([]Node, error) {
+// parseAtomList reads atoms until EOF or the stop byte (')' or '}') is next.
+// stop==0 means only EOF stops (used at top level; still stops before ')').
+func (p *parser) parseAtomList(stop byte) ([]Node, error) {
 	var atoms []Node
 	for {
 		p.skipSpace()
 		if p.done() {
 			break
 		}
-		if inParen && p.peek() == ')' {
+		c := p.peek()
+		if stop != 0 && c == stop {
 			break
 		}
-		// Top-level: stop if we somehow see lone )
-		if !inParen && p.peek() == ')' {
+		// Never consume a closing paren/brace as a normal atom at list level.
+		if c == ')' || c == '}' {
 			break
 		}
 		atom, err := p.parseAtom()
@@ -152,13 +154,12 @@ func (p *parser) parseAtomList(inParen bool) ([]Node, error) {
 		}
 		atoms = append(atoms, atom)
 
-		// After an atom, if '(' follows immediately (call sugar), fold later in sequenceToNode
+		// After an atom, if '(' follows, include call argument list as tokens.
 		p.skipSpace()
 		if p.peek() == '(' {
-			// include ( as lit and parse inside
 			p.i++
 			atoms = append(atoms, Node{Kind: "lit", Text: "("})
-			inner, err := p.parseAtomList(true)
+			inner, err := p.parseAtomList(')')
 			if err != nil {
 				return nil, err
 			}
@@ -169,7 +170,6 @@ func (p *parser) parseAtomList(inParen bool) ([]Node, error) {
 			}
 			p.i++
 			atoms = append(atoms, Node{Kind: "lit", Text: ")"})
-			// continue for more top-level atoms if any
 			continue
 		}
 	}
@@ -270,7 +270,7 @@ func (p *parser) parseCapture() (Node, error) {
 	// $name:{ ... }
 	if p.peek() == '{' {
 		p.i++
-		inner, err := p.parseAtomList(false)
+		inner, err := p.parseAtomList('}')
 		if err != nil {
 			return Node{}, err
 		}

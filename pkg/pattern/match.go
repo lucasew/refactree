@@ -319,16 +319,20 @@ func matchStep(tokens []tok, pos int, step Node, caps map[string]string, quoted 
 		return true, 1, nil
 
 	case "string":
-		content, uqOK := unquoteLiteral(t.text)
+		// /regex/ and "equals" apply to token text. For quoted string lits, match
+		// against unquoted content; for idents (e.g. TestFoo), match raw text.
+		content := t.text
+		uqOK := false
+		if uq, ok := unquoteLiteral(t.text); ok {
+			content = uq
+			uqOK = true
+		}
 		if step.Equals != "" {
-			if !uqOK || content != step.Equals {
+			if content != step.Equals {
 				return false, 0, nil
 			}
 		}
 		if step.Regex != "" {
-			if !uqOK {
-				return false, 0, nil
-			}
 			re, err := regexp.Compile(step.Regex)
 			if err != nil {
 				return false, 0, err
@@ -338,12 +342,14 @@ func matchStep(tokens []tok, pos int, step Node, caps map[string]string, quoted 
 				return false, 0, nil
 			}
 			if step.As != "" {
-				// Full token in Captures (lock A)
+				// Full token in Captures (lock A for string lits)
 				caps[step.As] = t.text
-				quoted[step.As] = true
-				// Fixture stretch: group 1 as emit override (already quoted content)
-				if step.CaptureGroup > 0 && step.CaptureGroup < len(m) {
-					override[step.As] = quoteString(m[step.CaptureGroup])
+				if uqOK {
+					quoted[step.As] = true
+					// Fixture stretch: group 1 as emit override (re-quoted content)
+					if step.CaptureGroup > 0 && step.CaptureGroup < len(m) {
+						override[step.As] = quoteString(m[step.CaptureGroup])
+					}
 				}
 			}
 			return true, 1, nil
