@@ -2,84 +2,104 @@ package pattern
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/lucasew/refactree/pkg/ingest"
 )
 
-// Instantiate builds the replacement text for a match from replacement_ir.
+// Instantiate builds replacement text from a template node or call-shaped emit IR.
 func Instantiate(repl Node, m Match) (string, error) {
-	return instantiateNode(repl, m)
+	switch repl.Kind {
+	case "template":
+		return expandTemplate(repl.Text, m)
+	case "call":
+		return instantiateCall(repl, m)
+	case "token", "type_token", "lit":
+		return repl.Text, nil
+	case "capture", "ref":
+		return captureText(m, repl.As), nil
+	case "string":
+		if repl.FromCapture != "" {
+			return captureText(m, repl.FromCapture), nil
+		}
+		if repl.Equals != "" {
+			return quoteString(repl.Equals), nil
+		}
+		return "", fmt.Errorf("string replacement needs from_capture or equals")
+	default:
+		// Fallback: if Text looks like a template
+		if repl.Text != "" {
+			return expandTemplate(repl.Text, m)
+		}
+		return "", fmt.Errorf("replacement: unsupported kind %q", repl.Kind)
+	}
 }
 
-func instantiateNode(n Node, m Match) (string, error) {
-	switch n.Kind {
-	case "call":
-		return instantiateCall(n, m)
-	case "token", "type_token":
-		if n.Text == "" {
-			return "", fmt.Errorf("token replacement missing text")
-		}
-		return n.Text, nil
-	case "string":
-		if n.FromCapture != "" {
-			v, ok := m.Captures[n.FromCapture]
-			if !ok {
-				return "", fmt.Errorf("string from_capture %q not bound", n.FromCapture)
-			}
-			// Emit as a double-quoted string literal (common across langs).
-			return strconv.Quote(v), nil
-		}
-		if n.Equals != "" {
-			return strconv.Quote(n.Equals), nil
-		}
-		if n.Text != "" {
-			return strconv.Quote(n.Text), nil
-		}
-		return "", fmt.Errorf("string replacement needs from_capture, equals, or text")
-	case "capture":
-		v, ok := m.Captures[n.As]
-		if !ok {
-			return "", fmt.Errorf("capture %q not bound", n.As)
-		}
-		if m.emitQuoted[n.As] {
-			return strconv.Quote(v), nil
-		}
-		return v, nil
-	case "lit":
-		return n.Text, nil
-	case "ref":
-		// Unusual in replacement; emit bound capture if As set, else ref string.
-		if n.As != "" {
-			if v, ok := m.Captures[n.As]; ok {
-				return v, nil
-			}
-		}
-		return n.Ref, nil
-	default:
-		return "", fmt.Errorf("replacement: unsupported kind %q", n.Kind)
+func captureText(m Match, name string) string {
+	if name == "" {
+		return ""
 	}
+	if m.emitOverride != nil {
+		if v, ok := m.emitOverride[name]; ok {
+			return v
+		}
+	}
+	v := m.Captures[name]
+	// Captures for strings already include quotes when from string holes.
+	return v
+}
+
+func expandTemplate(tmpl string, m Match) (string, error) {
+	var b strings.Builder
+	i := 0
+	for i < len(tmpl) {
+		if tmpl[i] == '$' {
+			i++
+			start := i
+			for i < len(tmpl) {
+				r, w := utf8.DecodeRuneInString(tmpl[i:])
+				if r != '_' && !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+					break
+				}
+				i += w
+			}
+			name := tmpl[start:i]
+			if name == "" {
+				b.WriteByte('$')
+				continue
+			}
+			b.WriteString(captureText(m, name))
+			continue
+		}
+		b.WriteByte(tmpl[i])
+		i++
+	}
+	return b.String(), nil
 }
 
 func instantiateCall(n Node, m Match) (string, error) {
 	if n.Callee == nil {
 		return "", fmt.Errorf("call replacement missing callee")
 	}
-	fn, err := instantiateNode(*n.Callee, m)
+	fn, err := Instantiate(*n.Callee, m)
 	if err != nil {
 		return "", err
+	}
+	// If callee is capture/ref, Instantiate handles it
+	if n.Callee.Kind == "capture" || n.Callee.Kind == "ref" {
+		fn = captureText(m, n.Callee.As)
 	}
 	var parts []string
 	for _, a := range n.Args {
 		if a.Kind == "rest" {
-			v := m.Captures[a.As]
-			if v != "" {
+			if v := m.Captures[a.As]; v != "" {
 				parts = append(parts, v)
 			}
 			continue
 		}
-		p, err := instantiateNode(a, m)
+		p, err := Instantiate(a, m)
 		if err != nil {
 			return "", err
 		}
@@ -88,7 +108,7 @@ func instantiateCall(n Node, m Match) (string, error) {
 	return fn + "(" + strings.Join(parts, ", ") + ")", nil
 }
 
-// EditsForMatches turns matches + replacement_ir into ingest.Edit values.
+// EditsForMatches turns matches + replacement into ingest.Edit values.
 func EditsForMatches(matches []Match, repl Node) ([]ingest.Edit, error) {
 	var edits []ingest.Edit
 	for _, m := range matches {

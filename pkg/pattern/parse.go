@@ -8,13 +8,14 @@ import (
 )
 
 // ParsePattern parses a CLI pattern string into match IR.
-// Supported subset (v1): grammar tokens (exact node text), @ref holes, calls,
-// string/lit/capture/rest args. Tokens are language-agnostic exact spans from
-// the tree-sitter tree (e.g. interface{}, any, keywords) — not builtin refs.
+//
+// Dialect (see testdata/pattern/README.md):
+//   literal tokens, /regex/, @ref, $name, $name:@ref, $name:/re/, $name:{…}, $$$_
 func ParsePattern(s string) (Node, error) {
 	p := &parser{s: s}
 	p.skipSpace()
-	n, err := p.parseExpr(true)
+	// Top-level: sequence of atoms, sugar as call if looks like callee(
+	n, err := p.parseSequenceAsNode()
 	if err != nil {
 		return Node{}, err
 	}
@@ -25,10 +26,12 @@ func ParsePattern(s string) (Node, error) {
 	return n, nil
 }
 
-// ParseReplacement parses a CLI replacement template into replacement IR.
+// ParseReplacement parses a rewrite template (literals + $captures), not a match pattern.
 func ParseReplacement(s string) (Node, error) {
-	// Same surface as patterns; @ref on holes is allowed but usually plain $Name.
-	return ParsePattern(s)
+	// Template IR: single "template" kind with raw string, or parse $Name holes.
+	// For fixtures we also accept call-shaped templates via the same surface as patterns
+	// but emit-only. Simplest: store as template string node.
+	return Node{Kind: "template", Text: s}, nil
 }
 
 type parser struct {
@@ -37,28 +40,24 @@ type parser struct {
 }
 
 func (p *parser) done() bool { return p.i >= len(p.s) }
-
 func (p *parser) rest() string {
 	if p.done() {
 		return ""
 	}
 	return p.s[p.i:]
 }
-
 func (p *parser) peek() byte {
 	if p.done() {
 		return 0
 	}
 	return p.s[p.i]
 }
-
 func (p *parser) peekRune() (rune, int) {
 	if p.done() {
 		return 0, 0
 	}
 	return utf8.DecodeRuneInString(p.s[p.i:])
 }
-
 func (p *parser) skipSpace() {
 	for p.i < len(p.s) {
 		r, w := utf8.DecodeRuneInString(p.s[p.i:])
@@ -68,169 +67,246 @@ func (p *parser) skipSpace() {
 		p.i += w
 	}
 }
-
 func (p *parser) errf(format string, args ...any) error {
 	return fmt.Errorf("pattern:%d: %s", p.i, fmt.Sprintf(format, args...))
 }
 
-func (p *parser) parseExpr(allowCall bool) (Node, error) {
+// parseSequenceAsNode reads atoms until end or unmatched ')'.
+// If single atom, return it; if callee + ( args ), return call sugar; else seq.
+func (p *parser) parseSequenceAsNode() (Node, error) {
+	atoms, err := p.parseAtomList(false)
+	if err != nil {
+		return Node{}, err
+	}
+	return sequenceToNode(atoms), nil
+}
+
+func sequenceToNode(atoms []Node) Node {
+	if len(atoms) == 0 {
+		return Node{Kind: "seq", Args: nil}
+	}
+	if len(atoms) == 1 {
+		return atoms[0]
+	}
+	// Sugar: REF/CAPTURE ( ... )  => call
+	if len(atoms) >= 2 && atoms[1].Kind == "lit" && atoms[1].Text == "(" {
+		// find matching close at end
+		if atoms[len(atoms)-1].Kind == "lit" && atoms[len(atoms)-1].Text == ")" {
+			callee := atoms[0]
+			inner := atoms[2 : len(atoms)-1]
+			args := splitArgs(inner)
+			return Node{Kind: "call", As: "ROOT", Callee: &callee, Args: args}
+		}
+	}
+	return Node{Kind: "seq", Args: atoms}
+}
+
+func splitArgs(atoms []Node) []Node {
+	var args []Node
+	var cur []Node
+	depth := 0
+	for _, a := range atoms {
+		if a.Kind == "lit" && a.Text == "(" {
+			depth++
+		}
+		if a.Kind == "lit" && a.Text == ")" {
+			depth--
+		}
+		if depth == 0 && a.Kind == "lit" && a.Text == "," {
+			if len(cur) == 1 {
+				args = append(args, cur[0])
+			} else if len(cur) > 1 {
+				args = append(args, Node{Kind: "seq", Args: cur})
+			}
+			cur = nil
+			continue
+		}
+		cur = append(cur, a)
+	}
+	if len(cur) == 1 {
+		args = append(args, cur[0])
+	} else if len(cur) > 1 {
+		args = append(args, Node{Kind: "seq", Args: cur})
+	}
+	return args
+}
+
+// parseAtomList reads atoms. If inParen, stop before ')'.
+func (p *parser) parseAtomList(inParen bool) ([]Node, error) {
+	var atoms []Node
+	for {
+		p.skipSpace()
+		if p.done() {
+			break
+		}
+		if inParen && p.peek() == ')' {
+			break
+		}
+		// Top-level: stop if we somehow see lone )
+		if !inParen && p.peek() == ')' {
+			break
+		}
+		atom, err := p.parseAtom()
+		if err != nil {
+			return nil, err
+		}
+		atoms = append(atoms, atom)
+
+		// After an atom, if '(' follows immediately (call sugar), fold later in sequenceToNode
+		p.skipSpace()
+		if p.peek() == '(' {
+			// include ( as lit and parse inside
+			p.i++
+			atoms = append(atoms, Node{Kind: "lit", Text: "("})
+			inner, err := p.parseAtomList(true)
+			if err != nil {
+				return nil, err
+			}
+			atoms = append(atoms, inner...)
+			p.skipSpace()
+			if p.peek() != ')' {
+				return nil, p.errf("expected ')'")
+			}
+			p.i++
+			atoms = append(atoms, Node{Kind: "lit", Text: ")"})
+			// continue for more top-level atoms if any
+			continue
+		}
+	}
+	return atoms, nil
+}
+
+func (p *parser) parseAtom() (Node, error) {
 	p.skipSpace()
 	if p.done() {
 		return Node{}, p.errf("unexpected end")
 	}
 
-	// Grammar token: exact source text of a tree-sitter node (any language).
-	// interface{} is one token with braces; bare idents (any, func, …) are tokens.
-	if strings.HasPrefix(p.s[p.i:], "interface{}") {
-		p.i += len("interface{}")
-		return Node{Kind: "token", Text: "interface{}", As: "ROOT"}, nil
+	// $$$_ or $$$name
+	if strings.HasPrefix(p.s[p.i:], "$$$") {
+		p.i += 3
+		name := p.scanIdent()
+		if name == "" {
+			name = "_"
+		}
+		return Node{Kind: "rest", As: name}, nil
 	}
 
-	if r, _ := p.peekRune(); unicode.IsLetter(r) || r == '_' {
-		ident := p.scanIdent()
-		// Allow trailing {} for other empty composite tokens if present (e.g. future)
-		if strings.HasPrefix(p.s[p.i:], "{}") {
-			ident += "{}"
-			p.i += 2
-		}
-		p.skipSpace()
-		if allowCall && p.peek() == '(' {
-			callee := Node{Kind: "lit", Text: ident}
-			return p.parseCall(callee)
-		}
-		return Node{Kind: "token", Text: ident, As: "ROOT"}, nil
-	}
-
-	// $$$rest or $hole
+	// $name or $name:constraint or $name:{...}
 	if p.peek() == '$' {
-		n, err := p.parseHole()
+		return p.parseCapture()
+	}
+
+	// @ref (unbound)
+	if p.peek() == '@' {
+		p.i++
+		ref, err := p.scanRef()
 		if err != nil {
 			return Node{}, err
 		}
-		p.skipSpace()
-		if allowCall && p.peek() == '(' {
-			return p.parseCall(n)
-		}
-		return n, nil
+		return Node{Kind: "ref", Ref: ref}, nil
 	}
 
-	// string literal
+	// /regex/
+	if p.peek() == '/' {
+		re, err := p.scanRegex()
+		if err != nil {
+			return Node{}, err
+		}
+		return Node{Kind: "string", Regex: re, CaptureGroup: defaultCaptureGroup(re)}, nil
+	}
+
+	// quoted string literal token
 	if p.peek() == '"' || p.peek() == '`' {
-		return p.parseStringNode()
+		return p.parseStringLit()
+	}
+
+	// punctuation single-char tokens
+	if isPatternPunct(p.peek()) {
+		c := p.s[p.i]
+		p.i++
+		return Node{Kind: "lit", Text: string(c)}, nil
 	}
 
 	// number lit
 	if p.peek() >= '0' && p.peek() <= '9' {
-		return p.parseNumberLit()
+		start := p.i
+		for p.i < len(p.s) && p.s[p.i] >= '0' && p.s[p.i] <= '9' {
+			p.i++
+		}
+		return Node{Kind: "lit", Text: p.s[start:p.i]}, nil
 	}
+
+	// word token, optionally with {}
+	if r, _ := p.peekRune(); unicode.IsLetter(r) || r == '_' {
+		ident := p.scanIdent()
+		if strings.HasPrefix(p.s[p.i:], "{}") {
+			ident += "{}"
+			p.i += 2
+		}
+		return Node{Kind: "token", Text: ident, As: "ROOT"}, nil
+	}
+
+	// interface{} already handled via ident+{} 
 
 	return Node{}, p.errf("unexpected %q", p.rest())
 }
 
-func (p *parser) parseCall(callee Node) (Node, error) {
-	if p.peek() != '(' {
-		return Node{}, p.errf("expected '('")
-	}
-	p.i++ // (
-	var args []Node
-	p.skipSpace()
-	if p.peek() != ')' {
-		for {
-			p.skipSpace()
-			arg, err := p.parseExpr(true)
-			if err != nil {
-				return Node{}, err
-			}
-			args = append(args, arg)
-			p.skipSpace()
-			if p.peek() == ',' {
-				p.i++
-				continue
-			}
-			break
-		}
-	}
-	p.skipSpace()
-	if p.peek() != ')' {
-		return Node{}, p.errf("expected ')'")
-	}
-	p.i++
-	return Node{
-		Kind:   "call",
-		As:     "ROOT",
-		Callee: &callee,
-		Args:   args,
-	}, nil
-}
-
-func (p *parser) parseHole() (Node, error) {
+func (p *parser) parseCapture() (Node, error) {
 	if p.peek() != '$' {
 		return Node{}, p.errf("expected '$'")
 	}
 	p.i++
-	// $$$
-	if strings.HasPrefix(p.s[p.i:], "$$") {
-		p.i += 2
-		name := p.scanIdent()
-		if name == "" {
-			return Node{}, p.errf("expected rest capture name after $$$")
-		}
-		return Node{Kind: "rest", As: name}, nil
-	}
 	name := p.scanIdent()
 	if name == "" {
-		return Node{}, p.errf("expected capture name after $")
+		return Node{}, p.errf("expected capture name")
 	}
 
-	// optional :constraint
-	if p.peek() == ':' {
+	if p.peek() != ':' {
+		return Node{Kind: "capture", As: name}, nil
+	}
+	p.i++ // :
+
+	// $name:{ ... }
+	if p.peek() == '{' {
 		p.i++
-		return p.parseConstrainedHole(name)
+		inner, err := p.parseAtomList(false)
+		if err != nil {
+			return Node{}, err
+		}
+		p.skipSpace()
+		if p.peek() != '}' {
+			return Node{}, p.errf("expected '}'")
+		}
+		p.i++
+		innerNode := sequenceToNode(inner)
+		return Node{Kind: "group", As: name, Callee: &innerNode}, nil
 	}
-	return Node{Kind: "capture", As: name}, nil
-}
 
-func (p *parser) parseConstrainedHole(name string) (Node, error) {
-	p.skipSpace()
-	switch p.peek() {
-	case '@':
+	// $name:@ref
+	if p.peek() == '@' {
 		p.i++
 		ref, err := p.scanRef()
 		if err != nil {
 			return Node{}, err
 		}
 		return Node{Kind: "ref", As: name, Ref: ref}, nil
-	case '/':
+	}
+
+	// $name:/regex/
+	if p.peek() == '/' {
 		re, err := p.scanRegex()
 		if err != nil {
 			return Node{}, err
 		}
-		n := Node{Kind: "string", As: name, Regex: re}
-		// If the regex has a capturing group, rebind $name to group 1 (fixture convention).
-		if strings.Contains(re, "(") && !strings.Contains(re, "(?") {
-			n.CaptureGroup = 1
-		} else if strings.Contains(re, "(") {
-			// Has some group; if there's a numbered or plain capture for suffix, use 1
-			// when pattern contains "(.*" or similar. Count capturing groups roughly.
-			if capturingGroupCount(re) >= 1 {
-				n.CaptureGroup = 1
-			}
-		}
-		return n, nil
-	case '"', '`':
-		strNode, err := p.parseStringNode()
-		if err != nil {
-			return Node{}, err
-		}
-		strNode.As = name
-		return strNode, nil
-	default:
-		return Node{}, p.errf("expected @ref, /regex/, or string after %s:", name)
+		return Node{Kind: "string", As: name, Regex: re, CaptureGroup: defaultCaptureGroup(re)}, nil
 	}
+
+	return Node{}, p.errf("expected @ref, /regex/, or {…} after $%s:", name)
 }
 
-func capturingGroupCount(re string) int {
-	// Rough: count '(' not followed by '?' and not escaped.
+func defaultCaptureGroup(re string) int {
+	// Stretch for fixtures: if there is a capturing group, rebind emit value (not span).
 	n := 0
 	for i := 0; i < len(re); i++ {
 		if re[i] == '\\' {
@@ -244,27 +320,26 @@ func capturingGroupCount(re string) int {
 			n++
 		}
 	}
-	return n
+	if n >= 1 {
+		return 1
+	}
+	return 0
 }
 
 func (p *parser) scanRef() (string, error) {
-	// provider:path::symbol or provider:path
-	// e.g. go:fmt::Errorf, go:net/http::ListenAndServe, go:context.Context
 	start := p.i
-	if p.done() {
-		return "", p.errf("expected ref after @")
-	}
-	// read until delimiter for call/arg: ( ) , whitespace end
+	// Allow / in package paths (go:net/http::ListenAndServe).
 	for p.i < len(p.s) {
 		c := p.s[p.i]
-		if c == '(' || c == ')' || c == ',' || unicode.IsSpace(rune(c)) {
+		if c == '(' || c == ')' || c == '{' || c == '}' || c == ',' || unicode.IsSpace(rune(c)) {
 			break
 		}
+		// Bare /regex/ is only after $name: — not inside @ref
 		p.i++
 	}
 	ref := p.s[start:p.i]
 	if ref == "" || !strings.Contains(ref, ":") {
-		return "", p.errf("invalid ref %q (want provider:path[::symbol])", ref)
+		return "", p.errf("invalid ref %q", ref)
 	}
 	return ref, nil
 }
@@ -290,28 +365,21 @@ func (p *parser) scanRegex() (string, error) {
 	return "", p.errf("unterminated regex")
 }
 
-func (p *parser) parseStringNode() (Node, error) {
-	if p.done() {
-		return Node{}, p.errf("expected string")
-	}
-	quote := p.s[p.i]
-	if quote != '"' && quote != '`' {
-		return Node{}, p.errf("expected string quote")
-	}
+func (p *parser) parseStringLit() (Node, error) {
+	q := p.s[p.i]
 	p.i++
 	start := p.i
-	if quote == '`' {
+	if q == '`' {
 		for p.i < len(p.s) && p.s[p.i] != '`' {
 			p.i++
 		}
 		if p.done() {
-			return Node{}, p.errf("unterminated raw string")
+			return Node{}, p.errf("unterminated string")
 		}
 		content := p.s[start:p.i]
 		p.i++
 		return Node{Kind: "string", Equals: content}, nil
 	}
-	// interpreted "
 	var b strings.Builder
 	for p.i < len(p.s) {
 		c := p.s[p.i]
@@ -342,17 +410,6 @@ func (p *parser) parseStringNode() (Node, error) {
 	return Node{}, p.errf("unterminated string")
 }
 
-func (p *parser) parseNumberLit() (Node, error) {
-	start := p.i
-	for p.i < len(p.s) && p.s[p.i] >= '0' && p.s[p.i] <= '9' {
-		p.i++
-	}
-	if start == p.i {
-		return Node{}, p.errf("expected number")
-	}
-	return Node{Kind: "lit", Text: p.s[start:p.i]}, nil
-}
-
 func (p *parser) scanIdent() string {
 	if p.done() {
 		return ""
@@ -371,4 +428,13 @@ func (p *parser) scanIdent() string {
 		p.i += w
 	}
 	return p.s[start:p.i]
+}
+
+func isPatternPunct(c byte) bool {
+	switch c {
+	case '(', ')', '{', '}', '[', ']', ',', '.', '*', '+', '-', '=', '!', '?', ':', ';', '<', '>', '|', '&', '^', '%', '#', '~':
+		return true
+	default:
+		return false
+	}
 }

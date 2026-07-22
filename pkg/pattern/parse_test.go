@@ -63,8 +63,12 @@ func TestParsePattern_MatchesFixtureIR(t *testing.T) {
 				if err != nil {
 					t.Fatalf("parse replacement: %v", err)
 				}
-				if r.Kind != op.ReplacementIR.Kind {
-					t.Fatalf("repl kind got %s want %s\n%s", r.Kind, op.ReplacementIR.Kind, mustJSON(r))
+				// Replacement is a template string (locked dialect), not match IR.
+				if r.Kind != "template" {
+					t.Fatalf("repl kind got %s want template\n%s", r.Kind, mustJSON(r))
+				}
+				if r.Text != *op.Replacement {
+					t.Fatalf("repl text got %q want %q", r.Text, *op.Replacement)
 				}
 			}
 		})
