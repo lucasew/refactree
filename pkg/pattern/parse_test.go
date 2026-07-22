@@ -10,8 +10,8 @@ import (
 func TestParsePattern_Fixtures(t *testing.T) {
 	// Round-trip: parse fixture pattern string, match same cases as pattern_ir intent.
 	cases := []struct {
-		name    string
-		pattern string
+		name     string
+		pattern  string
 		wantKind string
 	}{
 		{"any", "interface{}", "token"},

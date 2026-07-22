@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/lucasew/refactree/pkg/pattern"
 	_ "github.com/lucasew/refactree/pkg/ingest/go"
+	"github.com/lucasew/refactree/pkg/pattern"
 )
 
 func TestPatternFixtures(t *testing.T) {

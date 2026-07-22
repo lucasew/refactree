@@ -10,7 +10,8 @@ import (
 // ParsePattern parses a CLI pattern string into match IR.
 //
 // Dialect (see testdata/pattern/README.md):
-//   literal tokens, /regex/, @ref, $name, $name:@ref, $name:/re/, $name:{…}, $$$_
+//
+//	literal tokens, /regex/, @ref, $name, $name:@ref, $name:/re/, $name:{…}, $$$_
 func ParsePattern(s string) (Node, error) {
 	p := &parser{s: s}
 	p.skipSpace()
@@ -247,7 +248,7 @@ func (p *parser) parseAtom() (Node, error) {
 		return Node{Kind: "token", Text: ident, As: "ROOT"}, nil
 	}
 
-	// interface{} already handled via ident+{} 
+	// interface{} already handled via ident+{}
 
 	return Node{}, p.errf("unexpected %q", p.rest())
 }

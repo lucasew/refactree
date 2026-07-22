@@ -10,15 +10,15 @@ import (
 
 // Op is the fixture/CLI operation description (op.json).
 type Op struct {
-	Mode              string  `json:"mode"` // grep | rewrite
-	Lang              string  `json:"lang"`
-	Description       string  `json:"description,omitempty"`
-	Pattern           string  `json:"pattern,omitempty"`
-	Replacement       *string `json:"replacement"` // null for grep
-	PatternIR         Node    `json:"pattern_ir"`
-	ReplacementIR     *Node   `json:"replacement_ir"`
-	ExpectMatchCount  *int    `json:"expect_match_count,omitempty"`
-	Notes             []string `json:"notes,omitempty"`
+	Mode             string   `json:"mode"` // grep | rewrite
+	Lang             string   `json:"lang"`
+	Description      string   `json:"description,omitempty"`
+	Pattern          string   `json:"pattern,omitempty"`
+	Replacement      *string  `json:"replacement"` // null for grep
+	PatternIR        Node     `json:"pattern_ir"`
+	ReplacementIR    *Node    `json:"replacement_ir"`
+	ExpectMatchCount *int     `json:"expect_match_count,omitempty"`
+	Notes            []string `json:"notes,omitempty"`
 }
 
 // Node is one pattern/replacement IR node.
