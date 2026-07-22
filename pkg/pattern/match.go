@@ -225,9 +225,25 @@ func matchSeqFrom(tokens []tok, startIdx int, seq []Node, caps map[string]string
 	if pos < len(tokens) {
 		matchStart, matchEnd = tokens[pos].start, tokens[pos].end
 	}
-	for _, step := range seq {
+	for si := 0; si < len(seq); si++ {
+		step := seq[si]
+		// Multi-$$$_: rest may appear more than once; recurse via findRest.
 		if step.Kind == "rest" {
-			return Match{}, startIdx, false, fmt.Errorf("nested rest")
+			after := seq[si+1:]
+			j, next, restText, ok, err := findRest(tokens, pos, after, caps, quoted, override, source, root)
+			if err != nil || !ok {
+				return Match{}, startIdx, false, err
+			}
+			if step.As != "" && step.As != "_" {
+				caps[step.As] = restText
+			}
+			if j > pos {
+				matchEnd = tokens[j-1].end
+			}
+			if next > startIdx && next <= len(tokens) {
+				matchEnd = tokens[next-1].end
+			}
+			return Match{StartByte: matchStart, EndByte: matchEnd}, next, true, nil
 		}
 		for pos < len(tokens) && isSpaceText(tokens[pos].text) {
 			pos++

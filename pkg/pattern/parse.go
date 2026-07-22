@@ -72,10 +72,10 @@ func (p *parser) errf(format string, args ...any) error {
 	return fmt.Errorf("pattern:%d: %s", p.i, fmt.Sprintf(format, args...))
 }
 
-// parseSequenceAsNode reads atoms until end or unmatched ')'.
+// parseSequenceAsNode reads atoms until end.
 // If single atom, return it; if callee + ( args ), return call sugar; else seq.
 func (p *parser) parseSequenceAsNode() (Node, error) {
-	atoms, err := p.parseAtomList(')')
+	atoms, err := p.parseAtomList(0)
 	if err != nil {
 		return Node{}, err
 	}
@@ -133,9 +133,12 @@ func splitArgs(atoms []Node) []Node {
 }
 
 // parseAtomList reads atoms until EOF or the stop byte (')' or '}') is next.
-// stop==0 means only EOF stops (used at top level; still stops before ')').
+// stop==0 means only EOF stops (top-level sequences).
+// Bare ')' and '}' are normal lit tokens when they are not the active stop;
+// inside $name:{…}, nested '{'…'}' pairs are consumed as lits (brace depth).
 func (p *parser) parseAtomList(stop byte) ([]Node, error) {
 	var atoms []Node
+	braceDepth := 0
 	for {
 		p.skipSpace()
 		if p.done() {
@@ -143,15 +146,22 @@ func (p *parser) parseAtomList(stop byte) ([]Node, error) {
 		}
 		c := p.peek()
 		if stop != 0 && c == stop {
-			break
-		}
-		// Never consume a closing paren/brace as a normal atom at list level.
-		if c == ')' || c == '}' {
-			break
+			// Nested braces inside a group: treat '}' as a lit while depth > 0.
+			if !(stop == '}' && braceDepth > 0) {
+				break
+			}
 		}
 		atom, err := p.parseAtom()
 		if err != nil {
 			return nil, err
+		}
+		if atom.Kind == "lit" {
+			switch atom.Text {
+			case "{":
+				braceDepth++
+			case "}":
+				braceDepth--
+			}
 		}
 		atoms = append(atoms, atom)
 
