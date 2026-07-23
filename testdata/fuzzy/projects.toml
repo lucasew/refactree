@@ -81,14 +81,17 @@ node = "22.23.1"
 "npm:pnpm" = "11.9.0"
 
 [projects.astro.mise.tasks.setup]
-description = "Install astro package workspace deps (offline when RFT_FUZZY_OFFLINE=1)"
+description = "Install astro package + @astrojs/* workspace deps (offline when RFT_FUZZY_OFFLINE=1)"
 # Mise sequences run steps; fail if filter matches nothing (pnpm otherwise exits 0 with no node_modules).
+# Unit fixtures (e.g. test/fixtures/astro-basic) import integrations like @astrojs/mdx and
+# @astrojs/preact — those are not dependencies of the astro package graph (astro...), so
+# they must be installed explicitly or every seed fails as class=bug with ERR_MODULE_NOT_FOUND.
 run = [
   """
   if [ "${RFT_FUZZY_OFFLINE:-}" = 1 ]; then
-    pnpm install --offline --reporter=default --filter "astro..."
+    pnpm install --offline --reporter=default --filter "astro..." --filter "@astrojs/*"
   else
-    pnpm install --reporter=default --filter "astro..."
+    pnpm install --reporter=default --filter "astro..." --filter "@astrojs/*"
   fi
   """,
   "test -d node_modules",
@@ -97,12 +100,11 @@ run = [
 [projects.astro.mise.tasks.test]
 description = "Build workspace dist packages, then run astro unit tests"
 # unit tests import packages/astro/dist and workspace:* packages that export dist/*
-# (e.g. @astrojs/internal-helpers/remote, @astrojs/markdown-remark). Setup only
-# pnpm-installs sources. Build the whole astro... dependency graph on check so
-# dist reflects the tree after catalog mv and workspace package dist/ exists
-# (missing @astrojs/markdown-remark/dist previously failed every seed as class=bug).
+# (e.g. @astrojs/internal-helpers, @astrojs/markdown-remark, @astrojs/mdx). Setup only
+# pnpm-installs sources. Build astro... plus all @astrojs/* packages on check so
+# integration dist/ exists for fixtures after catalog mv.
 run = [
-  "pnpm --filter \"astro...\" run build:ci",
+  "pnpm --filter \"astro...\" --filter \"@astrojs/*\" run build:ci",
   "pnpm --filter astro run test:unit -- --verbose",
 ]
 
