@@ -84,6 +84,14 @@ Structural spine for discovery and graphs. Goal: one walk/parse path, no duplica
 - Just the doc, and if it makes sense the signature of functions
 - `# name\nSignature: $signature\n$actual_docstring`
 
+### Transform core (shared data model)
+- **`ingest.Span`**: half-open byte range; embedded on **`ingest.Edit`**
+- **`ingest.Edit`**: apply unit (`File` + `Span` + `NewText`) — `StageEdits` / `ApplyEdits` / LSP stage
+- **`pattern.Rule`**: site unit (`Pattern` + `Replacement` + optional `SetCapture`) → NFA match → `[]Edit`
+  - `rft rewrite` is one Rule over a file stream
+  - `mv` remains a symbol-identity **planner** (full graph); use-site leaf rewrites may be expressed as site Rules (e.g. `RefLeafRule(@old, newLeaf)`) without a second match engine
+- Planners differ (identity/graph vs stream/codemod); site expansion and apply do not
+
 ### Subcommands: grep / rewrite
 - Structural find (`grep`) and site rewrite (`rewrite`) — **not** symbol identity ops (`mv`)
 - **Dialect locks** (authoritative detail: `testdata/pattern/README.md`):

@@ -41,28 +41,34 @@ type StreamOptions struct {
 // OpFromCLI builds an Op from grep/rewrite argv strings.
 // For rewrite, replacement may be "name=template" to rewrite only capture $name
 // (when name is declared by the pattern); otherwise the whole match is replaced.
+// Rewrite mode fills PatternIR/ReplacementIR via RuleFromStrings (shared site core).
 func OpFromCLI(mode, lang, patternStr, replacementStr string) (Op, error) {
+	if mode == "rewrite" {
+		rule, err := RuleFromStrings(patternStr, replacementStr)
+		if err != nil {
+			return Op{}, err
+		}
+		repl := replacementStr
+		return Op{
+			Mode:          mode,
+			Lang:          lang,
+			Pattern:       patternStr,
+			PatternIR:     rule.Pattern,
+			Replacement:   &repl,
+			ReplacementIR: &rule.Replacement,
+			SetCapture:    rule.SetCapture,
+		}, nil
+	}
 	pat, err := ParsePattern(patternStr)
 	if err != nil {
 		return Op{}, fmt.Errorf("pattern: %w", err)
 	}
-	op := Op{
+	return Op{
 		Mode:      mode,
 		Lang:      lang,
 		Pattern:   patternStr,
 		PatternIR: pat,
-	}
-	if mode == "rewrite" {
-		setName, tmpl := splitCaptureSet(pat, replacementStr)
-		repl, err := ParseReplacement(tmpl)
-		if err != nil {
-			return Op{}, fmt.Errorf("replacement: %w", err)
-		}
-		op.Replacement = &replacementStr
-		op.ReplacementIR = &repl
-		op.SetCapture = setName
-	}
-	return op, nil
+	}, nil
 }
 
 // splitCaptureSet parses optional "name=template" rewrite emit.
@@ -104,12 +110,18 @@ func RunWithOptions(root string, op Op, opts RunOptions) (RunResult, error) {
 
 // Stream processes files via ingest.WalkExtracts (same skip rules / walk policy as
 // ls, mv, serve). Per file: optional materialize for @ref, parse AST, match.
+// Rewrite mode expands a site Rule (RuleFromOp) to edits.
 func Stream(root string, op Op, opts StreamOptions) error {
 	if op.PatternIR.Kind == "" {
 		return fmt.Errorf("pattern: empty pattern_ir")
 	}
-	if op.Mode == "rewrite" && op.ReplacementIR == nil {
-		return fmt.Errorf("rewrite missing replacement_ir")
+	var rule Rule
+	if op.Mode == "rewrite" {
+		var err error
+		rule, err = RuleFromOp(op)
+		if err != nil {
+			return err
+		}
 	}
 
 	rootAbs, err := filepath.Abs(root)
@@ -179,7 +191,7 @@ func Stream(root string, op Op, opts StreamOptions) error {
 
 		var fileEdits []ingest.Edit
 		if op.Mode == "rewrite" && len(ms) > 0 {
-			fileEdits, err = EditsForMatches(ms, *op.ReplacementIR, source, op.SetCapture)
+			fileEdits, err = rule.Edits(ms, source)
 			if err != nil {
 				return err
 			}

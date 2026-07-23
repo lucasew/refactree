@@ -1,5 +1,10 @@
 // Package pattern implements structural match/rewrite for rft grep / rft rewrite
 // (pattern IR, string dialect parser, and testdata/pattern fixtures).
+//
+// Site transforms use Rule (pattern + replacement) → Match → []ingest.Edit.
+// Apply/stage stay in package ingest. Symbol-identity mv plans stay in ingest;
+// they may emit site Rules (e.g. RefLeafRule) for use-site text without owning
+// a second match engine.
 package pattern
 
 import (

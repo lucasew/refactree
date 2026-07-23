@@ -190,6 +190,9 @@ func instantiateCall(n Node, m Match, source []byte) (string, error) {
 }
 
 // EditsForMatches turns matches + replacement into ingest.Edit values.
+// Prefer Rule.Edits for the shared site-transform path; this remains the
+// low-level expander.
+//
 // source is the file content for all matches (one file per call).
 // If setCapture is non-empty, one edit is emitted per span of that capture
 // (Multi * holes may have several). Matches with no such spans are skipped.
