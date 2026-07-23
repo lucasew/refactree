@@ -258,6 +258,54 @@ func TestPackageMove_OnlyGraphConsumersRewritten(t *testing.T) {
 	}
 }
 
+func TestPackageMove_ModuleImportPathConsumers(t *testing.T) {
+	// Real monorepo shape: go.mod + import module/pkg/sub — must rewrite to module/pkga/sub.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/mod\n\ngo 1.22\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "pkg", "sub"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pkg", "sub", "lib.go"), []byte("package sub\n\nfunc Hello() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nimport \"example.com/mod/pkg/sub\"\n\nfunc main() { sub.Hello() }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	edits, err := ingest.Rename(dir, "path:./pkg", "path:./pkga")
+	if err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	var sawMain bool
+	for _, e := range edits {
+		if e.File == "main.go" {
+			sawMain = true
+			break
+		}
+	}
+	if !sawMain {
+		t.Fatalf("expected consumer rewrite on main.go; edits=%d", len(edits))
+	}
+	if err := ingest.ApplyEdits(dir, edits); err != nil {
+		t.Fatal(err)
+	}
+	main, err := os.ReadFile(filepath.Join(dir, "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(main), "example.com/mod/pkga/sub") {
+		t.Fatalf("module import not rewritten:\n%s", main)
+	}
+	if strings.Contains(string(main), "example.com/mod/pkg/sub") {
+		t.Fatalf("old module import still present:\n%s", main)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "pkga", "sub", "lib.go")); err != nil {
+		t.Fatalf("package not relocated: %v", err)
+	}
+}
+
 func TestMove_GoCrossFile(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "doc.go"), []byte("package main\n\nfunc helper() {\n}\n"), 0644); err != nil {
