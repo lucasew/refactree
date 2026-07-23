@@ -121,9 +121,9 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 				continue
 			}
 			edits = append(edits, ingest.Edit{
-				File:      file,
-				Span: ingest.Span{StartByte: ent.StartByte, EndByte: ent.EndByte},
-				NewText:   newLeaf,
+				File:    file,
+				Span:    ingest.Span{StartByte: ent.StartByte, EndByte: ent.EndByte},
+				NewText: newLeaf,
 			})
 			markOccupied(file, ent.StartByte, ent.EndByte)
 		}
@@ -322,9 +322,9 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 		merged := ensureJavaImports(string(dstContent), decl.Imports)
 		if merged != string(dstContent) {
 			return ingest.Edit{
-				File:      dstRelPath,
-				Span: ingest.Span{StartByte: 0, EndByte: uint32(len(dstContent))},
-				NewText:   ingest.AppendDeclText(merged, decl.DeclText),
+				File:    dstRelPath,
+				Span:    ingest.Span{StartByte: 0, EndByte: uint32(len(dstContent))},
+				NewText: ingest.AppendDeclText(merged, decl.DeclText),
 			}
 		}
 		insertAt := uint32(len(dstContent))
@@ -337,9 +337,9 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 		}
 		insertText += decl.DeclText + "\n"
 		return ingest.Edit{
-			File:      dstRelPath,
-			Span: ingest.Span{StartByte: insertAt, EndByte: insertAt},
-			NewText:   insertText,
+			File:    dstRelPath,
+			Span:    ingest.Span{StartByte: insertAt, EndByte: insertAt},
+			NewText: insertText,
 		}
 	}
 
@@ -351,9 +351,9 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 		body = ensureJavaImports(body, decl.Imports)
 	}
 	return ingest.Edit{
-		File:      dstRelPath,
-		Span: ingest.Span{StartByte: 0, EndByte: 0},
-		NewText:   ingest.AppendDeclText(body, decl.DeclText),
+		File:    dstRelPath,
+		Span:    ingest.Span{StartByte: 0, EndByte: 0},
+		NewText: ingest.AppendDeclText(body, decl.DeclText),
 	}
 }
 
@@ -558,9 +558,9 @@ func stripUnusedJavaImports(file string, content []byte, decl ingest.DeclExtract
 			continue
 		}
 		edits = append(edits, ingest.Edit{
-			File:      file,
-			Span: ingest.Span{StartByte: uint32(spec.startByte), EndByte: uint32(spec.endByte)},
-			NewText:   "",
+			File:    file,
+			Span:    ingest.Span{StartByte: uint32(spec.startByte), EndByte: uint32(spec.endByte)},
+			NewText: "",
 		})
 	}
 	return edits
@@ -698,9 +698,9 @@ func rewriteJavaPrefixedSpecs(fileRelPath string, content []byte, prefixes []str
 			}
 			if repl != "" {
 				edits = append(edits, ingest.Edit{
-					File:      fileRelPath,
-					Span: ingest.Span{StartByte: uint32(specStart), EndByte: uint32(specEnd)},
-					NewText:   repl,
+					File:    fileRelPath,
+					Span:    ingest.Span{StartByte: uint32(specStart), EndByte: uint32(specEnd)},
+					NewText: repl,
 				})
 			}
 			off = specEnd + 1
@@ -732,9 +732,9 @@ func rewriteJavaNameToken(fileRelPath string, content []byte, oldName, newName s
 			continue
 		}
 		edits = append(edits, ingest.Edit{
-			File:      fileRelPath,
-			Span: ingest.Span{StartByte: uint32(start), EndByte: uint32(end)},
-			NewText:   newName,
+			File:    fileRelPath,
+			Span:    ingest.Span{StartByte: uint32(start), EndByte: uint32(end)},
+			NewText: newName,
 		})
 		off = end
 	}
@@ -814,9 +814,9 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			if name != nil && ingest.NodeText(name, content) == oldLeaf {
 				if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, typeMembers, implementsEdges) {
 					edits = append(edits, ingest.Edit{
-						File:      fileRel,
-						Span: ingest.Span{StartByte: name.StartByte(), EndByte: name.EndByte()},
-						NewText:   newLeaf,
+						File:    fileRel,
+						Span:    ingest.Span{StartByte: name.StartByte(), EndByte: name.EndByte()},
+						NewText: newLeaf,
 					})
 				}
 			}
@@ -829,9 +829,9 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 			if field != nil && ingest.NodeText(field, content) == oldLeaf {
 				if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, typeMembers, implementsEdges) {
 					edits = append(edits, ingest.Edit{
-						File:      fileRel,
-						Span: ingest.Span{StartByte: field.StartByte(), EndByte: field.EndByte()},
-						NewText:   newLeaf,
+						File:    fileRel,
+						Span:    ingest.Span{StartByte: field.StartByte(), EndByte: field.EndByte()},
+						NewText: newLeaf,
 					})
 				}
 			}
@@ -852,9 +852,9 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 				if name.Type() == "identifier" && ingest.NodeText(name, content) == oldLeaf {
 					if javaShouldRenameMemberAccess(obj, content, classHere, ourSimple, foreignSimple, typedLocals, entryValOf, valOf, elemOf, compOf, windowStreamOf, windowOptOf, groupValOf, entryGroupOf, typeMembers, implementsEdges) {
 						edits = append(edits, ingest.Edit{
-							File:      fileRel,
-							Span: ingest.Span{StartByte: name.StartByte(), EndByte: name.EndByte()},
-							NewText:   newLeaf,
+							File:    fileRel,
+							Span:    ingest.Span{StartByte: name.StartByte(), EndByte: name.EndByte()},
+							NewText: newLeaf,
 						})
 					}
 				}
@@ -868,9 +868,9 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 					if (ch.Type() == "identifier" || ch.Type() == "type_identifier") &&
 						ingest.NodeText(ch, content) == oldLeaf {
 						edits = append(edits, ingest.Edit{
-							File:      fileRel,
-							Span: ingest.Span{StartByte: ch.StartByte(), EndByte: ch.EndByte()},
-							NewText:   newLeaf,
+							File:    fileRel,
+							Span:    ingest.Span{StartByte: ch.StartByte(), EndByte: ch.EndByte()},
+							NewText: newLeaf,
 						})
 					}
 				}

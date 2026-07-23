@@ -471,9 +471,9 @@ func TestApplyEdits_OutOfBounds(t *testing.T) {
 	}
 
 	err := ingest.ApplyEdits(dir, []ingest.Edit{{
-		File:      "main.go",
-		Span: ingest.Span{StartByte: 0, EndByte: 999},
-		NewText:   "x",
+		File:    "main.go",
+		Span:    ingest.Span{StartByte: 0, EndByte: 999},
+		NewText: "x",
 	}})
 	if err == nil {
 		t.Fatal("expected out-of-bounds error")
@@ -486,9 +486,9 @@ func TestApplyEdits_OutOfBounds(t *testing.T) {
 func TestApplyEdits_MissingFile(t *testing.T) {
 	dir := t.TempDir()
 	err := ingest.ApplyEdits(dir, []ingest.Edit{{
-		File:      "missing.go",
-		Span: ingest.Span{StartByte: 0, EndByte: 1},
-		NewText:   "x",
+		File:    "missing.go",
+		Span:    ingest.Span{StartByte: 0, EndByte: 1},
+		NewText: "x",
 	}})
 	if err == nil {
 		t.Fatal("expected missing file error")

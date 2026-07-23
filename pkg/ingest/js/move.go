@@ -350,9 +350,9 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 	}
 
 	return ingest.Edit{
-		File:      dstRelPath,
-		Span: ingest.Span{StartByte: insertAt, EndByte: insertAt},
-		NewText:   insertText,
+		File:    dstRelPath,
+		Span:    ingest.Span{StartByte: insertAt, EndByte: insertAt},
+		NewText: insertText,
 	}
 }
 
@@ -587,9 +587,9 @@ func addExportKeyword(file string, content []byte, symbol string) []ingest.Edit 
 			if n := ingest.ChildByField(child, "name"); n != nil && ingest.NodeText(n, content) == symbol {
 				// Not already exported; add "export " before the declaration.
 				return []ingest.Edit{{
-					File:      file,
-					Span: ingest.Span{StartByte: child.StartByte(), EndByte: child.StartByte()},
-					NewText:   "export ",
+					File:    file,
+					Span:    ingest.Span{StartByte: child.StartByte(), EndByte: child.StartByte()},
+					NewText: "export ",
 				}}
 			}
 		}
@@ -726,9 +726,9 @@ func jsImportInsertEdits(file string, content []byte, stmts []string) []ingest.E
 	}
 	block := strings.Join(missing, "\n") + "\n"
 	return []ingest.Edit{{
-		File:      file,
-		Span: ingest.Span{StartByte: uint32(insertPos), EndByte: uint32(insertPos)},
-		NewText:   block,
+		File:    file,
+		Span:    ingest.Span{StartByte: uint32(insertPos), EndByte: uint32(insertPos)},
+		NewText: block,
 	}}
 }
 
@@ -788,9 +788,9 @@ func stripUnusedJSImports(file string, content []byte, decl ingest.DeclExtract) 
 			break // remove at most one trailing newline
 		}
 		edits = append(edits, ingest.Edit{
-			File:      file,
-			Span: ingest.Span{StartByte: stmt.startByte, EndByte: removeEnd},
-			NewText:   "",
+			File:    file,
+			Span:    ingest.Span{StartByte: stmt.startByte, EndByte: removeEnd},
+			NewText: "",
 		})
 	}
 	return edits
@@ -1113,9 +1113,9 @@ func jsShorthandLocalPropertyEdits(fileRel string, content []byte, oldLeaf, newL
 		}
 		seen[key] = true
 		edits = append(edits, ingest.Edit{
-			File:      fileRel,
-			Span: ingest.Span{StartByte: start, EndByte: end},
-			NewText:   newLeaf,
+			File:    fileRel,
+			Span:    ingest.Span{StartByte: start, EndByte: end},
+			NewText: newLeaf,
 		})
 	}
 
@@ -1261,9 +1261,9 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 		}
 		seen[key] = true
 		edits = append(edits, ingest.Edit{
-			File:      fileRel,
-			Span: ingest.Span{StartByte: start, EndByte: end},
-			NewText:   text,
+			File:    fileRel,
+			Span:    ingest.Span{StartByte: start, EndByte: end},
+			NewText: text,
 		})
 	}
 
