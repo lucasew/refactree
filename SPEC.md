@@ -92,7 +92,8 @@ Structural spine for discovery and graphs. Goal: one walk/parse path, no duplica
   - `rft rewrite` is one Rule over a file stream
   - `mv` remains a symbol-identity **planner** (full graph for defs, aliases, expanders, package moves)
   - **Use-site leaf renames** go through `RegisterUseSiteRenamer` → `pattern.UseSiteRenames` (`RefLeafRule` per target file) when `pkg/pattern` is linked; graph `Uses` walk is the fallback
-- Planners differ (identity/graph vs stream/codemod); site expansion and apply do not
+- **`ImportHygiene`**: after rewrite site edits, ensure imports for **static `@ref`s in the replacement** (`NeedsFromRef` + `EnsureImports`). Go registered; not `RewriteImports` (move path rewrite). Strip-unused is out of v1
+- Planners differ (identity/graph vs stream/codemod); site expansion, import ensure, and apply do not
 
 ### Subcommands: grep / rewrite
 - Structural find (`grep`) and site rewrite (`rewrite`) — **not** symbol identity ops (`mv`)

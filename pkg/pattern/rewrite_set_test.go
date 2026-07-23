@@ -195,8 +195,9 @@ func Helper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Edits) != 2 {
-		t.Fatalf("edits=%d want 2; %v", len(res.Edits), res.Edits)
+	// 2 site leaf rewrites + import "context" ensure for @go:context::Background
+	if len(res.Edits) < 2 {
+		t.Fatalf("edits=%d want >=2; %v", len(res.Edits), res.Edits)
 	}
 	out, err := os.ReadFile(path)
 	if err != nil {
@@ -208,6 +209,9 @@ func Helper(t *testing.T) {
 	}
 	if strings.Count(got, "t.Context()") != 1 {
 		t.Fatalf("Helper should keep one t.Context:\n%s", got)
+	}
+	if !strings.Contains(got, `"context"`) {
+		t.Fatalf("expected import context:\n%s", got)
 	}
 }
 
@@ -237,7 +241,19 @@ func TestFoo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Edits) != 2 {
-		t.Fatalf("edits=%d want 2; %v", len(res.Edits), res.Edits)
+	// 2 site rewrites + import ensure for @go:context::Background
+	if len(res.Edits) < 2 {
+		t.Fatalf("edits=%d want >=2; %v", len(res.Edits), res.Edits)
+	}
+	out, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+	if strings.Count(got, "context.Background()") != 2 {
+		t.Fatalf("context.Background count=%d\n%s", strings.Count(got, "context.Background()"), got)
+	}
+	if !strings.Contains(got, `"context"`) {
+		t.Fatalf("expected import context:\n%s", got)
 	}
 }

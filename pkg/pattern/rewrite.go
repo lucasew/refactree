@@ -61,8 +61,9 @@ func captureText(m Match, name string, source []byte) string {
 }
 
 // expandTemplate fills $name captures and @provider:path::Symbol ref emits.
-// Ref emit is a best-effort source selector (e.g. go:net/http::Get → http.Get);
-// it does not rewrite imports.
+// Ref emit is a best-effort source selector (e.g. go:net/http::Get → http.Get).
+// Import ensure for static @refs in the replacement is handled after site
+// edits (WithImportHygiene), not here.
 func expandTemplate(tmpl string, m Match, source []byte) (string, error) {
 	var b strings.Builder
 	i := 0

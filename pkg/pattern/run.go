@@ -195,6 +195,11 @@ func Stream(root string, op Op, opts StreamOptions) error {
 			if err != nil {
 				return err
 			}
+			// Ensure imports for static @refs in the replacement (Go first).
+			if len(fileEdits) > 0 {
+				needs := ImportNeedsForRule(fe.Language, rule)
+				fileEdits = WithImportHygiene(rel, fe.Language, source, fileEdits, needs)
+			}
 		}
 		if opts.OnFile != nil && !opts.OnFile(rel, ms, fileEdits, source) {
 			stop = true
