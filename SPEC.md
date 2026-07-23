@@ -118,26 +118,30 @@ Structural spine for discovery and graphs. Goal: one walk/parse path, no duplica
 - Language-specific parse/extract/ref resolution stays in language packages; pattern core stays token + ref algebra
 
 ### Subcommand: lint (codemod rulebook)
-- **Product:** batch runner over a project rule catalog — **not** graph intelligence, dead code, or LSP diagnostics. Model A only; intelligence / GC-roots / dead-code SARIF is later.
+- **Product:** batch runner over a project rule catalog — **not** graph intelligence, dead code (GC roots), or LSP diagnostics. Model A only; deeper intelligence SARIF is later. Unused **named** imports are in-scope as a hygiene builtin (not whole-program dead code).
 - **Config file:** `refactree.yaml` at the project root.
-  - Discovery: walk up from `-C` / cwd for `refactree.yaml`; **`--config path`** overrides. Missing file (no override) → hard error. Empty `rules: []` → exit 0 (nothing to do).
+  - Discovery: walk up from `-C` / cwd for `refactree.yaml`; **`--config path`** overrides (missing override path → hard error).
+  - **No config found** (no override) → use **built-in default catalog** (not an error). Today: one rule `imports/unused-named` with `builtin: dead-imports`.
+  - Empty `rules: []` in an **existing** file → exit 0 (explicit empty; defaults are **not** merged).
   - No nested multi-file rule packs in v1; no CLI `--select` / `--ignore` (edit YAML to disable).
 - **Rule schema** (each entry under `rules:`):
-  - **Required:** `id`, exactly one of `language` | `family`, `pattern`, `message`
-  - **Optional:** `level` (default `warning`; allowed: `error`, `warning`, `note`), `replacement`
+  - **Required always:** `id`, `message`
+  - **Pattern rules:** exactly one of `language` | `family`, `pattern`; optional `replacement`, `level`
+  - **Builtin rules:** `builtin: <name>` (no `pattern` / `replacement`); optional `language` | `family` scope; optional `level`
+  - Builtins today: **`dead-imports`** — full-file `ImportHygiene.PruneNamedUnusedEdits` (named only; never barrels). Unscoped = every language with registered ImportHygiene; scoped = that language/family only.
   - `language` = one surface language id; `family` = all surfaces in that family (`ingest` families: e.g. `ecma` covers JS/TS/Svelte)
-  - Both or neither of `language`/`family` → config load error; duplicate `id` → load error
+  - Both `language`/`family` → config load error; duplicate `id` → load error; unknown `builtin` → load error
   - Pattern / replacement dialect = **same as grep/rewrite** (including `name=template` set-capture form)
-  - No `replacement` → **report-only** (still a finding; no SARIF `fixes`; ignored by `--fix`)
-- **Execution:** one invocation runs **all** rules. Per-file stream: parse once, match every applicable rule (language/family). Same **ImportHygiene** as `rewrite` when building/applying fixes (`@ref` ensure + named prune).
+  - No `replacement` on a pattern rule → **report-only** (still a finding; no SARIF `fixes`; ignored by `--fix`)
+- **Execution:** one invocation runs **all** rules. Per-file stream: parse once, run every applicable rule (language/family). Pattern rewrites use the same **ImportHygiene** ensure+prune path as `rewrite` when building/applying fixes. Builtin `dead-imports` is the full-file prune itself (findings + fixes per pruned span).
 - **CLI:** `rft lint [paths…]`
   - `-C` / `--dir`, `--config`, `-l` (optional language or family filter on files), `--format` (`text` default; `sarif`), `--fix`, `-n` / `--dry-run`, `-b` / `--backup`
   - No `-i` interactive in v1
   - `grep` / `rewrite` stay one-off patterns; `lint` is the catalog
-- **`--fix`:** apply non-conflicting planned edits (rules with `replacement` only). Conflict policy: **YAML order** — first rule’s site edits win; a later rule whose site edits **overlap** already-claimed spans on that file has its fixes **skipped** for that run (findings still reported); may apply cleanly on a later run after earlier fixes land. Dry-run (`-n`) prints plan / still reports, never writes.
+- **`--fix`:** apply non-conflicting planned edits (pattern rules with `replacement`, and fixable builtins). Conflict policy: **YAML order** — first rule’s site edits win; a later rule whose site edits **overlap** already-claimed spans on that file has its fixes **skipped** for that run (findings still reported); may apply cleanly on a later run after earlier fixes land. Dry-run (`-n`) prints plan / still reports, never writes.
 - **Exit codes:** tool/config/parse errors → non-zero (message on stderr). **Any remaining finding** after the run → exit **1** (including report-only and conflict-skipped fixables). Zero findings → exit **0**. After `--fix`, exit 0 only if the tree is clean of all catalog findings.
-- **SARIF (`--format sarif`):** one `run`; rules from the catalog as `reportingDescriptor`s; each match a `result`. When `replacement` expands successfully, always emit `result.fixes` (even without `--fix`) so consumers can autofix. Report-only → location + message only. Import-hygiene edits are applied with `--fix` but need not appear as separate SARIF fixes in v1 (site replacements are enough for interchange).
-- **Out of v1:** LSP code actions from the rulebook, `--select`/`--ignore`, multi-config monorepo packs, intelligence diagnostics in the same command.
+- **SARIF (`--format sarif`):** one `run`; rules from the catalog as `reportingDescriptor`s; each match a `result`. When fixes expand successfully, always emit `result.fixes` (even without `--fix`) so consumers can autofix. Report-only → location + message only. Pattern-rule import-hygiene side edits with `--fix` need not appear as separate SARIF fixes in v1.
+- **Out of v1:** LSP code actions from the rulebook, `--select`/`--ignore`, multi-config monorepo packs, GC-root / dead-code intelligence diagnostics.
 
 ### Subcommand: edit
 - Opens the definition of a reference in `$EDITOR` (or jumps to a file), blocking until the editor exits

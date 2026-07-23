@@ -30,21 +30,21 @@ type Finding struct {
 	EndLine int
 	EndCol  int
 	Snippet string
-	// SiteEdits are replacement edits for this match (no import hygiene).
+	// SiteEdits are replacement edits for this match (no import hygiene for pattern rules).
 	SiteEdits []ingest.Edit
-	// Fixable is true when the rule has a replacement and site edits were produced.
+	// Fixable is true when site edits were produced (pattern replacement or builtin fix).
 	Fixable bool
 	// FixSkipped is true when Fixable but edits were dropped due to earlier-rule conflict.
 	FixSkipped bool
-	// Source is the file bytes at match time (for SARIF/display); not written to disk formats as-is.
+	// Source is the file bytes at match time (for SARIF/display).
 	source []byte
 }
 
 // Result is the outcome of a catalog run.
 type Result struct {
 	Findings []Finding
-	// ApplyEdits is the conflict-filtered site edits plus per-file import hygiene,
-	// ready for ApplyEdits / --fix.
+	// ApplyEdits is the conflict-filtered site edits plus per-file import hygiene
+	// for pattern rewrite rules, ready for ApplyEdits / --fix.
 	ApplyEdits []ingest.Edit
 	Rules      []CompiledRule
 }
@@ -64,9 +64,10 @@ func Run(root string, rules []CompiledRule, opts Options) (Result, error) {
 
 	// claimed[file] = non-overlapping site spans already taken by earlier rules.
 	claimed := map[string][]ingest.Span{}
-	// pendingHygiene: file → site edits accepted for apply (before hygiene).
-	pending := map[string][]ingest.Edit{}
-	// needsByFile accumulates import needs for accepted rewrite rules.
+	// patternPending: file → pattern rewrite site edits (before import hygiene).
+	patternPending := map[string][]ingest.Edit{}
+	// builtinApply: file → builtin site edits (already final; no second hygiene pass).
+	builtinApply := map[string][]ingest.Edit{}
 	type fileRuleNeed struct {
 		lang  string
 		needs []ingest.ImportNeed
@@ -75,6 +76,9 @@ func Run(root string, rules []CompiledRule, opts Options) (Result, error) {
 
 	needLinksAny := false
 	for _, r := range rules {
+		if r.Builtin != "" {
+			continue
+		}
 		if pattern.PatternNeedsLinks(r.Pattern) {
 			needLinksAny = true
 			break
@@ -103,7 +107,6 @@ func Run(root string, rules []CompiledRule, opts Options) (Result, error) {
 
 		var fileResult *ingest.Result
 		if needLinksAny {
-			// Materialize once if any rule needs links; cheap hop reuse of extract.
 			fileResult = ingest.Materialize(rootAbs, []*ingest.FileExtract{fe}, ingest.MaterializeOptions{
 				ExpandImports: false,
 			})
@@ -113,7 +116,13 @@ func Run(root string, rules []CompiledRule, opts Options) (Result, error) {
 			if !cr.AppliesToFile(fe.Language) {
 				continue
 			}
-			// Skip link materialize cost per rule when only some need links:
+			if cr.Builtin != "" {
+				if err := runBuiltin(cr, rel, fe.Language, source, claimed, builtinApply, &out); err != nil {
+					return err
+				}
+				continue
+			}
+
 			var res *ingest.Result
 			if pattern.PatternNeedsLinks(cr.Pattern) {
 				res = fileResult
@@ -139,8 +148,6 @@ func Run(root string, rules []CompiledRule, opts Options) (Result, error) {
 				}
 			}
 
-			// Conflict: if any site edit of this rule overlaps claimed spans, skip all
-			// fixes for this rule on this file (findings still emitted).
 			skipFix := false
 			if len(allSite) > 0 {
 				for _, e := range allSite {
@@ -152,7 +159,7 @@ func Run(root string, rules []CompiledRule, opts Options) (Result, error) {
 			}
 
 			for i, m := range ms {
-				line, col, endLine, endCol, snippet, err := matchLoc(source, m)
+				line, col, endLine, endCol, snippet, err := spanLoc(source, m.Span)
 				if err != nil {
 					return err
 				}
@@ -178,7 +185,7 @@ func Run(root string, rules []CompiledRule, opts Options) (Result, error) {
 
 			if len(allSite) > 0 && !skipFix {
 				claimed[rel] = append(claimed[rel], siteSpans(allSite)...)
-				pending[rel] = append(pending[rel], allSite...)
+				patternPending[rel] = append(patternPending[rel], allSite...)
 				if cr.Rule != nil {
 					needs := pattern.ImportNeedsForRule(fe.Language, *cr.Rule)
 					meta := hygieneMeta[rel]
@@ -194,8 +201,12 @@ func Run(root string, rules []CompiledRule, opts Options) (Result, error) {
 		return out, err
 	}
 
-	// Import hygiene per file on accepted site edits.
-	for rel, siteEdits := range pending {
+	for _, edits := range builtinApply {
+		out.ApplyEdits = append(out.ApplyEdits, edits...)
+	}
+
+	// Import hygiene per file on accepted *pattern* site edits only.
+	for rel, siteEdits := range patternPending {
 		if len(siteEdits) == 0 {
 			continue
 		}
@@ -210,6 +221,80 @@ func Run(root string, rules []CompiledRule, opts Options) (Result, error) {
 		out.ApplyEdits = append(out.ApplyEdits, edits...)
 	}
 	return out, nil
+}
+
+func runBuiltin(cr CompiledRule, rel, lang string, source []byte, claimed map[string][]ingest.Span, builtinApply map[string][]ingest.Edit, out *Result) error {
+	switch cr.Builtin {
+	case BuiltinDeadImports:
+		return runDeadImports(cr, rel, lang, source, claimed, builtinApply, out)
+	default:
+		return fmt.Errorf("rule %q: unknown builtin %q", cr.Spec.ID, cr.Builtin)
+	}
+}
+
+func runDeadImports(cr CompiledRule, rel, lang string, source []byte, claimed map[string][]ingest.Span, builtinApply map[string][]ingest.Edit, out *Result) error {
+	h, ok := ingest.ImportHygieneForLanguage(lang)
+	if !ok {
+		return nil
+	}
+	// Full-file prune: no mask, no candidate filter — drop unused named imports only.
+	edits := h.PruneNamedUnusedEdits(rel, source, ingest.PruneImportOpts{})
+	if len(edits) == 0 {
+		return nil
+	}
+
+	skipFix := false
+	for _, e := range edits {
+		if spansOverlapAny(e.Span, claimed[rel]) {
+			skipFix = true
+			break
+		}
+	}
+
+	for _, e := range edits {
+		line, col, endLine, endCol, snippet, err := spanLoc(source, e.Span)
+		if err != nil {
+			return err
+		}
+		snippet = strings.TrimSpace(snippet)
+		msg := cr.Spec.Message
+		if snippet != "" {
+			msg = cr.Spec.Message + ": " + oneLine(snippet)
+		}
+		site := []ingest.Edit{e}
+		f := Finding{
+			RuleID:    cr.Spec.ID,
+			Level:     cr.Level,
+			Message:   msg,
+			File:      rel,
+			Line:      line,
+			Column:    col,
+			EndLine:   endLine,
+			EndCol:    endCol,
+			Snippet:   oneLine(snippet),
+			SiteEdits: site,
+			Fixable:   true,
+			source:    source,
+		}
+		if skipFix {
+			f.FixSkipped = true
+		}
+		out.Findings = append(out.Findings, f)
+	}
+
+	if !skipFix {
+		claimed[rel] = append(claimed[rel], siteSpans(edits)...)
+		builtinApply[rel] = append(builtinApply[rel], edits...)
+	}
+	return nil
+}
+
+func oneLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSpace(s[:i]) + "…"
+	}
+	return s
 }
 
 func fileMatchesFilter(fileLang, filter string) bool {
@@ -267,17 +352,16 @@ func dedupeNeeds(needs []ingest.ImportNeed) []ingest.ImportNeed {
 	return out
 }
 
-func matchLoc(src []byte, m pattern.Match) (line, col, endLine, endCol int, snippet string, err error) {
-	if int(m.EndByte) > len(src) || m.StartByte > m.EndByte {
-		return 0, 0, 0, 0, "", fmt.Errorf("match span out of range in %s", m.File)
+func spanLoc(src []byte, sp ingest.Span) (line, col, endLine, endCol int, snippet string, err error) {
+	if int(sp.EndByte) > len(src) || sp.StartByte > sp.EndByte {
+		return 0, 0, 0, 0, "", fmt.Errorf("span out of range")
 	}
 	li := grammar.NewLineIndexBytes(src)
-	l, c0 := li.LineColumnAtU32(m.StartByte)
-	el, ec0 := li.LineColumnAtU32(m.EndByte)
-	text := string(src[m.StartByte:m.EndByte])
+	l, c0 := li.LineColumnAtU32(sp.StartByte)
+	el, ec0 := li.LineColumnAtU32(sp.EndByte)
+	text := string(src[sp.StartByte:sp.EndByte])
 	if i := strings.IndexByte(text, '\n'); i >= 0 {
 		text = text[:i] + "…"
 	}
-	// LineIndex: line 1-based, column 0-based byte col → 1-based for tools.
 	return l, c0 + 1, el, ec0 + 1, text, nil
 }

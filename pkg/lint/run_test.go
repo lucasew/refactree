@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/lucasew/refactree/pkg/ingest"
 	_ "github.com/lucasew/refactree/pkg/ingest/go"
 	"github.com/lucasew/refactree/pkg/lint"
 )
@@ -153,6 +154,44 @@ rules:
 	}
 	if strings.Contains(buf.String(), `"fixes"`) {
 		t.Fatalf("report-only SARIF should not have fixes: %s", buf.String())
+	}
+}
+
+func TestRun_DeadImportsBuiltin(t *testing.T) {
+	dir := t.TempDir()
+	src := []byte("package p\n\nimport (\n\t\"fmt\"\n\t\"strings\"\n)\n\nfunc f() {\n\t_ = strings.TrimSpace(\"x\")\n}\n")
+	if err := os.WriteFile(filepath.Join(dir, "p.go"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, rules, err := lint.LoadDefault()
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := lint.Run(dir, rules, lint.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Findings) == 0 {
+		t.Fatal("expected unused fmt finding")
+	}
+	found := false
+	for _, f := range res.Findings {
+		if f.RuleID == "imports/unused-named" && f.Fixable && !f.FixSkipped {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("findings: %+v", res.Findings)
+	}
+	if len(res.ApplyEdits) == 0 {
+		t.Fatal("expected apply edits")
+	}
+	out := ingest.ApplyEditsInMemory(src, res.ApplyEdits)
+	if strings.Contains(string(out), `"fmt"`) {
+		t.Fatalf("fmt should be pruned:\n%s", out)
+	}
+	if !strings.Contains(string(out), `"strings"`) {
+		t.Fatalf("strings must remain:\n%s", out)
 	}
 }
 

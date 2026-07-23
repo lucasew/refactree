@@ -24,8 +24,12 @@ func newLintCmd() *cobra.Command {
 		Long: `Run all rules from refactree.yaml (project codemod catalog).
 
 Config discovery: walk up from -C for refactree.yaml, or pass --config.
-Each rule is a structural pattern (same dialect as grep/rewrite). Optional
-replacement makes the finding fixable (SARIF result.fixes; --fix applies).
+If no config is found, a built-in default catalog runs (currently unused
+named imports via ImportHygiene).
+
+Rules are structural patterns (same dialect as grep/rewrite) or builtins
+(e.g. builtin: dead-imports). Optional replacement / builtin fixes make
+findings fixable (SARIF result.fixes; --fix applies).
 
   rft lint
   rft lint --format sarif
@@ -50,11 +54,7 @@ Tool/config errors use a non-zero exit with a message on stderr.`,
 			if err != nil {
 				return errExit{code: 2, err: err}
 			}
-			cfgPath, err := lint.ResolveConfigPath(root, configPath)
-			if err != nil {
-				return errExit{code: 2, err: err}
-			}
-			_, rules, err := lint.LoadFile(cfgPath)
+			_, rules, _, err := lint.LoadCatalog(root, configPath)
 			if err != nil {
 				return errExit{code: 2, err: err}
 			}
@@ -67,21 +67,9 @@ Tool/config errors use a non-zero exit with a message on stderr.`,
 				return errExit{code: 2, err: err}
 			}
 
-			// When --fix (and not dry-run only for write): apply first, then re-run
-			// is expensive; SPEC says exit 1 if any finding remains after apply.
-			// Report-only findings always remain. Conflict-skipped stay until next run.
-			// For exit: after successful fix apply, findings that were fully fixed
-			// (fixable and applied) should not count. Simplest accurate approach:
-			// apply, then re-run match to compute remaining — expensive but correct.
-			// Lighter: remaining = report-only + fix-skipped + (fixable not applied when !fix).
-			// With --fix: apply ApplyEdits; remaining = report-only + FixSkipped (+ apply failure).
-			// Without re-match after fix, we won't see if fix actually cleared the pattern.
-			// Re-run after --fix is the truth for exit 0 "tree clean".
-
 			out := cmd.OutOrStdout()
 			applyNow := fix && !dryRun
 			if dryRun && fix {
-				// Show planned apply edits via applyEditPlan dry-run style.
 				if len(res.ApplyEdits) > 0 {
 					if err := applyEditPlan(cmd, root, res.ApplyEdits, applyEditPlanOptions{
 						DryRun: true,
@@ -96,7 +84,6 @@ Tool/config errors use a non-zero exit with a message on stderr.`,
 				}); err != nil {
 					return errExit{code: 2, err: err}
 				}
-				// Re-scan so exit reflects post-fix tree.
 				res, err = lint.Run(root, rules, lint.Options{
 					Paths:      args,
 					LangFilter: lang,
@@ -125,7 +112,7 @@ Tool/config errors use a non-zero exit with a message on stderr.`,
 	}
 
 	cmd.Flags().StringVarP(&dir, "dir", "C", ".", "project root")
-	cmd.Flags().StringVar(&configPath, "config", "", "path to refactree.yaml (default: walk up from -C)")
+	cmd.Flags().StringVar(&configPath, "config", "", "path to refactree.yaml (default: walk up from -C; built-in defaults if missing)")
 	cmd.Flags().StringVarP(&lang, "lang", "l", "", "language or family filter for files")
 	cmd.Flags().StringVar(&format, "format", "text", "output format: text or sarif")
 	cmd.Flags().BoolVar(&fix, "fix", false, "apply non-conflicting fixes from rules with replacement")

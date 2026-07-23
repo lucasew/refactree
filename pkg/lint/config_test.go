@@ -108,9 +108,65 @@ func TestFindConfig_WalkUp(t *testing.T) {
 }
 
 func TestResolveConfigPath_Missing(t *testing.T) {
-	_, err := lint.ResolveConfigPath(t.TempDir(), "")
+	path, err := lint.ResolveConfigPath(t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != "" {
+		t.Fatalf("want empty path for missing config, got %q", path)
+	}
+}
+
+func TestLoadCatalog_Defaults(t *testing.T) {
+	path, rules, fromDefault, err := lint.LoadCatalog(t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != "" || !fromDefault {
+		t.Fatalf("path=%q fromDefault=%v", path, fromDefault)
+	}
+	if len(rules) != 1 || rules[0].Builtin != lint.BuiltinDeadImports {
+		t.Fatalf("default rules: %+v", rules)
+	}
+}
+
+func TestLoad_BuiltinDeadImports(t *testing.T) {
+	_, rules, err := lint.Load([]byte(`
+rules:
+  - id: imports/unused-named
+    builtin: dead-imports
+    message: Unused named import
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rules[0].Builtin != lint.BuiltinDeadImports || rules[0].Rule != nil {
+		t.Fatalf("%+v", rules[0])
+	}
+}
+
+func TestLoad_BuiltinRejectsPattern(t *testing.T) {
+	_, _, err := lint.Load([]byte(`
+rules:
+  - id: x
+    builtin: dead-imports
+    pattern: "a"
+    message: m
+`))
 	if err == nil {
-		t.Fatal("expected missing config error")
+		t.Fatal("expected error")
+	}
+}
+
+func TestLoad_UnknownBuiltin(t *testing.T) {
+	_, _, err := lint.Load([]byte(`
+rules:
+  - id: x
+    builtin: nope
+    message: m
+`))
+	if err == nil {
+		t.Fatal("expected error")
 	}
 }
 

@@ -170,16 +170,29 @@ rft rewrite -i \
 
 ### Lint (rulebook)
 
-Project codemod catalog in `refactree.yaml` (walk-up from `-C`, or `--config`). Same pattern dialect as `grep`/`rewrite`. Optional `replacement` → SARIF autofix and `--fix`.
+Project codemod catalog in `refactree.yaml` (walk-up from `-C`, or `--config`). If no config exists, a **built-in default** runs (unused named imports). Pattern dialect matches `grep`/`rewrite`; optional `replacement` or `builtin: dead-imports` → SARIF autofix and `--fix`.
 
 ```bash
-# report (exit 1 if any finding)
+# report (exit 1 if any finding); works with no refactree.yaml
 rft lint
 rft lint --format sarif
 
 # apply non-conflicting fixes (first rule in YAML order wins on overlap)
 rft lint --fix
 rft lint -n --fix   # plan only
+```
+
+```yaml
+# refactree.yaml (optional)
+rules:
+  - id: imports/unused-named
+    builtin: dead-imports
+    message: Unused named import
+  - id: go/prefer-any
+    language: go
+    pattern: "interface{}"
+    message: Prefer any over interface{}
+    replacement: any
 ```
 
 ## Development
