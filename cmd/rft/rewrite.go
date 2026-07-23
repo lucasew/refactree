@@ -22,7 +22,8 @@ func newRewriteCmd() *cobra.Command {
 		Long: `Find matches of a structural pattern and replace with a template.
 
 Processing is per-file (map): each file is hop-parsed, matched, and (unless
-dry-run) written as soon as that file is done — no full-tree materialize barrier.
+dry-run / interactive) written as soon as that file is done — no full-tree
+materialize barrier.
 
 Replacement forms:
   template          replace the whole match root
@@ -39,8 +40,9 @@ Examples:
   # trailing * on $c:@ref collects every site in the function; c= rewrites all
 
 $Name holes in the template are filled from the match. @provider:path::Symbol
-expands to a source-like selector (go:net/http::Get → http.Get); imports are
-not updated. String holes bound via regex with a capture group re-emit the
+expands to a source-like selector (go:net/http::Get → http.Get). For Go,
+static @refs in the replacement also ensure the corresponding import when
+missing. String holes bound via regex with a capture group re-emit the
 group text as a string literal.`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -65,37 +67,11 @@ group text as a string literal.`,
 				if len(res.Edits) == 0 {
 					return fmt.Errorf("no matches")
 				}
-				w := cmd.ErrOrStderr()
-				if _, err := fmt.Fprintf(w, "Edit plan (%d edits):\n", len(res.Edits)); err != nil {
-					return err
-				}
-				for _, e := range res.Edits {
-					if _, err := fmt.Fprintf(w, "  %s [%d:%d] → %q\n", e.File, e.StartByte, e.EndByte, e.NewText); err != nil {
-						return err
-					}
-				}
-				if dryRun {
-					return nil
-				}
-				if _, err := fmt.Fprint(w, "Apply? [y/N] "); err != nil {
-					return err
-				}
-				var answer string
-				if _, err := fmt.Fscan(cmd.InOrStdin(), &answer); err != nil {
-					return err
-				}
-				if answer != "y" && answer != "Y" {
-					return fmt.Errorf("cancelled")
-				}
-				if backup {
-					if err := createBackups(root, res.Edits); err != nil {
-						return err
-					}
-				}
-				if err := ensureEditFiles(root, res.Edits); err != nil {
-					return err
-				}
-				return ingest.ApplyEdits(root, res.Edits)
+				return applyEditPlan(cmd, root, res.Edits, applyEditPlanOptions{
+					Interactive: interactive,
+					DryRun:      dryRun,
+					Backup:      backup,
+				})
 			}
 
 			// Default: stream apply per file (map-reduce: no global barrier).
@@ -107,17 +83,7 @@ group text as a string literal.`,
 						return true
 					}
 					editCount += len(fileEdits)
-					if backup {
-						if err := createBackups(root, fileEdits); err != nil {
-							fmt.Fprintln(cmd.ErrOrStderr(), err)
-							return false
-						}
-					}
-					if err := ensureEditFiles(root, fileEdits); err != nil {
-						fmt.Fprintln(cmd.ErrOrStderr(), err)
-						return false
-					}
-					if err := ingest.ApplyEdits(root, fileEdits); err != nil {
+					if err := writeEdits(root, fileEdits, backup); err != nil {
 						fmt.Fprintln(cmd.ErrOrStderr(), err)
 						return false
 					}
