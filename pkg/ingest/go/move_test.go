@@ -161,3 +161,24 @@ func TestExtractDecl_IotaConstGroupUnsupported(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestExtractDecl_StructFieldUnsupported(t *testing.T) {
+	dir := t.TempDir()
+	src := "package types\n\ntype SudoCommand struct {\n\tSlug string\n\tCommand string\n}\n"
+	path := filepath.Join(dir, "types.go")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	off := uint32(strings.Index(src, "Slug"))
+	_, err := moveDriver{}.ExtractDecl(path, ingest.Atom{
+		Reference: "path:./types.go::SudoCommand.Slug",
+		StartByte: off,
+		EndByte:   off + 4,
+	})
+	if err == nil {
+		t.Fatal("expected error for struct field extract")
+	}
+	if !strings.Contains(err.Error(), "struct field is not supported") {
+		t.Fatalf("got %v", err)
+	}
+}

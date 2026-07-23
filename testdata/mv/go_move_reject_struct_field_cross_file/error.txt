@@ -1,0 +1,1 @@
+cross-file move of struct field is not supported

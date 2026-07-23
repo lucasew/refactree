@@ -1,0 +1,4 @@
+{
+  "source": "path:./pkg/types/types.go::SudoCommand.Slug",
+  "destination": "path:./pkg/types_fuzz_5791/types.go::SudoCommand.Slug"
+}
