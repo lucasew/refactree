@@ -17,6 +17,9 @@ type Op struct {
 	Replacement      *string  `json:"replacement"` // null for grep
 	PatternIR        Node     `json:"pattern_ir"`
 	ReplacementIR    *Node    `json:"replacement_ir"`
+	// SetCapture, when non-empty, limits rewrite edits to that capture's Span
+	// instead of the whole match root. CLI form: replacement "name=template".
+	SetCapture       string   `json:"set_capture,omitempty"`
 	ExpectMatchCount *int     `json:"expect_match_count,omitempty"`
 	Notes            []string `json:"notes,omitempty"`
 }

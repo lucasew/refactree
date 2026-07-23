@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/lucasew/refactree/pkg/ingest"
 )
@@ -37,6 +38,8 @@ type StreamOptions struct {
 }
 
 // OpFromCLI builds an Op from grep/rewrite argv strings.
+// For rewrite, replacement may be "name=template" to rewrite only capture $name
+// (when name is declared by the pattern); otherwise the whole match is replaced.
 func OpFromCLI(mode, lang, patternStr, replacementStr string) (Op, error) {
 	pat, err := ParsePattern(patternStr)
 	if err != nil {
@@ -49,14 +52,53 @@ func OpFromCLI(mode, lang, patternStr, replacementStr string) (Op, error) {
 		PatternIR: pat,
 	}
 	if mode == "rewrite" {
-		repl, err := ParseReplacement(replacementStr)
+		setName, tmpl := splitCaptureSet(pat, replacementStr)
+		repl, err := ParseReplacement(tmpl)
 		if err != nil {
 			return Op{}, fmt.Errorf("replacement: %w", err)
 		}
 		op.Replacement = &replacementStr
 		op.ReplacementIR = &repl
+		op.SetCapture = setName
 	}
 	return op, nil
+}
+
+// splitCaptureSet parses optional "name=template" rewrite emit.
+// If name is a capture declared by pat, returns (name, template); else ("", repl).
+func splitCaptureSet(pat Node, repl string) (name, template string) {
+	i := strings.IndexByte(repl, '=')
+	if i <= 0 {
+		return "", repl
+	}
+	key := repl[:i]
+	if !isCaptureIdent(key) {
+		return "", repl
+	}
+	for _, n := range CaptureNames(pat) {
+		if n == key {
+			return key, repl[i+1:]
+		}
+	}
+	return "", repl
+}
+
+func isCaptureIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		if i == 0 {
+			if r != '_' && !unicode.IsLetter(r) {
+				return false
+			}
+			continue
+		}
+		if r != '_' && !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // Run loads sources under root, matches op.PatternIR, and for rewrite builds edits.
@@ -160,7 +202,7 @@ func Stream(root string, op Op, opts StreamOptions) error {
 
 		var fileEdits []ingest.Edit
 		if op.Mode == "rewrite" && len(ms) > 0 {
-			fileEdits, err = EditsForMatches(ms, *op.ReplacementIR, source)
+			fileEdits, err = EditsForMatches(ms, *op.ReplacementIR, source, op.SetCapture)
 			if err != nil {
 				return err
 			}

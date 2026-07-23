@@ -19,20 +19,26 @@ func newRewriteCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "rewrite <pattern> <replacement> [paths...]",
 		Short: "Rewrite structural pattern matches",
-		Long: `Find matches of a structural pattern and replace each match root with the
-replacement template.
+		Long: `Find matches of a structural pattern and replace with a template.
 
 Processing is per-file (map): each file is hop-parsed, matched, and (unless
 dry-run) written as soon as that file is done — no full-tree materialize barrier.
 
-Example:
+Replacement forms:
+  template          replace the whole match root
+  name=template     replace only capture $name (name must appear in the pattern)
+
+Examples:
   rft rewrite 'interface{}' 'any'
   rft rewrite \
     '$F:@go:fmt::Errorf($MSG:/(?i)^failed to\s+(.*)/, $ERR)' \
-    '$F($MSG, $ERR)'
+    '$F("$MSG", $ERR)'
+  rft rewrite -n \
+    'func /Test.*/ (t *testing.T) { $$$_ $c:@go:context::Background $$$_ }' \
+    'c=t.Context'
 
-$Name holes in the replacement are filled from the match. String holes bound
-via regex with a capture group re-emit the group text as a string literal.`,
+$Name holes in the template are filled from the match. String holes bound via
+regex with a capture group re-emit the group text as a string literal.`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pat, repl := args[0], args[1]

@@ -111,17 +111,27 @@ func instantiateCall(n Node, m Match, source []byte) (string, error) {
 
 // EditsForMatches turns matches + replacement into ingest.Edit values.
 // source is the file content for all matches (one file per call).
-func EditsForMatches(matches []Match, repl Node, source []byte) ([]ingest.Edit, error) {
+// If setCapture is non-empty, each edit targets that capture's Span; matches
+// missing the capture are skipped. Otherwise the whole match root is replaced.
+func EditsForMatches(matches []Match, repl Node, source []byte, setCapture string) ([]ingest.Edit, error) {
 	var edits []ingest.Edit
 	for _, m := range matches {
 		text, err := Instantiate(repl, m, source)
 		if err != nil {
 			return nil, err
 		}
+		sp := m.Span
+		if setCapture != "" {
+			c, ok := m.Captures[setCapture]
+			if !ok {
+				continue
+			}
+			sp = c
+		}
 		edits = append(edits, ingest.Edit{
 			File:      m.File,
-			StartByte: m.Span.StartByte,
-			EndByte:   m.Span.EndByte,
+			StartByte: sp.StartByte,
+			EndByte:   sp.EndByte,
 			NewText:   text,
 		})
 	}
