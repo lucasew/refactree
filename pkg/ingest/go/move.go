@@ -54,6 +54,11 @@ func (moveDriver) ExtractDecl(filePath string, entity ingest.Atom) (ingest.DeclE
 		if keyword == "" {
 			keyword = "type"
 		}
+		// iota groups assign successive values; peeling one spec leaves siblings
+		// without init expressions (e.g. const ( A = iota; B; C )).
+		if keyword == "const" && goDeclGroupUsesIota(result.Node, source) {
+			return ingest.DeclExtract{}, fmt.Errorf("cross-file move of const using iota in a group is not supported")
+		}
 		specText := string(source[spec.StartByte():spec.EndByte()])
 		declText = keyword + " " + dedentOnce(specText)
 		removeStart = spec.StartByte()
@@ -699,6 +704,15 @@ type goDeclResult struct {
 	Grouped bool          // true when part of a type|var|const (...) group
 	Spec    *grammar.Node // non-nil for grouped type/var/const declarations
 	Keyword string        // "type", "var", or "const" when Grouped
+}
+
+// goDeclGroupUsesIota reports whether a const_declaration (or similar group)
+// mentions iota anywhere in its text (including in expressions on any spec).
+func goDeclGroupUsesIota(decl *grammar.Node, source []byte) bool {
+	if decl == nil {
+		return false
+	}
+	return strings.Contains(string(source[decl.StartByte():decl.EndByte()]), "iota")
 }
 
 // findGoDecl returns the declaration containing the entity whose name starts at nameStart.

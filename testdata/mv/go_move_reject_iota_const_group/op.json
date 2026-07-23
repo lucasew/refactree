@@ -1,0 +1,4 @@
+{
+  "source": "path:./pkg/tg/a.go::Control",
+  "destination": "path:./pkg/tg/b.go::Control"
+}
