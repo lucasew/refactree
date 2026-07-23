@@ -112,7 +112,13 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 		}
 		insertText += decl.DeclText + "\n"
 	} else {
-		pkgName := decl.Preamble
+		// New file: package clause must match the destination directory name,
+		// not the source package (Preamble). Moving into pkg/media_fuzz must
+		// emit "package media_fuzz", not the old "package media".
+		pkgName := ingest.LastPathComponent(dirOf(strings.TrimPrefix(dstRelPath, "./")))
+		if pkgName == "" || pkgName == "." {
+			pkgName = decl.Preamble
+		}
 		if pkgName == "" {
 			pkgName = ingest.LastPathComponent(strings.TrimSuffix(dstRelPath, ".go"))
 		}
@@ -603,11 +609,19 @@ func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ing
 		return nil
 	}
 
+	// Symbol-level moves: do not relocate the whole package import when the
+	// consumer still needs other symbols from the old package (e.g. type moves
+	// leaving consts behind). Surgical rewrite of oldLocal.MovedLeaf only, plus
+	// ensure the destination package is imported.
+	if oldRef.Name != "" {
+		return rewriteImportsForSymbolMove(fileRelPath, content, oldDir, newDir, ingest.AtomName(oldRef.Name))
+	}
+
 	var edits []ingest.Edit
 
-	// Rewrite import path strings on path-segment boundaries so that moving
-	// "pkg/api" does not rewrite "pkg/palette/api", and moving "pkg/cas" does
-	// not corrupt "case" or "lucas" inside string literals.
+	// Package moves: rewrite import path strings on path-segment boundaries so
+	// that moving "pkg/api" does not rewrite "pkg/palette/api", and moving
+	// "pkg/cas" does not corrupt "case" or "lucas" inside string literals.
 	edits = findPathSegmentOccurrencesInStrings(fileRelPath, content, oldDir, newDir)
 
 	if len(edits) == 0 {
@@ -626,18 +640,196 @@ func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ing
 		}
 	}
 
-	// For cross-file symbol moves, also update the qualifier (e.g. pkga.Helper -> pkgb.Helper).
-	// For package moves, the qualifier comes from the `package` directive and is handled
-	// separately by planPackageMove's declaredName logic.
-	if oldRef.Name != "" {
-		oldQual := ingest.LastPathComponent(oldDir)
-		newQual := ingest.LastPathComponent(newDir)
-		if oldQual != newQual {
-			qualEdits := findQualifierDotOccurrences(fileRelPath, content, oldQual, newQual)
-			edits = append(edits, qualEdits...)
+	return edits
+}
+
+// rewriteImportsForSymbolMove updates consumer files when a single symbol
+// changes packages. If every use of an import of oldDir is the moved leaf,
+// the import path and qualifiers are rewritten wholesale (same as a package
+// relocate for that import). If the import is still needed for other symbols,
+// only oldLocal.leaf selectors are rewritten and the destination package is
+// imported under its assumed name.
+func rewriteImportsForSymbolMove(fileRelPath string, content []byte, oldDir, newDir, leaf string) []ingest.Edit {
+	if leaf == "" {
+		return nil
+	}
+	newQual := ingest.LastPathComponent(newDir)
+	if newQual == "" {
+		return nil
+	}
+
+	specs := parseGoImportSpecs(content)
+	text := string(content)
+	var edits []ingest.Edit
+	needNewImport := false
+	var newImportPath string
+
+	for _, spec := range specs {
+		if !goImportPathMatchesDir(spec.path, oldDir) {
+			continue
+		}
+		local := spec.local
+		if local == "" {
+			local = goAssumedImportName(spec.path)
+		}
+		if local == "" || local == "." || local == "_" {
+			continue
+		}
+		uses := findQualifierSelectorUses(text, local)
+		if len(uses) == 0 {
+			continue
+		}
+		movedOnly := true
+		for _, u := range uses {
+			if u.leaf != leaf {
+				movedOnly = false
+				break
+			}
+		}
+		if movedOnly {
+			// Relocate this import path and rewrite local → newQual on selectors.
+			if np := goRewriteImportPathDir(spec.path, oldDir, newDir); np != "" && np != spec.path {
+				// Rewrite the quoted import path string in content.
+				// parseGoImportSpecs stores path without quotes; find it in import lines.
+				edits = append(edits, findExactImportPathEdits(fileRelPath, content, spec.path, np)...)
+				newImportPath = np
+			}
+			if local != newQual {
+				edits = append(edits, findQualifierDotOccurrences(fileRelPath, content, local, newQual)...)
+			}
+		} else {
+			// Keep old import; rewrite only local.leaf → newQual.leaf.
+			for _, u := range uses {
+				if u.leaf != leaf {
+					continue
+				}
+				edits = append(edits, ingest.Edit{
+					File:    fileRelPath,
+					Span:    ingest.Span{StartByte: uint32(u.qualStart), EndByte: uint32(u.leafEnd)},
+					NewText: newQual + "." + leaf,
+				})
+			}
+			needNewImport = true
+			if newImportPath == "" {
+				if np := goRewriteImportPathDir(spec.path, oldDir, newDir); np != "" {
+					newImportPath = np
+				}
+			}
 		}
 	}
 
+	// Also rewrite bare default-qualifier forms when import local matched assumed name
+	// of oldDir but path rewrite did not fire (e.g. no import of oldDir found above
+	// yet uses exist via a different mechanism). Skip if already handled.
+	if len(edits) == 0 {
+		oldQual := ingest.LastPathComponent(oldDir)
+		if oldQual != "" && oldQual != newQual {
+			// Only rewrite oldQual.leaf, not all oldQual.*
+			for _, u := range findQualifierSelectorUses(text, oldQual) {
+				if u.leaf != leaf {
+					continue
+				}
+				edits = append(edits, ingest.Edit{
+					File:    fileRelPath,
+					Span:    ingest.Span{StartByte: uint32(u.qualStart), EndByte: uint32(u.leafEnd)},
+					NewText: newQual + "." + leaf,
+				})
+				needNewImport = true
+			}
+		}
+	}
+
+	if needNewImport && newImportPath != "" {
+		edits = append(edits, goImportInsertEdits(fileRelPath, content, []string{newImportPath})...)
+	}
+	return edits
+}
+
+type qualifierSelectorUse struct {
+	qualStart, leafEnd int
+	leaf               string
+}
+
+// findQualifierSelectorUses finds ident.Ident selections where ident == qual.
+func findQualifierSelectorUses(text, qual string) []qualifierSelectorUse {
+	if qual == "" {
+		return nil
+	}
+	needle := qual + "."
+	var out []qualifierSelectorUse
+	off := 0
+	for {
+		idx := strings.Index(text[off:], needle)
+		if idx < 0 {
+			break
+		}
+		pos := off + idx
+		if pos > 0 && ingest.IsIdentChar(text[pos-1]) {
+			off = pos + len(needle)
+			continue
+		}
+		leafStart := pos + len(needle)
+		leafEnd := leafStart
+		for leafEnd < len(text) && ingest.IsIdentChar(text[leafEnd]) {
+			leafEnd++
+		}
+		if leafEnd == leafStart {
+			off = pos + len(needle)
+			continue
+		}
+		out = append(out, qualifierSelectorUse{
+			qualStart: pos,
+			leafEnd:   leafEnd,
+			leaf:      text[leafStart:leafEnd],
+		})
+		off = leafEnd
+	}
+	return out
+}
+
+func goImportPathMatchesDir(importPath, pkgDir string) bool {
+	if importPath == "" || pkgDir == "" {
+		return false
+	}
+	return importPath == pkgDir || strings.HasSuffix(importPath, "/"+pkgDir)
+}
+
+func goRewriteImportPathDir(importPath, oldDir, newDir string) string {
+	if importPath == oldDir {
+		return newDir
+	}
+	if strings.HasSuffix(importPath, "/"+oldDir) {
+		return strings.TrimSuffix(importPath, oldDir) + newDir
+	}
+	return ""
+}
+
+// findExactImportPathEdits rewrites import path string literals equal to oldPath.
+func findExactImportPathEdits(file string, content []byte, oldPath, newPath string) []ingest.Edit {
+	if oldPath == "" || oldPath == newPath {
+		return nil
+	}
+	text := string(content)
+	// Match "oldPath" or `oldPath` as full import path.
+	var edits []ingest.Edit
+	for _, quote := range []byte{'"', '`'} {
+		needle := string(quote) + oldPath + string(quote)
+		off := 0
+		for {
+			idx := strings.Index(text[off:], needle)
+			if idx < 0 {
+				break
+			}
+			pos := off + idx
+			// path span inside quotes
+			edits = append(edits, ingest.Edit{
+				File:    file,
+				Span:    ingest.Span{StartByte: uint32(pos + 1), EndByte: uint32(pos + 1 + len(oldPath))},
+				NewText: newPath,
+			})
+			off = pos + len(needle)
+		}
+	}
 	return edits
 }
 

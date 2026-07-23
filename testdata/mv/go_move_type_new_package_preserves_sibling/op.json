@@ -1,0 +1,4 @@
+{
+  "source": "path:./pkg/media/driver.go::PlaybackStatus",
+  "destination": "path:./pkg/media_fuzz/driver.go::PlaybackStatus"
+}
