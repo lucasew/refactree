@@ -29,6 +29,12 @@ func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 		return nil, fmt.Errorf("source and destination references must both include symbols or both omit them (for package moves)")
 	}
 
+	// CLI may pass absolute path: refs; Result identity is ./rel under root.
+	src = ProjectPathRef(dir, src)
+	dst = ProjectPathRef(dir, dst)
+	sourceRef = src.String()
+	destRef = dst.String()
+
 	slog.Debug("rename: materialize project", "root", dir, "source", sourceRef, "destination", destRef)
 	result, err := ProjectResult(dir)
 	if err != nil {
@@ -49,6 +55,9 @@ func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Keep project-relative path identity after canonicalize.
+	src = ProjectPathRef(dir, src)
+	dst = ProjectPathRef(dir, dst)
 	slog.Debug("rename: canonical refs", "source", src.String(), "destination", dst.String())
 
 	sourceRef = src.String()

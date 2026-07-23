@@ -98,9 +98,81 @@ func AbsolutePathReferenceForScope(scope ReferenceScope) Reference {
 	return ref
 }
 
+// AbsolutePathRef rewrites a path-provider ref so Path is an absolute filesystem
+// path under baseDir. Non-path refs and already-absolute paths are unchanged.
+// Used at the mv CLI boundary so path identity is not a short relative leaf
+// (e.g. "pkg") that collides with nested dirs like testdata/.../pkg.
+func AbsolutePathRef(baseDir string, ref Reference) Reference {
+	if ref.Provider != "path" || ref.Path == "" || filepath.IsAbs(ref.Path) {
+		return ref
+	}
+	ref.Path = absolutePathFromBase(baseDir, ref.Path)
+	return ref
+}
+
+// RelPathUnderRoot maps an absolute or ./relative path to a clean slash path
+// relative to root (no leading "./"). Empty string means the root itself.
+// Paths outside root return an error.
+func RelPathUnderRoot(root, p string) (string, error) {
+	if p == "" {
+		return "", nil
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	var targetAbs string
+	if filepath.IsAbs(p) {
+		targetAbs = filepath.Clean(p)
+	} else {
+		targetAbs = absolutePathFromBase(rootAbs, p)
+	}
+	rel, err := filepath.Rel(rootAbs, targetAbs)
+	if err != nil {
+		return "", err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", errPathOutsideRoot(p, rootAbs)
+	}
+	if rel == "." {
+		return "", nil
+	}
+	return filepath.ToSlash(rel), nil
+}
+
+// ProjectPathRef rewrites a path ref to ./rel form under root (ingest Result
+// identity). Absolute paths under root become ./rel; others unchanged on error.
+func ProjectPathRef(root string, ref Reference) Reference {
+	if ref.Provider != "path" || ref.Path == "" {
+		return ref
+	}
+	rel, err := RelPathUnderRoot(root, ref.Path)
+	if err != nil {
+		return ref
+	}
+	if rel == "" {
+		ref.Path = "./"
+		return ref
+	}
+	ref.Path = "./" + rel
+	return ref
+}
+
+func errPathOutsideRoot(p, rootAbs string) error {
+	return &pathOutsideRootError{path: p, root: rootAbs}
+}
+
+type pathOutsideRootError struct {
+	path, root string
+}
+
+func (e *pathOutsideRootError) Error() string {
+	return "path " + e.path + " outside root " + e.root
+}
+
 func absolutePathFromBase(baseDir, p string) string {
 	if filepath.IsAbs(p) {
-		return p
+		return filepath.Clean(p)
 	}
 	trimmed := strings.TrimPrefix(p, "./")
 	joined := filepath.Join(baseDir, trimmed)

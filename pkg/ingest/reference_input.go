@@ -59,9 +59,10 @@ func ResolveInputReferenceScope(baseDir, input string) ReferenceScope {
 // inputs under project baseDir (typically cwd).
 //
 // Unlike ResolveInputReferenceScope, this does not narrow the ingest root to the
-// source file's parent directory. Both paths stay relative to baseDir so a
-// destination like path:./pkg/ingest/span.go is not rebased under the source
-// package (e.g. pkg/pattern/pkg/ingest/…).
+// source file's parent directory. Path refs are expanded to absolute filesystem
+// paths so package identity is not a short relative leaf (e.g. "pkg") that
+// collides with nested trees like testdata/.../pkg. Rename maps them back to
+// ./rel under root for Result identity via ProjectPathRef.
 //
 // Source is canonicalized (barrels / definition hops). Destination is only
 // coerced and path-normalized: the target file may not exist yet.
@@ -69,14 +70,21 @@ func ResolveMoveArgs(baseDir, source, destination string) (root, src, dst string
 	if baseDir == "" {
 		baseDir = "."
 	}
+	rootAbs, err := filepath.Abs(baseDir)
+	if err != nil {
+		rootAbs = baseDir
+	}
+
 	srcRef := ParseReference(source)
 	srcRef = CoerceLocalPathReference(baseDir, srcRef)
 	srcRef = CanonicalizeReference(baseDir, srcRef)
 	srcRef = NormalizeReferenceForScope(baseDir, baseDir, srcRef)
+	srcRef = AbsolutePathRef(baseDir, srcRef)
 
 	dstRef := ParseReference(destination)
 	dstRef = CoerceLocalPathReference(baseDir, dstRef)
 	dstRef = NormalizeReferenceForScope(baseDir, baseDir, dstRef)
+	dstRef = AbsolutePathRef(baseDir, dstRef)
 
-	return baseDir, srcRef.String(), dstRef.String()
+	return rootAbs, srcRef.String(), dstRef.String()
 }

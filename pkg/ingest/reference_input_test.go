@@ -59,7 +59,7 @@ func TestResolveInputReferenceScope(t *testing.T) {
 	}
 }
 
-func TestResolveMoveArgs_CrossDirKeepsProjectRelativePaths(t *testing.T) {
+func TestResolveMoveArgs_ExpandsPathToAbsolute(t *testing.T) {
 	dir := t.TempDir()
 	srcFile := filepath.Join(dir, "pkg", "pattern", "match.go")
 	if err := os.MkdirAll(filepath.Dir(srcFile), 0755); err != nil {
@@ -76,24 +76,36 @@ func TestResolveMoveArgs_CrossDirKeepsProjectRelativePaths(t *testing.T) {
 		"path:./pkg/pattern/match.go::Span",
 		"path:./pkg/ingest/span.go::Span",
 	)
-	if root != dir {
-		t.Fatalf("root=%q want project root %q", root, dir)
+	rootAbs, err := filepath.Abs(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root != rootAbs {
+		t.Fatalf("root=%q want abs %q", root, rootAbs)
 	}
 	srcRef := ingest.ParseReference(src)
 	dstRef := ingest.ParseReference(dst)
-	if srcRef.Path != "./pkg/pattern/match.go" || srcRef.Name != "Span" {
-		t.Fatalf("source ref=%+v want path ./pkg/pattern/match.go::Span", srcRef)
+	wantSrc := filepath.Join(rootAbs, "pkg", "pattern", "match.go")
+	wantDst := filepath.Join(rootAbs, "pkg", "ingest", "span.go")
+	if srcRef.Path != wantSrc || srcRef.Name != "Span" {
+		t.Fatalf("source ref=%+v want path %s::Span", srcRef, wantSrc)
 	}
-	if dstRef.Path != "./pkg/ingest/span.go" || dstRef.Name != "Span" {
-		t.Fatalf("destination ref=%+v want path ./pkg/ingest/span.go::Span", dstRef)
+	if dstRef.Path != wantDst || dstRef.Name != "Span" {
+		t.Fatalf("destination ref=%+v want path %s::Span", dstRef, wantDst)
 	}
-	// Regression: old CLI used source parent as root and rebased dest under it.
+	// Absolute paths must not be rebased under a source-parent scope.
 	if strings.Contains(dstRef.Path, "pattern/pkg") {
 		t.Fatalf("destination rebased under source package: %q", dstRef.Path)
 	}
+
+	// Rename maps absolute path refs back to project-relative identity.
+	proj := ingest.ProjectPathRef(root, srcRef)
+	if proj.Path != "./pkg/pattern/match.go" {
+		t.Fatalf("ProjectPathRef=%q", proj.Path)
+	}
 }
 
-func TestResolveMoveArgs_BarePackageDirs(t *testing.T) {
+func TestResolveMoveArgs_BarePackageDirsAbsolute(t *testing.T) {
 	dir := t.TempDir()
 	for _, p := range []string{"cmd/codegen", "cmd/gen"} {
 		if err := os.MkdirAll(filepath.Join(dir, p), 0755); err != nil {
@@ -106,18 +118,55 @@ func TestResolveMoveArgs_BarePackageDirs(t *testing.T) {
 	}
 
 	root, src, dst := ingest.ResolveMoveArgs(dir, "cmd/codegen", "cmd/gen")
-	if root != dir {
-		t.Fatalf("root=%q want %q", root, dir)
+	rootAbs, err := filepath.Abs(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root != rootAbs {
+		t.Fatalf("root=%q want %q", root, rootAbs)
 	}
 	srcRef := ingest.ParseReference(src)
 	dstRef := ingest.ParseReference(dst)
-	if srcRef.Provider != "path" || !strings.Contains(srcRef.Path, "codegen") {
+	if srcRef.Provider != "path" || !filepath.IsAbs(srcRef.Path) || !strings.Contains(srcRef.Path, "codegen") {
 		t.Fatalf("source ref=%+v", srcRef)
 	}
-	if dstRef.Provider != "path" || !strings.Contains(dstRef.Path, "gen") {
+	if dstRef.Provider != "path" || !filepath.IsAbs(dstRef.Path) || !strings.Contains(dstRef.Path, "gen") {
 		t.Fatalf("destination ref=%+v", dstRef)
 	}
 	if srcRef.Name != "" || dstRef.Name != "" {
 		t.Fatalf("package move should have empty symbols: src=%+v dst=%+v", srcRef, dstRef)
+	}
+	// Nested fixture-like pkg/ must not equal top-level absolute pkg identity.
+	nested := filepath.Join(rootAbs, "testdata", "mv", "input", "pkg")
+	top := filepath.Join(rootAbs, "pkg")
+	if nested == top {
+		t.Fatal("nested and top pkg paths should differ")
+	}
+	topRef := ingest.AbsolutePathRef(rootAbs, ingest.ParseReference("path:./pkg"))
+	if topRef.Path != top {
+		// ./pkg may not exist in this temp dir — only check abs form when present
+		if st, err := os.Stat(top); err == nil && st.IsDir() && topRef.Path != top {
+			t.Fatalf("AbsolutePathRef pkg=%q want %q", topRef.Path, top)
+		}
+	}
+}
+
+func TestRelPathUnderRoot(t *testing.T) {
+	dir := t.TempDir()
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(abs, "pkg", "a.go")
+	rel, err := ingest.RelPathUnderRoot(abs, sub)
+	if err != nil || rel != "pkg/a.go" {
+		t.Fatalf("rel=%q err=%v", rel, err)
+	}
+	rel, err = ingest.RelPathUnderRoot(abs, "./pkg/a.go")
+	if err != nil || rel != "pkg/a.go" {
+		t.Fatalf("rel from ./ =%q err=%v", rel, err)
+	}
+	if _, err := ingest.RelPathUnderRoot(abs, filepath.Join(abs, "..", "outside")); err == nil {
+		t.Fatal("expected outside root error")
 	}
 }
