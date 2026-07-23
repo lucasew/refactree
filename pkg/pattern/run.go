@@ -195,10 +195,13 @@ func Stream(root string, op Op, opts StreamOptions) error {
 			if err != nil {
 				return err
 			}
-			// Ensure imports for static @refs in the replacement (Go first).
+			// Ensure @ref imports + prune named imports unused after site replacements.
+			// Mask only the replaced site spans (not full match roots) so signatures
+			// and other remaining uses still count (e.g. t *testing.T).
 			if len(fileEdits) > 0 {
 				needs := ImportNeedsForRule(fe.Language, rule)
-				fileEdits = WithImportHygiene(rel, fe.Language, source, fileEdits, needs)
+				prune := ingest.PruneImportOpts{MaskSpans: siteEditMaskSpans(fileEdits)}
+				fileEdits = WithImportHygiene(rel, fe.Language, source, fileEdits, needs, prune)
 			}
 		}
 		if opts.OnFile != nil && !opts.OnFile(rel, ms, fileEdits, source) {

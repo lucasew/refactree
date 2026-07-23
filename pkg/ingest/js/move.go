@@ -440,10 +440,9 @@ func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src
 
 	var edits []ingest.Edit
 
-	// 1. Strip unused imports from the source file (imports that only the
-	//    moved declaration used).
+	// 1. Strip unused named imports from the source (only the moved decl needed).
 	if srcContent, err := os.ReadFile(path.Join(rootDir, srcRel)); err == nil {
-		edits = append(edits, stripUnusedJSImports(srcRel, srcContent, decl)...)
+		edits = append(edits, ingest.PruneNamedUnusedForDecl("javascript", srcRel, srcContent, decl)...)
 	}
 
 	// 2. Carry needed imports to the destination with rewritten relative paths.
@@ -612,8 +611,12 @@ func addExportKeyword(file string, content []byte, symbol string) []ingest.Edit 
 type jsImportStmt struct {
 	// Full text of the import statement including trailing semicolon/newline.
 	text string
-	// Local names this import introduces.
+	// Local names this import introduces (default, named, and namespace).
 	locals []string
+	// namedLocals are only from { named } specs (for prune).
+	namedLocals []string
+	// namedOnly is true when the clause is only { named } (no default/namespace/side-effect).
+	namedOnly bool
 	// startByte/endByte in the source file.
 	startByte, endByte uint32
 }
@@ -633,38 +636,51 @@ func parseJSImportStatements(root *grammar.Node, source []byte) []jsImportStmt {
 			endByte:   child.EndByte(),
 		}
 		clause := ingest.ChildByType(child, "import_clause")
-		if clause != nil {
-			collectImportLocals(clause, source, &stmt.locals)
+		if clause == nil {
+			stmt.namedOnly = false
+		} else {
+			var hasDefault, hasNamespace, hasNamed bool
+			collectImportLocals(clause, source, &stmt.locals, &stmt.namedLocals, &hasDefault, &hasNamespace, &hasNamed)
+			stmt.namedOnly = hasNamed && !hasDefault && !hasNamespace
 		}
 		stmts = append(stmts, stmt)
 	}
 	return stmts
 }
 
-func collectImportLocals(n *grammar.Node, source []byte, out *[]string) {
+func collectImportLocals(n *grammar.Node, source []byte, all, named *[]string, hasDefault, hasNamespace, hasNamed *bool) {
 	for i := uint32(0); i < n.ChildCount(); i++ {
 		c := n.Child(i)
 		switch c.Type() {
 		case "identifier":
-			*out = append(*out, ingest.NodeText(c, source))
+			// Default import binding.
+			*hasDefault = true
+			*all = append(*all, ingest.NodeText(c, source))
 		case "named_imports":
+			*hasNamed = true
 			for j := uint32(0); j < c.ChildCount(); j++ {
 				spec := c.Child(j)
 				if spec.Type() != "import_specifier" {
 					continue
 				}
-				// Alias takes precedence as local name.
+				var local string
 				if alias := ingest.ChildByField(spec, "alias"); alias != nil {
-					*out = append(*out, ingest.NodeText(alias, source))
+					local = ingest.NodeText(alias, source)
 				} else if name := ingest.ChildByField(spec, "name"); name != nil {
-					*out = append(*out, ingest.NodeText(name, source))
+					local = ingest.NodeText(name, source)
 				}
+				if local == "" {
+					continue
+				}
+				*all = append(*all, local)
+				*named = append(*named, local)
 			}
 		case "namespace_import":
+			*hasNamespace = true
 			for j := uint32(0); j < c.ChildCount(); j++ {
 				id := c.Child(j)
 				if id.Type() == "identifier" {
-					*out = append(*out, ingest.NodeText(id, source))
+					*all = append(*all, ingest.NodeText(id, source))
 				}
 			}
 		}
@@ -730,70 +746,6 @@ func jsImportInsertEdits(file string, content []byte, stmts []string) []ingest.E
 		Span:    ingest.Span{StartByte: uint32(insertPos), EndByte: uint32(insertPos)},
 		NewText: block,
 	}}
-}
-
-// stripUnusedJSImports removes import statements from the source file that were
-// only used by the removed declaration.
-func stripUnusedJSImports(file string, content []byte, decl ingest.DeclExtract) []ingest.Edit {
-	if len(decl.Imports) == 0 {
-		return nil
-	}
-	// Build set of import texts that the declaration used.
-	declImports := map[string]bool{}
-	for _, imp := range decl.Imports {
-		declImports[imp] = true
-	}
-	// Mask out the declaration region to see what the rest of the file uses.
-	masked := append([]byte(nil), content...)
-	ingest.MaskNonNewlinesInPlace(masked, int(decl.RemoveStart), int(decl.RemoveEnd))
-
-	// For each import used by the declaration, check if any of its local
-	// names are still referenced in the rest of the file.
-	pf, err := ingest.ParseSource(content, file, "")
-	if err != nil {
-		return nil
-	}
-	defer pf.Close()
-	root := pf.Root
-
-	stmts := parseJSImportStatements(root, content)
-
-	// Also mask out all import statements so we only check usage in
-	// the non-import body of the file.
-	for _, stmt := range stmts {
-		ingest.MaskNonNewlinesInPlace(masked, int(stmt.startByte), int(stmt.endByte))
-	}
-	restText := string(masked)
-
-	var edits []ingest.Edit
-	for _, stmt := range stmts {
-		if !declImports[stmt.text] {
-			continue
-		}
-		// Check if any local name from this import is still used in the body.
-		stillUsed := false
-		for _, local := range stmt.locals {
-			if jsIdentUsed(restText, local) {
-				stillUsed = true
-				break
-			}
-		}
-		if stillUsed {
-			continue
-		}
-		// Remove the entire import statement including trailing newline.
-		removeEnd := stmt.endByte
-		for removeEnd < uint32(len(content)) && content[removeEnd] == '\n' {
-			removeEnd++
-			break // remove at most one trailing newline
-		}
-		edits = append(edits, ingest.Edit{
-			File:    file,
-			Span:    ingest.Span{StartByte: stmt.startByte, EndByte: removeEnd},
-			NewText: "",
-		})
-	}
-	return edits
 }
 
 // jsRelativeImportPath computes a relative import path from fromFile to toFile.

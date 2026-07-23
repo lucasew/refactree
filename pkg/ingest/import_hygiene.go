@@ -14,16 +14,30 @@ type ImportNeed struct {
 	ImportPath string
 }
 
-// ImportHygiene ensures missing imports after site rewrites (and similar).
+// PruneImportOpts controls named-only unused-import removal.
+//
+// MaskSpans are body regions treated as deleted for usage (moved decl, rewrite
+// match spans). OnlyCandidates, when non-empty, limits prune to those import
+// keys (language-specific: Go import path; JS/Java full import statement text
+// as in DeclExtract.Imports). Empty OnlyCandidates means all named imports.
+//
+// Never removes barrel-style imports (side-effect, star/namespace, Go blank/dot).
+type PruneImportOpts struct {
+	MaskSpans       []Span
+	OnlyCandidates  []string
+}
+
+// ImportHygiene ensures missing imports and prunes unused named imports.
 //
 // Layering (Go):
 //   - ImportHygiene.EnsureImportEdits — edit-plan form (rewrite)
+//   - ImportHygiene.PruneNamedUnusedEdits — drop dead named bindings only
 //   - language EnsureImportsInContent — in-memory string form (InsertDecl)
 //   - MoveDriver.RewriteImports — rewrite import *paths* on package/symbol move
 //
 // Prefer ImportHygiene when the caller emits []Edit. Prefer EnsureImportsInContent
 // only when assembling full file text in memory. Never use either for path
-// rewrite on move.
+// rewrite on move. A future `imports` subcommand should call the same methods.
 type ImportHygiene interface {
 	Language() string
 	// NeedsFromRef maps a product ref (with or without leading @) to an import
@@ -34,6 +48,26 @@ type ImportHygiene interface {
 	// Edits use content's byte offsets so they compose with later body edits
 	// when ApplyEdits runs high offsets first.
 	EnsureImportEdits(fileRel string, content []byte, needs []ImportNeed) []Edit
+	// PruneNamedUnusedEdits removes unused named import bindings under opts.
+	// Edits are against content. Never removes barrel imports. Empty = nothing.
+	PruneNamedUnusedEdits(fileRel string, content []byte, opts PruneImportOpts) []Edit
+}
+
+// PruneNamedUnusedForDecl is the shared residual path for cross-file moves:
+// prune named imports that only the removed declaration needed.
+// Empty decl.Imports means no candidates (do not full-file prune).
+func PruneNamedUnusedForDecl(lang, fileRel string, content []byte, decl DeclExtract) []Edit {
+	h, ok := ImportHygieneForLanguage(lang)
+	if !ok || len(content) == 0 || len(decl.Imports) == 0 {
+		return nil
+	}
+	return h.PruneNamedUnusedEdits(fileRel, content, PruneImportOpts{
+		MaskSpans: []Span{{
+			StartByte: decl.RemoveStart,
+			EndByte:   decl.RemoveEnd,
+		}},
+		OnlyCandidates: decl.Imports,
+	})
 }
 
 var (

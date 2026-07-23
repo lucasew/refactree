@@ -42,3 +42,34 @@ func TestGoImportHygiene_EnsureImportEdits(t *testing.T) {
 		t.Fatalf("expected no change, got %+v", got)
 	}
 }
+
+func TestGoImportHygiene_PruneNamedUnused(t *testing.T) {
+	h := goImportHygiene{}
+	// fmt only used in the masked region; strings still used outside.
+	src := []byte("package p\n\nimport (\n\t\"fmt\"\n\t\"strings\"\n)\n\nfunc f() {\n\tfmt.Println()\n\t_ = strings.TrimSpace(\"\")\n}\n")
+	// Mask the fmt.Println line.
+	start := strings.Index(string(src), "fmt.Println()")
+	if start < 0 {
+		t.Fatal("fixture")
+	}
+	end := start + len("fmt.Println()")
+	edits := h.PruneNamedUnusedEdits("p.go", src, ingest.PruneImportOpts{
+		MaskSpans:      []ingest.Span{{StartByte: uint32(start), EndByte: uint32(end)}},
+		OnlyCandidates: []string{"fmt"},
+	})
+	if len(edits) == 0 {
+		t.Fatal("expected prune of fmt")
+	}
+	out := string(ingest.ApplyEditsInMemory(src, edits))
+	if strings.Contains(out, `"fmt"`) {
+		t.Fatalf("fmt should be pruned:\n%s", out)
+	}
+	if !strings.Contains(out, `"strings"`) {
+		t.Fatalf("strings must remain:\n%s", out)
+	}
+	// Blank import never pruned.
+	side := []byte("package p\n\nimport _ \"image/png\"\n\nfunc f() {}\n")
+	if got := h.PruneNamedUnusedEdits("p.go", side, ingest.PruneImportOpts{}); len(got) != 0 {
+		t.Fatalf("blank import must not prune: %+v", got)
+	}
+}

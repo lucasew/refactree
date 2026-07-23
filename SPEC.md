@@ -92,8 +92,11 @@ Structural spine for discovery and graphs. Goal: one walk/parse path, no duplica
   - `rft rewrite` is one Rule over a file stream
   - `mv` remains a symbol-identity **planner** (full graph for defs, aliases, expanders, package moves)
   - **Use-site leaf renames** go through `RegisterUseSiteRenamer` → `pattern.UseSiteRenames` (`RefLeafRule` per target file) when `pkg/pattern` is linked; graph `Uses` walk is the fallback
-- **`ImportHygiene`**: after rewrite site edits, ensure imports for **static `@ref`s in the replacement** (`NeedsFromRef` + `EnsureImportEdits`). Go registered. Strip-unused is out of v1
-- **Import layering (Go):** `EnsureImportsInContent` (in-memory add missing paths; InsertDecl) ↔ `ImportHygiene.EnsureImportEdits` (same engine as `[]Edit`) vs `MoveDriver.RewriteImports` (rewrite import *paths* on move)
+- **`ImportHygiene`**: shared import engine for rewrite, mv residual, and a future `imports` subcommand
+  - **Ensure** (`NeedsFromRef` + `EnsureImportEdits`): add missing imports for static `@ref`s in the replacement
+  - **Prune named** (`PruneNamedUnusedEdits`): drop unused **named** import bindings only; never barrels (side-effect, star/namespace, Go `_`/`.`). MaskSpans = deleted body (moved decl / rewrite matches); OnlyCandidates limits residual prune
+  - Go ensure+prune; JS/Java prune (named-only). Subcommand last — same API, no second path
+- **Import layering (Go):** `EnsureImportsInContent` (in-memory add missing paths; InsertDecl) ↔ `ImportHygiene.EnsureImportEdits` / `PruneNamedUnusedEdits` vs `MoveDriver.RewriteImports` (rewrite import *paths* on move)
 - **`ApplyEditsInMemory`**: single in-memory apply helper (rename/package plan staging)
 - Planners differ (identity/graph vs stream/codemod); site expansion, import ensure, and apply do not
 

@@ -514,56 +514,14 @@ func ensureJavaImports(content string, imports []string) string {
 	return strings.Join(out, "\n")
 }
 
-// FinishCrossFileMove strips source imports that were only needed by the moved decl.
+// FinishCrossFileMove strips source named imports that were only needed by the moved decl.
 func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src, dst ingest.Reference, decl ingest.DeclExtract) ([]ingest.Edit, error) {
 	srcRel := strings.TrimPrefix(src.Path, "./")
 	srcContent, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(srcRel)))
 	if err != nil {
 		return nil, nil
 	}
-	return stripUnusedJavaImports(srcRel, srcContent, decl), nil
-}
-
-// stripUnusedJavaImports removes import statements from the source file that
-// were only used by the removed declaration (same idea as Go/JS).
-func stripUnusedJavaImports(file string, content []byte, decl ingest.DeclExtract) []ingest.Edit {
-	if len(decl.Imports) == 0 {
-		return nil
-	}
-	carried := map[string]bool{}
-	for _, stmt := range decl.Imports {
-		carried[strings.TrimSpace(stmt)] = true
-	}
-	// Mask the removed declaration so remaining body usage is visible.
-	masked := append([]byte(nil), content...)
-	ingest.MaskNonNewlinesInPlace(masked, int(decl.RemoveStart), int(decl.RemoveEnd))
-	// Mask import lines themselves so we do not count import idents as body use.
-	specs := parseJavaImportSpecs(content)
-	for _, spec := range specs {
-		ingest.MaskNonNewlinesInPlace(masked, int(spec.startByte), int(spec.endByte))
-	}
-	rest := string(masked)
-
-	var edits []ingest.Edit
-	for _, spec := range specs {
-		if !carried[spec.stmt] {
-			continue
-		}
-		// Wildcards: cannot prove remaining body still needs them. Only strip
-		// when the simple-name path would also strip (never for "*").
-		if spec.local == "*" {
-			continue
-		}
-		if javaIdentUsed(rest, spec.local) {
-			continue
-		}
-		edits = append(edits, ingest.Edit{
-			File:    file,
-			Span:    ingest.Span{StartByte: uint32(spec.startByte), EndByte: uint32(spec.endByte)},
-			NewText: "",
-		})
-	}
-	return edits
+	return ingest.PruneNamedUnusedForDecl("java", srcRel, srcContent, decl), nil
 }
 
 func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ingest.Result, oldRef, newRef ingest.Reference) []ingest.Edit {

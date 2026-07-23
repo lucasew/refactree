@@ -931,10 +931,10 @@ func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src
 	oldDir := dirOf(srcRel)
 	newDir := dirOf(dstRel)
 
-	// Same-package layout moves still need unused import cleanup on the source file.
+	// Same-package layout moves still need unused named-import cleanup on the source file.
 	if oldDir == newDir {
 		if srcContent, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(srcRel))); err == nil {
-			return stripUnusedSourceImports(srcRel, srcContent, decl), nil
+			return ingest.PruneNamedUnusedForDecl("go", srcRel, srcContent, decl), nil
 		}
 		return nil, nil
 	}
@@ -964,7 +964,7 @@ func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src
 
 	var edits []ingest.Edit
 	if srcContent, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(srcRel))); err == nil {
-		edits = append(edits, stripUnusedSourceImports(srcRel, srcContent, decl)...)
+		edits = append(edits, ingest.PruneNamedUnusedForDecl("go", srcRel, srcContent, decl)...)
 	}
 	if leaf == "init" {
 		return edits, nil
@@ -1182,88 +1182,6 @@ func goImportInsertEdits(file string, content []byte, paths []string) []ingest.E
 		offset += len(line) + 1
 	}
 	return nil
-}
-
-func stripUnusedSourceImports(file string, content []byte, decl ingest.DeclExtract) []ingest.Edit {
-	if len(decl.Imports) == 0 {
-		return nil
-	}
-	want := map[string]bool{}
-	for _, p := range decl.Imports {
-		want[p] = true
-	}
-	specs := parseGoImportSpecs(content)
-	masked := append([]byte(nil), content...)
-	ingest.MaskNonNewlinesInPlace(masked, int(decl.RemoveStart), int(decl.RemoveEnd))
-	seenBlocks := map[int]bool{}
-	for _, spec := range specs {
-		if spec.blockStart >= 0 && spec.blockEnd > 0 {
-			if !seenBlocks[spec.blockStart] {
-				ingest.MaskNonNewlinesInPlace(masked, spec.blockStart, spec.blockEnd)
-				seenBlocks[spec.blockStart] = true
-			}
-			continue
-		}
-		ingest.MaskNonNewlinesInPlace(masked, spec.lineStart, spec.lineEnd)
-	}
-	bodyText := string(masked)
-	var edits []ingest.Edit
-	blockCounts := map[int]int{}
-	blockRemove := map[int]int{}
-	for _, spec := range specs {
-		if spec.blockStart >= 0 {
-			blockCounts[spec.blockStart]++
-		}
-	}
-	for _, spec := range specs {
-		if !want[spec.path] || spec.local == "" || spec.local == "." || spec.local == "_" {
-			continue
-		}
-		if goIdentUsed(bodyText, spec.local) {
-			continue
-		}
-		edits = append(edits, ingest.Edit{
-			File:    file,
-			Span:    ingest.Span{StartByte: uint32(spec.lineStart), EndByte: uint32(spec.lineEnd)},
-			NewText: "",
-		})
-		if spec.blockStart >= 0 {
-			blockRemove[spec.blockStart]++
-		}
-	}
-	for blockStart, removed := range blockRemove {
-		if removed == 0 || removed < blockCounts[blockStart] {
-			continue
-		}
-		blockEnd := 0
-		for _, spec := range specs {
-			if spec.blockStart == blockStart && spec.blockEnd > 0 {
-				blockEnd = spec.blockEnd
-				break
-			}
-		}
-		if blockEnd <= blockStart {
-			continue
-		}
-		filtered := edits[:0]
-		for _, e := range edits {
-			if int(e.StartByte) >= blockStart && int(e.EndByte) <= blockEnd && e.NewText == "" {
-				continue
-			}
-			filtered = append(filtered, e)
-		}
-		edits = filtered
-		start, end := blockStart, blockEnd
-		if start > 0 && content[start-1] == '\n' {
-			start--
-		}
-		edits = append(edits, ingest.Edit{
-			File:    file,
-			Span:    ingest.Span{StartByte: uint32(start), EndByte: uint32(end)},
-			NewText: "",
-		})
-	}
-	return edits
 }
 
 func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, sourceRefs []string, oldLeaf, newLeaf string) []ingest.Edit {

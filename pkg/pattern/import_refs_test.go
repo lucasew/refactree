@@ -84,3 +84,41 @@ func TestImportNeedsForRule(t *testing.T) {
 		t.Fatal("python should have no hygiene registered")
 	}
 }
+
+func TestWithImportHygiene_PrunesNamedAfterSiteRewrite(t *testing.T) {
+	dir := t.TempDir()
+	// context only used at the rewritten site; after rewrite it is unused and pruned.
+	src := []byte("package p\n\nimport (\n\t\"context\"\n\t\"fmt\"\n)\n\nfunc f() {\n\t_ = context.Background()\n\tfmt.Println()\n}\n")
+	path := filepath.Join(dir, "p.go")
+	if err := os.WriteFile(path, src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	op, err := pattern.OpFromCLI("rewrite", "go",
+		`context.Background()`,
+		`nil`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := pattern.RunWithOptions(dir, op, pattern.RunOptions{Paths: []string{path}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ingest.ApplyEdits(dir, res.Edits); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(got)
+	if strings.Contains(text, `"context"`) {
+		t.Fatalf("expected context import pruned:\n%s", text)
+	}
+	if !strings.Contains(text, `"fmt"`) {
+		t.Fatalf("fmt must remain:\n%s", text)
+	}
+	if !strings.Contains(text, "nil") {
+		t.Fatalf("rewrite missing:\n%s", text)
+	}
+}
