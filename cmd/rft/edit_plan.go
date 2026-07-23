@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -23,14 +24,24 @@ type applyEditPlanOptions struct {
 // DryRun never writes. Empty edits is a no-op success (callers may error first).
 func applyEditPlan(cmd *cobra.Command, root string, edits []ingest.Edit, opts applyEditPlanOptions) error {
 	if len(edits) == 0 {
+		slog.Debug("apply plan: no edits")
 		return nil
 	}
+	slog.Debug("apply plan",
+		"root", root,
+		"edits", len(edits),
+		"files", editFileCount(edits),
+		"interactive", opts.Interactive,
+		"dry_run", opts.DryRun,
+		"backup", opts.Backup,
+	)
 	if opts.Interactive || opts.DryRun {
 		w := cmd.ErrOrStderr()
 		if err := printEditPlan(w, edits); err != nil {
 			return err
 		}
 		if opts.DryRun {
+			slog.Debug("apply plan: dry-run, skip write")
 			return nil
 		}
 		ok, err := confirmApply(w, cmd.InOrStdin())
@@ -38,6 +49,7 @@ func applyEditPlan(cmd *cobra.Command, root string, edits []ingest.Edit, opts ap
 			return err
 		}
 		if !ok {
+			slog.Debug("apply plan: cancelled by user")
 			return fmt.Errorf("cancelled")
 		}
 	}
@@ -46,6 +58,7 @@ func applyEditPlan(cmd *cobra.Command, root string, edits []ingest.Edit, opts ap
 
 // writeEdits optionally backups, ensures files exist, then ApplyEdits.
 func writeEdits(root string, edits []ingest.Edit, backup bool) error {
+	slog.Debug("write edits", "root", root, "edits", len(edits), "backup", backup)
 	if backup {
 		if err := createBackups(root, edits); err != nil {
 			return err
@@ -54,7 +67,19 @@ func writeEdits(root string, edits []ingest.Edit, backup bool) error {
 	if err := ensureEditFiles(root, edits); err != nil {
 		return err
 	}
-	return ingest.ApplyEdits(root, edits)
+	if err := ingest.ApplyEdits(root, edits); err != nil {
+		return err
+	}
+	slog.Debug("write edits: done")
+	return nil
+}
+
+func editFileCount(edits []ingest.Edit) int {
+	seen := map[string]bool{}
+	for _, e := range edits {
+		seen[e.File] = true
+	}
+	return len(seen)
 }
 
 func printEditPlan(w io.Writer, edits []ingest.Edit) error {

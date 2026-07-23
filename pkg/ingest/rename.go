@@ -3,6 +3,7 @@ package ingest
 import (
 	"cmp"
 	"fmt"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
@@ -28,10 +29,17 @@ func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 		return nil, fmt.Errorf("source and destination references must both include symbols or both omit them (for package moves)")
 	}
 
+	slog.Debug("rename: materialize project", "root", dir, "source", sourceRef, "destination", destRef)
 	result, err := ProjectResult(dir)
 	if err != nil {
 		return nil, err
 	}
+	slog.Debug("rename: project loaded",
+		"files", len(result.Files),
+		"atoms", len(result.Atoms),
+		"uses", len(result.Uses),
+		"aliases", len(result.Aliases),
+	)
 
 	src, err = canonicalSourceReference(dir, result, src)
 	if err != nil {
@@ -41,11 +49,13 @@ func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 	if err != nil {
 		return nil, err
 	}
+	slog.Debug("rename: canonical refs", "source", src.String(), "destination", dst.String())
 
 	sourceRef = src.String()
 
 	if src.Name == "" && dst.Name == "" {
 		// package/dir move (no symbol); canonical* already short-circuit+normalize for Symbol==""
+		slog.Debug("rename: package move")
 		return planPackageMove(dir, result, src, dst)
 	}
 
@@ -63,6 +73,7 @@ func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 		if !ok {
 			return nil, fmt.Errorf("cross-file move is not supported for language %q", srcLang)
 		}
+		slog.Debug("rename: cross-file move", "lang", srcLang, "from", src.Path, "to", dst.Path)
 		return planCrossFileMove(dir, result, src, dst, sourceEntity, driver)
 	}
 
@@ -76,6 +87,12 @@ func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 			}
 		}
 	}
+	slog.Debug("rename: symbol rename",
+		"path", src.Path,
+		"from", AtomName(src.Name),
+		"to", AtomName(dst.Name),
+		"source_refs", len(sourceRefs),
+	)
 	return planSymbolRename(dir, result, sourceRefs, dst.Name)
 }
 
@@ -113,33 +130,51 @@ func planSymbolRename(dir string, result *Result, sourceRefs []string, destSymbo
 	// qualified ("Gson.toJson"). Always rewrite source text with the leaf.
 	newText := AtomName(destSymbol)
 	oldLeaf := AtomName(ParseReference(sourceRefs[0]).Name)
+	slog.Debug("planSymbolRename", "source_set", len(sourceSet), "old_leaf", oldLeaf, "new_leaf", newText)
 
 	// 1. Rename each related entity definition. Destination symbol qualifiers
 	// stay aligned with each source entity's receiver prefix.
+	nDef := 0
 	for _, ent := range result.Atoms {
 		if !sourceSet[ent.Reference] {
 			continue
 		}
 		ref := ParseReference(ent.Reference)
+		before := len(edits)
 		edits = AppendReplaceSpan(edits, ref.Path, Span{StartByte: ent.StartByte, EndByte: ent.EndByte}, newText)
+		if len(edits) > before {
+			nDef++
+		}
 	}
 
 	// 2. Rename at every call site that targets any expanded entity.
 	// Prefer the registered site renamer (Rule / NFA backbone when pattern is
 	// linked); otherwise walk result.Uses directly.
-	edits = append(edits, expandUseSiteRenames(dir, result, sourceSet, newText)...)
+	useEdits := expandUseSiteRenames(dir, result, sourceSet, newText)
+	edits = append(edits, useEdits...)
 
 	// 3. Rename in import bindings that target any expanded entity.
 	// Zero-span aliases (DefaultExport, re-exports) exist only for
 	// CanonicalizeInResult — they are not textual sites and must not be rewritten
 	// (rewriting [0:0] would insert the new name at the start of the file).
+	nAlias := 0
 	for _, alias := range result.Aliases {
 		if !sourceSet[alias.Target] {
 			continue
 		}
 		ref := ParseReference(alias.Reference)
+		before := len(edits)
 		edits = AppendReplaceSpan(edits, ref.Path, Span{StartByte: alias.StartByte, EndByte: alias.EndByte}, newText)
+		if len(edits) > before {
+			nAlias++
+		}
 	}
+	slog.Debug("planSymbolRename: spans",
+		"defs", nDef,
+		"use_edits", len(useEdits),
+		"aliases", nAlias,
+		"total", len(edits),
+	)
 
 	if len(edits) == 0 {
 		return nil, fmt.Errorf("no entity found for reference %s", sourceRefs[0])

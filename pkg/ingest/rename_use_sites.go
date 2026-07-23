@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"log/slog"
 	"sync"
 )
 
@@ -32,9 +33,13 @@ func expandUseSiteRenames(root string, result *Result, sourceSet map[string]bool
 	fn := useSiteRenamer
 	useSiteRenamerMu.RUnlock()
 	if fn != nil {
-		return fn(root, result, sourceSet, newLeaf)
+		edits := fn(root, result, sourceSet, newLeaf)
+		slog.Debug("use-site renames: rule expander", "edits", len(edits), "new_leaf", newLeaf)
+		return edits
 	}
-	return useSiteRenamesFromGraph(result, sourceSet, newLeaf)
+	edits := useSiteRenamesFromGraph(result, sourceSet, newLeaf)
+	slog.Debug("use-site renames: graph fallback", "edits", len(edits), "new_leaf", newLeaf)
+	return edits
 }
 
 // useSiteRenamesFromGraph rewrites identifier leaves at Uses that target any
