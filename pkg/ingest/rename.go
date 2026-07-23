@@ -689,6 +689,7 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 			dirPairs = expanded
 		}
 	}
+	slog.Debug("planPackageMove", "srcDir", srcDir, "dstDir", dstDir, "dir_pairs", len(dirPairs))
 
 	var edits []Edit
 	movedFiles := map[string]bool{}
@@ -696,6 +697,7 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 	// Relocate package contents across every paired directory.
 	// isUnderDir requires a path prefix (pkg/…), so nested leaves like
 	// testdata/…/pkg are not relocated when moving top-level ./pkg.
+	nRelocated := 0
 	for _, pair := range dirPairs {
 		fromDir, toDir := pair[0], pair[1]
 		pairSrc := Reference{Provider: "path", Path: "./" + fromDir}
@@ -710,6 +712,7 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 				continue
 			}
 			movedFiles[srcFile] = true
+			nRelocated++
 			under := strings.TrimPrefix(srcFile, fromDir)
 			under = strings.TrimPrefix(under, "/")
 			dstFile := toDir
@@ -725,36 +728,38 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 				newContent = string(ApplyEditsInMemory(content, driver.RewriteImports(dstFile, content, result, pairSrc, pairDst)))
 			}
 			edits = append(edits, Edit{
-				File:      srcFile,
-				Span: Span{StartByte: 0, EndByte: uint32(len(content))},
-				NewText:   "",
+				File:    srcFile,
+				Span:    Span{StartByte: 0, EndByte: uint32(len(content))},
+				NewText: "",
 			})
 			edits = append(edits, Edit{
-				File:      dstFile,
-				Span: Span{StartByte: 0, EndByte: 0},
-				NewText:   newContent,
+				File:    dstFile,
+				Span:    Span{StartByte: 0, EndByte: 0},
+				NewText: newContent,
 			})
 		}
 	}
+	slog.Debug("planPackageMove: relocated files", "count", nRelocated, "edits", len(edits))
 
 	// Rewrite imports only in files that the graph shows as consumers of
 	// something defined under srcDir — not every file that textually contains
 	// the path leaf (which would corrupt unrelated trees sharing that leaf).
 	consumers := packageMoveConsumerFiles(result, srcDir, movedFiles)
+	slog.Debug("planPackageMove: consumers", "count", len(consumers))
+	langByFile := map[string]string{}
+	for _, f := range result.Files {
+		langByFile[strings.TrimPrefix(f.Path, "./")] = f.Language
+	}
+	nConsumerEdits := 0
 	for consumerFile := range consumers {
 		fcontent, err := os.ReadFile(filepath.Join(dir, consumerFile))
 		if err != nil {
 			return nil, fmt.Errorf("reading %s: %w", consumerFile, err)
 		}
-		lang := ""
-		for _, f := range result.Files {
-			if strings.TrimPrefix(f.Path, "./") == consumerFile {
-				lang = f.Language
-				break
-			}
-		}
+		lang := langByFile[consumerFile]
 		if driver, ok := moveDriverForLanguage(lang); ok {
 			occs := driver.RewriteImports(consumerFile, fcontent, result, src, dst)
+			nConsumerEdits += len(occs)
 			edits = append(edits, occs...)
 			continue
 		}
@@ -766,9 +771,12 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 			}
 		}
 		if pathOld != pathNew {
-			edits = append(edits, FindAllWholeWordOccurrences(consumerFile, fcontent, pathOld, pathNew)...)
+			occs := FindAllWholeWordOccurrences(consumerFile, fcontent, pathOld, pathNew)
+			nConsumerEdits += len(occs)
+			edits = append(edits, occs...)
 		}
 	}
+	slog.Debug("planPackageMove: consumer rewrites", "edits", nConsumerEdits, "total", len(edits))
 
 	if planner != nil {
 		extra, err := planner.RewriteSupportFiles(dir, result, movedFiles, srcDir, dstDir)
@@ -778,6 +786,7 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 		edits = append(edits, extra...)
 	}
 
+	slog.Debug("planPackageMove: done", "edits", len(edits))
 	return edits, nil
 }
 
@@ -827,13 +836,15 @@ func packageMoveConsumerFiles(result *Result, srcDir string, movedFiles map[stri
 }
 
 // targetsUnderPackageDir collects reference strings that identify code defined
-// under srcDir (path atoms/files and non-path targets that resolve there).
+// under srcDir. Linear in |atoms|+|uses|+|aliases| (no nested atom×use scans).
 func targetsUnderPackageDir(result *Result, srcDir string) map[string]bool {
 	srcDir = CleanRelDir(srcDir)
 	targets := map[string]bool{}
-	if srcDir == "" {
+	if srcDir == "" || result == nil {
 		return targets
 	}
+	// Symbols defined under srcDir (for matching go:/python: targets by name+path).
+	symbolsUnder := map[string]bool{}
 	for _, a := range result.Atoms {
 		ref := ParseReference(a.Reference)
 		p := CleanRelDir(ref.Path)
@@ -842,47 +853,50 @@ func targetsUnderPackageDir(result *Result, srcDir string) map[string]bool {
 		}
 		targets[a.Reference] = true
 		targets[FileRef("./"+p)] = true
+		if ref.Name != "" {
+			symbolsUnder[ref.Name] = true
+		}
 	}
 	// Path-shaped use/alias targets under srcDir.
 	for _, u := range result.Uses {
 		tref := ParseReference(u.Target)
-		if isUnderDir(CleanRelDir(tref.Path), srcDir) {
+		tp := CleanRelDir(tref.Path)
+		if tref.Provider == "path" || tref.Provider == "" {
+			if isUnderDir(tp, srcDir) {
+				targets[u.Target] = true
+			}
+			continue
+		}
+		// Non-path: symbol defined under srcDir and import path refers to that package.
+		if tref.Name != "" && symbolsUnder[tref.Name] && importPathRefersToDir(tref.Path, srcDir) {
 			targets[u.Target] = true
 		}
 	}
 	for _, al := range result.Aliases {
 		tref := ParseReference(al.Target)
-		if isUnderDir(CleanRelDir(tref.Path), srcDir) {
+		tp := CleanRelDir(tref.Path)
+		if tref.Provider == "path" || tref.Provider == "" {
+			if isUnderDir(tp, srcDir) {
+				targets[al.Target] = true
+			}
+			continue
+		}
+		if tref.Name != "" && symbolsUnder[tref.Name] && importPathRefersToDir(tref.Path, srcDir) {
 			targets[al.Target] = true
 		}
 	}
-	// Non-path provider targets that resolve to atoms under srcDir.
-	for _, a := range result.Atoms {
-		ref := ParseReference(a.Reference)
-		p := CleanRelDir(ref.Path)
-		if !isUnderDir(p, srcDir) {
-			continue
-		}
-		for _, u := range result.Uses {
-			tref := ParseReference(u.Target)
-			if tref.Provider == "path" || tref.Provider == "" {
-				continue
-			}
-			if aliasTargetMatchesFile(result, u.Target, tref, p, ref.Name) {
-				targets[u.Target] = true
-			}
-		}
-		for _, al := range result.Aliases {
-			tref := ParseReference(al.Target)
-			if tref.Provider == "path" || tref.Provider == "" {
-				continue
-			}
-			if aliasTargetMatchesFile(result, al.Target, tref, p, ref.Name) {
-				targets[al.Target] = true
-			}
-		}
-	}
 	return targets
+}
+
+// importPathRefersToDir reports whether a non-path provider path (e.g. Go import
+// path) corresponds to project-relative package dir srcDir.
+func importPathRefersToDir(importPath, srcDir string) bool {
+	ip := strings.Trim(strings.TrimPrefix(importPath, "./"), "/")
+	sd := CleanRelDir(srcDir)
+	if ip == "" || sd == "" {
+		return false
+	}
+	return ip == sd || strings.HasSuffix(ip, "/"+sd)
 }
 
 // FindAllWholeWordOccurrences finds all whole-word occurrences of oldBase in
