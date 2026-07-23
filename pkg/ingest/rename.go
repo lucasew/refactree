@@ -694,6 +694,8 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 	movedFiles := map[string]bool{}
 
 	// Relocate package contents across every paired directory.
+	// isUnderDir requires a path prefix (pkg/…), so nested leaves like
+	// testdata/…/pkg are not relocated when moving top-level ./pkg.
 	for _, pair := range dirPairs {
 		fromDir, toDir := pair[0], pair[1]
 		pairSrc := Reference{Provider: "path", Path: "./" + fromDir}
@@ -735,32 +737,36 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 		}
 	}
 
-	// Update references in all consumer files (files not relocated).
-	for _, f := range result.Files {
-		rel := strings.TrimPrefix(f.Path, "./")
-		if movedFiles[rel] {
+	// Rewrite imports only in files that the graph shows as consumers of
+	// something defined under srcDir — not every file that textually contains
+	// the path leaf (which would corrupt unrelated trees sharing that leaf).
+	consumers := packageMoveConsumerFiles(result, srcDir, movedFiles)
+	for consumerFile := range consumers {
+		fcontent, err := os.ReadFile(filepath.Join(dir, consumerFile))
+		if err != nil {
+			return nil, fmt.Errorf("reading %s: %w", consumerFile, err)
+		}
+		lang := ""
+		for _, f := range result.Files {
+			if strings.TrimPrefix(f.Path, "./") == consumerFile {
+				lang = f.Language
+				break
+			}
+		}
+		if driver, ok := moveDriverForLanguage(lang); ok {
+			occs := driver.RewriteImports(consumerFile, fcontent, result, src, dst)
+			edits = append(edits, occs...)
 			continue
 		}
-		fcontent, err := os.ReadFile(filepath.Join(dir, f.Path))
-		if err != nil {
-			return nil, fmt.Errorf("reading %s: %w", f.Path, err)
+		pathOld := oldDirBase
+		pathNew := newDirBase
+		if cp := CommonPathPrefix(srcDir, dstDir); cp != "" {
+			if r := strings.Trim(strings.TrimPrefix(dstDir, cp), "/"); r != "" {
+				pathNew = r
+			}
 		}
-
-		if driver, ok := moveDriverForLanguage(f.Language); ok {
-			occs := driver.RewriteImports(f.Path, fcontent, result, src, dst)
-			edits = append(edits, occs...)
-		} else {
-			pathOld := oldDirBase
-			pathNew := newDirBase
-			if cp := CommonPathPrefix(srcDir, dstDir); cp != "" {
-				if rel := strings.Trim(strings.TrimPrefix(dstDir, cp), "/"); rel != "" {
-					pathNew = rel
-				}
-			}
-			if pathOld != pathNew {
-				occs := FindAllWholeWordOccurrences(f.Path, fcontent, pathOld, pathNew)
-				edits = append(edits, occs...)
-			}
+		if pathOld != pathNew {
+			edits = append(edits, FindAllWholeWordOccurrences(consumerFile, fcontent, pathOld, pathNew)...)
 		}
 	}
 
@@ -784,6 +790,99 @@ func isUnderDir(p, dir string) bool {
 		return true
 	}
 	return false
+}
+
+// packageMoveConsumerFiles returns project-relative files (not under the moved
+// package) that have Uses or Aliases targeting something defined under srcDir.
+// Text-only path-segment rewrites without a graph edge are intentionally
+// excluded so unrelated directories that share a leaf name are left alone.
+func packageMoveConsumerFiles(result *Result, srcDir string, movedFiles map[string]bool) map[string]bool {
+	if result == nil {
+		return nil
+	}
+	srcDir = CleanRelDir(srcDir)
+	targets := targetsUnderPackageDir(result, srcDir)
+	if len(targets) == 0 {
+		return nil
+	}
+	consumers := map[string]bool{}
+	addConsumer := func(filePath string) {
+		c := CleanRelDir(filePath)
+		if c == "" || movedFiles[c] || isUnderDir(c, srcDir) {
+			return
+		}
+		consumers[c] = true
+	}
+	for _, u := range result.Uses {
+		if targets[u.Target] {
+			addConsumer(ParseReference(u.Reference).Path)
+		}
+	}
+	for _, a := range result.Aliases {
+		if targets[a.Target] {
+			addConsumer(ParseReference(a.Reference).Path)
+		}
+	}
+	return consumers
+}
+
+// targetsUnderPackageDir collects reference strings that identify code defined
+// under srcDir (path atoms/files and non-path targets that resolve there).
+func targetsUnderPackageDir(result *Result, srcDir string) map[string]bool {
+	srcDir = CleanRelDir(srcDir)
+	targets := map[string]bool{}
+	if srcDir == "" {
+		return targets
+	}
+	for _, a := range result.Atoms {
+		ref := ParseReference(a.Reference)
+		p := CleanRelDir(ref.Path)
+		if !isUnderDir(p, srcDir) {
+			continue
+		}
+		targets[a.Reference] = true
+		targets[FileRef("./"+p)] = true
+	}
+	// Path-shaped use/alias targets under srcDir.
+	for _, u := range result.Uses {
+		tref := ParseReference(u.Target)
+		if isUnderDir(CleanRelDir(tref.Path), srcDir) {
+			targets[u.Target] = true
+		}
+	}
+	for _, al := range result.Aliases {
+		tref := ParseReference(al.Target)
+		if isUnderDir(CleanRelDir(tref.Path), srcDir) {
+			targets[al.Target] = true
+		}
+	}
+	// Non-path provider targets that resolve to atoms under srcDir.
+	for _, a := range result.Atoms {
+		ref := ParseReference(a.Reference)
+		p := CleanRelDir(ref.Path)
+		if !isUnderDir(p, srcDir) {
+			continue
+		}
+		for _, u := range result.Uses {
+			tref := ParseReference(u.Target)
+			if tref.Provider == "path" || tref.Provider == "" {
+				continue
+			}
+			if aliasTargetMatchesFile(result, u.Target, tref, p, ref.Name) {
+				targets[u.Target] = true
+			}
+		}
+		for _, al := range result.Aliases {
+			tref := ParseReference(al.Target)
+			if tref.Provider == "path" || tref.Provider == "" {
+				continue
+			}
+			if aliasTargetMatchesFile(result, al.Target, tref, p, ref.Name) {
+				targets[al.Target] = true
+			}
+		}
+	}
+	return targets
 }
 
 // FindAllWholeWordOccurrences finds all whole-word occurrences of oldBase in

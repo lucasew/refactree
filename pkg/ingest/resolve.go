@@ -37,13 +37,25 @@ func resolve(rootDir string, extracts []*FileExtract) *Result {
 	}
 
 	// Collect known files and directories for import resolution.
+	// knownDirs includes every parent directory of each file (not only the first
+	// path segment) so local packages under nested trees are addressable.
 	knownFiles := map[string]bool{}
 	knownDirs := map[string]bool{}
 	for _, fe := range extracts {
-		knownFiles[fe.Path] = true
-		parts := strings.Split(fe.Path, "/")
-		if len(parts) > 1 {
-			knownDirs[parts[0]] = true
+		p := strings.TrimPrefix(filepath.ToSlash(fe.Path), "./")
+		knownFiles[p] = true
+		dir := path.Dir(p)
+		for dir != "." && dir != "/" && dir != "" {
+			knownDirs[dir] = true
+			parent := path.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+		// First segment remains for bare last-component ResolveImport matching.
+		if i := strings.IndexByte(p, '/'); i > 0 {
+			knownDirs[p[:i]] = true
 		}
 	}
 

@@ -202,6 +202,62 @@ func TestRename_ModuleAliasMemberCallsite_RenamesMemberAccess(t *testing.T) {
 	}
 }
 
+func TestPackageMove_OnlyGraphConsumersRewritten(t *testing.T) {
+	// Moving top-level ./pkg must not rewrite files under nested …/pkg that
+	// share only the leaf name and have no import/use edge to the real package.
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "pkg"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pkg", "lib.go"), []byte("package pkg\n\nfunc Hello() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nimport \"./pkg\"\n\nfunc main() { pkg.Hello() }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Unrelated tree sharing the leaf name "pkg", with path text that a naive
+	// segment rewrite would change, but no graph edge to top-level ./pkg.
+	nested := filepath.Join(dir, "testdata", "fixture", "input", "pkg")
+	if err := os.MkdirAll(nested, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "x.go"), []byte("package pkg\n\nfunc Local() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	unrelated := filepath.Join(dir, "testdata", "fixture", "input", "other.go")
+	// Local import to nested pkg only (resolves under testdata/…/input/pkg).
+	if err := os.WriteFile(unrelated, []byte("package input\n\nimport nest \"./pkg\"\n\nfunc F() { nest.Local() }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	edits, err := ingest.Rename(dir, "path:./pkg", "path:./pkga")
+	if err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	for _, e := range edits {
+		if strings.Contains(e.File, "testdata") {
+			t.Fatalf("package move must not edit tree without use of moved package: %+v", e)
+		}
+	}
+	if err := ingest.ApplyEdits(dir, edits); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "pkga", "lib.go")); err != nil {
+		t.Fatalf("expected pkga/lib.go after move: %v", err)
+	}
+	// Nested fixture tree unchanged.
+	got, err := os.ReadFile(unrelated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(got), "pkga") {
+		t.Fatalf("unrelated file rewritten:\n%s", got)
+	}
+	if !strings.Contains(string(got), `"./pkg"`) {
+		t.Fatalf("local fixture import lost:\n%s", got)
+	}
+}
+
 func TestMove_GoCrossFile(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "doc.go"), []byte("package main\n\nfunc helper() {\n}\n"), 0644); err != nil {

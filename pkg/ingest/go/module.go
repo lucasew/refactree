@@ -41,7 +41,32 @@ func (languageDriver) Extract(root *grammar.Node, source []byte, relPath string)
 }
 
 func (languageDriver) ResolveImport(sourcePath string, ctx ingest.ImportResolveContext) string {
-	return goref.ResolveImport(sourcePath, ctx.KnownDirs)
+	spec := strings.TrimSpace(sourcePath)
+	// Relative imports resolve against the importer file directory — not a
+	// global knownDirs leaf map (which would map every "./pkg" to top-level pkg).
+	if strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../") {
+		return resolveGoRelativeImport(spec, ctx.ImporterPath)
+	}
+	return goref.ResolveImport(spec, ctx.KnownDirs)
+}
+
+// resolveGoRelativeImport joins a ./ or ../ import with the importer's directory
+// and returns a path:./… reference (directory package form).
+func resolveGoRelativeImport(spec, importerPath string) string {
+	imp := strings.TrimPrefix(filepath.ToSlash(importerPath), "./")
+	impDir := path.Dir(imp)
+	if impDir == "." {
+		impDir = ""
+	}
+	joined := path.Clean(path.Join(impDir, spec))
+	if joined == "." || joined == "" {
+		return "path:./"
+	}
+	// Guard path.Clean of ".." escaping above project (rare for normal imports).
+	if joined == ".." || strings.HasPrefix(joined, "../") {
+		return "go:" + spec
+	}
+	return "path:./" + joined
 }
 
 func (languageDriver) AllowListAtom(name string, opts ingest.AtomListOptions) bool {

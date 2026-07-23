@@ -58,3 +58,33 @@ func hasScopeChild(children []refpkg.ScopeChild, want refpkg.ScopeChild) bool {
 	}
 	return false
 }
+
+func TestResolveGoRelativeImport(t *testing.T) {
+	cases := []struct {
+		spec, importer, want string
+	}{
+		{"./pkg", "testdata/fixture/input/other.go", "path:./testdata/fixture/input/pkg"},
+		{"./pkg", "main.go", "path:./pkg"},
+		{"../pkg", "testdata/fixture/input/sub/other.go", "path:./testdata/fixture/input/pkg"},
+		{"./pkg/sub", "cmd/tool/main.go", "path:./cmd/tool/pkg/sub"},
+	}
+	for _, tc := range cases {
+		got := resolveGoRelativeImport(tc.spec, tc.importer)
+		if got != tc.want {
+			t.Errorf("resolveGoRelativeImport(%q, %q)=%q want %q", tc.spec, tc.importer, got, tc.want)
+		}
+	}
+}
+
+func TestLanguageDriver_ResolveImport_RelativeUsesImporter(t *testing.T) {
+	d := languageDriver{}
+	ctx := ingest.ImportResolveContext{
+		ImporterPath: "testdata/fixture/input/other.go",
+		KnownDirs:    map[string]bool{"pkg": true}, // top-level pkg must not win
+	}
+	got := d.ResolveImport("./pkg", ctx)
+	want := "path:./testdata/fixture/input/pkg"
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
