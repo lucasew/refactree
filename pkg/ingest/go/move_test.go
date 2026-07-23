@@ -140,3 +140,24 @@ import (
 		t.Fatalf("want 1 edit for cmd tree only, got %+v", edits)
 	}
 }
+
+func TestExtractDecl_IotaConstGroupUnsupported(t *testing.T) {
+	dir := t.TempDir()
+	src := "package tg\n\ntype PoolKind int\n\nconst (\n\tControl PoolKind = iota\n\tIO\n\tCPU\n)\n"
+	path := filepath.Join(dir, "a.go")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	off := uint32(strings.Index(src, "Control"))
+	_, err := moveDriver{}.ExtractDecl(path, ingest.Atom{
+		Reference: "path:./a.go::Control",
+		StartByte: off,
+		EndByte:   off + uint32(len("Control")),
+	})
+	if err == nil {
+		t.Fatal("expected error for iota const group extract")
+	}
+	if !strings.Contains(err.Error(), "iota") || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("got %v", err)
+	}
+}
