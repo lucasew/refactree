@@ -2,11 +2,12 @@ package pattern
 
 import (
 	"fmt"
+	"go/token"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
-	"unicode"
 
 	"github.com/lucasew/refactree/pkg/ingest"
 )
@@ -67,38 +68,14 @@ func OpFromCLI(mode, lang, patternStr, replacementStr string) (Op, error) {
 // splitCaptureSet parses optional "name=template" rewrite emit.
 // If name is a capture declared by pat, returns (name, template); else ("", repl).
 func splitCaptureSet(pat Node, repl string) (name, template string) {
-	i := strings.IndexByte(repl, '=')
-	if i <= 0 {
+	key, tmpl, ok := strings.Cut(repl, "=")
+	if !ok || key == "" || !token.IsIdentifier(key) {
 		return "", repl
 	}
-	key := repl[:i]
-	if !isCaptureIdent(key) {
-		return "", repl
-	}
-	for _, n := range CaptureNames(pat) {
-		if n == key {
-			return key, repl[i+1:]
-		}
+	if slices.Contains(CaptureNames(pat), key) {
+		return key, tmpl
 	}
 	return "", repl
-}
-
-func isCaptureIdent(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i, r := range s {
-		if i == 0 {
-			if r != '_' && !unicode.IsLetter(r) {
-				return false
-			}
-			continue
-		}
-		if r != '_' && !unicode.IsLetter(r) && !unicode.IsDigit(r) {
-			return false
-		}
-	}
-	return true
 }
 
 // Run loads sources under root, matches op.PatternIR, and for rewrite builds edits.

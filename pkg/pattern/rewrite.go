@@ -2,6 +2,7 @@ package pattern
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -27,13 +28,13 @@ func Instantiate(repl Node, m Match, source []byte) (string, error) {
 			// String IR holes always emit a string literal. If the capture is
 			// already quoted source, keep it; otherwise quote the raw span text
 			// (A1: CaptureGroup binds the unquoted interior).
-			if _, ok := unquoteLiteral(v); ok {
+			if _, err := strconv.Unquote(v); err == nil {
 				return v, nil
 			}
-			return quoteString(v), nil
+			return strconv.Quote(v), nil
 		}
 		if repl.Equals != "" {
-			return quoteString(repl.Equals), nil
+			return strconv.Quote(repl.Equals), nil
 		}
 		return "", fmt.Errorf("string replacement needs from_capture or equals")
 	default:

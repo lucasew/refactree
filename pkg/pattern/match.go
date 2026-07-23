@@ -1,12 +1,14 @@
 package pattern
 
 import (
+	"bytes"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
-	"unicode"
 
 	"github.com/lucasew/refactree/pkg/ingest"
 	"github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar"
@@ -222,7 +224,7 @@ func findRest(tokens []tok, pos int, after []Node, caps map[string]Span, source 
 		return pos, pos, z, z, true, nil
 	}
 	for j := pos; j <= len(tokens); j++ {
-		c2 := cloneCaptures(caps)
+		c2 := maps.Clone(caps)
 		_, next, ok, err := matchSeqFrom(tokens, j, after, c2, source, root)
 		if err != nil {
 			return 0, 0, 0, 0, false, err
@@ -306,7 +308,7 @@ func matchStep(tokens []tok, pos int, step Node, caps map[string]Span, source []
 	switch step.Kind {
 	case "group":
 		inner := flattenPattern(*step.Callee)
-		c2 := cloneCaptures(caps)
+		c2 := maps.Clone(caps)
 		_, next, ok, err := matchSeqFrom(tokens, pos, inner, c2, source, root)
 		if err != nil || !ok {
 			return false, 0, err
@@ -441,26 +443,6 @@ func hasNamedGroup(re *regexp.Regexp) bool {
 		}
 	}
 	return false
-}
-
-func quoteString(s string) string {
-	var b strings.Builder
-	b.WriteByte('"')
-	for i := 0; i < len(s); i++ {
-		switch s[i] {
-		case '\\', '"':
-			b.WriteByte('\\')
-			b.WriteByte(s[i])
-		case '\n':
-			b.WriteString(`\n`)
-		case '\t':
-			b.WriteString(`\t`)
-		default:
-			b.WriteByte(s[i])
-		}
-	}
-	b.WriteByte('"')
-	return b.String()
 }
 
 func selectorStart(tokens []tok, pos int, source []byte) uint32 {
@@ -617,15 +599,7 @@ func isCompositeTokenSpan(src []byte, start, end uint32) bool {
 
 func isSpaceSpan(src []byte, t tok) bool {
 	b := t.Bytes(src)
-	if len(b) == 0 {
-		return false
-	}
-	for _, r := range string(b) {
-		if !unicode.IsSpace(r) {
-			return false
-		}
-	}
-	return true
+	return len(b) > 0 && len(bytes.TrimSpace(b)) == 0
 }
 
 // tokenContentMap derives the regex/equals match surface from a token span in
@@ -699,7 +673,12 @@ func unquoteLiteralMap(raw []byte) (content string, srcOf []int, closeOff int, o
 }
 
 // unquoteLiteral is the content-only helper (no offset map).
+// Prefers strconv.Unquote for std Go string/raw/char lits; falls back to the
+// offset-map unquoter for odd single-quoted spans tree-sitter may emit.
 func unquoteLiteral(raw string) (string, bool) {
+	if s, err := strconv.Unquote(raw); err == nil {
+		return s, true
+	}
 	content, _, _, ok := unquoteLiteralMap([]byte(raw))
 	return content, ok
 }
@@ -734,12 +713,4 @@ func contentSpanToSource(tokenStart uint32, srcOf []int, closeOff, cs, ce int) (
 		return Span{}, false
 	}
 	return Span{StartByte: start, EndByte: end}, true
-}
-
-func cloneCaptures(m map[string]Span) map[string]Span {
-	o := make(map[string]Span, len(m))
-	for k, v := range m {
-		o[k] = v
-	}
-	return o
 }
