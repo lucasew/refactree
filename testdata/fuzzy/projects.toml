@@ -81,17 +81,30 @@ node = "22.23.1"
 "npm:pnpm" = "11.9.0"
 
 [projects.astro.mise.tasks.setup]
-description = "Install astro package + @astrojs/* workspace deps (offline when RFT_FUZZY_OFFLINE=1)"
+description = "Install astro + @astrojs/* + unit test fixtures (offline when RFT_FUZZY_OFFLINE=1)"
 # Mise sequences run steps; fail if filter matches nothing (pnpm otherwise exits 0 with no node_modules).
-# Unit fixtures (e.g. test/fixtures/astro-basic) import integrations like @astrojs/mdx and
-# @astrojs/preact — those are not dependencies of the astro package graph (astro...), so
-# they must be installed explicitly or every seed fails as class=bug with ERR_MODULE_NOT_FOUND.
+#
+# Unit fixtures (packages/astro/test/fixtures/*, package name @test/...) declare their own
+# workspace deps (e.g. @astrojs/mdx, @astrojs/preact). Those packages are NOT in the
+# astro... dependency graph. Installing only astro... / @astrojs/* builds mdx dist but
+# never links fixture packages, so Vite fails with ERR_MODULE_NOT_FOUND for @astrojs/mdx
+# when loading astro-basic/astro.config.mjs — every seed class=bug.
+#
+# Include @test/* (and the fixtures path) so pnpm links fixture dependency trees.
 run = [
   """
   if [ "${RFT_FUZZY_OFFLINE:-}" = 1 ]; then
-    pnpm install --offline --reporter=default --filter "astro..." --filter "@astrojs/*"
+    pnpm install --offline --reporter=default \
+      --filter "astro..." \
+      --filter "@astrojs/*" \
+      --filter "@test/*" \
+      --filter "./packages/astro/test/fixtures/**"
   else
-    pnpm install --reporter=default --filter "astro..." --filter "@astrojs/*"
+    pnpm install --reporter=default \
+      --filter "astro..." \
+      --filter "@astrojs/*" \
+      --filter "@test/*" \
+      --filter "./packages/astro/test/fixtures/**"
   fi
   """,
   "test -d node_modules",
