@@ -40,6 +40,12 @@ func (moveDriver) ExtractDecl(filePath string, entity ingest.Atom) (ingest.DeclE
 
 	result := findGoDecl(root, entity.StartByte)
 	if result == nil {
+		// Struct fields and interface method elems are rename-only atoms
+		// (Type.Field / Type.Method for ExtraRename). They are not top-level
+		// declarations and cannot be extracted across files as a unit.
+		if kind := goNestedMemberKind(root, entity.StartByte); kind != "" {
+			return ingest.DeclExtract{}, fmt.Errorf("cross-file move of %s is not supported", kind)
+		}
 		return ingest.DeclExtract{}, fmt.Errorf("declaration not found in %s", filePath)
 	}
 
@@ -699,6 +705,40 @@ type goDeclResult struct {
 	Grouped bool          // true when part of a type|var|const (...) group
 	Spec    *grammar.Node // non-nil for grouped type/var/const declarations
 	Keyword string        // "type", "var", or "const" when Grouped
+}
+
+// goNestedMemberKind reports whether nameStart is a nested member that is not a
+// top-level extractable declaration: "struct field" or "interface method".
+// Empty string means not a known nested member (or not found).
+func goNestedMemberKind(root *grammar.Node, nameStart uint32) string {
+	var scan func(n *grammar.Node, inMethodElem, inFieldDecl bool) string
+	scan = func(n *grammar.Node, inMethodElem, inFieldDecl bool) string {
+		if n == nil || n.IsNull() {
+			return ""
+		}
+		t := n.Type()
+		if t == "method_elem" {
+			inMethodElem = true
+		}
+		if t == "field_declaration" {
+			inFieldDecl = true
+		}
+		if n.StartByte() == nameStart && (t == "field_identifier" || t == "identifier" || t == "property_identifier") {
+			if inMethodElem {
+				return "interface method"
+			}
+			if inFieldDecl {
+				return "struct field"
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			if k := scan(n.Child(i), inMethodElem, inFieldDecl); k != "" {
+				return k
+			}
+		}
+		return ""
+	}
+	return scan(root, false, false)
 }
 
 // findGoDecl returns the declaration containing the entity whose name starts at nameStart.
