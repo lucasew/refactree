@@ -11,69 +11,33 @@ import (
 	"github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar"
 )
 
-// Span is a half-open UTF-8 byte range [StartByte, EndByte) in a source buffer.
-// Offsets match tree-sitter StartByte/EndByte (not rune indexes). Used for
-// tokens, match roots, pattern captures, and hyperlink leaves. Text is always
-// derived from the original file []byte — never stored on the span.
-type Span struct {
-	StartByte uint32
-	EndByte   uint32
-}
-
-// Text returns src[StartByte:EndByte].
-func (s Span) Text(src []byte) string {
-	b := s.Bytes(src)
-	if b == nil {
-		return ""
-	}
-	return string(b)
-}
-
-// Bytes returns src[StartByte:EndByte], or nil if out of range / empty invalid.
-func (s Span) Bytes(src []byte) []byte {
-	if src == nil || s.EndByte > uint32(len(src)) || s.StartByte > s.EndByte {
-		return nil
-	}
-	return src[s.StartByte:s.EndByte]
-}
-
-// Empty reports whether the span has zero length (StartByte == EndByte).
-func (s Span) Empty() bool { return s.StartByte >= s.EndByte }
-
-// Eq reports whether s.Text(src) equals want without an intermediate string
-// when lengths differ.
-func (s Span) Eq(src []byte, want string) bool {
-	b := s.Bytes(src)
-	return len(b) == len(want) && string(b) == want
-}
-
 // Match is one successful pattern match in a file.
 // It does not retain file contents; pass the file []byte at the call site
 // (Stream OnMatch/OnFile, Span.Text, PublicCaptures, Instantiate).
 type Match struct {
 	File string
-	Span // root match range
+	ingest.Span // root match range
 	// Captures maps pattern $names to one or more source spans.
 	// Single holes have len 1; Multi (*) holes list every site in the gap.
-	Captures map[string][]Span
+	Captures map[string][]ingest.Span
 }
 
 // CaptureFirst returns the first span for name, or a zero Span.
-func (m Match) CaptureFirst(name string) (Span, bool) {
+func (m Match) CaptureFirst(name string) (ingest.Span, bool) {
 	ss := m.Captures[name]
 	if len(ss) == 0 {
-		return Span{}, false
+		return ingest.Span{}, false
 	}
 	return ss[0], true
 }
 
 // tok is a significant leaf: a Span plus optional hyperlink target.
 type tok struct {
-	Span
+	ingest.Span
 	target string
 }
 
-type linkIndex map[Span]string
+type linkIndex map[ingest.Span]string
 
 func buildLinkIndex(result *ingest.Result, fileRel string) linkIndex {
 	idx := linkIndex{}
@@ -87,7 +51,7 @@ func buildLinkIndex(result *ingest.Result, fileRel string) linkIndex {
 		if p != norm || use.Target == "" || use.StartByte >= use.EndByte {
 			continue
 		}
-		idx[Span{use.StartByte, use.EndByte}] = use.Target
+		idx[ingest.Span{use.StartByte, use.EndByte}] = use.Target
 	}
 	return idx
 }
@@ -109,7 +73,7 @@ func MatchFile(root, fileRel string, source []byte, rootNode *grammar.Node, pat 
 		out[i].File = fileRel
 		if callish && rootNode != nil {
 			if n := coveringNode(rootNode, out[i].StartByte, out[i].EndByte); n != nil {
-				out[i].Span = Span{StartByte: n.StartByte(), EndByte: n.EndByte()}
+				out[i].Span = ingest.Span{StartByte: n.StartByte(), EndByte: n.EndByte()}
 			}
 		}
 	}
@@ -160,12 +124,12 @@ func selectorStart(tokens []tok, pos int, source []byte) uint32 {
 	return selectorSpan(tokens, pos, source).StartByte
 }
 
-func selectorSpan(tokens []tok, pos int, source []byte) Span {
+func selectorSpan(tokens []tok, pos int, source []byte) ingest.Span {
 	i := pos
 	for i >= 2 && tokens[i-1].Eq(source, ".") {
 		i -= 2
 	}
-	return Span{StartByte: tokens[i].StartByte, EndByte: tokens[pos].EndByte}
+	return ingest.Span{StartByte: tokens[i].StartByte, EndByte: tokens[pos].EndByte}
 }
 
 func coveringNode(root *grammar.Node, start, end uint32) *grammar.Node {
@@ -267,19 +231,19 @@ func collectLeaves(n *grammar.Node, source []byte, out *[]tok) {
 	switch typ {
 	case "interpreted_string_literal", "raw_string_literal", "string_literal", "string", "template_string":
 		if start < end {
-			*out = append(*out, tok{Span: Span{StartByte: start, EndByte: end}})
+			*out = append(*out, tok{Span: ingest.Span{StartByte: start, EndByte: end}})
 		}
 		return
 	}
 
 	// Composite grammar tokens (e.g. empty interface{}) — whole span, no children.
 	if isCompositeTokenSpan(source, start, end) {
-		*out = append(*out, tok{Span: Span{StartByte: start, EndByte: end}})
+		*out = append(*out, tok{Span: ingest.Span{StartByte: start, EndByte: end}})
 		return
 	}
 	if n.ChildCount() == 0 {
 		if start < end {
-			*out = append(*out, tok{Span: Span{StartByte: start, EndByte: end}})
+			*out = append(*out, tok{Span: ingest.Span{StartByte: start, EndByte: end}})
 		}
 		return
 	}
@@ -398,9 +362,9 @@ func unquoteLiteral(raw string) (string, bool) {
 // absolute source Span using srcOf (content byte → raw token offset) and
 // tokenStart. closeOff is the exclusive raw end of content (closing quote or
 // len(token)). ok is false when the content range is out of bounds.
-func contentSpanToSource(tokenStart uint32, srcOf []int, closeOff, cs, ce int) (Span, bool) {
+func contentSpanToSource(tokenStart uint32, srcOf []int, closeOff, cs, ce int) (ingest.Span, bool) {
 	if cs < 0 || ce < cs || ce > len(srcOf) {
-		return Span{}, false
+		return ingest.Span{}, false
 	}
 	if cs == ce {
 		// Empty match: zero-width at cs (or at content end before closeOff).
@@ -410,7 +374,7 @@ func contentSpanToSource(tokenStart uint32, srcOf []int, closeOff, cs, ce int) (
 		} else {
 			s = tokenStart + uint32(closeOff)
 		}
-		return Span{StartByte: s, EndByte: s}, true
+		return ingest.Span{StartByte: s, EndByte: s}, true
 	}
 	start := tokenStart + uint32(srcOf[cs])
 	var end uint32
@@ -421,7 +385,7 @@ func contentSpanToSource(tokenStart uint32, srcOf []int, closeOff, cs, ce int) (
 		end = tokenStart + uint32(closeOff)
 	}
 	if end < start {
-		return Span{}, false
+		return ingest.Span{}, false
 	}
-	return Span{StartByte: start, EndByte: end}, true
+	return ingest.Span{StartByte: start, EndByte: end}, true
 }

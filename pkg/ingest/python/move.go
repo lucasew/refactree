@@ -81,8 +81,7 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 			if dstContent == nil {
 				return ingest.Edit{
 					File:      dstRelPath,
-					StartByte: 0,
-					EndByte:   0,
+					Span: ingest.Span{StartByte: 0, EndByte: 0},
 					NewText:   text + "\n",
 				}
 			}
@@ -111,8 +110,7 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 
 	return ingest.Edit{
 		File:      dstRelPath,
-		StartByte: insertAt,
-		EndByte:   insertAt,
+		Span: ingest.Span{StartByte: insertAt, EndByte: insertAt},
 		NewText:   insertText,
 	}
 }
@@ -163,8 +161,7 @@ func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src
 			block := strings.Join(stmts, "\n") + "\n\n"
 			edits = append(edits, ingest.Edit{
 				File:      dstRel,
-				StartByte: 0,
-				EndByte:   0,
+				Span: ingest.Span{StartByte: 0, EndByte: 0},
 				NewText:   block,
 			})
 		}
@@ -315,8 +312,7 @@ func pythonImportInsertEdits(file string, content []byte, stmts []string) []inge
 	}
 	return []ingest.Edit{{
 		File:      file,
-		StartByte: uint32(insertPos),
-		EndByte:   uint32(insertPos),
+		Span: ingest.Span{StartByte: uint32(insertPos), EndByte: uint32(insertPos)},
 		NewText:   block,
 	}}
 }
@@ -491,8 +487,7 @@ func rewritePythonModuleFile(fileRelPath string, content []byte, oldPath, newPat
 		modEnd := modStart + len(modStr)
 		edits = append(edits, ingest.Edit{
 			File:      fileRelPath,
-			StartByte: uint32(modStart),
-			EndByte:   uint32(modEnd),
+			Span: ingest.Span{StartByte: uint32(modStart), EndByte: uint32(modEnd)},
 			NewText:   pythonReplacementModuleSpec(modStr, oldMod, newMod, consumerDir),
 		})
 		off = afterFrom + importIdx + 7
@@ -544,8 +539,7 @@ func rewritePythonModuleFile(fileRelPath string, content []byte, oldPath, newPat
 					modStart := partOff + inner
 					edits = append(edits, ingest.Edit{
 						File:      fileRelPath,
-						StartByte: uint32(modStart),
-						EndByte:   uint32(modStart + len(modStr)),
+						Span: ingest.Span{StartByte: uint32(modStart), EndByte: uint32(modStart + len(modStr))},
 						NewText:   pythonReplacementModuleSpec(modStr, oldMod, newMod, consumerDir),
 					})
 				}
@@ -746,8 +740,7 @@ func rewritePythonSymbolImport(fileRelPath string, content []byte, result *inges
 				modEnd := modStart + len(modStr)
 				edits = append(edits, ingest.Edit{
 					File:      fileRelPath,
-					StartByte: uint32(modStart),
-					EndByte:   uint32(modEnd),
+					Span: ingest.Span{StartByte: uint32(modStart), EndByte: uint32(modEnd)},
 					NewText:   buildReplacementModule(modStr, oldMod, newMod),
 				})
 			} else if items := parsePythonImportItems(importedNames); len(items) > 0 {
@@ -766,8 +759,7 @@ func rewritePythonSymbolImport(fileRelPath string, content []byte, result *inges
 						modEnd := modStart + len(modStr)
 						edits = append(edits, ingest.Edit{
 							File:      fileRelPath,
-							StartByte: uint32(modStart),
-							EndByte:   uint32(modEnd),
+							Span: ingest.Span{StartByte: uint32(modStart), EndByte: uint32(modEnd)},
 							NewText:   buildReplacementModule(modStr, oldMod, newMod),
 						})
 					}
@@ -777,8 +769,7 @@ func rewritePythonSymbolImport(fileRelPath string, content []byte, result *inges
 					modEnd := modStart + len(modStr)
 					edits = append(edits, ingest.Edit{
 						File:      fileRelPath,
-						StartByte: uint32(modStart),
-						EndByte:   uint32(modEnd),
+						Span: ingest.Span{StartByte: uint32(modStart), EndByte: uint32(modEnd)},
 						NewText:   buildReplacementModule(modStr, oldMod, newMod),
 					})
 				} else {
@@ -788,8 +779,7 @@ func rewritePythonSymbolImport(fileRelPath string, content []byte, result *inges
 					newText := formatPythonFromImport(modStr, stayed) + "\n" + formatPythonFromImport(replacement, moved)
 					edits = append(edits, ingest.Edit{
 						File:      fileRelPath,
-						StartByte: uint32(fromStart),
-						EndByte:   uint32(importEnd),
+						Span: ingest.Span{StartByte: uint32(fromStart), EndByte: uint32(importEnd)},
 						NewText:   newText,
 					})
 				}
@@ -799,8 +789,7 @@ func rewritePythonSymbolImport(fileRelPath string, content []byte, result *inges
 				modEnd := modStart + len(modStr)
 				edits = append(edits, ingest.Edit{
 					File:      fileRelPath,
-					StartByte: uint32(modStart),
-					EndByte:   uint32(modEnd),
+					Span: ingest.Span{StartByte: uint32(modStart), EndByte: uint32(modEnd)},
 					NewText:   buildReplacementModule(modStr, oldMod, newMod),
 				})
 			}
@@ -1266,8 +1255,7 @@ func pythonInsertIntoClassBody(dstRelPath string, dstContent []byte, className, 
 			passStart := pythonLeadingIndentStart(pf.Source, only.StartByte())
 			return ingest.Edit{
 				File:      dstRelPath,
-				StartByte: passStart,
-				EndByte:   body.EndByte(),
+				Span: ingest.Span{StartByte: passStart, EndByte: body.EndByte()},
 				NewText:   insertText,
 			}, true
 		}
@@ -1279,8 +1267,7 @@ func pythonInsertIntoClassBody(dstRelPath string, dstContent []byte, className, 
 	}
 	return ingest.Edit{
 		File:      dstRelPath,
-		StartByte: at,
-		EndByte:   at,
+		Span: ingest.Span{StartByte: at, EndByte: at},
 		NewText:   insertText,
 	}, true
 }
@@ -1397,8 +1384,7 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 			}
 			edits = append(edits, ingest.Edit{
 				File:      file,
-				StartByte: ent.StartByte,
-				EndByte:   ent.EndByte,
+				Span: ingest.Span{StartByte: ent.StartByte, EndByte: ent.EndByte},
 				NewText:   newLeaf,
 			})
 			markOccupied(file, ent.StartByte, ent.EndByte)
@@ -1702,8 +1688,7 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 				if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf, funcReturns) {
 					edits = append(edits, ingest.Edit{
 						File:      fileRel,
-						StartByte: attr.StartByte(),
-						EndByte:   attr.EndByte(),
+						Span: ingest.Span{StartByte: attr.StartByte(), EndByte: attr.EndByte()},
 						NewText:   newLeaf,
 					})
 				}
@@ -1720,8 +1705,7 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 					if pythonShouldRenameAttr(obj, content, classHere, ourReceivers, foreignReceivers, typedLocals, fieldOf, elemOf, typeOf, pairSlots, factoryOf, futureOf, getterOf, funcReturns) {
 						edits = append(edits, ingest.Edit{
 							File:      fileRel,
-							StartByte: contentN.StartByte(),
-							EndByte:   contentN.EndByte(),
+							Span: ingest.Span{StartByte: contentN.StartByte(), EndByte: contentN.EndByte()},
 							NewText:   newLeaf,
 						})
 					}
@@ -1740,8 +1724,7 @@ func pythonMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 							if contentN, text := pythonStringContent(key, content); contentN != nil && text == oldLeaf {
 								edits = append(edits, ingest.Edit{
 									File:      fileRel,
-									StartByte: contentN.StartByte(),
-									EndByte:   contentN.EndByte(),
+									Span: ingest.Span{StartByte: contentN.StartByte(), EndByte: contentN.EndByte()},
 									NewText:   newLeaf,
 								})
 							}
@@ -1816,8 +1799,7 @@ func pythonGetattrMethodStringEdits(fileRel string, call *grammar.Node, content 
 	}
 	return []ingest.Edit{{
 		File:      fileRel,
-		StartByte: contentN.StartByte(),
-		EndByte:   contentN.EndByte(),
+		Span: ingest.Span{StartByte: contentN.StartByte(), EndByte: contentN.EndByte()},
 		NewText:   newLeaf,
 	}}
 }
@@ -1853,8 +1835,7 @@ func pythonMethodcallerStringEdits(fileRel string, call *grammar.Node, content [
 	}
 	return []ingest.Edit{{
 		File:      fileRel,
-		StartByte: contentN.StartByte(),
-		EndByte:   contentN.EndByte(),
+		Span: ingest.Span{StartByte: contentN.StartByte(), EndByte: contentN.EndByte()},
 		NewText:   newLeaf,
 	}}
 }
@@ -1979,8 +1960,7 @@ func pythonStoredMethodcallerStringEdits(fileRel string, root *grammar.Node, con
 			seen[start] = true
 			edits = append(edits, ingest.Edit{
 				File:      fileRel,
-				StartByte: start,
-				EndByte:   b.nameNode.EndByte(),
+				Span: ingest.Span{StartByte: start, EndByte: b.nameNode.EndByte()},
 				NewText:   newLeaf,
 			})
 		}
@@ -2064,8 +2044,7 @@ func pythonReplaceKeywordEdits(fileRel string, call *grammar.Node, content []byt
 		}
 		edits = append(edits, ingest.Edit{
 			File:      fileRel,
-			StartByte: nameN.StartByte(),
-			EndByte:   nameN.EndByte(),
+			Span: ingest.Span{StartByte: nameN.StartByte(), EndByte: nameN.EndByte()},
 			NewText:   newLeaf,
 		})
 	}

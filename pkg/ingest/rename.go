@@ -11,11 +11,11 @@ import (
 )
 
 // Edit describes a text replacement in a source file.
+// Span is the half-open byte range [StartByte, EndByte) replaced by NewText.
 type Edit struct {
-	File      string // path relative to the ingest root
-	StartByte uint32
-	EndByte   uint32
-	NewText   string
+	File string // path relative to the ingest root
+	Span
+	NewText string
 }
 
 // Rename computes the edits needed to rename or move a symbol from sourceRef to
@@ -123,8 +123,7 @@ func planSymbolRename(dir string, result *Result, sourceRefs []string, destSymbo
 		ref := ParseReference(ent.Reference)
 		edits = append(edits, Edit{
 			File:      strings.TrimPrefix(ref.Path, "./"),
-			StartByte: ent.StartByte,
-			EndByte:   ent.EndByte,
+			Span: Span{StartByte: ent.StartByte, EndByte: ent.EndByte},
 			NewText:   newText,
 		})
 	}
@@ -142,8 +141,7 @@ func planSymbolRename(dir string, result *Result, sourceRefs []string, destSymbo
 		ref := ParseReference(rel.Reference)
 		edits = append(edits, Edit{
 			File:      strings.TrimPrefix(ref.Path, "./"),
-			StartByte: rel.StartByte,
-			EndByte:   rel.EndByte,
+			Span: Span{StartByte: rel.StartByte, EndByte: rel.EndByte},
 			NewText:   newText,
 		})
 	}
@@ -165,8 +163,7 @@ func planSymbolRename(dir string, result *Result, sourceRefs []string, destSymbo
 		ref := ParseReference(alias.Reference)
 		edits = append(edits, Edit{
 			File:      strings.TrimPrefix(ref.Path, "./"),
-			StartByte: alias.StartByte,
-			EndByte:   alias.EndByte,
+			Span: Span{StartByte: alias.StartByte, EndByte: alias.EndByte},
 			NewText:   newText,
 		})
 	}
@@ -224,8 +221,8 @@ func applyRenameFileMoves(rootDir string, edits []Edit, moves map[string]string)
 		}
 		newContent := applyEditsToString(string(content), byFile[oldRel])
 		kept = append(kept,
-			Edit{File: oldRel, StartByte: 0, EndByte: uint32(len(content)), NewText: ""},
-			Edit{File: newRel, StartByte: 0, EndByte: 0, NewText: newContent},
+			Edit{File: oldRel, Span: Span{StartByte: 0, EndByte: uint32(len(content))}, NewText: ""},
+			Edit{File: newRel, Span: Span{StartByte: 0, EndByte: 0}, NewText: newContent},
 		)
 	}
 	return dedupeEdits(kept)
@@ -449,8 +446,7 @@ func planCrossFileMove(dir string, result *Result, src, dst Reference, sourceEnt
 	edits := []Edit{
 		{
 			File:      srcRel,
-			StartByte: decl.RemoveStart,
-			EndByte:   decl.RemoveEnd,
+			Span: Span{StartByte: decl.RemoveStart, EndByte: decl.RemoveEnd},
 			NewText:   "",
 		},
 		insertEdit,
@@ -730,14 +726,12 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 			}
 			edits = append(edits, Edit{
 				File:      srcFile,
-				StartByte: 0,
-				EndByte:   uint32(len(content)),
+				Span: Span{StartByte: 0, EndByte: uint32(len(content))},
 				NewText:   "",
 			})
 			edits = append(edits, Edit{
 				File:      dstFile,
-				StartByte: 0,
-				EndByte:   0,
+				Span: Span{StartByte: 0, EndByte: 0},
 				NewText:   newContent,
 			})
 		}
@@ -824,8 +818,7 @@ func FindAllWholeWordOccurrences(file string, content []byte, oldBase, newBase s
 
 		edits = append(edits, Edit{
 			File:      file,
-			StartByte: uint32(pos),
-			EndByte:   uint32(endPos),
+			Span: Span{StartByte: uint32(pos), EndByte: uint32(endPos)},
 			NewText:   newBase,
 		})
 		off = endPos
@@ -854,8 +847,7 @@ func FindAllOccurrences(file string, content []byte, oldBase, newBase string) []
 		pos := off + idx
 		edits = append(edits, Edit{
 			File:      file,
-			StartByte: uint32(pos),
-			EndByte:   uint32(pos + len(oldBase)),
+			Span: Span{StartByte: uint32(pos), EndByte: uint32(pos + len(oldBase))},
 			NewText:   newBase,
 		})
 		off = pos + len(oldBase)
@@ -883,8 +875,7 @@ func FindAllOccurrencesInStrings(file string, content []byte, oldBase, newBase s
 			pos := start + posInSeg
 			edits = append(edits, Edit{
 				File:      file,
-				StartByte: uint32(pos),
-				EndByte:   uint32(pos + len(oldBase)),
+				Span: Span{StartByte: uint32(pos), EndByte: uint32(pos + len(oldBase))},
 				NewText:   newBase,
 			})
 			sOff = posInSeg + len(oldBase)

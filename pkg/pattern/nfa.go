@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 
+	"github.com/lucasew/refactree/pkg/ingest"
 	"github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar"
 )
 
@@ -289,7 +290,7 @@ type nfaThread struct {
 	state int
 	pos   int // next token index
 	open  map[string]int
-	caps  map[string][]Span
+	caps  map[string][]ingest.Span
 }
 
 func cloneThread(t nfaThread) nfaThread {
@@ -297,13 +298,13 @@ func cloneThread(t nfaThread) nfaThread {
 		state: t.state,
 		pos:   t.pos,
 		open:  make(map[string]int, len(t.open)),
-		caps:  make(map[string][]Span, len(t.caps)),
+		caps:  make(map[string][]ingest.Span, len(t.caps)),
 	}
 	for k, v := range t.open {
 		o.open[k] = v
 	}
 	for k, v := range t.caps {
-		o.caps[k] = append([]Span(nil), v...)
+		o.caps[k] = append([]ingest.Span(nil), v...)
 	}
 	return o
 }
@@ -334,7 +335,7 @@ func applyOps(t *nfaThread, ops []capOp, tokens []tok, source []byte, lastTok in
 				end = start
 			}
 			if start >= 0 && start < len(tokens) && end >= 0 && end < len(tokens) {
-				t.caps[op.name] = []Span{{
+				t.caps[op.name] = []ingest.Span{{
 					StartByte: tokens[start].StartByte,
 					EndByte:   tokens[end].EndByte,
 				}}
@@ -350,7 +351,7 @@ func applyOps(t *nfaThread, ops []capOp, tokens []tok, source []byte, lastTok in
 				end = start
 			}
 			if start >= 0 && start < len(tokens) && end >= 0 && end < len(tokens) {
-				t.caps[op.name] = append(t.caps[op.name], Span{
+				t.caps[op.name] = append(t.caps[op.name], ingest.Span{
 					StartByte: tokens[start].StartByte,
 					EndByte:   tokens[end].EndByte,
 				})
@@ -363,7 +364,7 @@ func applyOps(t *nfaThread, ops []capOp, tokens []tok, source []byte, lastTok in
 			if op.kind == capAppendToken {
 				t.caps[op.name] = append(t.caps[op.name], sp)
 			} else {
-				t.caps[op.name] = []Span{sp}
+				t.caps[op.name] = []ingest.Span{sp}
 			}
 		case capBindRef, capAppendRef:
 			if lastTok < 0 || lastTok >= len(tokens) {
@@ -373,7 +374,7 @@ func applyOps(t *nfaThread, ops []capOp, tokens []tok, source []byte, lastTok in
 			if op.kind == capAppendRef {
 				t.caps[op.name] = append(t.caps[op.name], sp)
 			} else {
-				t.caps[op.name] = []Span{sp}
+				t.caps[op.name] = []ingest.Span{sp}
 			}
 		case capBindRegex, capAppendRegex:
 			if lastTok < 0 || lastTok >= len(tokens) {
@@ -384,13 +385,13 @@ func applyOps(t *nfaThread, ops []capOp, tokens []tok, source []byte, lastTok in
 			if op.kind == capAppendRegex {
 				t.caps[op.name] = append(t.caps[op.name], sp)
 			} else {
-				t.caps[op.name] = []Span{sp}
+				t.caps[op.name] = []ingest.Span{sp}
 			}
 		}
 	}
 }
 
-func bindRegexSpan(t tok, source []byte, captureGroup int) Span {
+func bindRegexSpan(t tok, source []byte, captureGroup int) ingest.Span {
 	content, srcOf, closeOff, _ := tokenContentMap(source, t)
 	if captureGroup <= 0 {
 		return t.Span
@@ -402,7 +403,7 @@ func bindRegexSpan(t tok, source []byte, captureGroup int) Span {
 	return t.Span
 }
 
-func predMatch(p nfaPred, tokens []tok, pos int, source []byte) (ok bool, named map[string]Span) {
+func predMatch(p nfaPred, tokens []tok, pos int, source []byte) (ok bool, named map[string]ingest.Span) {
 	if pos < 0 || pos >= len(tokens) {
 		return false, nil
 	}
@@ -431,7 +432,7 @@ func predMatch(p nfaPred, tokens []tok, pos int, source []byte) (ok bool, named 
 		if idx == nil {
 			return false, nil
 		}
-		named = map[string]Span{}
+		named = map[string]ingest.Span{}
 		names := p.regex.SubexpNames()
 		for i, name := range names {
 			if i == 0 || name == "" || 2*i+1 >= len(idx) || idx[2*i] < 0 {
@@ -469,7 +470,7 @@ func matchNFA(n *nfa, tokens []tok, startIdx int, source []byte, root *grammar.N
 		state: n.start,
 		pos:   startIdx,
 		open:  map[string]int{},
-		caps:  map[string][]Span{},
+		caps:  map[string][]ingest.Span{},
 	}
 	queue := []nfaThread{seed}
 
@@ -541,14 +542,14 @@ func matchNFA(n *nfa, tokens []tok, startIdx int, source []byte, root *grammar.N
 									if op.kind == capAppendRegex && len(nt.caps[op.name]) > 0 {
 										nt.caps[op.name][len(nt.caps[op.name])-1] = sp
 									} else {
-										nt.caps[op.name] = []Span{sp}
+										nt.caps[op.name] = []ingest.Span{sp}
 									}
 								}
 							}
 						}
 						continue
 					}
-					nt.caps[name] = []Span{sp}
+					nt.caps[name] = []ingest.Span{sp}
 				}
 				k := key{nt.state, nt.pos}
 				sc := captureScore(nt.caps)
@@ -571,7 +572,7 @@ func matchNFA(n *nfa, tokens []tok, startIdx int, source []byte, root *grammar.N
 	}
 	_ = root
 	return Match{
-		Span:     Span{StartByte: ms, EndByte: me},
+		Span:     ingest.Span{StartByte: ms, EndByte: me},
 		Captures: best.caps,
 	}, best.pos, true, nil
 }
@@ -599,7 +600,7 @@ func epsilonClose(n *nfa, t nfaThread, tokens []tok, source []byte) []nfaThread 
 	return out
 }
 
-func captureScore(caps map[string][]Span) int {
+func captureScore(caps map[string][]ingest.Span) int {
 	n := 0
 	for _, v := range caps {
 		n += len(v)

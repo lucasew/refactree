@@ -40,7 +40,7 @@ func TestContentSpanToSource_IdentAndQuoted(t *testing.T) {
 	ident := []byte("TestFoo")
 	buf := make([]byte, 100+len(ident))
 	copy(buf[100:], ident)
-	tk := tok{Span: Span{StartByte: 100, EndByte: 100 + uint32(len(ident))}}
+	tk := tok{Span: ingest.Span{StartByte: 100, EndByte: 100 + uint32(len(ident))}}
 	content, srcOf, closeOff, quoted := tokenContentMap(buf, tk)
 	if quoted || content != "TestFoo" {
 		t.Fatalf("ident map: content=%q quoted=%v", content, quoted)
@@ -53,7 +53,7 @@ func TestContentSpanToSource_IdentAndQuoted(t *testing.T) {
 	raw := []byte(`"pre\tpost"`)
 	buf = make([]byte, 50+len(raw))
 	copy(buf[50:], raw)
-	tk = tok{Span: Span{StartByte: 50, EndByte: 50 + uint32(len(raw))}}
+	tk = tok{Span: ingest.Span{StartByte: 50, EndByte: 50 + uint32(len(raw))}}
 	content, srcOf, closeOff, quoted = tokenContentMap(buf, tk)
 	if !quoted || content != "pre\tpost" {
 		t.Fatalf("quoted content=%q quoted=%v", content, quoted)
@@ -76,7 +76,7 @@ func TestContentSpanToSource_IdentAndQuoted(t *testing.T) {
 
 func TestContentSpanToSource_EmptyAndOOB(t *testing.T) {
 	src := []byte("abc")
-	tk := tok{Span: Span{StartByte: 0, EndByte: 3}}
+	tk := tok{Span: ingest.Span{StartByte: 0, EndByte: 3}}
 	_, srcOf, closeOff, _ := tokenContentMap(src, tk)
 	sp, ok := contentSpanToSource(0, srcOf, closeOff, 1, 1)
 	if !ok || sp.StartByte != 1 || sp.EndByte != 1 {

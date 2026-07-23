@@ -97,8 +97,7 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 		if merged != string(dstContent) {
 			return ingest.Edit{
 				File:      dstRelPath,
-				StartByte: 0,
-				EndByte:   uint32(len(dstContent)),
+				Span: ingest.Span{StartByte: 0, EndByte: uint32(len(dstContent))},
 				NewText:   ingest.AppendDeclText(merged, decl.DeclText),
 			}
 		}
@@ -124,8 +123,7 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 
 	return ingest.Edit{
 		File:      dstRelPath,
-		StartByte: insertAt,
-		EndByte:   insertAt,
+		Span: ingest.Span{StartByte: insertAt, EndByte: insertAt},
 		NewText:   insertText,
 	}
 }
@@ -533,8 +531,7 @@ func findQualifierDotOccurrences(file string, content []byte, oldQual, newQual s
 		}
 		edits = append(edits, ingest.Edit{
 			File:      file,
-			StartByte: uint32(pos),
-			EndByte:   uint32(endPos),
+			Span: ingest.Span{StartByte: uint32(pos), EndByte: uint32(endPos)},
 			NewText:   newQual,
 		})
 		off = pos + len(needle)
@@ -988,8 +985,7 @@ func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src
 		// Same-package calls are bare identifiers; qualify them for the new package.
 		edits = append(edits, ingest.Edit{
 			File:      fileRel,
-			StartByte: rel.StartByte,
-			EndByte:   rel.EndByte,
+			Span: ingest.Span{StartByte: rel.StartByte, EndByte: rel.EndByte},
 			NewText:   newQual + "." + leaf,
 		})
 		needImport[fileRel] = true
@@ -1160,8 +1156,7 @@ func goImportInsertEdits(file string, content []byte, paths []string) []ingest.E
 			}
 			return []ingest.Edit{{
 				File:      file,
-				StartByte: uint32(insertPos),
-				EndByte:   uint32(insertPos),
+				Span: ingest.Span{StartByte: uint32(insertPos), EndByte: uint32(insertPos)},
 				NewText:   b.String(),
 			}}
 		}
@@ -1177,8 +1172,7 @@ func goImportInsertEdits(file string, content []byte, paths []string) []ingest.E
 			}
 			return []ingest.Edit{{
 				File:      file,
-				StartByte: uint32(insertPos),
-				EndByte:   uint32(insertPos),
+				Span: ingest.Span{StartByte: uint32(insertPos), EndByte: uint32(insertPos)},
 				NewText:   b.String(),
 			}}
 		}
@@ -1187,8 +1181,7 @@ func goImportInsertEdits(file string, content []byte, paths []string) []ingest.E
 			// Preserve a single blank line between import and the next decl.
 			return []ingest.Edit{{
 				File:      file,
-				StartByte: uint32(insertPos),
-				EndByte:   uint32(insertPos),
+				Span: ingest.Span{StartByte: uint32(insertPos), EndByte: uint32(insertPos)},
 				NewText:   "\n" + formatGoImportBlock(missing) + "\n",
 			}}
 		}
@@ -1237,8 +1230,7 @@ func stripUnusedSourceImports(file string, content []byte, decl ingest.DeclExtra
 		}
 		edits = append(edits, ingest.Edit{
 			File:      file,
-			StartByte: uint32(spec.lineStart),
-			EndByte:   uint32(spec.lineEnd),
+			Span: ingest.Span{StartByte: uint32(spec.lineStart), EndByte: uint32(spec.lineEnd)},
 			NewText:   "",
 		})
 		if spec.blockStart >= 0 {
@@ -1273,8 +1265,7 @@ func stripUnusedSourceImports(file string, content []byte, decl ingest.DeclExtra
 		}
 		edits = append(edits, ingest.Edit{
 			File:      file,
-			StartByte: uint32(start),
-			EndByte:   uint32(end),
+			Span: ingest.Span{StartByte: uint32(start), EndByte: uint32(end)},
 			NewText:   "",
 		})
 	}
@@ -1936,8 +1927,7 @@ func findImportedIndexFieldSelectorEdits(file string, content []byte, oldLeaf, n
 				if elem, ok := elemTypeFromIndexExpr(operand, content, rangeSrc, nil); ok && fieldReceivers[elem] {
 					edits = append(edits, ingest.Edit{
 						File:      file,
-						StartByte: field.StartByte(),
-						EndByte:   field.EndByte(),
+						Span: ingest.Span{StartByte: field.StartByte(), EndByte: field.EndByte()},
 						NewText:   newLeaf,
 					})
 				}
@@ -2369,8 +2359,7 @@ func collectCompositeKeyEdits(n *grammar.Node, content []byte, file, oldLeaf, ne
 			if ingest.NodeText(keyNode, content) == oldLeaf {
 				*edits = append(*edits, ingest.Edit{
 					File:      file,
-					StartByte: keyNode.StartByte(),
-					EndByte:   keyNode.EndByte(),
+					Span: ingest.Span{StartByte: keyNode.StartByte(), EndByte: keyNode.EndByte()},
 					NewText:   newLeaf,
 				})
 			}
@@ -6429,8 +6418,7 @@ func findSelectorLeafEdits(file string, content []byte, oldLeaf, newLeaf string,
 		}
 		edits = append(edits, ingest.Edit{
 			File:      file,
-			StartByte: uint32(start),
-			EndByte:   uint32(end),
+			Span: ingest.Span{StartByte: uint32(start), EndByte: uint32(end)},
 			NewText:   newLeaf,
 		})
 		off = end
@@ -6536,8 +6524,7 @@ func findComplexOperandSelectorEdits(file string, content []byte, oldLeaf, newLe
 				if ok {
 					edits = append(edits, ingest.Edit{
 						File:      file,
-						StartByte: field.StartByte(),
-						EndByte:   field.EndByte(),
+						Span: ingest.Span{StartByte: field.StartByte(), EndByte: field.EndByte()},
 						NewText:   newLeaf,
 					})
 				}
@@ -7753,8 +7740,7 @@ func findInterfaceMethodEdits(file string, content []byte, oldLeaf, newLeaf stri
 					if ingest.NodeText(name, content) == oldLeaf {
 						edits = append(edits, ingest.Edit{
 							File:      file,
-							StartByte: name.StartByte(),
-							EndByte:   name.EndByte(),
+							Span: ingest.Span{StartByte: name.StartByte(), EndByte: name.EndByte()},
 							NewText:   newLeaf,
 						})
 					}
@@ -7768,8 +7754,7 @@ func findInterfaceMethodEdits(file string, content []byte, oldLeaf, newLeaf stri
 						ingest.NodeText(ch, content) == oldLeaf {
 						edits = append(edits, ingest.Edit{
 							File:      file,
-							StartByte: ch.StartByte(),
-							EndByte:   ch.EndByte(),
+							Span: ingest.Span{StartByte: ch.StartByte(), EndByte: ch.EndByte()},
 							NewText:   newLeaf,
 						})
 					}

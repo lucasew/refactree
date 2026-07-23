@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/lucasew/refactree/pkg/ingest"
 )
 
 // PatternNeedsLinks reports whether matching requires ingest hyperlink targets
@@ -89,7 +91,7 @@ func PublicCaptures(m Match, source []byte) map[string]string {
 	return out
 }
 
-func formatCaptureSites(sites []Span, source []byte) string {
+func formatCaptureSites(sites []ingest.Span, source []byte) string {
 	if len(sites) == 0 {
 		return ""
 	}

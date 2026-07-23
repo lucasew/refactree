@@ -351,8 +351,7 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 
 	return ingest.Edit{
 		File:      dstRelPath,
-		StartByte: insertAt,
-		EndByte:   insertAt,
+		Span: ingest.Span{StartByte: insertAt, EndByte: insertAt},
 		NewText:   insertText,
 	}
 }
@@ -589,8 +588,7 @@ func addExportKeyword(file string, content []byte, symbol string) []ingest.Edit 
 				// Not already exported; add "export " before the declaration.
 				return []ingest.Edit{{
 					File:      file,
-					StartByte: child.StartByte(),
-					EndByte:   child.StartByte(),
+					Span: ingest.Span{StartByte: child.StartByte(), EndByte: child.StartByte()},
 					NewText:   "export ",
 				}}
 			}
@@ -729,8 +727,7 @@ func jsImportInsertEdits(file string, content []byte, stmts []string) []ingest.E
 	block := strings.Join(missing, "\n") + "\n"
 	return []ingest.Edit{{
 		File:      file,
-		StartByte: uint32(insertPos),
-		EndByte:   uint32(insertPos),
+		Span: ingest.Span{StartByte: uint32(insertPos), EndByte: uint32(insertPos)},
 		NewText:   block,
 	}}
 }
@@ -792,8 +789,7 @@ func stripUnusedJSImports(file string, content []byte, decl ingest.DeclExtract) 
 		}
 		edits = append(edits, ingest.Edit{
 			File:      file,
-			StartByte: stmt.startByte,
-			EndByte:   removeEnd,
+			Span: ingest.Span{StartByte: stmt.startByte, EndByte: removeEnd},
 			NewText:   "",
 		})
 	}
@@ -1118,8 +1114,7 @@ func jsShorthandLocalPropertyEdits(fileRel string, content []byte, oldLeaf, newL
 		seen[key] = true
 		edits = append(edits, ingest.Edit{
 			File:      fileRel,
-			StartByte: start,
-			EndByte:   end,
+			Span: ingest.Span{StartByte: start, EndByte: end},
 			NewText:   newLeaf,
 		})
 	}
@@ -1267,8 +1262,7 @@ func jsMethodAttrEdits(fileRel string, content []byte, oldLeaf, newLeaf string, 
 		seen[key] = true
 		edits = append(edits, ingest.Edit{
 			File:      fileRel,
-			StartByte: start,
-			EndByte:   end,
+			Span: ingest.Span{StartByte: start, EndByte: end},
 			NewText:   text,
 		})
 	}

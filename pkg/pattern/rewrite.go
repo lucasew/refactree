@@ -208,19 +208,17 @@ func EditsForMatches(matches []Match, repl Node, source []byte, setCapture strin
 			}
 			for _, sp := range sites {
 				edits = append(edits, ingest.Edit{
-					File:      m.File,
-					StartByte: sp.StartByte,
-					EndByte:   sp.EndByte,
-					NewText:   text,
+					File:    m.File,
+					Span:    sp,
+					NewText: text,
 				})
 			}
 			continue
 		}
 		edits = append(edits, ingest.Edit{
-			File:      m.File,
-			StartByte: m.Span.StartByte,
-			EndByte:   m.Span.EndByte,
-			NewText:   text,
+			File:    m.File,
+			Span:    m.Span,
+			NewText: text,
 		})
 	}
 	return edits, nil

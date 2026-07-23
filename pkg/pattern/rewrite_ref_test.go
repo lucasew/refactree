@@ -1,6 +1,10 @@
 package pattern
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/lucasew/refactree/pkg/ingest"
+)
 
 func TestRefEmitText(t *testing.T) {
 	cases := []struct {
@@ -41,7 +45,7 @@ func TestExpandTemplateRef(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 	got, err = expandTemplate(`@go:fmt::Errorf($MSG)`, Match{
-		Captures: map[string][]Span{"MSG": {{StartByte: 0, EndByte: 3}}},
+		Captures: map[string][]ingest.Span{"MSG": {{StartByte: 0, EndByte: 3}}},
 	}, []byte("err"))
 	if err != nil {
 		t.Fatal(err)

@@ -258,8 +258,8 @@ func TestApplyEdits_AppliesDescendingOffsets(t *testing.T) {
 	}
 
 	err := ingest.ApplyEdits(dir, []ingest.Edit{
-		{File: "main.go", StartByte: 11, EndByte: 16, NewText: "G"}, // gamma
-		{File: "main.go", StartByte: 0, EndByte: 5, NewText: "A"},   // alpha
+		{File: "main.go", Span: ingest.Span{StartByte: 11, EndByte: 16}, NewText: "G"}, // gamma
+		{File: "main.go", Span: ingest.Span{StartByte: 0, EndByte: 5}, NewText: "A"},   // alpha
 	})
 	if err != nil {
 		t.Fatalf("apply edits failed: %v", err)
@@ -283,8 +283,7 @@ func TestApplyEdits_OutOfBounds(t *testing.T) {
 
 	err := ingest.ApplyEdits(dir, []ingest.Edit{{
 		File:      "main.go",
-		StartByte: 0,
-		EndByte:   999,
+		Span: ingest.Span{StartByte: 0, EndByte: 999},
 		NewText:   "x",
 	}})
 	if err == nil {
@@ -299,8 +298,7 @@ func TestApplyEdits_MissingFile(t *testing.T) {
 	dir := t.TempDir()
 	err := ingest.ApplyEdits(dir, []ingest.Edit{{
 		File:      "missing.go",
-		StartByte: 0,
-		EndByte:   1,
+		Span: ingest.Span{StartByte: 0, EndByte: 1},
 		NewText:   "x",
 	}})
 	if err == nil {
