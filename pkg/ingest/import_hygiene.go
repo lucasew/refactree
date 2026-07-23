@@ -23,8 +23,8 @@ type ImportNeed struct {
 //
 // Never removes barrel-style imports (side-effect, star/namespace, Go blank/dot).
 type PruneImportOpts struct {
-	MaskSpans       []Span
-	OnlyCandidates  []string
+	MaskSpans      []Span
+	OnlyCandidates []string
 }
 
 // ImportHygiene ensures missing imports and prunes unused named imports.
