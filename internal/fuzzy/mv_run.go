@@ -390,16 +390,16 @@ func formatFuzzName(styleHint string, n int) string {
 	return "fuzz_" + hex
 }
 
-// ApplyMvPlan runs Rename+ApplyEdits and returns edits.
+// ApplyMvPlan runs Rename+ApplyPlan and returns text edits from the plan.
 func ApplyMvPlan(root string, plan movePlan) ([]ingest.Edit, error) {
-	edits, err := ingest.Rename(root, plan.Source, plan.Destination)
+	p, err := ingest.Rename(root, plan.Source, plan.Destination)
 	if err != nil {
 		return nil, err
 	}
-	if err := ingest.ApplyEdits(root, edits); err != nil {
-		return edits, err
+	if err := ingest.ApplyPlan(root, p); err != nil {
+		return p.Edits, err
 	}
-	return edits, nil
+	return p.Edits, nil
 }
 
 func postMvInvariants(root string, plan movePlan, strict bool) []InvariantFailure {

@@ -31,12 +31,16 @@ func newMvCmd() *cobra.Command {
 				"backup", backup,
 			)
 
-			edits, err := ingest.Rename(dir, source, destination)
+			plan, err := ingest.Rename(dir, source, destination)
 			if err != nil {
 				return err
 			}
-			slog.Debug("mv plan ready", "edits", len(edits), "files", editFileCount(edits))
-			return applyEditPlan(cmd, dir, edits, applyEditPlanOptions{
+			slog.Debug("mv plan ready",
+				"dir_moves", len(plan.DirMoves),
+				"edits", len(plan.Edits),
+				"files", editFileCount(plan.Edits),
+			)
+			return applyMovePlan(cmd, dir, plan, applyEditPlanOptions{
 				Interactive: interactive,
 				Backup:      backup,
 			})

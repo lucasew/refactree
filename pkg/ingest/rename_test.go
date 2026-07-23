@@ -34,15 +34,15 @@ func TestRename_RenamesDefinitionAndCallsite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	edits, err := ingest.Rename(dir, "path:./helper.py::helper", "path:./helper.py::renamed")
+	plan, err := ingest.Rename(dir, "path:./helper.py::helper", "path:./helper.py::renamed")
 	if err != nil {
 		t.Fatalf("rename failed: %v", err)
 	}
-	if len(edits) != 3 {
-		t.Fatalf("expected 3 edits (definition + import + callsite), got %d", len(edits))
+	if len(plan.Edits) != 3 {
+		t.Fatalf("expected 3 edits (definition + import + callsite), got %d", len(plan.Edits))
 	}
 
-	if err := ingest.ApplyEdits(dir, edits); err != nil {
+	if err := ingest.ApplyPlan(dir, plan); err != nil {
 		t.Fatalf("apply edits failed: %v", err)
 	}
 
@@ -75,12 +75,12 @@ func TestRename_ShorthandPathReferences(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	edits, err := ingest.Rename(dir, "helper.py::helper", "helper.py::renamed")
+	plan, err := ingest.Rename(dir, "helper.py::helper", "helper.py::renamed")
 	if err != nil {
 		t.Fatalf("rename failed: %v", err)
 	}
-	if len(edits) != 3 {
-		t.Fatalf("expected 3 edits (definition + import + callsite), got %d", len(edits))
+	if len(plan.Edits) != 3 {
+		t.Fatalf("expected 3 edits (definition + import + callsite), got %d", len(plan.Edits))
 	}
 }
 
@@ -93,15 +93,15 @@ func TestRename_PythonAliasedImport_RenamesImportedMemberOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	edits, err := ingest.Rename(dir, "path:./helper.py::helper", "path:./helper.py::renamed")
+	plan, err := ingest.Rename(dir, "path:./helper.py::helper", "path:./helper.py::renamed")
 	if err != nil {
 		t.Fatalf("rename failed: %v", err)
 	}
-	if len(edits) != 2 {
-		t.Fatalf("expected 2 edits (definition + imported member), got %d", len(edits))
+	if len(plan.Edits) != 2 {
+		t.Fatalf("expected 2 edits (definition + imported member), got %d", len(plan.Edits))
 	}
 
-	if err := ingest.ApplyEdits(dir, edits); err != nil {
+	if err := ingest.ApplyPlan(dir, plan); err != nil {
 		t.Fatalf("apply edits failed: %v", err)
 	}
 
@@ -137,15 +137,15 @@ func TestRename_JSAliasedImport_RenamesImportedMemberOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	edits, err := ingest.Rename(dir, "path:./helper.js::helper", "path:./helper.js::doHelp")
+	plan, err := ingest.Rename(dir, "path:./helper.js::helper", "path:./helper.js::doHelp")
 	if err != nil {
 		t.Fatalf("rename failed: %v", err)
 	}
-	if len(edits) != 2 {
-		t.Fatalf("expected 2 edits (definition + imported member), got %d", len(edits))
+	if len(plan.Edits) != 2 {
+		t.Fatalf("expected 2 edits (definition + imported member), got %d", len(plan.Edits))
 	}
 
-	if err := ingest.ApplyEdits(dir, edits); err != nil {
+	if err := ingest.ApplyPlan(dir, plan); err != nil {
 		t.Fatalf("apply edits failed: %v", err)
 	}
 
@@ -181,15 +181,15 @@ func TestRename_ModuleAliasMemberCallsite_RenamesMemberAccess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	edits, err := ingest.Rename(dir, "path:./helpers.py::helper", "path:./helpers.py::renamed")
+	plan, err := ingest.Rename(dir, "path:./helpers.py::helper", "path:./helpers.py::renamed")
 	if err != nil {
 		t.Fatalf("rename failed: %v", err)
 	}
-	if len(edits) != 2 {
-		t.Fatalf("expected 2 edits (definition + member callsite), got %d", len(edits))
+	if len(plan.Edits) != 2 {
+		t.Fatalf("expected 2 edits (definition + member callsite), got %d", len(plan.Edits))
 	}
 
-	if err := ingest.ApplyEdits(dir, edits); err != nil {
+	if err := ingest.ApplyPlan(dir, plan); err != nil {
 		t.Fatalf("apply edits failed: %v", err)
 	}
 
@@ -230,16 +230,16 @@ func TestPackageMove_OnlyGraphConsumersRewritten(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	edits, err := ingest.Rename(dir, "path:./pkg", "path:./pkga")
+	plan, err := ingest.Rename(dir, "path:./pkg", "path:./pkga")
 	if err != nil {
 		t.Fatalf("Rename: %v", err)
 	}
-	for _, e := range edits {
+	for _, e := range plan.Edits {
 		if strings.Contains(e.File, "testdata") {
 			t.Fatalf("package move must not edit tree without use of moved package: %+v", e)
 		}
 	}
-	if err := ingest.ApplyEdits(dir, edits); err != nil {
+	if err := ingest.ApplyPlan(dir, plan); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "pkga", "lib.go")); err != nil {
@@ -274,21 +274,24 @@ func TestPackageMove_ModuleImportPathConsumers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	edits, err := ingest.Rename(dir, "path:./pkg", "path:./pkga")
+	plan, err := ingest.Rename(dir, "path:./pkg", "path:./pkga")
 	if err != nil {
 		t.Fatalf("Rename: %v", err)
 	}
+	if len(plan.DirMoves) != 1 || plan.DirMoves[0].From != "pkg" || plan.DirMoves[0].To != "pkga" {
+		t.Fatalf("expected DirMove pkg→pkga, got %+v", plan.DirMoves)
+	}
 	var sawMain bool
-	for _, e := range edits {
+	for _, e := range plan.Edits {
 		if e.File == "main.go" {
 			sawMain = true
 			break
 		}
 	}
 	if !sawMain {
-		t.Fatalf("expected consumer rewrite on main.go; edits=%d", len(edits))
+		t.Fatalf("expected consumer rewrite on main.go; edits=%d", len(plan.Edits))
 	}
-	if err := ingest.ApplyEdits(dir, edits); err != nil {
+	if err := ingest.ApplyPlan(dir, plan); err != nil {
 		t.Fatal(err)
 	}
 	main, err := os.ReadFile(filepath.Join(dir, "main.go"))
@@ -306,6 +309,88 @@ func TestPackageMove_ModuleImportPathConsumers(t *testing.T) {
 	}
 }
 
+func TestPackageMove_DestExistsUsesFileLevel(t *testing.T) {
+	// Merging into an existing destination cannot DirMove; fall back to file edits.
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "pkg"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "pkga"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pkg", "lib.go"), []byte("package pkg\n\nfunc Hello() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pkga", "keep.go"), []byte("package pkga\n\nfunc Keep() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := ingest.Rename(dir, "path:./pkg", "path:./pkga")
+	if err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	if len(plan.DirMoves) != 0 {
+		t.Fatalf("dest exists: expected no DirMove, got %+v", plan.DirMoves)
+	}
+	if len(plan.Edits) == 0 {
+		t.Fatal("expected file-level relocate edits")
+	}
+	if err := ingest.ApplyPlan(dir, plan); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "pkga", "lib.go")); err != nil {
+		t.Fatalf("expected merge of lib.go into pkga: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "pkga", "keep.go")); err != nil {
+		t.Fatalf("pre-existing keep.go lost: %v", err)
+	}
+}
+
+func TestPackageMove_DirMoveKeepsUntrackedCoLocated(t *testing.T) {
+	// Single-pair package move renames the directory so non-ingested files
+	// co-located under the package (README, assets, etc.) move with it.
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "pkg"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pkg", "lib.go"), []byte("package pkg\n\nfunc Hello() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pkg", "NOTES.md"), []byte("# notes for pkg\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nimport \"./pkg\"\n\nfunc main() { pkg.Hello() }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := ingest.Rename(dir, "path:./pkg", "path:./pkga")
+	if err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	if len(plan.DirMoves) != 1 {
+		t.Fatalf("expected 1 DirMove, got %+v", plan.DirMoves)
+	}
+	if err := ingest.ApplyPlan(dir, plan); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "pkga", "NOTES.md")); err != nil {
+		t.Fatalf("untracked co-located file not moved with package: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "pkg")); !os.IsNotExist(err) {
+		t.Fatalf("old package dir should be gone after DirMove, err=%v", err)
+	}
+	main, err := os.ReadFile(filepath.Join(dir, "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(main), `"./pkg"`) {
+		t.Fatalf("consumer import not rewritten:\n%s", main)
+	}
+	if !strings.Contains(string(main), `"./pkga"`) {
+		t.Fatalf("expected import of ./pkga:\n%s", main)
+	}
+}
+
 func TestMove_GoCrossFile(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "doc.go"), []byte("package main\n\nfunc helper() {\n}\n"), 0644); err != nil {
@@ -318,15 +403,15 @@ func TestMove_GoCrossFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	edits, err := ingest.Rename(dir, "doc.go::helper", "ls.go::helper")
+	plan, err := ingest.Rename(dir, "doc.go::helper", "ls.go::helper")
 	if err != nil {
 		t.Fatalf("move failed: %v", err)
 	}
-	if len(edits) != 2 {
-		t.Fatalf("expected 2 edits (remove+insert), got %d", len(edits))
+	if len(plan.Edits) != 2 {
+		t.Fatalf("expected 2 edits (remove+insert), got %d", len(plan.Edits))
 	}
 
-	if err := ingest.ApplyEdits(dir, edits); err != nil {
+	if err := ingest.ApplyPlan(dir, plan); err != nil {
 		t.Fatalf("apply edits failed: %v", err)
 	}
 

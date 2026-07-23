@@ -47,7 +47,7 @@ func TestMv(t *testing.T) {
 			expectErr := wantErr == nil
 
 			// Run rename.
-			edits, err := ingest.Rename(tmpDir, op.Source, op.Destination)
+			plan, err := ingest.Rename(tmpDir, op.Source, op.Destination)
 			if expectErr {
 				if err == nil {
 					t.Fatalf("rename: want error containing %q, got nil", strings.TrimSpace(string(wantErrBytes)))
@@ -61,7 +61,7 @@ func TestMv(t *testing.T) {
 			if err != nil {
 				t.Fatalf("rename: %v", err)
 			}
-			if err := ingest.ApplyEdits(tmpDir, edits); err != nil {
+			if err := ingest.ApplyPlan(tmpDir, plan); err != nil {
 				t.Fatalf("apply edits: %v", err)
 			}
 

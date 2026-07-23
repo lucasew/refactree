@@ -23,21 +23,27 @@ type applyEditPlanOptions struct {
 // for confirmation, then backups / creates missing files / ApplyEdits.
 // DryRun never writes. Empty edits is a no-op success (callers may error first).
 func applyEditPlan(cmd *cobra.Command, root string, edits []ingest.Edit, opts applyEditPlanOptions) error {
-	if len(edits) == 0 {
-		slog.Debug("apply plan: no edits")
+	return applyMovePlan(cmd, root, ingest.Plan{Edits: edits}, opts)
+}
+
+// applyMovePlan is applyEditPlan for a full Rename plan (DirMoves + Edits).
+func applyMovePlan(cmd *cobra.Command, root string, plan ingest.Plan, opts applyEditPlanOptions) error {
+	if plan.Empty() {
+		slog.Debug("apply plan: empty")
 		return nil
 	}
 	slog.Debug("apply plan",
 		"root", root,
-		"edits", len(edits),
-		"files", editFileCount(edits),
+		"dir_moves", len(plan.DirMoves),
+		"edits", len(plan.Edits),
+		"files", editFileCount(plan.Edits),
 		"interactive", opts.Interactive,
 		"dry_run", opts.DryRun,
 		"backup", opts.Backup,
 	)
 	if opts.Interactive || opts.DryRun {
 		w := cmd.ErrOrStderr()
-		if err := printEditPlan(w, edits); err != nil {
+		if err := printMovePlan(w, plan); err != nil {
 			return err
 		}
 		if opts.DryRun {
@@ -53,7 +59,45 @@ func applyEditPlan(cmd *cobra.Command, root string, edits []ingest.Edit, opts ap
 			return fmt.Errorf("cancelled")
 		}
 	}
-	return writeEdits(root, edits, opts.Backup)
+	return writeMovePlan(root, plan, opts.Backup)
+}
+
+func printMovePlan(w io.Writer, plan ingest.Plan) error {
+	if len(plan.DirMoves) > 0 {
+		if _, err := fmt.Fprintf(w, "Dir moves (%d):\n", len(plan.DirMoves)); err != nil {
+			return err
+		}
+		for _, m := range plan.DirMoves {
+			if _, err := fmt.Fprintf(w, "  %s → %s\n", m.From, m.To); err != nil {
+				return err
+			}
+		}
+	}
+	return printEditPlan(w, plan.Edits)
+}
+
+// writeMovePlan optionally backups text-edit files, ensures create targets, then ApplyPlan.
+// DirMoves run before ensureEditFiles so post-rename paths are not pre-created
+// as empty files (that would block os.Rename of the package tree).
+func writeMovePlan(root string, plan ingest.Plan, backup bool) error {
+	slog.Debug("write plan", "root", root, "dir_moves", len(plan.DirMoves), "edits", len(plan.Edits), "backup", backup)
+	if backup {
+		if err := createBackups(root, plan.Edits); err != nil {
+			return err
+		}
+	}
+	// Apply directory renames first; then ensure/create only remaining edit targets.
+	if err := ingest.ApplyPlan(root, ingest.Plan{DirMoves: plan.DirMoves}); err != nil {
+		return err
+	}
+	if err := ensureEditFiles(root, plan.Edits); err != nil {
+		return err
+	}
+	if err := ingest.ApplyEdits(root, plan.Edits); err != nil {
+		return err
+	}
+	slog.Debug("write plan: done")
+	return nil
 }
 
 // writeEdits optionally backups, ensures files exist, then ApplyEdits.

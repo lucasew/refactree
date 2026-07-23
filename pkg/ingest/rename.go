@@ -19,14 +19,35 @@ type Edit struct {
 	NewText string
 }
 
-// Rename computes the edits needed to rename or move a symbol from sourceRef to
+// DirMove is a filesystem directory rename relative to the project root.
+// Paths are slash-separated without a leading "./". Applied before Edits so
+// package trees (including untracked/non-ingested co-located files) move as a unit.
+type DirMove struct {
+	From string
+	To   string
+}
+
+// Plan is the full result of Rename: optional directory renames plus text edits.
+// DirMoves run first (ApplyPlan); Edits target paths as they exist after those renames.
+type Plan struct {
+	DirMoves []DirMove
+	Edits    []Edit
+}
+
+// Empty reports whether the plan has no directory moves and no text edits.
+func (p Plan) Empty() bool {
+	return len(p.DirMoves) == 0 && len(p.Edits) == 0
+}
+
+// Rename computes the plan needed to rename or move a symbol from sourceRef to
 // destRef. Same-file operations are treated as renames; cross-file operations
-// are treated as moves.
-func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
+// are treated as moves. Package moves may include DirMoves when a single
+// source tree can be renamed wholesale (destination free).
+func Rename(dir, sourceRef, destRef string) (Plan, error) {
 	src := ParseReference(sourceRef)
 	dst := ParseReference(destRef)
 	if (src.Name == "") != (dst.Name == "") {
-		return nil, fmt.Errorf("source and destination references must both include symbols or both omit them (for package moves)")
+		return Plan{}, fmt.Errorf("source and destination references must both include symbols or both omit them (for package moves)")
 	}
 
 	// CLI may pass absolute path: refs; Result identity is ./rel under root.
@@ -38,7 +59,7 @@ func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 	slog.Debug("rename: materialize project", "root", dir, "source", sourceRef, "destination", destRef)
 	result, err := ProjectResult(dir)
 	if err != nil {
-		return nil, err
+		return Plan{}, err
 	}
 	slog.Debug("rename: project loaded",
 		"files", len(result.Files),
@@ -49,11 +70,11 @@ func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 
 	src, err = canonicalSourceReference(dir, result, src)
 	if err != nil {
-		return nil, err
+		return Plan{}, err
 	}
 	dst, err = canonicalDestinationReference(dir, result, src, dst)
 	if err != nil {
-		return nil, err
+		return Plan{}, err
 	}
 	// Keep project-relative path identity after canonicalize.
 	src = ProjectPathRef(dir, src)
@@ -70,20 +91,24 @@ func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 
 	sourceEntity, ok := findEntityByReference(result, sourceRef)
 	if !ok {
-		return nil, fmt.Errorf("no entity found for reference %s", sourceRef)
+		return Plan{}, fmt.Errorf("no entity found for reference %s", sourceRef)
 	}
 
 	if src.Path != dst.Path {
 		if src.Name != dst.Name {
-			return nil, fmt.Errorf("cross-file move with symbol rename is not supported yet")
+			return Plan{}, fmt.Errorf("cross-file move with symbol rename is not supported yet")
 		}
 		srcLang := languageForRefPath(result, src.Path)
 		driver, ok := moveDriverForLanguage(srcLang)
 		if !ok {
-			return nil, fmt.Errorf("cross-file move is not supported for language %q", srcLang)
+			return Plan{}, fmt.Errorf("cross-file move is not supported for language %q", srcLang)
 		}
 		slog.Debug("rename: cross-file move", "lang", srcLang, "from", src.Path, "to", dst.Path)
-		return planCrossFileMove(dir, result, src, dst, sourceEntity, driver)
+		edits, err := planCrossFileMove(dir, result, src, dst, sourceEntity, driver)
+		if err != nil {
+			return Plan{}, err
+		}
+		return Plan{Edits: edits}, nil
 	}
 
 	sourceRefs := []string{sourceRef}
@@ -102,7 +127,11 @@ func Rename(dir, sourceRef, destRef string) ([]Edit, error) {
 		"to", AtomName(dst.Name),
 		"source_refs", len(sourceRefs),
 	)
-	return planSymbolRename(dir, result, sourceRefs, dst.Name)
+	edits, err := planSymbolRename(dir, result, sourceRefs, dst.Name)
+	if err != nil {
+		return Plan{}, err
+	}
+	return Plan{Edits: edits}, nil
 }
 
 func uniqueStrings(in []string) []string {
@@ -554,6 +583,41 @@ func aliasTargetMatchesFile(result *Result, targetStr string, targetRef Referenc
 	return false
 }
 
+// ApplyPlan applies directory renames then text edits under dir.
+// DirMoves run first so package-tree renames (including untracked co-located
+// files) complete before import/consumer rewrites target post-move paths.
+func ApplyPlan(dir string, plan Plan) error {
+	for _, m := range plan.DirMoves {
+		if err := applyDirMove(dir, m); err != nil {
+			return err
+		}
+	}
+	return ApplyEdits(dir, plan.Edits)
+}
+
+// applyDirMove renames From → To under root (slash paths). Creates parent of To
+// when missing. Fails if From is missing or To already exists.
+func applyDirMove(root string, m DirMove) error {
+	from := CleanRelDir(m.From)
+	to := CleanRelDir(m.To)
+	if from == "" || to == "" {
+		return fmt.Errorf("dir move requires non-empty from/to")
+	}
+	if from == to {
+		return nil
+	}
+	fromAbs := filepath.Join(root, filepath.FromSlash(from))
+	toAbs := filepath.Join(root, filepath.FromSlash(to))
+	if err := os.MkdirAll(filepath.Dir(toAbs), 0o755); err != nil {
+		return fmt.Errorf("mkdir parent for %s: %w", to, err)
+	}
+	if err := os.Rename(fromAbs, toAbs); err != nil {
+		return fmt.Errorf("rename dir %s → %s: %w", from, to, err)
+	}
+	slog.Debug("applyDirMove", "from", from, "to", to)
+	return nil
+}
+
 // ApplyEdits applies text replacements to files under dir.
 // Edits are grouped by file and applied from last to first byte offset
 // so that earlier offsets remain valid.
@@ -604,11 +668,8 @@ func ApplyEdits(dir string, edits []Edit) error {
 			return fmt.Errorf("writing %s: %w", file, err)
 		}
 
-		// For package moves we emit full-file truncate edits (NewText:"") on every
-		// source file under the old package dir. After the write, if the file is now
-		// empty we remove it entirely instead of leaving a 0-byte file behind.
-		// This keeps the "edits only" model for the returned plan while still
-		// producing a clean result (no empty files from relocation).
+		// File-level package relocate emits truncate (NewText:"") on old paths.
+		// After the write, remove empty files instead of leaving 0-byte placeholders.
 		if len(content) == 0 {
 			_ = os.Remove(target)
 		}
@@ -617,27 +678,44 @@ func ApplyEdits(dir string, edits []Edit) error {
 	return nil
 }
 
+// canDirRename reports whether From can be os.Rename'd to To under root:
+// From exists as a directory and To does not exist (no merge into an existing tree).
+func canDirRename(root, from, to string) bool {
+	from = CleanRelDir(from)
+	to = CleanRelDir(to)
+	if from == "" || to == "" || from == to {
+		return false
+	}
+	fromAbs := filepath.Join(root, filepath.FromSlash(from))
+	toAbs := filepath.Join(root, filepath.FromSlash(to))
+	fi, err := os.Stat(fromAbs)
+	if err != nil || !fi.IsDir() {
+		return false
+	}
+	if _, err := os.Stat(toAbs); err == nil {
+		return false
+	} else if !os.IsNotExist(err) {
+		return false
+	}
+	return true
+}
+
 // planPackageMove handles directory/package level moves (inter-package).
-// It relocates all files under the source dir by clearing old locations and
-// inserting full original contents at new locations, and performs textual
-// replacement of the package base name in all other files (updating import
-// spec strings, local bindings and qualifiers at call sites).
 //
-// Note on relocation: emits truncate (NewText:"") edits on old paths (edits-only
-// model, no explicit file/dir removal in the plan). ApplyEdits removes any file
-// that ends up 0 bytes after its edits (see the len(content)==0 Remove after
-// WriteFile). This means old package files disappear entirely on disk instead of
-// leaving 0-byte placeholders. Empty directories may remain (no dir pruning is
-// performed, for simplicity). compareDir in tests only validates the expected/
-// tree. This matches the "content deleted" intent from the original fixtures/task.
-func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, error) {
+// Single pair + free destination: DirMove renames the tree on disk (pulls
+// untracked/non-ingested co-located files), then Edits rewrite imports inside
+// the moved tree (at new paths) and in consumer/support files.
+//
+// Multi-root (e.g. Java) or merge into an existing destination: file-level
+// truncate/create relocation of ingested files only.
+func planPackageMove(dir string, result *Result, src, dst Reference) (Plan, error) {
 	srcDir := strings.TrimPrefix(src.Path, "./")
 	dstDir := strings.TrimPrefix(dst.Path, "./")
 	if srcDir == "" || dstDir == "" {
-		return nil, fmt.Errorf("package move requires non-empty directory paths")
+		return Plan{}, fmt.Errorf("package move requires non-empty directory paths")
 	}
 	if srcDir == dstDir {
-		return nil, nil // no-op; avoids pointless I/O + self-overwrite edits
+		return Plan{}, nil // no-op; avoids pointless I/O + self-overwrite edits
 	}
 	oldDirBase := LastPathComponent(srcDir)
 	newDirBase := LastPathComponent(dstDir)
@@ -649,57 +727,92 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 			dirPairs = expanded
 		}
 	}
-	slog.Debug("planPackageMove", "srcDir", srcDir, "dstDir", dstDir, "dir_pairs", len(dirPairs))
+	useDirMove := len(dirPairs) == 1 && canDirRename(dir, dirPairs[0][0], dirPairs[0][1])
+	slog.Debug("planPackageMove", "srcDir", srcDir, "dstDir", dstDir, "dir_pairs", len(dirPairs), "dir_move", useDirMove)
 
+	var plan Plan
 	var edits []Edit
 	movedFiles := map[string]bool{}
-
-	// Relocate package contents across every paired directory.
-	// isUnderDir requires a path prefix (pkg/…), so nested leaves like
-	// testdata/…/pkg are not relocated when moving top-level ./pkg.
 	nRelocated := 0
-	for _, pair := range dirPairs {
-		fromDir, toDir := pair[0], pair[1]
+
+	if useDirMove {
+		fromDir, toDir := dirPairs[0][0], dirPairs[0][1]
+		plan.DirMoves = []DirMove{{From: fromDir, To: toDir}}
 		pairSrc := Reference{Provider: "path", Path: "./" + fromDir}
 		pairDst := Reference{Provider: "path", Path: "./" + toDir}
+		// Mark ingested files as moved; plan import rewrites against post-rename paths.
 		for _, f := range result.Files {
 			rel := strings.TrimPrefix(f.Path, "./")
 			if !isUnderDir(rel, fromDir) {
 				continue
 			}
-			srcFile := rel
-			if movedFiles[srcFile] {
+			if movedFiles[rel] {
 				continue
 			}
-			movedFiles[srcFile] = true
+			movedFiles[rel] = true
 			nRelocated++
-			under := strings.TrimPrefix(srcFile, fromDir)
+			under := strings.TrimPrefix(rel, fromDir)
 			under = strings.TrimPrefix(under, "/")
 			dstFile := toDir
 			if under != "" {
 				dstFile = path.Join(toDir, under)
 			}
-			content, err := os.ReadFile(filepath.Join(dir, srcFile))
+			content, err := os.ReadFile(filepath.Join(dir, rel))
 			if err != nil {
-				return nil, fmt.Errorf("reading %s: %w", srcFile, err)
+				return Plan{}, fmt.Errorf("reading %s: %w", rel, err)
 			}
-			newContent := string(content)
 			if driver, ok := moveDriverForLanguage(f.Language); ok {
-				newContent = string(ApplyEditsInMemory(content, driver.RewriteImports(dstFile, content, result, pairSrc, pairDst)))
+				edits = append(edits, driver.RewriteImports(dstFile, content, result, pairSrc, pairDst)...)
 			}
-			edits = append(edits, Edit{
-				File:    srcFile,
-				Span:    Span{StartByte: 0, EndByte: uint32(len(content))},
-				NewText: "",
-			})
-			edits = append(edits, Edit{
-				File:    dstFile,
-				Span:    Span{StartByte: 0, EndByte: 0},
-				NewText: newContent,
-			})
 		}
+		slog.Debug("planPackageMove: dir move relocate", "count", nRelocated, "from", fromDir, "to", toDir)
+	} else {
+		// File-level: truncate old paths + create new paths for ingested files only.
+		// isUnderDir requires a path prefix (pkg/…), so nested leaves like
+		// testdata/…/pkg are not relocated when moving top-level ./pkg.
+		for _, pair := range dirPairs {
+			fromDir, toDir := pair[0], pair[1]
+			pairSrc := Reference{Provider: "path", Path: "./" + fromDir}
+			pairDst := Reference{Provider: "path", Path: "./" + toDir}
+			for _, f := range result.Files {
+				rel := strings.TrimPrefix(f.Path, "./")
+				if !isUnderDir(rel, fromDir) {
+					continue
+				}
+				srcFile := rel
+				if movedFiles[srcFile] {
+					continue
+				}
+				movedFiles[srcFile] = true
+				nRelocated++
+				under := strings.TrimPrefix(srcFile, fromDir)
+				under = strings.TrimPrefix(under, "/")
+				dstFile := toDir
+				if under != "" {
+					dstFile = path.Join(toDir, under)
+				}
+				content, err := os.ReadFile(filepath.Join(dir, srcFile))
+				if err != nil {
+					return Plan{}, fmt.Errorf("reading %s: %w", srcFile, err)
+				}
+				newContent := string(content)
+				if driver, ok := moveDriverForLanguage(f.Language); ok {
+					newContent = string(ApplyEditsInMemory(content, driver.RewriteImports(dstFile, content, result, pairSrc, pairDst)))
+				}
+				edits = append(edits, Edit{
+					File:    srcFile,
+					Span:    Span{StartByte: 0, EndByte: uint32(len(content))},
+					NewText: "",
+				})
+				edits = append(edits, Edit{
+					File:    dstFile,
+					Span:    Span{StartByte: 0, EndByte: 0},
+					NewText: newContent,
+				})
+			}
+		}
+		slog.Debug("planPackageMove: file-level relocated", "count", nRelocated, "edits", len(edits))
 	}
-	slog.Debug("planPackageMove: relocated files", "count", nRelocated, "edits", len(edits))
 
 	// Rewrite imports only in files that the graph shows as consumers of
 	// something defined under srcDir (path: or language import paths via
@@ -714,7 +827,7 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 	for consumerFile := range consumers {
 		fcontent, err := os.ReadFile(filepath.Join(dir, consumerFile))
 		if err != nil {
-			return nil, fmt.Errorf("reading %s: %w", consumerFile, err)
+			return Plan{}, fmt.Errorf("reading %s: %w", consumerFile, err)
 		}
 		lang := langByFile[consumerFile]
 		if driver, ok := moveDriverForLanguage(lang); ok {
@@ -741,13 +854,14 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 	if planner != nil {
 		extra, err := planner.RewriteSupportFiles(dir, result, movedFiles, srcDir, dstDir)
 		if err != nil {
-			return nil, err
+			return Plan{}, err
 		}
 		edits = append(edits, extra...)
 	}
 
-	slog.Debug("planPackageMove: done", "edits", len(edits))
-	return edits, nil
+	plan.Edits = edits
+	slog.Debug("planPackageMove: done", "dir_moves", len(plan.DirMoves), "edits", len(edits))
+	return plan, nil
 }
 
 func isUnderDir(p, dir string) bool {

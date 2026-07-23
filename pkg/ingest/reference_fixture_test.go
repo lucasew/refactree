@@ -93,24 +93,24 @@ func TestRename_ReferenceFixtures(t *testing.T) {
 			tmpDir := t.TempDir()
 			copyDir(t, srcDir, tmpDir)
 
-			edits, err := ingest.Rename(tmpDir, tc.Source, tc.Destination)
+			plan, err := ingest.Rename(tmpDir, tc.Source, tc.Destination)
 			if tc.ExpectError {
 				if err == nil {
-					t.Fatalf("expected error, got %d edits", len(edits))
+					t.Fatalf("expected error, got %d edits", len(plan.Edits))
 				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("rename failed: %v", err)
 			}
-			if tc.ExpectEditCountAtLeast > 0 && len(edits) < tc.ExpectEditCountAtLeast {
-				t.Fatalf("expected at least %d edits, got %d", tc.ExpectEditCountAtLeast, len(edits))
+			if tc.ExpectEditCountAtLeast > 0 && len(plan.Edits) < tc.ExpectEditCountAtLeast {
+				t.Fatalf("expected at least %d edits, got %d", tc.ExpectEditCountAtLeast, len(plan.Edits))
 			}
 
 			if !tc.ApplyEdits {
 				return
 			}
-			if err := ingest.ApplyEdits(tmpDir, edits); err != nil {
+			if err := ingest.ApplyPlan(tmpDir, plan); err != nil {
 				t.Fatalf("apply edits failed: %v", err)
 			}
 

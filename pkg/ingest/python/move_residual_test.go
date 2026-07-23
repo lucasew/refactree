@@ -15,11 +15,11 @@ func TestPythonResidualSameFileImport(t *testing.T) {
 	mustWrite(t, filepath.Join(dir, "helpers.py"), "def helper():\n    return 1\n\ndef other():\n    return helper()\n")
 	mustWrite(t, filepath.Join(dir, "utils.py"), "def existing():\n    pass\n")
 
-	edits, err := ingest.Rename(dir, "path:./helpers.py::helper", "path:./utils.py::helper")
+	plan, err := ingest.Rename(dir, "path:./helpers.py::helper", "path:./utils.py::helper")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ingest.ApplyEdits(dir, edits); err != nil {
+	if err := ingest.ApplyPlan(dir, plan); err != nil {
 		t.Fatal(err)
 	}
 	helpers := mustRead(t, filepath.Join(dir, "helpers.py"))
@@ -44,11 +44,11 @@ func TestPythonResidualPackageRootImport(t *testing.T) {
 	mustWrite(t, filepath.Join(dir, "helpers.py"), "def helper():\n    return 1\n\ndef other():\n    return helper()\n")
 	mustWrite(t, filepath.Join(dir, "utils.py"), "def existing():\n    pass\n")
 
-	edits, err := ingest.Rename(dir, "path:./helpers.py::helper", "path:./utils.py::helper")
+	plan, err := ingest.Rename(dir, "path:./helpers.py::helper", "path:./utils.py::helper")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ingest.ApplyEdits(dir, edits); err != nil {
+	if err := ingest.ApplyPlan(dir, plan); err != nil {
 		t.Fatal(err)
 	}
 	helpers := mustRead(t, filepath.Join(dir, "helpers.py"))
@@ -71,11 +71,11 @@ func TestPythonLocalDepImportNewModule(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "models.py"), "class Config:\n    pass\n\ndef create_config(name):\n    return Config(name)\n")
 
-	edits, err := ingest.Rename(dir, "path:./models.py::create_config", "path:./factory.py::create_config")
+	plan, err := ingest.Rename(dir, "path:./models.py::create_config", "path:./factory.py::create_config")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ingest.ApplyEdits(dir, edits); err != nil {
+	if err := ingest.ApplyPlan(dir, plan); err != nil {
 		t.Fatal(err)
 	}
 	factory := mustRead(t, filepath.Join(dir, "factory.py"))
@@ -96,11 +96,11 @@ func TestPythonLocalDepImportPackageRoot(t *testing.T) {
 	mustWrite(t, filepath.Join(dir, "__init__.py"), "")
 	mustWrite(t, filepath.Join(dir, "models.py"), "class Config:\n    pass\n\ndef create_config(name):\n    return Config(name)\n")
 
-	edits, err := ingest.Rename(dir, "path:./models.py::create_config", "path:./factory.py::create_config")
+	plan, err := ingest.Rename(dir, "path:./models.py::create_config", "path:./factory.py::create_config")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ingest.ApplyEdits(dir, edits); err != nil {
+	if err := ingest.ApplyPlan(dir, plan); err != nil {
 		t.Fatal(err)
 	}
 	factory := mustRead(t, filepath.Join(dir, "factory.py"))
@@ -118,11 +118,11 @@ func TestPythonClassCrossFileResidualImport(t *testing.T) {
 	mustWrite(t, filepath.Join(dir, "types.py"), "pass\n")
 	mustWrite(t, filepath.Join(dir, "app.py"), "from models import Config\n\nc = Config(\"test\")\n")
 
-	edits, err := ingest.Rename(dir, "path:./models.py::Config", "path:./types.py::Config")
+	plan, err := ingest.Rename(dir, "path:./models.py::Config", "path:./types.py::Config")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ingest.ApplyEdits(dir, edits); err != nil {
+	if err := ingest.ApplyPlan(dir, plan); err != nil {
 		t.Fatal(err)
 	}
 	models := mustRead(t, filepath.Join(dir, "models.py"))

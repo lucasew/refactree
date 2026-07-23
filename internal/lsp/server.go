@@ -515,11 +515,13 @@ func (s *Server) Rename(_ context.Context, params *protocol.RenameParams) (*prot
 		}
 	}
 
-	edits, err := ingest.Rename(snap.Root, srcRef.String(), dstRef.String())
+	plan, err := ingest.Rename(snap.Root, srcRef.String(), dstRef.String())
 	if err != nil {
 		return nil, err
 	}
+	edits := plan.Edits
 	// Stage in memory on current overlay, validate, then emit WorkspaceEdit (client applies).
+	// LSP rename is symbol-only (no package DirMoves).
 	staged, err := ingest.StageEdits(snap.Root, s.session.overlay, edits)
 	if err != nil {
 		return nil, err

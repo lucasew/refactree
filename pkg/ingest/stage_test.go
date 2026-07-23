@@ -19,14 +19,14 @@ func TestStageEditsAndValidate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	edits, err := ingest.Rename(dir, "path:./main.go::Hello", "path:./main.go::Hi")
+	plan, err := ingest.Rename(dir, "path:./main.go::Hello", "path:./main.go::Hi")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(edits) == 0 {
+	if len(plan.Edits) == 0 {
 		t.Fatal("expected edits")
 	}
-	ov, err := ingest.StageEdits(dir, nil, edits)
+	ov, err := ingest.StageEdits(dir, nil, plan.Edits)
 	if err != nil {
 		t.Fatal(err)
 	}
