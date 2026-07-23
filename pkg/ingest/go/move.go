@@ -93,12 +93,14 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 	insertText := ""
 
 	if dstContent != nil {
-		merged := ensureGoImports(string(dstContent), decl.Imports)
+		// In-memory ensure (same engine as ImportHygiene); prefer
+		// ImportHygiene.EnsureImportEdits when emitting a multi-edit plan.
+		merged := EnsureImportsInContent(string(dstContent), decl.Imports)
 		if merged != string(dstContent) {
 			return ingest.Edit{
-				File:      dstRelPath,
-				Span: ingest.Span{StartByte: 0, EndByte: uint32(len(dstContent))},
-				NewText:   ingest.AppendDeclText(merged, decl.DeclText),
+				File:    dstRelPath,
+				Span:    ingest.Span{StartByte: 0, EndByte: uint32(len(dstContent))},
+				NewText: ingest.AppendDeclText(merged, decl.DeclText),
 			}
 		}
 		insertAt = uint32(len(dstContent))
@@ -116,7 +118,7 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 		}
 		body := fmt.Sprintf("package %s\n", pkgName)
 		if len(decl.Imports) > 0 {
-			body = ensureGoImports(body, decl.Imports)
+			body = EnsureImportsInContent(body, decl.Imports)
 		}
 		insertText = ingest.AppendDeclText(body, decl.DeclText)
 	}
@@ -346,7 +348,17 @@ func isIdentStart(b byte) bool {
 	return b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
-func ensureGoImports(content string, paths []string) string {
+// EnsureImportsInContent adds missing import paths to Go source text.
+// This is the shared string-level engine behind ImportHygiene.EnsureImportEdits
+// (which turns the same transform into localized []Edit for rewrite plans).
+//
+// Use:
+//   - ImportHygiene.EnsureImportEdits when emitting an edit plan (rewrite)
+//   - EnsureImportsInContent when building in-memory file text (InsertDecl)
+//
+// Do not use this to rewrite import *paths* when a package/symbol moves —
+// that is MoveDriver.RewriteImports.
+func EnsureImportsInContent(content string, paths []string) string {
 	if len(paths) == 0 {
 		return content
 	}
@@ -450,9 +462,12 @@ func mergeIntoExistingGoImports(content string, missing []string) string {
 			return strings.Join(out, "\n")
 		}
 	}
-	return ensureGoImports(content, add)
+	return EnsureImportsInContent(content, add)
 }
 
+// RewriteImports rewrites import *paths* (and related qualifiers) when a symbol
+// or package moves from oldRef to newRef. That is not the same as adding missing
+// imports — use EnsureImportsInContent / ImportHygiene for "ensure path is present".
 func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ingest.Result, oldRef, newRef ingest.Reference) []ingest.Edit {
 	// Determine old and new directory paths.
 	oldPath := strings.TrimPrefix(oldRef.Path, "./")

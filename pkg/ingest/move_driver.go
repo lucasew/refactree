@@ -48,8 +48,10 @@ type MoveDriver interface {
 	// dstContent is the current file content, or nil if the file doesn't exist.
 	InsertDecl(dstRelPath string, dstContent []byte, decl DeclExtract) Edit
 
-	// RewriteImports produces edits to update import statements in a consumer
-	// file when a symbol or package moves from oldRef to newRef.
+	// RewriteImports produces edits to update import *paths* (and related
+	// qualifiers) in a consumer file when a symbol or package moves from
+	// oldRef to newRef. Adding missing imports is ImportHygiene /
+	// EnsureImportsInContent, not this method.
 	RewriteImports(fileRelPath string, content []byte, result *Result, oldRef, newRef Reference) []Edit
 }
 

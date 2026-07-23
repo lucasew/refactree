@@ -53,6 +53,6 @@ func (goImportHygiene) EnsureImportEdits(fileRel string, content []byte, needs [
 	if len(paths) == 0 {
 		return nil
 	}
-	next := ensureGoImports(string(content), paths)
+	next := EnsureImportsInContent(string(content), paths)
 	return ingest.EditContentDiff(fileRel, content, []byte(next))
 }

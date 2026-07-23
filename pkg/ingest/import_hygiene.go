@@ -15,7 +15,15 @@ type ImportNeed struct {
 }
 
 // ImportHygiene ensures missing imports after site rewrites (and similar).
-// It is not package-path rewrite on move (see MoveDriver.RewriteImports).
+//
+// Layering (Go):
+//   - ImportHygiene.EnsureImportEdits — edit-plan form (rewrite)
+//   - language EnsureImportsInContent — in-memory string form (InsertDecl)
+//   - MoveDriver.RewriteImports — rewrite import *paths* on package/symbol move
+//
+// Prefer ImportHygiene when the caller emits []Edit. Prefer EnsureImportsInContent
+// only when assembling full file text in memory. Never use either for path
+// rewrite on move.
 type ImportHygiene interface {
 	Language() string
 	// NeedsFromRef maps a product ref (with or without leading @) to an import

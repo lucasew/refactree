@@ -192,7 +192,7 @@ func applyRenameFileMoves(rootDir string, edits []Edit, moves map[string]string)
 			kept = append(kept, byFile[oldRel]...)
 			continue
 		}
-		newContent := applyEditsToString(string(content), byFile[oldRel])
+		newContent := string(ApplyEditsInMemory(content, byFile[oldRel]))
 		kept = append(kept,
 			Edit{File: oldRel, Span: Span{StartByte: 0, EndByte: uint32(len(content))}, NewText: ""},
 			Edit{File: newRel, Span: Span{StartByte: 0, EndByte: 0}, NewText: newContent},
@@ -371,25 +371,6 @@ func quotedSymbolLeaf(symbol string) string {
 		// Quote mid-segment (unlikely); keep scanning for an earlier opener.
 	}
 	return ""
-}
-
-// applyEditsToString applies byte-offset edits to an in-memory buffer.
-func applyEditsToString(content string, edits []Edit) string {
-	if len(edits) == 0 {
-		return content
-	}
-	sorted := append([]Edit(nil), edits...)
-	slices.SortFunc(sorted, func(a, b Edit) int {
-		return cmp.Compare(b.StartByte, a.StartByte)
-	})
-	buf := []byte(content)
-	for _, e := range sorted {
-		if int(e.EndByte) > len(buf) || e.StartByte > e.EndByte {
-			continue
-		}
-		buf = append(buf[:e.StartByte], append([]byte(e.NewText), buf[e.EndByte:]...)...)
-	}
-	return string(buf)
 }
 
 // planCrossFileMove orchestrates a cross-file move using the MoveDriver interface.
@@ -695,7 +676,7 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 			}
 			newContent := string(content)
 			if driver, ok := moveDriverForLanguage(f.Language); ok {
-				newContent = applyEditsToString(newContent, driver.RewriteImports(dstFile, content, result, pairSrc, pairDst))
+				newContent = string(ApplyEditsInMemory(content, driver.RewriteImports(dstFile, content, result, pairSrc, pairDst)))
 			}
 			edits = append(edits, Edit{
 				File:      srcFile,
