@@ -1,0 +1,4 @@
+{
+  "source": "path:./astro-jsx.d.ts",
+  "destination": "path:./components/astro-jsx.d_fuzz_4.ts"
+}
