@@ -40,6 +40,11 @@ type Node struct {
 	CaptureGroup int    `json:"capture_group,omitempty"`
 	FromCapture  string `json:"from_capture,omitempty"`
 
+	// Multi (* suffix on $name:@ref or $name:/re/): collect every matching site
+	// in the gap before the rest of the pattern (non-adjacent ok). Rewrite
+	// name=… emits one edit per site.
+	Multi bool `json:"multi,omitempty"`
+
 	// call
 	Callee *Node  `json:"callee,omitempty"`
 	Args   []Node `json:"args,omitempty"`

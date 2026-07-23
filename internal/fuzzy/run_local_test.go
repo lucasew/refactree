@@ -14,7 +14,7 @@ import (
 func TestRunLocalIngestAndMv(t *testing.T) {
 	catalog, _ := localGoCatalog(t, nil)
 
-	res, err := fuzzy.Run(context.Background(), fuzzy.Options{
+	res, err := fuzzy.Run(t.Context(), fuzzy.Options{
 		CatalogPath: catalog,
 		Mode:        fuzzy.ModeRun,
 		Seed:        2, // PlanInput field layout changed; 42 hit a long rename edge
@@ -54,7 +54,7 @@ func TestPrefetchThenOfflineIngest(t *testing.T) {
 		t.Fatalf("missing prefetch worktree: %v", err)
 	}
 
-	_, err := fuzzy.Run(context.Background(), fuzzy.Options{
+	_, err := fuzzy.Run(t.Context(), fuzzy.Options{
 		CatalogPath: catalog,
 		Mode:        fuzzy.ModePrefetch,
 		WorkRoot:    workRoot,
@@ -86,7 +86,7 @@ func TestPrefetchThenOfflineIngest(t *testing.T) {
 	}
 
 	// Offline run (ingest + mv) must also succeed from the same work-root.
-	runRes, err := fuzzy.Run(context.Background(), fuzzy.Options{
+	runRes, err := fuzzy.Run(t.Context(), fuzzy.Options{
 		CatalogPath: catalog,
 		Mode:        fuzzy.ModeRun,
 		Seed:        7,
@@ -177,7 +177,7 @@ func TestIngestIdempotent(t *testing.T) {
 
 func runPrefetch(t *testing.T, catalog, workRoot string) *fuzzy.Result {
 	t.Helper()
-	res, err := fuzzy.Run(context.Background(), fuzzy.Options{
+	res, err := fuzzy.Run(t.Context(), fuzzy.Options{
 		CatalogPath: catalog,
 		Mode:        fuzzy.ModePrefetch,
 		WorkRoot:    workRoot,
@@ -195,7 +195,7 @@ func runPrefetch(t *testing.T, catalog, workRoot string) *fuzzy.Result {
 
 func runIngest(t *testing.T, catalog, workRoot string, offline bool) *fuzzy.Result {
 	t.Helper()
-	res, err := fuzzy.Run(context.Background(), fuzzy.Options{
+	res, err := fuzzy.Run(t.Context(), fuzzy.Options{
 		CatalogPath: catalog,
 		Mode:        fuzzy.ModeIngest,
 		WorkRoot:    workRoot,

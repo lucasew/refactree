@@ -109,8 +109,12 @@ func TestNamedRegexSpan_Ident(t *testing.T) {
 	if len(ms) != 1 {
 		t.Fatalf("matches=%d", len(ms))
 	}
-	name := ms[0].Captures["name"]
-	rest := ms[0].Captures["rest"]
+	names := ms[0].Captures["name"]
+	if len(names) == 0 { t.Fatal("empty name") }
+	name := names[0]
+	rests := ms[0].Captures["rest"]
+	if len(rests) == 0 { t.Fatal("empty rest") }
+	rest := rests[0]
 	if name.Text(src) != "TestFoo" {
 		t.Fatalf("name=%q", name.Text(src))
 	}
@@ -144,9 +148,15 @@ func TestNamedRegexSpan_StringEscapes(t *testing.T) {
 	if len(ms) != 1 {
 		t.Fatalf("matches=%d caps=%v", len(ms), PublicCaptures(ms[0], src))
 	}
-	sCap := ms[0].Captures["s"]
-	head := ms[0].Captures["head"]
-	tail := ms[0].Captures["tail"]
+	sCaps := ms[0].Captures["s"]
+	if len(sCaps) == 0 { t.Fatal("empty s") }
+	sCap := sCaps[0]
+	heads := ms[0].Captures["head"]
+	if len(heads) == 0 { t.Fatal("empty head") }
+	head := heads[0]
+	tails := ms[0].Captures["tail"]
+	if len(tails) == 0 { t.Fatal("empty tail") }
+	tail := tails[0]
 	// Outer $s is full token (no CaptureGroup rebind with named groups).
 	if sCap.Text(src) != `"pre\tPOST"` {
 		t.Fatalf("s=%q", sCap.Text(src))
@@ -178,7 +188,9 @@ func TestNamedRegexSpan_RawString(t *testing.T) {
 	if len(ms) != 1 {
 		t.Fatalf("matches=%d", len(ms))
 	}
-	rest := ms[0].Captures["rest"]
+	rests := ms[0].Captures["rest"]
+	if len(rests) == 0 { t.Fatal("empty rest") }
+	rest := rests[0]
 	if rest.Text(src) != "world" {
 		t.Fatalf("rest=%q", rest.Text(src))
 	}
@@ -199,7 +211,9 @@ func TestCaptureGroup_BindsGroupSourceSpan(t *testing.T) {
 	if len(ms) != 1 {
 		t.Fatalf("matches=%d", len(ms))
 	}
-	msg := ms[0].Captures["MSG"]
+	msgs := ms[0].Captures["MSG"]
+	if len(msgs) == 0 { t.Fatal("empty MSG") }
+	msg := msgs[0]
 	// CaptureGroup 1 → outer name is the group span (no quotes).
 	if got := msg.Text(src); got != "open: %w" {
 		t.Fatalf("MSG.Text=%q want open: %%w", got)
@@ -232,7 +246,9 @@ func TestRefSelectorSpan(t *testing.T) {
 	if len(ms) != 1 {
 		t.Fatalf("matches=%d", len(ms))
 	}
-	c := ms[0].Captures["c"]
+	cs := ms[0].Captures["c"]
+	if len(cs) == 0 { t.Fatal("empty c") }
+	c := cs[0]
 	if c.Text(src) != "context.Background" {
 		t.Fatalf("c=%q", c.Text(src))
 	}

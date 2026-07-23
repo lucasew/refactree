@@ -37,7 +37,7 @@ func TestSessionCorpus_AbsorbsFileOnce(t *testing.T) {
 	}
 
 	var edges int
-	if err := c.StreamVisit(context.Background(), "path:./a.go::A", func(ev StreamEvent) bool {
+	if err := c.StreamVisit(t.Context(), "path:./a.go::A", func(ev StreamEvent) bool {
 		if ev.Type == "edge" {
 			edges++
 		}
@@ -48,7 +48,7 @@ func TestSessionCorpus_AbsorbsFileOnce(t *testing.T) {
 	if edges < 1 {
 		t.Fatalf("edges=%d", edges)
 	}
-	if err := c.StreamVisit(context.Background(), "path:./b.go::B", func(ev StreamEvent) bool {
+	if err := c.StreamVisit(t.Context(), "path:./b.go::B", func(ev StreamEvent) bool {
 		return true
 	}); err != nil {
 		t.Fatal(err)
@@ -69,7 +69,7 @@ func TestStreamVisit_EmitsEdgesDuringExplore(t *testing.T) {
 
 	c := NewSessionCorpus(dir)
 	var seq []string
-	if err := c.StreamVisit(context.Background(), "path:./a.go::A", func(ev StreamEvent) bool {
+	if err := c.StreamVisit(t.Context(), "path:./a.go::A", func(ev StreamEvent) bool {
 		seq = append(seq, ev.Type)
 		return true
 	}); err != nil {
@@ -111,7 +111,7 @@ func TestStreamVisit_ModuleVisitsDirectFiles(t *testing.T) {
 	}
 
 	c := NewSessionCorpus(dir)
-	if err := c.StreamVisit(context.Background(), "path:./", func(ev StreamEvent) bool {
+	if err := c.StreamVisit(t.Context(), "path:./", func(ev StreamEvent) bool {
 		return true
 	}); err != nil {
 		t.Fatal(err)

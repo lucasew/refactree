@@ -20,7 +20,7 @@ func TestStreamNeighborhood_EmitsFocusEdgesDone(t *testing.T) {
 	}
 	var types []string
 	var edges, nodes int
-	err := StreamNeighborhood(context.Background(), dir, "path:./a.go::A", func(ev StreamEvent) bool {
+	err := StreamNeighborhood(t.Context(), dir, "path:./a.go::A", func(ev StreamEvent) bool {
 		types = append(types, ev.Type)
 		switch ev.Type {
 		case "edge":

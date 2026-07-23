@@ -47,10 +47,11 @@ func Instantiate(repl Node, m Match, source []byte) (string, error) {
 }
 
 func captureText(m Match, name string, source []byte) string {
-	if name == "" || m.Captures == nil {
+	sp, ok := m.CaptureFirst(name)
+	if !ok {
 		return ""
 	}
-	return m.Captures[name].Text(source)
+	return sp.Text(source)
 }
 
 func expandTemplate(tmpl string, m Match, source []byte) (string, error) {
@@ -112,8 +113,9 @@ func instantiateCall(n Node, m Match, source []byte) (string, error) {
 
 // EditsForMatches turns matches + replacement into ingest.Edit values.
 // source is the file content for all matches (one file per call).
-// If setCapture is non-empty, each edit targets that capture's Span; matches
-// missing the capture are skipped. Otherwise the whole match root is replaced.
+// If setCapture is non-empty, one edit is emitted per span of that capture
+// (Multi * holes may have several). Matches with no such spans are skipped.
+// Otherwise the whole match root is replaced once.
 func EditsForMatches(matches []Match, repl Node, source []byte, setCapture string) ([]ingest.Edit, error) {
 	var edits []ingest.Edit
 	for _, m := range matches {
@@ -121,18 +123,25 @@ func EditsForMatches(matches []Match, repl Node, source []byte, setCapture strin
 		if err != nil {
 			return nil, err
 		}
-		sp := m.Span
 		if setCapture != "" {
-			c, ok := m.Captures[setCapture]
-			if !ok {
+			sites := m.Captures[setCapture]
+			if len(sites) == 0 {
 				continue
 			}
-			sp = c
+			for _, sp := range sites {
+				edits = append(edits, ingest.Edit{
+					File:      m.File,
+					StartByte: sp.StartByte,
+					EndByte:   sp.EndByte,
+					NewText:   text,
+				})
+			}
+			continue
 		}
 		edits = append(edits, ingest.Edit{
 			File:      m.File,
-			StartByte: sp.StartByte,
-			EndByte:   sp.EndByte,
+			StartByte: m.Span.StartByte,
+			EndByte:   m.Span.EndByte,
 			NewText:   text,
 		})
 	}

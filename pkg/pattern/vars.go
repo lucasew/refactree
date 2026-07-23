@@ -3,6 +3,7 @@ package pattern
 import (
 	"regexp"
 	"sort"
+	"strings"
 )
 
 // PatternNeedsLinks reports whether matching requires ingest hyperlink targets
@@ -65,28 +66,39 @@ func CaptureNames(pat Node) []string {
 }
 
 // CaptureValues returns capture display texts for a match in the order of names
-// (missing binds are empty strings). Skips ROOT/empty keys in m.Captures when
-// names is built from CaptureNames. source is the file bytes used for matching.
+// (missing binds are empty strings). Multi-site captures join with ", ".
+// source is the file bytes used for matching.
 func CaptureValues(names []string, m Match, source []byte) []string {
 	out := make([]string, len(names))
 	for i, name := range names {
-		if m.Captures == nil {
-			continue
-		}
-		out[i] = m.Captures[name].Text(source)
+		out[i] = formatCaptureSites(m.Captures[name], source)
 	}
 	return out
 }
 
 // PublicCaptures filters match captures for display (no ROOT/empty).
-// Values are Span.Text(source) for each name.
+// Multi-site captures join with ", ".
 func PublicCaptures(m Match, source []byte) map[string]string {
 	out := make(map[string]string)
-	for name, c := range m.Captures {
+	for name, sites := range m.Captures {
 		if name == "" || name == "ROOT" {
 			continue
 		}
-		out[name] = c.Text(source)
+		out[name] = formatCaptureSites(sites, source)
 	}
 	return out
+}
+
+func formatCaptureSites(sites []Span, source []byte) string {
+	if len(sites) == 0 {
+		return ""
+	}
+	if len(sites) == 1 {
+		return sites[0].Text(source)
+	}
+	parts := make([]string, len(sites))
+	for i, sp := range sites {
+		parts[i] = sp.Text(source)
+	}
+	return strings.Join(parts, ", ")
 }

@@ -34,8 +34,9 @@ Examples:
     '$F:@go:fmt::Errorf($MSG:/(?i)^failed to\s+(.*)/, $ERR)' \
     '$F("$MSG", $ERR)'
   rft rewrite -n \
-    'func /Test.*/ (t *testing.T) { $$$_ $c:@go:context::Background $$$_ }' \
+    'func /Test.*/ (t *testing.T) { $$$_ $c:@go:context::Background* $$$_ }' \
     'c=t.Context'
+  # trailing * on $c:@ref collects every site in the function; c= rewrites all
 
 $Name holes in the template are filled from the match. String holes bound via
 regex with a capture group re-emit the group text as a string literal.`,

@@ -14,7 +14,7 @@ func TestStreamProject_EmitsAtoms(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "a.go"), []byte("package example\n\nfunc Hello() { World() }\nfunc World() {}\n"), 0644)
 	c := NewSessionCorpus(dir)
 	var atoms, pkgs int
-	err := c.StreamProject(context.Background(), func(ev StreamEvent) bool {
+	err := c.StreamProject(t.Context(), func(ev StreamEvent) bool {
 		if ev.Type != "edge" || ev.Edge == nil {
 			return true
 		}

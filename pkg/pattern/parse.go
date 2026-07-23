@@ -278,7 +278,7 @@ func (p *parser) parseCapture() (Node, error) {
 	}
 	p.i++ // :
 
-	// $name:{ ... }
+	// $name:{ ... } or $name:{ ... }*
 	if p.peek() == '{' {
 		p.i++
 		inner, err := p.parseAtomList('}')
@@ -291,29 +291,45 @@ func (p *parser) parseCapture() (Node, error) {
 		}
 		p.i++
 		innerNode := sequenceToNode(inner)
-		return Node{Kind: "group", As: name, Callee: &innerNode}, nil
+		n := Node{Kind: "group", As: name, Callee: &innerNode}
+		n.Multi = p.scanMultiStar()
+		return n, nil
 	}
 
-	// $name:@ref
+	// $name:@ref or $name:@ref*
 	if p.peek() == '@' {
 		p.i++
 		ref, err := p.scanRef()
 		if err != nil {
 			return Node{}, err
 		}
-		return Node{Kind: "ref", As: name, Ref: ref}, nil
+		n := Node{Kind: "ref", As: name, Ref: ref}
+		n.Multi = p.scanMultiStar()
+		return n, nil
 	}
 
-	// $name:/regex/
+	// $name:/regex/ or $name:/regex/*
 	if p.peek() == '/' {
 		re, err := p.scanRegex()
 		if err != nil {
 			return Node{}, err
 		}
-		return Node{Kind: "string", As: name, Regex: re, CaptureGroup: defaultCaptureGroup(re)}, nil
+		n := Node{Kind: "string", As: name, Regex: re, CaptureGroup: defaultCaptureGroup(re)}
+		n.Multi = p.scanMultiStar()
+		return n, nil
 	}
 
 	return Node{}, p.errf("expected @ref, /regex/, or {…} after $%s:", name)
+}
+
+// scanMultiStar consumes an optional trailing * (zero-or-more sites in the gap).
+func (p *parser) scanMultiStar() bool {
+	p.skipSpace()
+	if p.peek() == '*' {
+		p.i++
+		return true
+	}
+	return false
 }
 
 func defaultCaptureGroup(re string) int {
@@ -340,9 +356,10 @@ func defaultCaptureGroup(re string) int {
 func (p *parser) scanRef() (string, error) {
 	start := p.i
 	// Allow / in package paths (go:net/http::ListenAndServe).
+	// Stop before * so $name:@ref* can set Multi.
 	for p.i < len(p.s) {
 		c := p.s[p.i]
-		if c == '(' || c == ')' || c == '{' || c == '}' || c == ',' || unicode.IsSpace(rune(c)) {
+		if c == '(' || c == ')' || c == '{' || c == '}' || c == ',' || c == '*' || unicode.IsSpace(rune(c)) {
 			break
 		}
 		// Bare /regex/ is only after $name: — not inside @ref

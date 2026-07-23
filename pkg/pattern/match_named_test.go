@@ -23,10 +23,12 @@ func TestNamedRegexCaptures(t *testing.T) {
 	if len(ms) != 1 {
 		t.Fatalf("matches=%d", len(ms))
 	}
-	if got := ms[0].Captures["name"].Text(src); got != "TestFoo" {
+	if got := ms[0].Captures["name"][0].Text(src); got != "TestFoo" {
 		t.Logf("name=%q caps=%v", got, PublicCaptures(ms[0], src))
 	}
-	rest := ms[0].Captures["rest"]
+	rests := ms[0].Captures["rest"]
+	if len(rests) == 0 { t.Fatal("empty rest") }
+	rest := rests[0]
 	if got := rest.Text(src); got != "Foo" {
 		t.Fatalf("rest=%q want Foo", got)
 	}
@@ -65,7 +67,9 @@ func Helper() {
 	if len(ms) != 1 {
 		t.Fatalf("matches=%d want 1; caps=%v", len(ms), capsOf(ms, src))
 	}
-	c := ms[0].Captures["c"]
+	cs := ms[0].Captures["c"]
+	if len(cs) == 0 { t.Fatal("empty c") }
+	c := cs[0]
 	if got := c.Text(src); got != "context.Background" {
 		t.Fatalf("c=%q want context.Background", got)
 	}

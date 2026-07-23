@@ -38,7 +38,7 @@ func TestLSP_DefinitionCompletionHover(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
 	a, b := net.Pipe()

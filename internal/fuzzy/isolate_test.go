@@ -18,11 +18,11 @@ func TestRunnerNoIsolate(t *testing.T) {
 	dir := t.TempDir()
 	dataRoot := filepath.Join(t.TempDir(), "mise-data")
 	r := fuzzy.Runner{NoIsolate: true, DataRoot: dataRoot, Log: io.Discard}
-	s, err := r.StartSession(context.Background(), fuzzy.IsolateConfig{}, dir, "local", true)
+	s, err := r.StartSession(t.Context(), fuzzy.IsolateConfig{}, dir, "local", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close(context.Background())
+	defer s.Close(t.Context())
 	res := s.Run(context.Background(), []string{"true"})
 	if !res.OK() {
 		t.Fatalf("true failed: %#v", res)
@@ -45,11 +45,11 @@ func TestHostSessionOfflineEnv(t *testing.T) {
 		DataRoot:  filepath.Join(t.TempDir(), "mise-data"),
 		Log:       io.Discard,
 	}
-	s, err := r.StartSession(context.Background(), fuzzy.IsolateConfig{}, dir, "off", false)
+	s, err := r.StartSession(t.Context(), fuzzy.IsolateConfig{}, dir, "off", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close(context.Background())
+	defer s.Close(t.Context())
 	res := s.Run(context.Background(), []string{"sh", "-c", "test \"$RFT_FUZZY_OFFLINE\" = 1 && test \"$GOPROXY\" = off && test \"$MISE_GPG_VERIFY\" = false && test \"$MISE_NODE_GPG_VERIFY\" = false && test \"$MISE_NPM_PACKAGE_MANAGER\" = npm && echo ok-offline"})
 	if !res.OK() {
 		t.Fatalf("offline env: %#v\n%s%s", res, res.Stdout, res.Stderr)
@@ -67,11 +67,11 @@ func TestSessionSetsMiseGpgVerifyOff(t *testing.T) {
 		DataRoot:  filepath.Join(t.TempDir(), "mise-data"),
 		Log:       io.Discard,
 	}
-	s, err := r.StartSession(context.Background(), fuzzy.IsolateConfig{}, dir, "gpg", false)
+	s, err := r.StartSession(t.Context(), fuzzy.IsolateConfig{}, dir, "gpg", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close(context.Background())
+	defer s.Close(t.Context())
 	res := s.Run(context.Background(), []string{"sh", "-c", "printf '%s %s %s' \"$MISE_GPG_VERIFY\" \"$MISE_NODE_GPG_VERIFY\" \"$MISE_NPM_PACKAGE_MANAGER\""})
 	if !res.OK() {
 		t.Fatalf("%#v\n%s%s", res, res.Stdout, res.Stderr)
@@ -91,11 +91,11 @@ func TestCommandOutputStreamsAndCaptures(t *testing.T) {
 		Stdout:    &live,
 		Stderr:    &live,
 	}
-	s, err := r.StartSession(context.Background(), fuzzy.IsolateConfig{}, dir, "stream", true)
+	s, err := r.StartSession(t.Context(), fuzzy.IsolateConfig{}, dir, "stream", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close(context.Background())
+	defer s.Close(t.Context())
 	res := s.Run(context.Background(), []string{"sh", "-c", "echo secret-ok"})
 	if !res.OK() {
 		t.Fatal(res.Err)
@@ -119,7 +119,7 @@ func TestCommandOutputStreamsAndCaptures(t *testing.T) {
 }
 
 func TestSessionReusesContainerForSetupAndCheck(t *testing.T) {
-	if err := fuzzy.RequireDocker(context.Background()); err != nil {
+	if err := fuzzy.RequireDocker(t.Context()); err != nil {
 		t.Skip(err.Error())
 	}
 	dir := t.TempDir()
@@ -140,7 +140,7 @@ run = "test -f %s && echo did-check"
 		Stdout:   io.MultiWriter(os.Stdout, &live),
 		Stderr:   io.MultiWriter(os.Stderr, &live),
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 	s, err := r.StartSession(ctx, fuzzy.IsolateConfig{Image: fuzzy.DefaultMiseImage}, dir, "reuse", true)
 	if err != nil {
 		t.Fatal(err)

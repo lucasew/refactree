@@ -47,6 +47,7 @@ import (
 
 func TestFoo(t *testing.T) {
 	_ = context.Background()
+	_ = context.Background()
 }
 
 func Helper() {
@@ -57,6 +58,7 @@ func Helper() {
 	if err := os.WriteFile(path, src, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Without *: only first Background in TestFoo.
 	op, err := OpFromCLI("rewrite", "go",
 		`func /Test.*/ (t *testing.T) { $$$_ $c:@go:context::Background $$$_ }`,
 		`c=t.Context`,
@@ -72,21 +74,86 @@ func Helper() {
 		t.Fatal(err)
 	}
 	if len(res.Edits) != 1 {
-		t.Fatalf("edits=%d want 1 (Test only); edits=%v", len(res.Edits), res.Edits)
+		t.Fatalf("edits=%d want 1 (first only); edits=%v", len(res.Edits), res.Edits)
 	}
 	out, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := string(out)
-	if !strings.Contains(got, "t.Context()") {
-		t.Fatalf("want t.Context() in:\n%s", got)
+	if strings.Count(got, "t.Context()") != 1 {
+		t.Fatalf("t.Context count=%d want 1\n%s", strings.Count(got, "t.Context()"), got)
+	}
+	if strings.Count(got, "context.Background") != 2 {
+		t.Fatalf("context.Background count=%d want 2 (second Test + Helper)\n%s",
+			strings.Count(got, "context.Background"), got)
+	}
+}
+
+func TestRewriteSetCaptureMultiStar(t *testing.T) {
+	dir := t.TempDir()
+	src := []byte(`package p
+
+import (
+	"context"
+	"testing"
+)
+
+func TestFoo(t *testing.T) {
+	_ = context.Background()
+	_ = context.Background()
+}
+
+func Helper() {
+	_ = context.Background()
+}
+`)
+	path := filepath.Join(dir, "x_test.go")
+	if err := os.WriteFile(path, src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// With *: every Background inside each Test* function.
+	op, err := OpFromCLI("rewrite", "go",
+		`func /Test.*/ (t *testing.T) { $$$_ $c:@go:context::Background* $$$_ }`,
+		`c=t.Context`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := Apply(dir, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Edits) != 2 {
+		t.Fatalf("edits=%d want 2; edits=%v", len(res.Edits), res.Edits)
+	}
+	out, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+	if strings.Count(got, "t.Context()") != 2 {
+		t.Fatalf("t.Context count=%d want 2\n%s", strings.Count(got, "t.Context()"), got)
 	}
 	if strings.Count(got, "context.Background") != 1 {
 		t.Fatalf("context.Background count=%d want 1 (Helper only)\n%s",
 			strings.Count(got, "context.Background"), got)
 	}
-	if !strings.Contains(got, "func Helper") {
-		t.Fatal("Helper missing")
+}
+
+func TestParseMultiStar(t *testing.T) {
+	n, err := ParsePattern(`$c:@go:context::Background*`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n.Kind != "ref" || !n.Multi || n.As != "c" {
+		t.Fatalf("got %+v", n)
+	}
+	n, err = ParsePattern(`$c:{@go:context::Background}*`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n.Kind != "group" || !n.Multi {
+		t.Fatalf("group multi got %+v", n)
 	}
 }

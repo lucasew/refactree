@@ -27,7 +27,7 @@ func TestStreamProject_StreamsEdgesDuringWalk(t *testing.T) {
 	var edgeTimes []time.Time
 	var doneAt time.Time
 	start := time.Now()
-	err := c.StreamProject(context.Background(), func(ev StreamEvent) bool {
+	err := c.StreamProject(t.Context(), func(ev StreamEvent) bool {
 		switch ev.Type {
 		case "edge":
 			edgeTimes = append(edgeTimes, time.Now())

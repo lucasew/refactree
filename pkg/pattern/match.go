@@ -6,6 +6,7 @@ import (
 	"maps"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -56,8 +57,18 @@ func (s Span) Eq(src []byte, want string) bool {
 type Match struct {
 	File string
 	Span // root match range
-	// Captures maps pattern $names to their source spans.
-	Captures map[string]Span
+	// Captures maps pattern $names to one or more source spans.
+	// Single holes have len 1; Multi (*) holes list every site in the gap.
+	Captures map[string][]Span
+}
+
+// CaptureFirst returns the first span for name, or a zero Span.
+func (m Match) CaptureFirst(name string) (Span, bool) {
+	ss := m.Captures[name]
+	if len(ss) == 0 {
+		return Span{}, false
+	}
+	return ss[0], true
 }
 
 // tok is a significant leaf: a Span plus optional hyperlink target.
@@ -147,7 +158,7 @@ func flattenPattern(pat Node) []Node {
 }
 
 func matchSeq(tokens []tok, startIdx int, seq []Node, source []byte, root *grammar.Node) (Match, int, bool, error) {
-	caps := map[string]Span{}
+	caps := map[string][]Span{}
 	pos := startIdx
 	if pos >= len(tokens) || len(seq) == 0 {
 		return Match{}, startIdx, false, nil
@@ -173,6 +184,22 @@ func matchSeq(tokens []tok, startIdx int, seq []Node, source []byte, root *gramm
 			}
 			pos = next
 			// after already matched and filled caps
+			break
+		}
+
+		if hole, ok := multiHole(step); ok {
+			after := seq[si+1:]
+			j, next, sites, ok, err := findMultiSites(tokens, pos, hole, after, caps, source, root)
+			if err != nil || !ok {
+				return Match{}, startIdx, false, err
+			}
+			if step.As != "" && step.As != "_" {
+				caps[step.As] = sites
+			}
+			if j > pos {
+				matchEnd = tokens[j-1].EndByte
+			}
+			pos = next
 			break
 		}
 
@@ -210,7 +237,35 @@ func matchSeq(tokens []tok, startIdx int, seq []Node, source []byte, root *gramm
 	}, pos, true, nil
 }
 
-func findRest(tokens []tok, pos int, after []Node, caps map[string]Span, source []byte, root *grammar.Node) (restEndIdx, next int, restStart, restEnd uint32, ok bool, err error) {
+// multiHole normalizes Multi steps: $c:@ref*, $c:/re/*, or $c:{@ref}* / $c:{/re/*}.
+func multiHole(step Node) (Node, bool) {
+	if !step.Multi {
+		return Node{}, false
+	}
+	switch step.Kind {
+	case "ref", "string":
+		return step, true
+	case "group":
+		if step.Callee == nil {
+			return Node{}, false
+		}
+		inner := flattenPattern(*step.Callee)
+		if len(inner) != 1 {
+			return Node{}, false
+		}
+		h := inner[0]
+		if h.Kind != "ref" && h.Kind != "string" {
+			return Node{}, false
+		}
+		h.As = step.As
+		h.Multi = true
+		return h, true
+	default:
+		return Node{}, false
+	}
+}
+
+func findRest(tokens []tok, pos int, after []Node, caps map[string][]Span, source []byte, root *grammar.Node) (restEndIdx, next int, restStart, restEnd uint32, ok bool, err error) {
 	if len(after) == 0 {
 		if pos < len(tokens) {
 			rs, re := tokens[pos].StartByte, tokens[len(tokens)-1].EndByte
@@ -225,6 +280,10 @@ func findRest(tokens []tok, pos int, after []Node, caps map[string]Span, source 
 	}
 	for j := pos; j <= len(tokens); j++ {
 		c2 := maps.Clone(caps)
+		// deep-clone span slices
+		for k, v := range c2 {
+			c2[k] = slices.Clone(v)
+		}
 		_, next, ok, err := matchSeqFrom(tokens, j, after, c2, source, root)
 		if err != nil {
 			return 0, 0, 0, 0, false, err
@@ -248,7 +307,72 @@ func findRest(tokens []tok, pos int, after []Node, caps map[string]Span, source 
 	return 0, 0, 0, 0, false, nil
 }
 
-func matchSeqFrom(tokens []tok, startIdx int, seq []Node, caps map[string]Span, source []byte, root *grammar.Node) (Match, int, bool, error) {
+// findMultiSites finds a gap [pos,j) where after matches at j and collects every
+// token in that gap that matches the multi hole. Prefers the gap with the most
+// sites (so $c:@ref* sees every occurrence before the trailing pattern). Stops
+// extending past a later "func" token so we stay inside one function.
+func findMultiSites(tokens []tok, pos int, step Node, after []Node, caps map[string][]Span, source []byte, root *grammar.Node) (gapEnd, next int, sites []Span, ok bool, err error) {
+	type cand struct {
+		j, next int
+		sites   []Span
+		caps    map[string][]Span
+	}
+	var best *cand
+	for j := pos; j <= len(tokens); j++ {
+		if j > pos && tokens[j-1].Eq(source, "func") {
+			break
+		}
+		c2 := maps.Clone(caps)
+		for k, v := range c2 {
+			c2[k] = slices.Clone(v)
+		}
+		_, nnext, ok, err := matchSeqFrom(tokens, j, after, c2, source, root)
+		if err != nil {
+			return 0, 0, nil, false, err
+		}
+		if !ok {
+			continue
+		}
+		var collected []Span
+		for k := pos; k < j; k++ {
+			if tokenMatchesHole(tokens, k, step, source, root) {
+				sp := tokens[k].Span
+				if step.Kind == "ref" {
+					sp = selectorSpan(tokens, k, source)
+				}
+				collected = append(collected, sp)
+			}
+		}
+		if best == nil || len(collected) > len(best.sites) {
+			best = &cand{j: j, next: nnext, sites: collected, caps: c2}
+		}
+	}
+	if best == nil {
+		return 0, 0, nil, false, nil
+	}
+	for k, v := range best.caps {
+		caps[k] = v
+	}
+	return best.j, best.next, best.sites, true, nil
+}
+
+// tokenMatchesHole reports whether tokens[k] satisfies a multi ref/string hole
+// (group multi is not expanded token-wise; treated as non-match here).
+func tokenMatchesHole(tokens []tok, k int, step Node, source []byte, root *grammar.Node) bool {
+	if k < 0 || k >= len(tokens) {
+		return false
+	}
+	// Temporary caps so matchStep can bind without affecting outer.
+	tmp := map[string][]Span{}
+	// Use a step without Multi so matchStep does single-token match.
+	single := step
+	single.Multi = false
+	single.As = "" // don't bind
+	ok, _, err := matchStep(tokens, k, single, tmp, source, root)
+	return err == nil && ok
+}
+
+func matchSeqFrom(tokens []tok, startIdx int, seq []Node, caps map[string][]Span, source []byte, root *grammar.Node) (Match, int, bool, error) {
 	pos := startIdx
 	matchStart, matchEnd := uint32(0), uint32(0)
 	if pos < len(tokens) {
@@ -265,6 +389,23 @@ func matchSeqFrom(tokens []tok, startIdx int, seq []Node, caps map[string]Span, 
 			}
 			if step.As != "" && step.As != "_" {
 				bindCapture(caps, step.As, Span{StartByte: restStart, EndByte: restEnd})
+			}
+			if j > pos {
+				matchEnd = tokens[j-1].EndByte
+			}
+			if next > startIdx && next <= len(tokens) {
+				matchEnd = tokens[next-1].EndByte
+			}
+			return Match{Span: Span{StartByte: matchStart, EndByte: matchEnd}, Captures: caps}, next, true, nil
+		}
+		if hole, ok := multiHole(step); ok {
+			after := seq[si+1:]
+			j, next, sites, ok, err := findMultiSites(tokens, pos, hole, after, caps, source, root)
+			if err != nil || !ok {
+				return Match{}, startIdx, false, err
+			}
+			if step.As != "" && step.As != "_" {
+				caps[step.As] = sites
 			}
 			if j > pos {
 				matchEnd = tokens[j-1].EndByte
@@ -299,7 +440,7 @@ func looksLikeCallSeq(seq []Node) bool {
 	return false
 }
 
-func matchStep(tokens []tok, pos int, step Node, caps map[string]Span, source []byte, root *grammar.Node) (bool, int, error) {
+func matchStep(tokens []tok, pos int, step Node, caps map[string][]Span, source []byte, root *grammar.Node) (bool, int, error) {
 	if pos >= len(tokens) {
 		return false, 0, nil
 	}
@@ -407,17 +548,17 @@ func matchStep(tokens []tok, pos int, step Node, caps map[string]Span, source []
 	}
 }
 
-func bindCapture(caps map[string]Span, name string, sp Span) {
+func bindCapture(caps map[string][]Span, name string, sp Span) {
 	if name == "" {
 		return
 	}
-	caps[name] = sp
+	caps[name] = []Span{sp}
 }
 
 // bindNamedGroups binds each (?P<name>…) subexpression to its source span.
 // Unmatched groups (-1) and empty names are skipped. Returns false if a named
 // group matched in content but could not be mapped to trustworthy source offsets.
-func bindNamedGroups(caps map[string]Span, re *regexp.Regexp, idx []int, tokenStart uint32, srcOf []int, closeOff int) bool {
+func bindNamedGroups(caps map[string][]Span, re *regexp.Regexp, idx []int, tokenStart uint32, srcOf []int, closeOff int) bool {
 	names := re.SubexpNames()
 	for i, name := range names {
 		if i == 0 || name == "" {

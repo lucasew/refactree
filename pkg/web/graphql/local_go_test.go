@@ -24,7 +24,7 @@ func TestStreamProject_LocalGoPackagesArePathNotExternal(t *testing.T) {
 	}
 	c := NewSessionCorpus(dir)
 	var ids []string
-	err := c.StreamProject(context.Background(), func(ev StreamEvent) bool {
+	err := c.StreamProject(t.Context(), func(ev StreamEvent) bool {
 		if ev.Type == "edge" && ev.Edge != nil {
 			ids = append(ids, ev.Edge.From, ev.Edge.To)
 			t.Logf("edge %s %s → %s", ev.Edge.Kind, ev.Edge.From, ev.Edge.To)
