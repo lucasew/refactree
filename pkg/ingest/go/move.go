@@ -378,8 +378,6 @@ func notGoIdentRune(r rune) bool {
 	return !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_')
 }
 
-
-
 // goIdentUsed reports whether ident appears as a Go identifier in text,
 // ignoring comments and string/rune literals so comments/docs do not count
 // as real uses (imports, package-local deps, etc.).
