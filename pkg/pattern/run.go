@@ -28,7 +28,7 @@ type StreamOptions struct {
 	Paths []string
 
 	// OnMatch is invoked for each match as soon as its file is processed.
-	// source is that file's bytes (for Capture.Text). Return false to stop early.
+	// source is that file's bytes (for Span.Text). Return false to stop early.
 	OnMatch func(m Match, source []byte) bool
 
 	// OnFile is invoked after a file is matched (and, for rewrite, after its edits

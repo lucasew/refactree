@@ -12,57 +12,59 @@ import (
 	"github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar"
 )
 
-// Capture is one bound pattern variable as a half-open UTF-8 byte range.
-// Offsets match tree-sitter StartByte/EndByte (not rune indexes). A bind is
-// only recorded when the range is known. Read text with Text(src) using the
-// same []byte buffer that was matched.
-type Capture struct {
+// Span is a half-open UTF-8 byte range [StartByte, EndByte) in a source buffer.
+// Offsets match tree-sitter StartByte/EndByte (not rune indexes). Used for
+// tokens, match roots, pattern captures, and hyperlink leaves. Text is always
+// derived from the original file []byte — never stored on the span.
+type Span struct {
 	StartByte uint32
 	EndByte   uint32
 }
 
-// Text returns src[StartByte:EndByte]. src must be the UTF-8 file bytes used
-// for matching; offsets are byte indexes, so []rune would disagree with
-// tree-sitter and must not be used here.
-func (c Capture) Text(src []byte) string {
-	if src == nil || c.EndByte > uint32(len(src)) || c.StartByte > c.EndByte {
+// Text returns src[StartByte:EndByte].
+func (s Span) Text(src []byte) string {
+	b := s.Bytes(src)
+	if b == nil {
 		return ""
 	}
-	return string(src[c.StartByte:c.EndByte])
+	return string(b)
+}
+
+// Bytes returns src[StartByte:EndByte], or nil if out of range / empty invalid.
+func (s Span) Bytes(src []byte) []byte {
+	if src == nil || s.EndByte > uint32(len(src)) || s.StartByte > s.EndByte {
+		return nil
+	}
+	return src[s.StartByte:s.EndByte]
+}
+
+// Empty reports whether the span has zero length (StartByte == EndByte).
+func (s Span) Empty() bool { return s.StartByte >= s.EndByte }
+
+// Eq reports whether s.Text(src) equals want without an intermediate string
+// when lengths differ.
+func (s Span) Eq(src []byte, want string) bool {
+	b := s.Bytes(src)
+	return len(b) == len(want) && string(b) == want
 }
 
 // Match is one successful pattern match in a file.
 // It does not retain file contents; pass the file []byte at the call site
-// (Stream OnMatch/OnFile, Capture.Text, PublicCaptures, Instantiate).
+// (Stream OnMatch/OnFile, Span.Text, PublicCaptures, Instantiate).
 type Match struct {
-	File      string
-	StartByte uint32
-	EndByte   uint32
-	Captures  map[string]Capture
+	File string
+	Span // root match range
+	// Captures maps pattern $names to their source spans.
+	Captures map[string]Span
 }
 
-type span struct{ start, end uint32 }
-
-// tok is a significant leaf in the source file as a half-open UTF-8 byte range.
-// Text is always derived: string(source[start:end]). target is a hyperlink ref if any.
+// tok is a significant leaf: a Span plus optional hyperlink target.
 type tok struct {
-	start, end uint32
-	target     string
+	Span
+	target string
 }
 
-func tokBytes(src []byte, t tok) []byte {
-	if src == nil || t.end > uint32(len(src)) || t.start > t.end {
-		return nil
-	}
-	return src[t.start:t.end]
-}
-
-func tokEq(src []byte, t tok, want string) bool {
-	b := tokBytes(src, t)
-	return len(b) == len(want) && string(b) == want
-}
-
-type linkIndex map[span]string
+type linkIndex map[Span]string
 
 func buildLinkIndex(result *ingest.Result, fileRel string) linkIndex {
 	idx := linkIndex{}
@@ -76,7 +78,7 @@ func buildLinkIndex(result *ingest.Result, fileRel string) linkIndex {
 		if p != norm || use.Target == "" || use.StartByte >= use.EndByte {
 			continue
 		}
-		idx[span{use.StartByte, use.EndByte}] = use.Target
+		idx[Span{use.StartByte, use.EndByte}] = use.Target
 	}
 	return idx
 }
@@ -143,14 +145,14 @@ func flattenPattern(pat Node) []Node {
 }
 
 func matchSeq(tokens []tok, startIdx int, seq []Node, source []byte, root *grammar.Node) (Match, int, bool, error) {
-	caps := map[string]Capture{}
+	caps := map[string]Span{}
 	pos := startIdx
 	if pos >= len(tokens) || len(seq) == 0 {
 		return Match{}, startIdx, false, nil
 	}
 
-	matchStart := tokens[pos].start
-	matchEnd := tokens[pos].end
+	matchStart := tokens[pos].StartByte
+	matchEnd := tokens[pos].EndByte
 
 	for si := 0; si < len(seq); si++ {
 		step := seq[si]
@@ -162,10 +164,10 @@ func matchSeq(tokens []tok, startIdx int, seq []Node, source []byte, root *gramm
 				return Match{}, startIdx, false, err
 			}
 			if step.As != "" && step.As != "_" {
-				bindCapture(caps, step.As, restStart, restEnd)
+				bindCapture(caps, step.As, Span{StartByte: restStart, EndByte: restEnd})
 			}
 			if j > pos {
-				matchEnd = tokens[j-1].end
+				matchEnd = tokens[j-1].EndByte
 			}
 			pos = next
 			// after already matched and filled caps
@@ -187,9 +189,9 @@ func matchSeq(tokens []tok, startIdx int, seq []Node, source []byte, root *gramm
 		if si == 0 && step.Kind == "ref" {
 			matchStart = selectorStart(tokens, pos, source)
 		} else if si == 0 {
-			matchStart = tokens[pos].start
+			matchStart = tokens[pos].StartByte
 		}
-		matchEnd = tokens[pos+advance-1].end
+		matchEnd = tokens[pos+advance-1].EndByte
 		pos += advance
 	}
 
@@ -201,22 +203,21 @@ func matchSeq(tokens []tok, startIdx int, seq []Node, source []byte, root *gramm
 	}
 
 	return Match{
-		StartByte: matchStart,
-		EndByte:   matchEnd,
-		Captures:  caps,
+		Span:     Span{StartByte: matchStart, EndByte: matchEnd},
+		Captures: caps,
 	}, pos, true, nil
 }
 
-func findRest(tokens []tok, pos int, after []Node, caps map[string]Capture, source []byte, root *grammar.Node) (restEndIdx, next int, restStart, restEnd uint32, ok bool, err error) {
+func findRest(tokens []tok, pos int, after []Node, caps map[string]Span, source []byte, root *grammar.Node) (restEndIdx, next int, restStart, restEnd uint32, ok bool, err error) {
 	if len(after) == 0 {
 		if pos < len(tokens) {
-			rs, re := tokens[pos].start, tokens[len(tokens)-1].end
+			rs, re := tokens[pos].StartByte, tokens[len(tokens)-1].EndByte
 			return len(tokens), len(tokens), rs, re, true, nil
 		}
 		// Empty rest at EOF: zero-width at end of previous token when possible.
 		var z uint32
 		if pos > 0 && pos-1 < len(tokens) {
-			z = tokens[pos-1].end
+			z = tokens[pos-1].EndByte
 		}
 		return pos, pos, z, z, true, nil
 	}
@@ -234,22 +235,22 @@ func findRest(tokens []tok, pos int, after []Node, caps map[string]Capture, sour
 		}
 		var rs, re uint32
 		if j > pos {
-			rs, re = tokens[pos].start, tokens[j-1].end
+			rs, re = tokens[pos].StartByte, tokens[j-1].EndByte
 		} else if pos < len(tokens) {
-			rs, re = tokens[pos].start, tokens[pos].start
+			rs, re = tokens[pos].StartByte, tokens[pos].StartByte
 		} else if pos > 0 {
-			rs, re = tokens[pos-1].end, tokens[pos-1].end
+			rs, re = tokens[pos-1].EndByte, tokens[pos-1].EndByte
 		}
 		return j, next, rs, re, true, nil
 	}
 	return 0, 0, 0, 0, false, nil
 }
 
-func matchSeqFrom(tokens []tok, startIdx int, seq []Node, caps map[string]Capture, source []byte, root *grammar.Node) (Match, int, bool, error) {
+func matchSeqFrom(tokens []tok, startIdx int, seq []Node, caps map[string]Span, source []byte, root *grammar.Node) (Match, int, bool, error) {
 	pos := startIdx
 	matchStart, matchEnd := uint32(0), uint32(0)
 	if pos < len(tokens) {
-		matchStart, matchEnd = tokens[pos].start, tokens[pos].end
+		matchStart, matchEnd = tokens[pos].StartByte, tokens[pos].EndByte
 	}
 	for si := 0; si < len(seq); si++ {
 		step := seq[si]
@@ -261,15 +262,15 @@ func matchSeqFrom(tokens []tok, startIdx int, seq []Node, caps map[string]Captur
 				return Match{}, startIdx, false, err
 			}
 			if step.As != "" && step.As != "_" {
-				bindCapture(caps, step.As, restStart, restEnd)
+				bindCapture(caps, step.As, Span{StartByte: restStart, EndByte: restEnd})
 			}
 			if j > pos {
-				matchEnd = tokens[j-1].end
+				matchEnd = tokens[j-1].EndByte
 			}
 			if next > startIdx && next <= len(tokens) {
-				matchEnd = tokens[next-1].end
+				matchEnd = tokens[next-1].EndByte
 			}
-			return Match{StartByte: matchStart, EndByte: matchEnd, Captures: caps}, next, true, nil
+			return Match{Span: Span{StartByte: matchStart, EndByte: matchEnd}, Captures: caps}, next, true, nil
 		}
 		for pos < len(tokens) && isSpaceSpan(source, tokens[pos]) {
 			pos++
@@ -281,10 +282,10 @@ func matchSeqFrom(tokens []tok, startIdx int, seq []Node, caps map[string]Captur
 		if err != nil || !ok {
 			return Match{}, startIdx, false, err
 		}
-		matchEnd = tokens[pos+advance-1].end
+		matchEnd = tokens[pos+advance-1].EndByte
 		pos += advance
 	}
-	return Match{StartByte: matchStart, EndByte: matchEnd, Captures: caps}, pos, true, nil
+	return Match{Span: Span{StartByte: matchStart, EndByte: matchEnd}, Captures: caps}, pos, true, nil
 }
 
 func looksLikeCallSeq(seq []Node) bool {
@@ -296,7 +297,7 @@ func looksLikeCallSeq(seq []Node) bool {
 	return false
 }
 
-func matchStep(tokens []tok, pos int, step Node, caps map[string]Capture, source []byte, root *grammar.Node) (bool, int, error) {
+func matchStep(tokens []tok, pos int, step Node, caps map[string]Span, source []byte, root *grammar.Node) (bool, int, error) {
 	if pos >= len(tokens) {
 		return false, 0, nil
 	}
@@ -306,33 +307,34 @@ func matchStep(tokens []tok, pos int, step Node, caps map[string]Capture, source
 	case "group":
 		inner := flattenPattern(*step.Callee)
 		c2 := cloneCaptures(caps)
-		m, next, ok, err := matchSeqFrom(tokens, pos, inner, c2, source, root)
+		_, next, ok, err := matchSeqFrom(tokens, pos, inner, c2, source, root)
 		if err != nil || !ok {
 			return false, 0, err
 		}
 		for k, v := range c2 {
 			caps[k] = v
 		}
-		start, end := m.StartByte, m.EndByte
-		// fix: matchSeqFrom doesn't set start well — use tokens
-		start = tokens[pos].start
+		// Covering AST for the group match; fall back to token span.
+		sp := Span{StartByte: tokens[pos].StartByte}
 		if next > pos {
-			end = tokens[next-1].end
+			sp.EndByte = tokens[next-1].EndByte
+		} else {
+			sp.EndByte = tokens[pos].EndByte
 		}
-		if n := coveringNode(root, start, end); n != nil {
-			start, end = n.StartByte(), n.EndByte()
+		if n := coveringNode(root, sp.StartByte, sp.EndByte); n != nil {
+			sp = Span{StartByte: n.StartByte(), EndByte: n.EndByte()}
 		}
 		if step.As != "" {
-			bindCapture(caps, step.As, start, end)
+			bindCapture(caps, step.As, sp)
 		}
 		return true, next - pos, nil
 
 	case "lit", "token", "type_token":
-		if !tokEq(source, t, step.Text) {
+		if !t.Eq(source, step.Text) {
 			return false, 0, nil
 		}
 		if step.As != "" {
-			bindCapture(caps, step.As, t.start, t.end)
+			bindCapture(caps, step.As, t.Span)
 		}
 		return true, 1, nil
 
@@ -341,14 +343,13 @@ func matchStep(tokens []tok, pos int, step Node, caps map[string]Capture, source
 			return false, 0, nil
 		}
 		if step.As != "" {
-			ss, se := selectorSpan(tokens, pos, source)
-			bindCapture(caps, step.As, ss, se)
+			bindCapture(caps, step.As, selectorSpan(tokens, pos, source))
 		}
 		return true, 1, nil
 
 	case "capture":
 		if step.As != "" {
-			bindCapture(caps, step.As, t.start, t.end)
+			bindCapture(caps, step.As, t.Span)
 		}
 		return true, 1, nil
 
@@ -372,30 +373,30 @@ func matchStep(tokens []tok, pos int, step Node, caps map[string]Capture, source
 				return false, 0, nil
 			}
 			// Named groups require a mapped source range; fail if unmappable.
-			if !bindNamedGroups(caps, re, idx, t.start, srcOf, closeOff) {
+			if !bindNamedGroups(caps, re, idx, t.StartByte, srcOf, closeOff) {
 				return false, 0, nil
 			}
 			if step.As != "" {
 				// CaptureGroup N (unnamed groups only): bind outer name to that
 				// group's source range. Otherwise bind the full token span.
-				start, end := t.start, t.end
+				sp := t.Span
 				if step.CaptureGroup > 0 && !hasNamedGroup(re) {
 					gi := step.CaptureGroup
 					if 2*gi+1 >= len(idx) || idx[2*gi] < 0 {
 						return false, 0, nil
 					}
-					ss, se, ok := contentSpanToSource(t.start, srcOf, closeOff, idx[2*gi], idx[2*gi+1])
+					mapped, ok := contentSpanToSource(t.StartByte, srcOf, closeOff, idx[2*gi], idx[2*gi+1])
 					if !ok {
 						return false, 0, nil
 					}
-					start, end = ss, se
+					sp = mapped
 				}
-				bindCapture(caps, step.As, start, end)
+				bindCapture(caps, step.As, sp)
 			}
 			return true, 1, nil
 		}
 		if step.As != "" {
-			bindCapture(caps, step.As, t.start, t.end)
+			bindCapture(caps, step.As, t.Span)
 		}
 		return true, 1, nil
 
@@ -404,17 +405,17 @@ func matchStep(tokens []tok, pos int, step Node, caps map[string]Capture, source
 	}
 }
 
-func bindCapture(caps map[string]Capture, name string, start, end uint32) {
+func bindCapture(caps map[string]Span, name string, sp Span) {
 	if name == "" {
 		return
 	}
-	caps[name] = Capture{StartByte: start, EndByte: end}
+	caps[name] = sp
 }
 
 // bindNamedGroups binds each (?P<name>…) subexpression to its source span.
 // Unmatched groups (-1) and empty names are skipped. Returns false if a named
 // group matched in content but could not be mapped to trustworthy source offsets.
-func bindNamedGroups(caps map[string]Capture, re *regexp.Regexp, idx []int, tokenStart uint32, srcOf []int, closeOff int) bool {
+func bindNamedGroups(caps map[string]Span, re *regexp.Regexp, idx []int, tokenStart uint32, srcOf []int, closeOff int) bool {
 	names := re.SubexpNames()
 	for i, name := range names {
 		if i == 0 || name == "" {
@@ -424,11 +425,11 @@ func bindNamedGroups(caps map[string]Capture, re *regexp.Regexp, idx []int, toke
 			continue
 		}
 		cs, ce := idx[2*i], idx[2*i+1]
-		ss, se, ok := contentSpanToSource(tokenStart, srcOf, closeOff, cs, ce)
+		sp, ok := contentSpanToSource(tokenStart, srcOf, closeOff, cs, ce)
 		if !ok {
 			return false
 		}
-		bindCapture(caps, name, ss, se)
+		bindCapture(caps, name, sp)
 	}
 	return true
 }
@@ -463,16 +464,15 @@ func quoteString(s string) string {
 }
 
 func selectorStart(tokens []tok, pos int, source []byte) uint32 {
-	ss, _ := selectorSpan(tokens, pos, source)
-	return ss
+	return selectorSpan(tokens, pos, source).StartByte
 }
 
-func selectorSpan(tokens []tok, pos int, source []byte) (start, end uint32) {
+func selectorSpan(tokens []tok, pos int, source []byte) Span {
 	i := pos
-	for i >= 2 && tokEq(source, tokens[i-1], ".") {
+	for i >= 2 && tokens[i-1].Eq(source, ".") {
 		i -= 2
 	}
-	return tokens[i].start, tokens[pos].end
+	return Span{StartByte: tokens[i].StartByte, EndByte: tokens[pos].EndByte}
 }
 
 func coveringNode(root *grammar.Node, start, end uint32) *grammar.Node {
@@ -502,27 +502,27 @@ func buildTokens(root *grammar.Node, source []byte, links linkIndex) []tok {
 	var raw []tok
 	collectLeaves(root, source, &raw)
 	for i := range raw {
-		if t, ok := links[span{raw[i].start, raw[i].end}]; ok {
+		if t, ok := links[raw[i].Span]; ok {
 			raw[i].target = t
 		}
 	}
 	for s, target := range links {
 		found := false
 		for i := range raw {
-			if raw[i].start == s.start && raw[i].end == s.end {
+			if raw[i].StartByte == s.StartByte && raw[i].EndByte == s.EndByte {
 				raw[i].target = target
 				found = true
 				break
 			}
 		}
-		if !found && int(s.end) <= len(source) && s.start < s.end {
-			raw = append(raw, tok{start: s.start, end: s.end, target: target})
+		if !found && int(s.EndByte) <= len(source) && s.StartByte < s.EndByte {
+			raw = append(raw, tok{Span: s, target: target})
 		}
 	}
 	// Prefer innermost: drop tokens that strictly contain another
 	var candidates []tok
 	for _, a := range raw {
-		if a.start >= a.end || isSpaceSpan(source, a) {
+		if a.StartByte >= a.EndByte || isSpaceSpan(source, a) {
 			continue
 		}
 		candidates = append(candidates, a)
@@ -534,7 +534,7 @@ func buildTokens(root *grammar.Node, source []byte, links linkIndex) []tok {
 			if i == j {
 				continue
 			}
-			if b.start >= a.start && b.end <= a.end && (b.start > a.start || b.end < a.end) {
+			if b.StartByte >= a.StartByte && b.EndByte <= a.EndByte && (b.StartByte > a.StartByte || b.EndByte < a.EndByte) {
 				inner = true
 				break
 			}
@@ -544,15 +544,15 @@ func buildTokens(root *grammar.Node, source []byte, links linkIndex) []tok {
 		}
 	}
 	sort.SliceStable(leaves, func(i, j int) bool {
-		if leaves[i].start != leaves[j].start {
-			return leaves[i].start < leaves[j].start
+		if leaves[i].StartByte != leaves[j].StartByte {
+			return leaves[i].StartByte < leaves[j].StartByte
 		}
-		return leaves[i].end < leaves[j].end
+		return leaves[i].EndByte < leaves[j].EndByte
 	})
 	// Dedupe identical spans
 	var out []tok
 	for _, t := range leaves {
-		if len(out) > 0 && out[len(out)-1].start == t.start && out[len(out)-1].end == t.end {
+		if len(out) > 0 && out[len(out)-1].StartByte == t.StartByte && out[len(out)-1].EndByte == t.EndByte {
 			if out[len(out)-1].target == "" {
 				out[len(out)-1].target = t.target
 			}
@@ -574,19 +574,19 @@ func collectLeaves(n *grammar.Node, source []byte, out *[]tok) {
 	switch typ {
 	case "interpreted_string_literal", "raw_string_literal", "string_literal", "string", "template_string":
 		if start < end {
-			*out = append(*out, tok{start: start, end: end})
+			*out = append(*out, tok{Span: Span{StartByte: start, EndByte: end}})
 		}
 		return
 	}
 
 	// Composite grammar tokens (e.g. empty interface{}) — whole span, no children.
 	if isCompositeTokenSpan(source, start, end) {
-		*out = append(*out, tok{start: start, end: end})
+		*out = append(*out, tok{Span: Span{StartByte: start, EndByte: end}})
 		return
 	}
 	if n.ChildCount() == 0 {
 		if start < end {
-			*out = append(*out, tok{start: start, end: end})
+			*out = append(*out, tok{Span: Span{StartByte: start, EndByte: end}})
 		}
 		return
 	}
@@ -616,7 +616,7 @@ func isCompositeTokenSpan(src []byte, start, end uint32) bool {
 }
 
 func isSpaceSpan(src []byte, t tok) bool {
-	b := tokBytes(src, t)
+	b := t.Bytes(src)
 	if len(b) == 0 {
 		return false
 	}
@@ -632,9 +632,9 @@ func isSpaceSpan(src []byte, t tok) bool {
 // source. For string lits, content is unquoted; for other tokens, content is
 // the raw source slice. srcOf maps each content byte to an offset within the
 // token (0-based); closeOff is the exclusive end of content within the token.
-// Absolute source offset = t.start + srcOf[i].
+// Absolute source offset = t.StartByte + srcOf[i].
 func tokenContentMap(src []byte, t tok) (content string, srcOf []int, closeOff int, quoted bool) {
-	raw := tokBytes(src, t)
+	raw := t.Bytes(src)
 	if content, srcOf, closeOff, ok := unquoteLiteralMap(raw); ok {
 		return content, srcOf, closeOff, true
 	}
@@ -704,24 +704,26 @@ func unquoteLiteral(raw string) (string, bool) {
 	return content, ok
 }
 
-// contentSpanToSource maps a half-open range in unquoted/raw content into
-// absolute source offsets using srcOf (content byte → raw token offset) and
+// contentSpanToSource maps a half-open range in unquoted/raw content into an
+// absolute source Span using srcOf (content byte → raw token offset) and
 // tokenStart. closeOff is the exclusive raw end of content (closing quote or
-// len(token)). Returns ok=false when the content range is out of bounds.
-func contentSpanToSource(tokenStart uint32, srcOf []int, closeOff, cs, ce int) (start, end uint32, ok bool) {
+// len(token)). ok is false when the content range is out of bounds.
+func contentSpanToSource(tokenStart uint32, srcOf []int, closeOff, cs, ce int) (Span, bool) {
 	if cs < 0 || ce < cs || ce > len(srcOf) {
-		return 0, 0, false
+		return Span{}, false
 	}
 	if cs == ce {
 		// Empty match: zero-width at cs (or at content end before closeOff).
+		var s uint32
 		if cs < len(srcOf) {
-			s := tokenStart + uint32(srcOf[cs])
-			return s, s, true
+			s = tokenStart + uint32(srcOf[cs])
+		} else {
+			s = tokenStart + uint32(closeOff)
 		}
-		s := tokenStart + uint32(closeOff)
-		return s, s, true
+		return Span{StartByte: s, EndByte: s}, true
 	}
-	start = tokenStart + uint32(srcOf[cs])
+	start := tokenStart + uint32(srcOf[cs])
+	var end uint32
 	if ce < len(srcOf) {
 		// Exclusive end is the start of the next content byte's source.
 		end = tokenStart + uint32(srcOf[ce])
@@ -729,13 +731,13 @@ func contentSpanToSource(tokenStart uint32, srcOf []int, closeOff, cs, ce int) (
 		end = tokenStart + uint32(closeOff)
 	}
 	if end < start {
-		return 0, 0, false
+		return Span{}, false
 	}
-	return start, end, true
+	return Span{StartByte: start, EndByte: end}, true
 }
 
-func cloneCaptures(m map[string]Capture) map[string]Capture {
-	o := make(map[string]Capture, len(m))
+func cloneCaptures(m map[string]Span) map[string]Span {
+	o := make(map[string]Span, len(m))
 	for k, v := range m {
 		o[k] = v
 	}

@@ -10,7 +10,7 @@ import (
 )
 
 // Instantiate builds replacement text from a template node or call-shaped emit IR.
-// source is the file content that produced m (for Capture.Text).
+// source is the file content that produced m (for Span.Text).
 func Instantiate(repl Node, m Match, source []byte) (string, error) {
 	switch repl.Kind {
 	case "template":
@@ -120,8 +120,8 @@ func EditsForMatches(matches []Match, repl Node, source []byte) ([]ingest.Edit, 
 		}
 		edits = append(edits, ingest.Edit{
 			File:      m.File,
-			StartByte: m.StartByte,
-			EndByte:   m.EndByte,
+			StartByte: m.Span.StartByte,
+			EndByte:   m.Span.EndByte,
 			NewText:   text,
 		})
 	}

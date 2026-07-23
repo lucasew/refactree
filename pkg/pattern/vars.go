@@ -79,7 +79,7 @@ func CaptureValues(names []string, m Match, source []byte) []string {
 }
 
 // PublicCaptures filters match captures for display (no ROOT/empty).
-// Values are Capture.Text(source) for each name.
+// Values are Span.Text(source) for each name.
 func PublicCaptures(m Match, source []byte) map[string]string {
 	out := make(map[string]string)
 	for name, c := range m.Captures {

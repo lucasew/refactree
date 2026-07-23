@@ -40,56 +40,56 @@ func TestContentSpanToSource_IdentAndQuoted(t *testing.T) {
 	ident := []byte("TestFoo")
 	buf := make([]byte, 100+len(ident))
 	copy(buf[100:], ident)
-	tk := tok{start: 100, end: 100 + uint32(len(ident))}
+	tk := tok{Span: Span{StartByte: 100, EndByte: 100 + uint32(len(ident))}}
 	content, srcOf, closeOff, quoted := tokenContentMap(buf, tk)
 	if quoted || content != "TestFoo" {
 		t.Fatalf("ident map: content=%q quoted=%v", content, quoted)
 	}
-	ss, se, ok := contentSpanToSource(100, srcOf, closeOff, 4, 7) // "Foo"
-	if !ok || ss != 104 || se != 107 {
-		t.Fatalf("ident Foo span [%d,%d) ok=%v", ss, se, ok)
+	sp, ok := contentSpanToSource(100, srcOf, closeOff, 4, 7) // "Foo"
+	if !ok || sp.StartByte != 104 || sp.EndByte != 107 {
+		t.Fatalf("ident Foo span %+v ok=%v", sp, ok)
 	}
 
 	raw := []byte(`"pre\tpost"`)
 	buf = make([]byte, 50+len(raw))
 	copy(buf[50:], raw)
-	tk = tok{start: 50, end: 50 + uint32(len(raw))}
+	tk = tok{Span: Span{StartByte: 50, EndByte: 50 + uint32(len(raw))}}
 	content, srcOf, closeOff, quoted = tokenContentMap(buf, tk)
 	if !quoted || content != "pre\tpost" {
 		t.Fatalf("quoted content=%q quoted=%v", content, quoted)
 	}
-	ss, se, ok = contentSpanToSource(50, srcOf, closeOff, 3, 4)
+	sp, ok = contentSpanToSource(50, srcOf, closeOff, 3, 4)
 	if !ok {
 		t.Fatal("tab span map failed")
 	}
-	if ss != 50+4 {
-		t.Fatalf("tab start=%d want %d", ss, 50+4)
+	if sp.StartByte != 50+4 {
+		t.Fatalf("tab start=%d want %d", sp.StartByte, 50+4)
 	}
-	if se != 50+6 {
-		t.Fatalf("tab end=%d want %d", se, 50+6)
+	if sp.EndByte != 50+6 {
+		t.Fatalf("tab end=%d want %d", sp.EndByte, 50+6)
 	}
-	ss, se, ok = contentSpanToSource(50, srcOf, closeOff, 0, len(content))
-	if !ok || ss != 51 || se != 50+uint32(closeOff) {
-		t.Fatalf("full interior [%d,%d) closeOff=%d", ss, se, closeOff)
+	sp, ok = contentSpanToSource(50, srcOf, closeOff, 0, len(content))
+	if !ok || sp.StartByte != 51 || sp.EndByte != 50+uint32(closeOff) {
+		t.Fatalf("full interior %+v closeOff=%d", sp, closeOff)
 	}
 }
 
 func TestContentSpanToSource_EmptyAndOOB(t *testing.T) {
 	src := []byte("abc")
-	tk := tok{start: 0, end: 3}
+	tk := tok{Span: Span{StartByte: 0, EndByte: 3}}
 	_, srcOf, closeOff, _ := tokenContentMap(src, tk)
-	ss, se, ok := contentSpanToSource(0, srcOf, closeOff, 1, 1)
-	if !ok || ss != 1 || se != 1 {
-		t.Fatalf("empty mid [%d,%d) ok=%v", ss, se, ok)
+	sp, ok := contentSpanToSource(0, srcOf, closeOff, 1, 1)
+	if !ok || sp.StartByte != 1 || sp.EndByte != 1 {
+		t.Fatalf("empty mid %+v ok=%v", sp, ok)
 	}
-	ss, se, ok = contentSpanToSource(0, srcOf, closeOff, 3, 3)
-	if !ok || ss != 3 || se != 3 {
-		t.Fatalf("empty end [%d,%d) ok=%v", ss, se, ok)
+	sp, ok = contentSpanToSource(0, srcOf, closeOff, 3, 3)
+	if !ok || sp.StartByte != 3 || sp.EndByte != 3 {
+		t.Fatalf("empty end %+v ok=%v", sp, ok)
 	}
-	if _, _, ok = contentSpanToSource(0, srcOf, closeOff, -1, 1); ok {
+	if _, ok = contentSpanToSource(0, srcOf, closeOff, -1, 1); ok {
 		t.Fatal("want OOB fail")
 	}
-	if _, _, ok = contentSpanToSource(0, srcOf, closeOff, 0, 99); ok {
+	if _, ok = contentSpanToSource(0, srcOf, closeOff, 0, 99); ok {
 		t.Fatal("want OOB fail")
 	}
 }
