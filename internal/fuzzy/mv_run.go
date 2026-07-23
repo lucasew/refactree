@@ -422,11 +422,27 @@ func postMvInvariants(root string, plan movePlan, strict bool) []InvariantFailur
 	}
 	if dst.Name != "" && !entityRefs[plan.Destination] {
 		found := false
+		dstPath := strings.TrimPrefix(dst.Path, "./")
 		for ref := range entityRefs {
 			r := ingest.ParseReference(ref)
-			if r.Name == dst.Name && strings.TrimPrefix(r.Path, "./") == strings.TrimPrefix(dst.Path, "./") {
+			if r.Name != dst.Name {
+				continue
+			}
+			rPath := strings.TrimPrefix(r.Path, "./")
+			if rPath == dstPath {
 				found = true
 				break
+			}
+			// Rename may relocate the defining file with the leaf (Java public
+			// types: ExclusionStrategy.java → Fuzz1.java). Plan destination
+			// still names the pre-rename path; accept the atom when the new
+			// file stem matches the renamed leaf.
+			if plan.Placement == PlacementRename {
+				stem := strings.TrimSuffix(path.Base(rPath), path.Ext(rPath))
+				if stem == dst.Name {
+					found = true
+					break
+				}
 			}
 		}
 		if !found {
