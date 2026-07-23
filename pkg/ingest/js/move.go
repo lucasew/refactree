@@ -819,6 +819,14 @@ func findJSDecl(root *grammar.Node, nameStart uint32) (decl *grammar.Node, expor
 				return child, nil
 			}
 		}
+		// const/let/var — only whole single-declarator statements (multi-declarator
+		// partial extract is not supported yet). Needed for catalog seeds such as
+		// astro bin/astro.mjs::engines cross-file moves.
+		if child.Type() == "lexical_declaration" || child.Type() == "variable_declaration" {
+			if d := matchSingleLexicalDecl(child, nameStart); d != nil {
+				return d, nil
+			}
+		}
 		if child.Type() == "export_statement" {
 			for j := uint32(0); j < child.ChildCount(); j++ {
 				inner := child.Child(j)
@@ -827,10 +835,39 @@ func findJSDecl(root *grammar.Node, nameStart uint32) (decl *grammar.Node, expor
 						return inner, child
 					}
 				}
+				if inner.Type() == "lexical_declaration" || inner.Type() == "variable_declaration" {
+					if d := matchSingleLexicalDecl(inner, nameStart); d != nil {
+						return d, child
+					}
+				}
 			}
 		}
 	}
 	return nil, nil
+}
+
+// matchSingleLexicalDecl returns the lexical/variable declaration when it has
+// exactly one variable_declarator whose name starts at nameStart.
+func matchSingleLexicalDecl(decl *grammar.Node, nameStart uint32) *grammar.Node {
+	if decl == nil {
+		return nil
+	}
+	var matched bool
+	count := 0
+	for i := uint32(0); i < decl.ChildCount(); i++ {
+		ch := decl.Child(i)
+		if ch.Type() != "variable_declarator" {
+			continue
+		}
+		count++
+		if n := ingest.ChildByField(ch, "name"); n != nil && n.StartByte() == nameStart {
+			matched = true
+		}
+	}
+	if matched && count == 1 {
+		return decl
+	}
+	return nil
 }
 
 // ExtraRenameEdits rewrites member-expression call sites when renaming a method

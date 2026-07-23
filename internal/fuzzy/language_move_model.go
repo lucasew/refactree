@@ -196,12 +196,25 @@ func isJVMSourceRootDir(dir string) bool {
 func filterOutJVMSourceRoots(nodes []MoveNode) []MoveNode {
 	var out []MoveNode
 	for _, n := range nodes {
-		if isJVMSourceRootDir(n.Path) {
+		if isJVMSourceRootDir(n.Path) || isJVMTemplatePackageDir(n.Path) {
 			continue
 		}
 		out = append(out, n)
 	}
 	return out
+}
+
+// isJVMTemplatePackageDir reports paths under java-templates source sets.
+// Catalog seed gson relocated com/google/gson/internal under
+// src/main/java-templates; those trees are codegen inputs, not ordinary
+// packages the build expects to relocate independently.
+func isJVMTemplatePackageDir(dir string) bool {
+	dir = strings.Trim(strings.TrimPrefix(dir, "./"), "/")
+	if dir == "" {
+		return false
+	}
+	return strings.Contains(dir, "java-templates/") ||
+		strings.HasSuffix(dir, "java-templates")
 }
 
 // --- Python: file is a module; directory packages are a separate grain. ---

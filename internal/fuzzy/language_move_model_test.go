@@ -103,6 +103,21 @@ func TestIsJVMSourceRootDir(t *testing.T) {
 	}
 }
 
+func TestIsJVMTemplatePackageDir(t *testing.T) {
+	t.Parallel()
+	cases := map[string]bool{
+		"src/main/java-templates/com/google/gson/internal": true,
+		"src/main/java/com/google/gson/internal":           false,
+		"src/main/java-templates":                          true,
+		"./src/test/java-templates/com/foo":                true,
+	}
+	for dir, want := range cases {
+		if got := isJVMTemplatePackageDir(dir); got != want {
+			t.Errorf("isJVMTemplatePackageDir(%q)=%v want %v", dir, got, want)
+		}
+	}
+}
+
 func TestECMAMoveModelFileIsModule(t *testing.T) {
 	t.Parallel()
 	m, err := moveModelForLanguage("javascript")

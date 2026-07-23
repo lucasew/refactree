@@ -97,11 +97,12 @@ run = [
 [projects.astro.mise.tasks.test]
 description = "Build workspace dist packages, then run astro unit tests"
 # unit tests import packages/astro/dist and workspace:* packages that export dist/*
-# (e.g. @astrojs/internal-helpers/remote). Setup only pnpm-installs sources.
-# Build on check (not only setup) so dist reflects the tree after catalog mv.
+# (e.g. @astrojs/internal-helpers/remote, @astrojs/markdown-remark). Setup only
+# pnpm-installs sources. Build the whole astro... dependency graph on check so
+# dist reflects the tree after catalog mv and workspace package dist/ exists
+# (missing @astrojs/markdown-remark/dist previously failed every seed as class=bug).
 run = [
-  "pnpm --filter @astrojs/internal-helpers run build:ci",
-  "pnpm --filter astro run build:ci",
+  "pnpm --filter \"astro...\" run build:ci",
   "pnpm --filter astro run test:unit -- --verbose",
 ]
 
