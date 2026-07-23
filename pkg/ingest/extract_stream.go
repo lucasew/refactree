@@ -10,6 +10,7 @@ package ingest
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -167,7 +168,14 @@ func MaterializeSource(src ExtractSource, opts MaterializeOptions) (*Result, err
 }
 
 // ProjectResult is full-Dir Materialize with ExpandImports (mv, fuzzy, fixtures).
+// Root is the project root to walk (typically cwd / ResolveMoveArgs root) — not
+// the package being moved. Every non-skipped file under Root is visited.
 func ProjectResult(root string) (*Result, error) {
+	rootAbs, err := absRoot(root)
+	if err != nil {
+		rootAbs = root
+	}
+	slog.Debug("project result: walk root", "root", root, "root_abs", rootAbs, "expand_imports", true)
 	return MaterializeSource(ExtractSource{
 		Kind:      ExtractDir,
 		Root:      root,
@@ -231,12 +239,16 @@ func normalizeSourcePaths(rootAbs string, paths []string) ([]string, error) {
 }
 
 func walkExtractsDir(parseRoot, dirAbs string, recursive bool, fsys projectfs.FS, yield func(*FileExtract) bool) error {
-	return filepath.WalkDir(dirAbs, func(path string, d os.DirEntry, err error) error {
+	slog.Debug("extract walk start", "root", parseRoot, "dir", dirAbs, "recursive", recursive)
+	visited := 0
+	skipped := 0
+	err := filepath.WalkDir(dirAbs, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
 			if path != dirAbs && isSkippedDirName(d.Name()) {
+				slog.Debug("extract skip dir", "path", path, "name", d.Name())
 				return filepath.SkipDir
 			}
 			if !recursive && path != dirAbs {
@@ -253,13 +265,18 @@ func walkExtractsDir(parseRoot, dirAbs string, recursive bool, fsys projectfs.FS
 			return parseErr
 		}
 		if fe == nil {
+			skipped++
 			return nil
 		}
+		visited++
+		slog.Debug("extract visit", "path", fe.Path, "lang", fe.Language)
 		if !yield(fe) {
 			return filepath.SkipAll
 		}
 		return nil
 	})
+	slog.Debug("extract walk done", "dir", dirAbs, "visited", visited, "skipped_no_lang", skipped, "err", err)
+	return err
 }
 
 func walkExtractsHop(rootAbs string, paths []string, fsys projectfs.FS, yield func(*FileExtract) bool) error {

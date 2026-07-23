@@ -16,11 +16,13 @@ func newMvCmd() *cobra.Command {
 		Short: "Move or rename a symbol reference",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Project root is cwd. Do not narrow to the source file's parent —
-			// that rebased cross-dir destinations under the source package.
+			// Project root is always cwd ("."), then Abs'd by ResolveMoveArgs —
+			// not the package being moved. Source/dest only name what to move;
+			// materialize walks the whole root (skip list only).
 			dir, source, destination := ingest.ResolveMoveArgs(".", args[0], args[1])
 			slog.Debug("mv resolve",
 				"root", dir,
+				"root_note", "cwd Abs; full project walk for closed graph",
 				"source_in", args[0],
 				"dest_in", args[1],
 				"source", source,
