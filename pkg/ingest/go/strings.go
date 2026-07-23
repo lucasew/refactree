@@ -42,9 +42,9 @@ func findInStringLiterals(file string, content []byte, oldBase, newBase, parentD
 			}
 			if keep {
 				edits = append(edits, ingest.Edit{
-					File:      file,
-					Span: ingest.Span{StartByte: uint32(pos), EndByte: uint32(endPos)},
-					NewText:   newBase,
+					File:    file,
+					Span:    ingest.Span{StartByte: uint32(pos), EndByte: uint32(endPos)},
+					NewText: newBase,
 				})
 			}
 			sOff = posInSeg + len(oldBase)

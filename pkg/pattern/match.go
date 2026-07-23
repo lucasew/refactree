@@ -15,7 +15,7 @@ import (
 // It does not retain file contents; pass the file []byte at the call site
 // (Stream OnMatch/OnFile, Span.Text, PublicCaptures, Instantiate).
 type Match struct {
-	File string
+	File        string
 	ingest.Span // root match range
 	// Captures maps pattern $names to one or more source spans.
 	// Single holes have len 1; Multi (*) holes list every site in the gap.

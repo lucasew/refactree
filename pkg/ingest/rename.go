@@ -432,9 +432,9 @@ func planCrossFileMove(dir string, result *Result, src, dst Reference, sourceEnt
 
 	edits := []Edit{
 		{
-			File:      srcRel,
-			Span: Span{StartByte: decl.RemoveStart, EndByte: decl.RemoveEnd},
-			NewText:   "",
+			File:    srcRel,
+			Span:    Span{StartByte: decl.RemoveStart, EndByte: decl.RemoveEnd},
+			NewText: "",
 		},
 		insertEdit,
 	}
@@ -1020,9 +1020,9 @@ func FindAllWholeWordOccurrences(file string, content []byte, oldBase, newBase s
 		}
 
 		edits = append(edits, Edit{
-			File:      file,
-			Span: Span{StartByte: uint32(pos), EndByte: uint32(endPos)},
-			NewText:   newBase,
+			File:    file,
+			Span:    Span{StartByte: uint32(pos), EndByte: uint32(endPos)},
+			NewText: newBase,
 		})
 		off = endPos
 	}
@@ -1049,9 +1049,9 @@ func FindAllOccurrences(file string, content []byte, oldBase, newBase string) []
 		}
 		pos := off + idx
 		edits = append(edits, Edit{
-			File:      file,
-			Span: Span{StartByte: uint32(pos), EndByte: uint32(pos + len(oldBase))},
-			NewText:   newBase,
+			File:    file,
+			Span:    Span{StartByte: uint32(pos), EndByte: uint32(pos + len(oldBase))},
+			NewText: newBase,
 		})
 		off = pos + len(oldBase)
 	}
@@ -1077,9 +1077,9 @@ func FindAllOccurrencesInStrings(file string, content []byte, oldBase, newBase s
 			posInSeg := sOff + idx
 			pos := start + posInSeg
 			edits = append(edits, Edit{
-				File:      file,
-				Span: Span{StartByte: uint32(pos), EndByte: uint32(pos + len(oldBase))},
-				NewText:   newBase,
+				File:    file,
+				Span:    Span{StartByte: uint32(pos), EndByte: uint32(pos + len(oldBase))},
+				NewText: newBase,
 			})
 			sOff = posInSeg + len(oldBase)
 		}
