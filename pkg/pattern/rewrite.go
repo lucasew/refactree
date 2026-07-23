@@ -131,8 +131,18 @@ func scanTemplateRef(s string, at int) (ref string, end int, ok bool) {
 // refEmitText turns a product ref into source-like selector text for templates.
 // go:context::Background → context.Background
 // go:net/http::ListenAndServe → http.ListenAndServe
+// go:context.Background (legacy single-dot) → context.Background
 func refEmitText(ref string) (string, error) {
 	ref = strings.TrimPrefix(ref, "@")
+	// Accept go:pkg.Symbol as well as go:pkg::Symbol.
+	if !strings.Contains(ref, "::") {
+		if i := strings.LastIndex(ref, "."); i > 0 {
+			// go:context.Background → treat as go:context::Background
+			if j := strings.Index(ref, ":"); j >= 0 && j < i {
+				ref = ref[:i] + "::" + ref[i+1:]
+			}
+		}
+	}
 	r := ingest.ParseReference(ref)
 	if r.Name == "" {
 		if r.Path == "" {

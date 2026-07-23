@@ -156,4 +156,88 @@ func TestParseMultiStar(t *testing.T) {
 	if n.Kind != "group" || !n.Multi {
 		t.Fatalf("group multi got %+v", n)
 	}
+	n, err = ParsePattern(`$c:{t.Context}*`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n.Kind != "group" || !n.Multi || n.As != "c" {
+		t.Fatalf("t.Context multi group %+v", n)
+	}
+}
+
+func TestRewriteMultiGroupTContext(t *testing.T) {
+	dir := t.TempDir()
+	src := []byte(`package p
+
+import "testing"
+
+func TestFoo(t *testing.T) {
+	_ = t.Context()
+	_ = t.Context()
+}
+
+func Helper(t *testing.T) {
+	_ = t.Context()
+}
+`)
+	path := filepath.Join(dir, "x_test.go")
+	if err := os.WriteFile(path, src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	op, err := OpFromCLI("rewrite", "go",
+		`func /Test.*/ (t *testing.T) { $$$_ $c:{t.Context}* $$$_ }`,
+		`c=@go:context::Background`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := Apply(dir, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Edits) != 2 {
+		t.Fatalf("edits=%d want 2; %v", len(res.Edits), res.Edits)
+	}
+	out, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+	if strings.Count(got, "context.Background()") != 2 {
+		t.Fatalf("context.Background count=%d\n%s", strings.Count(got, "context.Background()"), got)
+	}
+	if strings.Count(got, "t.Context()") != 1 {
+		t.Fatalf("Helper should keep one t.Context:\n%s", got)
+	}
+}
+
+func TestRewriteNestedMultiIteration(t *testing.T) {
+	dir := t.TempDir()
+	src := []byte(`package p
+
+import "testing"
+
+func TestFoo(t *testing.T) {
+	_ = t.Context()
+	_ = t.Context()
+}
+`)
+	path := filepath.Join(dir, "x_test.go")
+	if err := os.WriteFile(path, src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	op, err := OpFromCLI("rewrite", "go",
+		`func /Test.*/ (t *testing.T) { $$$_ $i:{ $c:{t.Context} $$$_ }* }`,
+		`c=@go:context::Background`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := Apply(dir, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Edits) != 2 {
+		t.Fatalf("edits=%d want 2; %v", len(res.Edits), res.Edits)
+	}
 }
