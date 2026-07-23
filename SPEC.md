@@ -87,6 +87,7 @@ Structural spine for discovery and graphs. Goal: one walk/parse path, no duplica
 ### Transform core (shared data model)
 - **`ingest.Span`**: half-open byte range; embedded on **`ingest.Edit`**
 - **`ingest.Edit`**: apply unit (`File` + `Span` + `NewText`) — `StageEdits` / `ApplyEdits` / LSP stage
+- **`ReplaceSpan(s)`**: shared emit for known spans (defs, aliases, graph use-site fallback)
 - **`pattern.Rule`**: site unit (`Pattern` + `Replacement` + optional `SetCapture`) → NFA match → `[]Edit`
   - `rft rewrite` is one Rule over a file stream
   - `mv` remains a symbol-identity **planner** (full graph for defs, aliases, expanders, package moves)

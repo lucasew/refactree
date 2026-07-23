@@ -19,6 +19,7 @@ func init() {
 //
 // Files are taken from non-alias Uses that target sourceSet. ViaImportAlias
 // spans are excluded so local import aliases keep their binding names.
+// Each candidate file is parsed once; rules for all targets are compiled once.
 func UseSiteRenames(root string, result *ingest.Result, sourceSet map[string]bool, newLeaf string) []ingest.Edit {
 	if result == nil || len(sourceSet) == 0 || newLeaf == "" {
 		return nil
@@ -31,6 +32,18 @@ func UseSiteRenames(root string, result *ingest.Result, sourceSet map[string]boo
 		}
 	}
 	slices.Sort(targets)
+
+	rules := make([]Rule, 0, len(targets))
+	for _, target := range targets {
+		rule, err := RefLeafRule(target, newLeaf)
+		if err != nil {
+			continue
+		}
+		rules = append(rules, rule)
+	}
+	if len(rules) == 0 {
+		return nil
+	}
 
 	// file → spans to skip (import-alias bindings)
 	skip := map[string]map[ingest.Span]struct{}{}
@@ -78,7 +91,6 @@ func UseSiteRenames(root string, result *ingest.Result, sourceSet map[string]boo
 		}
 		source, err := os.ReadFile(abs)
 		if err != nil {
-			// Fall back to graph spans for this file if unreadable.
 			edits = append(edits, graphUseEditsForFile(result, sourceSet, newLeaf, file)...)
 			continue
 		}
@@ -94,11 +106,7 @@ func UseSiteRenames(root string, result *ingest.Result, sourceSet map[string]boo
 		}
 
 		skipSpans := skip[file]
-		for _, target := range targets {
-			rule, err := RefLeafRule(target, newLeaf)
-			if err != nil {
-				continue
-			}
+		for _, rule := range rules {
 			_, fileEdits, err := rule.ExpandFile(root, file, source, pf.Root, result)
 			if err != nil {
 				continue
@@ -127,11 +135,7 @@ func graphUseEditsForFile(result *ingest.Result, sourceSet map[string]bool, newL
 		if f != file {
 			continue
 		}
-		edits = append(edits, ingest.Edit{
-			File:    file,
-			Span:    ingest.Span{StartByte: rel.StartByte, EndByte: rel.EndByte},
-			NewText: newLeaf,
-		})
+		edits = ingest.AppendReplaceSpan(edits, file, ingest.Span{StartByte: rel.StartByte, EndByte: rel.EndByte}, newLeaf)
 	}
 	return edits
 }

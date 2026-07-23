@@ -121,11 +121,7 @@ func planSymbolRename(dir string, result *Result, sourceRefs []string, destSymbo
 			continue
 		}
 		ref := ParseReference(ent.Reference)
-		edits = append(edits, Edit{
-			File:      strings.TrimPrefix(ref.Path, "./"),
-			Span: Span{StartByte: ent.StartByte, EndByte: ent.EndByte},
-			NewText:   newText,
-		})
+		edits = AppendReplaceSpan(edits, ref.Path, Span{StartByte: ent.StartByte, EndByte: ent.EndByte}, newText)
 	}
 
 	// 2. Rename at every call site that targets any expanded entity.
@@ -137,22 +133,12 @@ func planSymbolRename(dir string, result *Result, sourceRefs []string, destSymbo
 	// Zero-span aliases (DefaultExport, re-exports) exist only for
 	// CanonicalizeInResult — they are not textual sites and must not be rewritten
 	// (rewriting [0:0] would insert the new name at the start of the file).
-	// Zero-span aliases (DefaultExport, star/legacy re-exports) exist only for
-	// CanonicalizeInResult — rewriting [0:0] would insert the new name at the
-	// start of the file.
 	for _, alias := range result.Aliases {
 		if !sourceSet[alias.Target] {
 			continue
 		}
-		if alias.EndByte <= alias.StartByte {
-			continue
-		}
 		ref := ParseReference(alias.Reference)
-		edits = append(edits, Edit{
-			File:      strings.TrimPrefix(ref.Path, "./"),
-			Span: Span{StartByte: alias.StartByte, EndByte: alias.EndByte},
-			NewText:   newText,
-		})
+		edits = AppendReplaceSpan(edits, ref.Path, Span{StartByte: alias.StartByte, EndByte: alias.EndByte}, newText)
 	}
 
 	if len(edits) == 0 {

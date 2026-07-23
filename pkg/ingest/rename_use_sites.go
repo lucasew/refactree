@@ -1,7 +1,6 @@
 package ingest
 
 import (
-	"strings"
 	"sync"
 )
 
@@ -43,18 +42,11 @@ func expandUseSiteRenames(root string, result *Result, sourceSet map[string]bool
 func useSiteRenamesFromGraph(result *Result, sourceSet map[string]bool, newLeaf string) []Edit {
 	var edits []Edit
 	for _, rel := range result.Uses {
-		if !sourceSet[rel.Target] {
-			continue
-		}
-		if rel.ViaImportAlias {
+		if !sourceSet[rel.Target] || rel.ViaImportAlias {
 			continue
 		}
 		ref := ParseReference(rel.Reference)
-		edits = append(edits, Edit{
-			File:    strings.TrimPrefix(ref.Path, "./"),
-			Span:    Span{StartByte: rel.StartByte, EndByte: rel.EndByte},
-			NewText: newLeaf,
-		})
+		edits = AppendReplaceSpan(edits, ref.Path, Span{StartByte: rel.StartByte, EndByte: rel.EndByte}, newLeaf)
 	}
 	return edits
 }
