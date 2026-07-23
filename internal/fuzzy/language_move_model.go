@@ -156,10 +156,52 @@ func (jvmMoveModel) ListNodes(result *ingest.Result, grain Grain, projectFamily 
 	case GrainAtom:
 		return listDeclarationNodes(result, projectFamily)
 	case GrainPackage:
-		return listPackageNodes(result, projectFamily)
+		// Skip Maven/Gradle source roots (e.g. src/main/java from module-info.java).
+		// Moving those is not a Java package relocate and breaks the build layout.
+		return filterOutJVMSourceRoots(listPackageNodes(result, projectFamily))
 	default:
 		return nil
 	}
+}
+
+// jvmSourceRootSuffixes are conventional JVM source-set roots (no package path).
+// Paths that equal or end with these are not Java packages.
+var jvmSourceRootSuffixes = []string{
+	"src/main/java-templates",
+	"src/test/java-templates",
+	"src/main/java",
+	"src/test/java",
+	"src/jmh/java",
+	"src/testFixtures/java",
+	"src/integrationTest/java",
+	"src/androidTest/java",
+	"src/main/resources",
+	"src/test/resources",
+	"src",
+}
+
+func isJVMSourceRootDir(dir string) bool {
+	dir = strings.Trim(strings.TrimPrefix(dir, "./"), "/")
+	if dir == "" {
+		return false
+	}
+	for _, root := range jvmSourceRootSuffixes {
+		if dir == root || strings.HasSuffix(dir, "/"+root) {
+			return true
+		}
+	}
+	return false
+}
+
+func filterOutJVMSourceRoots(nodes []MoveNode) []MoveNode {
+	var out []MoveNode
+	for _, n := range nodes {
+		if isJVMSourceRootDir(n.Path) {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
 }
 
 // --- Python: file is a module; directory packages are a separate grain. ---
@@ -262,6 +304,12 @@ func listPackageNodes(result *ingest.Result, projectFamily string) []MoveNode {
 			continue
 		}
 		rel := strings.TrimPrefix(f.Path, "./")
+		// module-info.java lives at the source-set root, not in a named package.
+		// Treating its parent as a package grain candidate (e.g. src/main/java)
+		// makes the catalog try to relocate the whole Maven source tree.
+		if path.Base(rel) == "module-info.java" {
+			continue
+		}
 		dir := path.Dir(rel)
 		if dir == "." || dir == "" {
 			continue
