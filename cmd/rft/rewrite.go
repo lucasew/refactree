@@ -38,8 +38,10 @@ Examples:
     'c=t.Context'
   # trailing * on $c:@ref collects every site in the function; c= rewrites all
 
-$Name holes in the template are filled from the match. String holes bound via
-regex with a capture group re-emit the group text as a string literal.`,
+$Name holes in the template are filled from the match. @provider:path::Symbol
+expands to a source-like selector (go:net/http::Get → http.Get); imports are
+not updated. String holes bound via regex with a capture group re-emit the
+group text as a string literal.`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pat, repl := args[0], args[1]

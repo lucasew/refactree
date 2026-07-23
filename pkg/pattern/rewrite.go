@@ -20,8 +20,14 @@ func Instantiate(repl Node, m Match, source []byte) (string, error) {
 		return instantiateCall(repl, m, source)
 	case "token", "type_token", "lit":
 		return repl.Text, nil
-	case "capture", "ref":
+	case "capture":
 		return captureText(m, repl.As, source), nil
+	case "ref":
+		// Bound capture ($F:@ref matched) uses As; bare @ref IR uses Ref.
+		if repl.As != "" {
+			return captureText(m, repl.As, source), nil
+		}
+		return refEmitText(repl.Ref)
 	case "string":
 		if repl.FromCapture != "" {
 			v := captureText(m, repl.FromCapture, source)
@@ -54,6 +60,9 @@ func captureText(m Match, name string, source []byte) string {
 	return sp.Text(source)
 }
 
+// expandTemplate fills $name captures and @provider:path::Symbol ref emits.
+// Ref emit is a best-effort source selector (e.g. go:net/http::Get → http.Get);
+// it does not rewrite imports.
 func expandTemplate(tmpl string, m Match, source []byte) (string, error) {
 	var b strings.Builder
 	i := 0
@@ -76,10 +85,69 @@ func expandTemplate(tmpl string, m Match, source []byte) (string, error) {
 			b.WriteString(captureText(m, name, source))
 			continue
 		}
+		if tmpl[i] == '@' {
+			ref, end, ok := scanTemplateRef(tmpl, i)
+			if !ok {
+				b.WriteByte('@')
+				i++
+				continue
+			}
+			emit, err := refEmitText(ref)
+			if err != nil {
+				return "", err
+			}
+			b.WriteString(emit)
+			i = end
+			continue
+		}
 		b.WriteByte(tmpl[i])
 		i++
 	}
 	return b.String(), nil
+}
+
+// scanTemplateRef reads @provider:path::Symbol starting at @. Returns the ref
+// without the leading @, and the index after the ref.
+func scanTemplateRef(s string, at int) (ref string, end int, ok bool) {
+	if at >= len(s) || s[at] != '@' {
+		return "", at, false
+	}
+	i := at + 1
+	start := i
+	for i < len(s) {
+		c := s[i]
+		if c == '(' || c == ')' || c == '{' || c == '}' || c == ',' || c == '*' ||
+			c == '$' || c == '@' || c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+			break
+		}
+		i++
+	}
+	if i == start || !strings.Contains(s[start:i], ":") {
+		return "", at, false
+	}
+	return s[start:i], i, true
+}
+
+// refEmitText turns a product ref into source-like selector text for templates.
+// go:context::Background → context.Background
+// go:net/http::ListenAndServe → http.ListenAndServe
+func refEmitText(ref string) (string, error) {
+	ref = strings.TrimPrefix(ref, "@")
+	r := ingest.ParseReference(ref)
+	if r.Name == "" {
+		if r.Path == "" {
+			return "", fmt.Errorf("replacement ref %q: empty symbol", ref)
+		}
+		return r.Path, nil
+	}
+	pkg := r.Path
+	if i := strings.LastIndex(pkg, "/"); i >= 0 {
+		pkg = pkg[i+1:]
+	}
+	if pkg == "" {
+		return r.Name, nil
+	}
+	return pkg + "." + r.Name, nil
 }
 
 func instantiateCall(n Node, m Match, source []byte) (string, error) {
