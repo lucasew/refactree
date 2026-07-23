@@ -1,0 +1,8 @@
+{
+  "name": "demo",
+  "type": "module",
+  "exports": {
+    "./astro-jsx": "./components/astro-jsx.d_fuzz_4.ts",
+    "./client": "./client.d.ts"
+  }
+}
