@@ -89,7 +89,8 @@ Structural spine for discovery and graphs. Goal: one walk/parse path, no duplica
 - **`ingest.Edit`**: apply unit (`File` + `Span` + `NewText`) — `StageEdits` / `ApplyEdits` / LSP stage
 - **`pattern.Rule`**: site unit (`Pattern` + `Replacement` + optional `SetCapture`) → NFA match → `[]Edit`
   - `rft rewrite` is one Rule over a file stream
-  - `mv` remains a symbol-identity **planner** (full graph); use-site leaf rewrites may be expressed as site Rules (e.g. `RefLeafRule(@old, newLeaf)`) without a second match engine
+  - `mv` remains a symbol-identity **planner** (full graph for defs, aliases, expanders, package moves)
+  - **Use-site leaf renames** go through `RegisterUseSiteRenamer` → `pattern.UseSiteRenames` (`RefLeafRule` per target file) when `pkg/pattern` is linked; graph `Uses` walk is the fallback
 - Planners differ (identity/graph vs stream/codemod); site expansion and apply do not
 
 ### Subcommands: grep / rewrite

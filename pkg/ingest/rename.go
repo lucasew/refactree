@@ -129,22 +129,9 @@ func planSymbolRename(dir string, result *Result, sourceRefs []string, destSymbo
 	}
 
 	// 2. Rename at every call site that targets any expanded entity.
-	for _, rel := range result.Uses {
-		if !sourceSet[rel.Target] {
-			continue
-		}
-		// Usage through explicit import alias bindings (`as`) should keep
-		// the local alias name unchanged when renaming the imported symbol.
-		if rel.ViaImportAlias {
-			continue
-		}
-		ref := ParseReference(rel.Reference)
-		edits = append(edits, Edit{
-			File:      strings.TrimPrefix(ref.Path, "./"),
-			Span: Span{StartByte: rel.StartByte, EndByte: rel.EndByte},
-			NewText:   newText,
-		})
-	}
+	// Prefer the registered site renamer (Rule / NFA backbone when pattern is
+	// linked); otherwise walk result.Uses directly.
+	edits = append(edits, expandUseSiteRenames(dir, result, sourceSet, newText)...)
 
 	// 3. Rename in import bindings that target any expanded entity.
 	// Zero-span aliases (DefaultExport, re-exports) exist only for
