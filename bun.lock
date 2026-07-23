@@ -15,7 +15,7 @@
         "@tailwindcss/vite": "^4.3.3",
         "@types/react": "^19.0.0",
         "@types/react-dom": "^19.0.0",
-        "@types/react-relay": "^16.0.6",
+        "@types/react-relay": "^18.0.0",
         "@types/relay-runtime": "^18.2.0",
         "@vitejs/plugin-react": "^4.3.4",
         "babel-plugin-relay": "^18.2.0",
@@ -231,7 +231,7 @@
 
     "@types/react-dom": ["@types/react-dom@19.2.3", "", { "peerDependencies": { "@types/react": "^19.2.0" } }, "sha512-jp2L/eY6fn+KgVVQAOqYItbF0VY/YApe5Mz2F0aykSO8gx31bYCZyvSeYxCHKvzHG5eZjc+zyaS5BrBWya2+kQ=="],
 
-    "@types/react-relay": ["@types/react-relay@16.0.6", "", { "dependencies": { "@types/react": "*", "@types/relay-runtime": "*" } }, "sha512-VTntVQJhlwQYNUlbNgGf8RYy7EtQPRZqsD/w2Si0ygZspJXuNlVdRkklWMFN99EMRhHDpqlNHD8i3wIs7QRz9g=="],
+    "@types/react-relay": ["@types/react-relay@18.2.1", "", { "dependencies": { "@types/react": "*", "@types/relay-runtime": "*" } }, "sha512-KgmFapsxAylhxcFfaAv5GZZJhTHnDvV8IDZVsUm5afpJUvgZC1Y68ssfOGsFfiFY/2EhxHM/YPfpdKbfmF3Ecg=="],
 
     "@types/relay-runtime": ["@types/relay-runtime@18.2.5", "", {}, "sha512-2ukE6xQMIpa3kG8F33kXZMcGl/VJdDjNW3eKjQVe1AZQaYnIpNX8vXpcRD6pc+No2rOwVFLbQ6thaPSXPs8ouQ=="],
 
