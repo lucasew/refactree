@@ -165,6 +165,9 @@ type goImportSpec struct {
 }
 
 func parseGoImportSpecs(source []byte) []goImportSpec {
+	// Only treat "import" at code (non-string, non-comment) positions as real
+	// declarations, so fixtures embedded in raw strings are ignored.
+	code := goCodeMask(source) // true = identifier/keyword may start here
 	text := string(source)
 	var specs []goImportSpec
 	lines := strings.Split(text, "\n")
@@ -177,8 +180,18 @@ func parseGoImportSpecs(source []byte) []goImportSpec {
 		if lineEnd < len(text) {
 			lineEnd++ // newline
 		}
+		// Skip lines whose first non-space byte is not in code (string/comment).
+		trimStart := offset
+		for trimStart < lineEnd && (trimStart < len(source) && (source[trimStart] == ' ' || source[trimStart] == '\t')) {
+			trimStart++
+		}
+		inCode := trimStart < len(code) && code[trimStart]
 		trim := strings.TrimSpace(line)
 		if !inBlock {
+			if !inCode {
+				offset = lineEnd
+				continue
+			}
 			if trim == "import (" {
 				inBlock = true
 				blockStart = offset
@@ -197,6 +210,7 @@ func parseGoImportSpecs(source []byte) []goImportSpec {
 			offset = lineEnd
 			continue
 		}
+		// Inside import (: still use original lines (paths are strings).
 		if trim == ")" {
 			for i := range specs {
 				if specs[i].blockStart == blockStart && specs[i].blockEnd == 0 {
@@ -222,6 +236,76 @@ func parseGoImportSpecs(source []byte) []goImportSpec {
 		offset = lineEnd
 	}
 	return specs
+}
+
+// goCodeMask marks bytes that are outside strings, runes, and comments.
+// true means a Go keyword/ident may begin at that index.
+func goCodeMask(src []byte) []bool {
+	mask := make([]bool, len(src))
+	for i := 0; i < len(src); {
+		// Line comment.
+		if i+1 < len(src) && src[i] == '/' && src[i+1] == '/' {
+			for i < len(src) && src[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		// Block comment.
+		if i+1 < len(src) && src[i] == '/' && src[i+1] == '*' {
+			i += 2
+			for i+1 < len(src) && !(src[i] == '*' && src[i+1] == '/') {
+				i++
+			}
+			if i+1 < len(src) {
+				i += 2
+			}
+			continue
+		}
+		// Interpreted string.
+		if src[i] == '"' {
+			i++
+			for i < len(src) && src[i] != '"' {
+				if src[i] == '\\' && i+1 < len(src) {
+					i += 2
+					continue
+				}
+				i++
+			}
+			if i < len(src) {
+				i++
+			}
+			continue
+		}
+		// Raw string.
+		if src[i] == '`' {
+			i++
+			for i < len(src) && src[i] != '`' {
+				i++
+			}
+			if i < len(src) {
+				i++
+			}
+			continue
+		}
+		// Rune.
+		if src[i] == '\'' {
+			i++
+			for i < len(src) && src[i] != '\'' {
+				if src[i] == '\\' && i+1 < len(src) {
+					i += 2
+					continue
+				}
+				i++
+			}
+			if i < len(src) {
+				i++
+			}
+			continue
+		}
+		mask[i] = true
+		i++
+	}
+	return mask
 }
 
 func parseGoImportLine(s string) (goImportSpec, bool) {
@@ -255,10 +339,46 @@ func parseGoImportLine(s string) (goImportSpec, bool) {
 	}
 	p := pathPart[1 : 1+end]
 	if local == "" {
-		local = ingest.LastPathComponent(p)
+		local = goAssumedImportName(p)
 	}
 	return goImportSpec{local: local, path: p}, true
 }
+
+// goAssumedImportName mirrors golang.org/x/tools/internal/imports ImportPathToAssumedName:
+// last path element that is not a major version (v2), strip "go-" prefix, then take
+// the leading identifier (so gopkg.in/yaml.v3 → yaml, go-toml/v2 → toml,
+// testcontainers-go → testcontainers).
+func goAssumedImportName(importPath string) string {
+	importPath = strings.TrimSuffix(importPath, "/")
+	base := importPath
+	if i := strings.LastIndex(base, "/"); i >= 0 {
+		base = base[i+1:]
+	}
+	if len(base) > 1 && base[0] == 'v' {
+		if _, err := strconv.Atoi(base[1:]); err == nil {
+			dir := importPath
+			if j := strings.LastIndex(dir, "/"); j >= 0 {
+				dir = dir[:j]
+				if k := strings.LastIndex(dir, "/"); k >= 0 {
+					base = dir[k+1:]
+				} else if dir != "" {
+					base = dir
+				}
+			}
+		}
+	}
+	base = strings.TrimPrefix(base, "go-")
+	if i := strings.IndexFunc(base, notGoIdentRune); i >= 0 {
+		base = base[:i]
+	}
+	return base
+}
+
+func notGoIdentRune(r rune) bool {
+	return !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_')
+}
+
+
 
 // goIdentUsed reports whether ident appears as a Go identifier in text,
 // ignoring comments and string/rune literals so comments/docs do not count
