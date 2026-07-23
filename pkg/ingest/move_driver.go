@@ -99,6 +99,18 @@ type PackageMovePlanner interface {
 	RewriteSupportFiles(rootDir string, result *Result, movedFiles map[string]bool, srcDir, dstDir string) ([]Edit, error)
 }
 
+// PackageImportMatcher is an optional MoveDriver capability that maps language
+// import paths (go: module paths, etc.) onto project-relative package dirs.
+// Core ingest never reads go.mod or other language project manifests; drivers do.
+type PackageImportMatcher interface {
+	// ImportPathUnderPackageTree reports whether importPath refers to
+	// packageDir or a subpackage under it (project-relative packageDir).
+	ImportPathUnderPackageTree(rootDir, importPath, packageDir string) bool
+	// ImportPathIsPackage reports whether importPath is exactly packageDir
+	// (one language package), not a subpackage.
+	ImportPathIsPackage(rootDir, importPath, packageDir string) bool
+}
+
 var (
 	moveDriversMu sync.RWMutex
 	moveDrivers   = map[string]MoveDriver{}

@@ -266,7 +266,7 @@ func dedupeEdits(edits []Edit) []Edit {
 
 // expandRenameSourceSet adds language-provider targets (e.g. go:mod/pkg::Sym)
 // that refer to the same package-scoped symbols as the path: entity refs.
-// rootDir is the ingest root (for reading go.mod module path when matching go: targets).
+// rootDir is the ingest root (passed to language PackageImportMatchers).
 func expandRenameSourceSet(rootDir string, result *Result, sourceRefs []string) map[string]bool {
 	sourceSet := map[string]bool{}
 	type want struct {
@@ -295,7 +295,6 @@ func expandRenameSourceSet(rootDir string, result *Result, sourceRefs []string) 
 	if len(wants) == 0 || result == nil {
 		return sourceSet
 	}
-	modulePath := readModulePathForRename(rootDir)
 	add := func(target string) {
 		if target == "" || sourceSet[target] {
 			return
@@ -308,7 +307,7 @@ func expandRenameSourceSet(rootDir string, result *Result, sourceRefs []string) 
 			if t.Name != w.symbol {
 				continue
 			}
-			if targetMatchesPackageSymbol(t, w.pkgDir, modulePath) {
+			if targetMatchesPackageSymbol(rootDir, t, w.pkgDir) {
 				sourceSet[target] = true
 				return
 			}
@@ -324,12 +323,10 @@ func expandRenameSourceSet(rootDir string, result *Result, sourceRefs []string) 
 }
 
 // targetMatchesPackageSymbol reports whether ref names a symbol in package pkgDir
-// (relative to the module root, e.g. "pkg/db").
-// For path: refs, compares file directory. For language providers (go:, …),
-// matches the module import path modulePath+"/"+pkgDir exactly when modulePath
-// is known — never bare trailing-segment suffix matches (db vs pkg/db) and never
-// empty pkgDir against arbitrary single-segment imports (fmt, os, …).
-func targetMatchesPackageSymbol(ref Reference, pkgDir, modulePath string) bool {
+// (relative to the project root, e.g. "pkg/db").
+// path: compares file directory. Other providers use PackageImportMatcher
+// (language drivers; e.g. Go reads go.mod in ingest/go).
+func targetMatchesPackageSymbol(rootDir string, ref Reference, pkgDir string) bool {
 	if ref.Provider == "path" || ref.Provider == "" {
 		dir := path.Dir(strings.TrimPrefix(ref.Path, "./"))
 		if dir == "." {
@@ -337,40 +334,7 @@ func targetMatchesPackageSymbol(ref Reference, pkgDir, modulePath string) bool {
 		}
 		return dir == pkgDir
 	}
-	p := strings.Trim(ref.Path, "/")
-	if modulePath != "" {
-		want := modulePath
-		if pkgDir != "" {
-			want = modulePath + "/" + pkgDir
-		}
-		return p == want
-	}
-	// No module path available: only exact pkgDir equality (no suffix / empty root).
-	if pkgDir == "" {
-		return false
-	}
-	return p == pkgDir
-}
-
-// readModulePathForRename returns the go.mod module path for rootDir, or "".
-// Only rootDir itself is consulted (no parent walk): walking up from a temp
-// fixture dir can pick an unrelated go.mod and poison import-path matching.
-// Callers pass the project/module root (CLI cwd Abs / fixture temp root).
-func readModulePathForRename(rootDir string) string {
-	if rootDir == "" {
-		return ""
-	}
-	data, err := os.ReadFile(filepath.Join(rootDir, "go.mod"))
-	if err != nil {
-		return ""
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "module ") {
-			return strings.TrimSpace(strings.TrimPrefix(line, "module "))
-		}
-	}
-	return ""
+	return packageImportIsPackage(rootDir, ref.Path, pkgDir)
 }
 
 // AtomName returns the identifier text written at a definition/use span.
@@ -738,10 +702,10 @@ func planPackageMove(dir string, result *Result, src, dst Reference) ([]Edit, er
 	slog.Debug("planPackageMove: relocated files", "count", nRelocated, "edits", len(edits))
 
 	// Rewrite imports only in files that the graph shows as consumers of
-	// something defined under srcDir (path: or language import path under
-	// modulePath/srcDir). Not every file that textually contains the path leaf.
+	// something defined under srcDir (path: or language import paths via
+	// PackageImportMatcher). Not every file that textually contains the path leaf.
 	consumers := packageMoveConsumerFiles(result, dir, srcDir, movedFiles)
-	slog.Debug("planPackageMove: consumers", "count", len(consumers), "module", readModulePathForRename(dir))
+	slog.Debug("planPackageMove: consumers", "count", len(consumers))
 	langByFile := map[string]string{}
 	for _, f := range result.Files {
 		langByFile[strings.TrimPrefix(f.Path, "./")] = f.Language
@@ -800,14 +764,13 @@ func isUnderDir(p, dir string) bool {
 // packageMoveConsumerFiles returns project-relative files (not under the moved
 // package tree) that have Uses or Aliases targeting something under srcDir.
 // Matching is graph-based: path: refs under the tree, or language import paths
-// that resolve to modulePath/srcDir (and subpackages). Linear in graph size.
+// via PackageImportMatcher. Linear in graph size.
 func packageMoveConsumerFiles(result *Result, rootDir, srcDir string, movedFiles map[string]bool) map[string]bool {
 	if result == nil {
 		return nil
 	}
 	srcDir = CleanRelDir(srcDir)
-	modulePath := readModulePathForRename(rootDir)
-	targets := targetsUnderPackageDir(result, srcDir, modulePath)
+	targets := targetsUnderPackageDir(result, rootDir, srcDir)
 	if len(targets) == 0 {
 		return nil
 	}
@@ -834,7 +797,7 @@ func packageMoveConsumerFiles(result *Result, rootDir, srcDir string, movedFiles
 
 // targetsUnderPackageDir collects reference strings that identify code under
 // srcDir: path atoms/files and provider import paths for that package tree.
-func targetsUnderPackageDir(result *Result, srcDir, modulePath string) map[string]bool {
+func targetsUnderPackageDir(result *Result, rootDir, srcDir string) map[string]bool {
 	srcDir = CleanRelDir(srcDir)
 	targets := map[string]bool{}
 	if srcDir == "" || result == nil {
@@ -844,7 +807,7 @@ func targetsUnderPackageDir(result *Result, srcDir, modulePath string) map[strin
 		if s == "" || targets[s] {
 			return
 		}
-		if targetRefersToPackageTree(ParseReference(s), srcDir, modulePath) {
+		if targetRefersToPackageTree(rootDir, ParseReference(s), srcDir) {
 			targets[s] = true
 		}
 	}
@@ -868,13 +831,8 @@ func targetsUnderPackageDir(result *Result, srcDir, modulePath string) map[strin
 
 // targetRefersToPackageTree reports whether ref names a file/symbol under
 // project-relative package directory srcDir (any depth), or a language-provider
-// import path for that tree.
-//
-// With modulePath (from go.mod): go:module/srcDir and go:module/srcDir/... match.
-// Without: path equality / prefix / suffix on the full srcDir (fixtures like
-// example/helperpkg for srcDir helperpkg) — never a bare last-segment-only match
-// that would equate nested testdata/.../pkg with top-level pkg via leaf alone.
-func targetRefersToPackageTree(ref Reference, srcDir, modulePath string) bool {
+// import path for that tree (via PackageImportMatcher — e.g. Go module paths).
+func targetRefersToPackageTree(rootDir string, ref Reference, srcDir string) bool {
 	srcDir = CleanRelDir(srcDir)
 	if srcDir == "" {
 		return false
@@ -882,16 +840,41 @@ func targetRefersToPackageTree(ref Reference, srcDir, modulePath string) bool {
 	if ref.Provider == "path" || ref.Provider == "" {
 		return isUnderDir(CleanRelDir(ref.Path), srcDir)
 	}
-	p := strings.Trim(strings.TrimPrefix(ref.Path, "./"), "/")
-	if p == "" {
-		return false
+	return packageImportUnderTree(rootDir, ref.Path, srcDir)
+}
+
+// packageImportUnderTree asks registered PackageImportMatchers whether
+// importPath refers to packageDir or a subpackage.
+func packageImportUnderTree(rootDir, importPath, packageDir string) bool {
+	moveDriversMu.RLock()
+	defer moveDriversMu.RUnlock()
+	for _, d := range moveDrivers {
+		m, ok := d.(PackageImportMatcher)
+		if !ok {
+			continue
+		}
+		if m.ImportPathUnderPackageTree(rootDir, importPath, packageDir) {
+			return true
+		}
 	}
-	if modulePath != "" {
-		prefix := strings.Trim(modulePath, "/") + "/" + srcDir
-		return p == prefix || strings.HasPrefix(p, prefix+"/")
+	return false
+}
+
+// packageImportIsPackage asks registered PackageImportMatchers for an exact
+// package import-path match.
+func packageImportIsPackage(rootDir, importPath, packageDir string) bool {
+	moveDriversMu.RLock()
+	defer moveDriversMu.RUnlock()
+	for _, d := range moveDrivers {
+		m, ok := d.(PackageImportMatcher)
+		if !ok {
+			continue
+		}
+		if m.ImportPathIsPackage(rootDir, importPath, packageDir) {
+			return true
+		}
 	}
-	// No module path (isolated fixtures): full package path relative forms.
-	return p == srcDir || strings.HasPrefix(p, srcDir+"/") || strings.HasSuffix(p, "/"+srcDir)
+	return false
 }
 
 // FindAllWholeWordOccurrences finds all whole-word occurrences of oldBase in

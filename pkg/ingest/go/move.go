@@ -971,8 +971,8 @@ func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src
 	}
 
 	newQual := ingest.LastPathComponent(newDir)
-	modPath, err := readGoModulePath(rootDir)
-	if err != nil || modPath == "" {
+	modPath := readGoModulePath(rootDir)
+	if modPath == "" {
 		return edits, nil
 	}
 	newImportPath := modPath + "/" + newDir
@@ -1122,27 +1122,6 @@ func packageLocalDepFromRelations(result *ingest.Result, pkgDir, movedLeaf strin
 		return name
 	}
 	return ""
-}
-
-func readGoModulePath(rootDir string) (string, error) {
-	dir := rootDir
-	for {
-		data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
-		if err == nil {
-			for _, line := range strings.Split(string(data), "\n") {
-				line = strings.TrimSpace(line)
-				if strings.HasPrefix(line, "module ") {
-					return strings.TrimSpace(strings.TrimPrefix(line, "module ")), nil
-				}
-			}
-			return "", fmt.Errorf("no module line in go.mod")
-		}
-		parent := filepath.Dir(dir)
-		if parent == "" || parent == dir {
-			return "", err
-		}
-		dir = parent
-	}
 }
 
 func goImportInsertEdits(file string, content []byte, paths []string) []ingest.Edit {
