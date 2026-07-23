@@ -27,7 +27,7 @@ exclude github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar v0.0.0
 
 require (
 	github.com/99designs/gqlgen v0.17.86
-	github.com/gorilla/websocket v1.5.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/lewtec/eletrocromo v0.0.0-20260720233412-019f2474a08f
 	github.com/moby/moby/api v1.55.0
 	github.com/vektah/gqlparser/v2 v2.5.31
