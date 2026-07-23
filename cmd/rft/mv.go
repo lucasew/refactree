@@ -19,40 +19,9 @@ func newMvCmd() *cobra.Command {
 		Short: "Move or rename a symbol reference",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			source := args[0]
-			destination := args[1]
-
-			srcScope := ingest.ResolveInputReferenceScope(".", source)
-			dir := srcScope.Dir
-			source = srcScope.Reference.String()
-			dstRef := ingest.CoerceLocalPathReference(".", ingest.ParseReference(destination))
-			destination = ingest.NormalizeReferenceForScope(".", dir, dstRef).String()
-
-			// If the source was a bare directory (no ::symbol), ResolveInputReferenceScope
-			// + NormalizeReferenceForScope collapses the source ref to Path="./" (scope root).
-			// This makes planPackageMove see an empty srcDir after TrimPrefix and refuse with
-			// "package move requires non-empty directory paths".
-			// When this happens for a package move (both sides end up without symbol), adjust
-			// so that the ingest root becomes the parent directory and the refs keep the
-			// sub-directory segment (e.g. source becomes "path:./ingest", dir becomes "pkg").
-			// This lets package moves via bare dir paths on the CLI work while preserving the
-			// original scope logic for symbol operations.
-			srcParsed := ingest.ParseReference(source)
-			dstParsed := ingest.ParseReference(destination)
-			if srcParsed.Name == "" && dstParsed.Name == "" && (srcParsed.Path == "./" || srcParsed.Path == ".") {
-				parent := filepath.Dir(dir)
-				if parent == "" || parent == "." || parent == dir {
-					parent = "."
-				}
-				base := filepath.Base(dir)
-				if base != "" && base != "." {
-					source = "path:./" + base
-				} else {
-					source = "path:./"
-				}
-				destination = ingest.NormalizeReferenceForScope(".", parent, dstRef).String()
-				dir = parent
-			}
+			// Project root is cwd. Do not narrow to the source file's parent —
+			// that rebased cross-dir destinations under the source package.
+			dir, source, destination := ingest.ResolveMoveArgs(".", args[0], args[1])
 
 			edits, err := ingest.Rename(dir, source, destination)
 			if err != nil {

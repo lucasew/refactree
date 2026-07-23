@@ -54,3 +54,29 @@ func ResolveInputReferenceScope(baseDir, input string) ReferenceScope {
 	ref = CanonicalizeReference(baseDir, ref)
 	return ResolveReferenceScope(baseDir, ref)
 }
+
+// ResolveMoveArgs prepares Rename root and source/destination refs from CLI-style
+// inputs under project baseDir (typically cwd).
+//
+// Unlike ResolveInputReferenceScope, this does not narrow the ingest root to the
+// source file's parent directory. Both paths stay relative to baseDir so a
+// destination like path:./pkg/ingest/span.go is not rebased under the source
+// package (e.g. pkg/pattern/pkg/ingest/…).
+//
+// Source is canonicalized (barrels / definition hops). Destination is only
+// coerced and path-normalized: the target file may not exist yet.
+func ResolveMoveArgs(baseDir, source, destination string) (root, src, dst string) {
+	if baseDir == "" {
+		baseDir = "."
+	}
+	srcRef := ParseReference(source)
+	srcRef = CoerceLocalPathReference(baseDir, srcRef)
+	srcRef = CanonicalizeReference(baseDir, srcRef)
+	srcRef = NormalizeReferenceForScope(baseDir, baseDir, srcRef)
+
+	dstRef := ParseReference(destination)
+	dstRef = CoerceLocalPathReference(baseDir, dstRef)
+	dstRef = NormalizeReferenceForScope(baseDir, baseDir, dstRef)
+
+	return baseDir, srcRef.String(), dstRef.String()
+}
