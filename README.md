@@ -168,6 +168,20 @@ rft rewrite -i \
 
 `-n` dry-run, `-i` confirm, `-b` backup — same idea as `mv`.
 
+### Lint (rulebook)
+
+Project codemod catalog in `refactree.yaml` (walk-up from `-C`, or `--config`). Same pattern dialect as `grep`/`rewrite`. Optional `replacement` → SARIF autofix and `--fix`.
+
+```bash
+# report (exit 1 if any finding)
+rft lint
+rft lint --format sarif
+
+# apply non-conflicting fixes (first rule in YAML order wins on overlap)
+rft lint --fix
+rft lint -n --fix   # plan only
+```
+
 ## Development
 
 ```bash

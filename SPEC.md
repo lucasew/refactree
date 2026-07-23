@@ -90,6 +90,7 @@ Structural spine for discovery and graphs. Goal: one walk/parse path, no duplica
 - **`ReplaceSpan(s)`**: shared emit for known spans (defs, aliases, graph use-site fallback)
 - **`pattern.Rule`**: site unit (`Pattern` + `Replacement` + optional `SetCapture`) → NFA match → `[]Edit`
   - `rft rewrite` is one Rule over a file stream
+  - `rft lint` is a catalog of Rules from `refactree.yaml` (batch match; optional replacement → fixes / `--fix`)
   - `mv` remains a symbol-identity **planner** (full graph for defs, aliases, expanders, package moves)
   - **Use-site leaf renames** go through `RegisterUseSiteRenamer` → `pattern.UseSiteRenames` (`RefLeafRule` per target file) when `pkg/pattern` is linked; graph `Uses` walk is the fallback
 - **`ImportHygiene`**: shared import engine for rewrite, mv residual, and a future `imports` subcommand
@@ -115,6 +116,28 @@ Structural spine for discovery and graphs. Goal: one walk/parse path, no duplica
 - CLI: `rft grep <pattern> [paths…]`; `rft rewrite <pattern> <replacement> [paths…]`; `-C` root; `-l` optional lang filter; rewrite `-n`/`-i`/`-b` like plan/confirm/backup
 - Fixtures: `testdata/pattern/` (`input/` + optional `expected/` + `op.json`), same idea as `testdata/mv/`
 - Language-specific parse/extract/ref resolution stays in language packages; pattern core stays token + ref algebra
+
+### Subcommand: lint (codemod rulebook)
+- **Product:** batch runner over a project rule catalog — **not** graph intelligence, dead code, or LSP diagnostics. Model A only; intelligence / GC-roots / dead-code SARIF is later.
+- **Config file:** `refactree.yaml` at the project root.
+  - Discovery: walk up from `-C` / cwd for `refactree.yaml`; **`--config path`** overrides. Missing file (no override) → hard error. Empty `rules: []` → exit 0 (nothing to do).
+  - No nested multi-file rule packs in v1; no CLI `--select` / `--ignore` (edit YAML to disable).
+- **Rule schema** (each entry under `rules:`):
+  - **Required:** `id`, exactly one of `language` | `family`, `pattern`, `message`
+  - **Optional:** `level` (default `warning`; allowed: `error`, `warning`, `note`), `replacement`
+  - `language` = one surface language id; `family` = all surfaces in that family (`ingest` families: e.g. `ecma` covers JS/TS/Svelte)
+  - Both or neither of `language`/`family` → config load error; duplicate `id` → load error
+  - Pattern / replacement dialect = **same as grep/rewrite** (including `name=template` set-capture form)
+  - No `replacement` → **report-only** (still a finding; no SARIF `fixes`; ignored by `--fix`)
+- **Execution:** one invocation runs **all** rules. Per-file stream: parse once, match every applicable rule (language/family). Same **ImportHygiene** as `rewrite` when building/applying fixes (`@ref` ensure + named prune).
+- **CLI:** `rft lint [paths…]`
+  - `-C` / `--dir`, `--config`, `-l` (optional language or family filter on files), `--format` (`text` default; `sarif`), `--fix`, `-n` / `--dry-run`, `-b` / `--backup`
+  - No `-i` interactive in v1
+  - `grep` / `rewrite` stay one-off patterns; `lint` is the catalog
+- **`--fix`:** apply non-conflicting planned edits (rules with `replacement` only). Conflict policy: **YAML order** — first rule’s site edits win; a later rule whose site edits **overlap** already-claimed spans on that file has its fixes **skipped** for that run (findings still reported); may apply cleanly on a later run after earlier fixes land. Dry-run (`-n`) prints plan / still reports, never writes.
+- **Exit codes:** tool/config/parse errors → non-zero (message on stderr). **Any remaining finding** after the run → exit **1** (including report-only and conflict-skipped fixables). Zero findings → exit **0**. After `--fix`, exit 0 only if the tree is clean of all catalog findings.
+- **SARIF (`--format sarif`):** one `run`; rules from the catalog as `reportingDescriptor`s; each match a `result`. When `replacement` expands successfully, always emit `result.fixes` (even without `--fix`) so consumers can autofix. Report-only → location + message only. Import-hygiene edits are applied with `--fix` but need not appear as separate SARIF fixes in v1 (site replacements are enough for interchange).
+- **Out of v1:** LSP code actions from the rulebook, `--select`/`--ignore`, multi-config monorepo packs, intelligence diagnostics in the same command.
 
 ### Subcommand: edit
 - Opens the definition of a reference in `$EDITOR` (or jumps to a file), blocking until the editor exits

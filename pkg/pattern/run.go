@@ -108,6 +108,16 @@ func RunWithOptions(root string, op Op, opts RunOptions) (RunResult, error) {
 	return out, err
 }
 
+// WalkSourceFiles streams FileExtract values under root with the same path
+// partition, skip rules, and walk policy as Stream (grep/rewrite/lint).
+func WalkSourceFiles(root string, paths []string, fn func(*ingest.FileExtract) error) error {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	return walkExtractSources(rootAbs, paths, fn)
+}
+
 // Stream processes files via ingest.WalkExtracts (same skip rules / walk policy as
 // ls, mv, serve). Per file: optional materialize for @ref, parse AST, match.
 // Rewrite mode expands a site Rule (RuleFromOp) to edits.

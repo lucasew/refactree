@@ -56,6 +56,7 @@ func newRootCmd() (*cobra.Command, *pprof.Profiler) {
 		newDocCmd(),
 		newGrepCmd(),
 		newIngestCmd(),
+		newLintCmd(),
 		newRewriteCmd(),
 		newServeCmd(),
 	)
