@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/lucasew/refactree/pkg/reference"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/lucasew/refactree/pkg/reference"
 )
 
 // SymbolTarget represents a provider-backed symbol location.

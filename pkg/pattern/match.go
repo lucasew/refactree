@@ -147,7 +147,6 @@ func flattenPattern(pat Node) []Node {
 	}
 }
 
-
 func looksLikeCallSeq(seq []Node) bool {
 	for _, s := range seq {
 		if s.Kind == "lit" && s.Text == "(" {
@@ -156,7 +155,6 @@ func looksLikeCallSeq(seq []Node) bool {
 	}
 	return false
 }
-
 
 func selectorStart(tokens []tok, pos int, source []byte) uint32 {
 	return selectorSpan(tokens, pos, source).StartByte

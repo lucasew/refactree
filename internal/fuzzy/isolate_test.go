@@ -2,7 +2,6 @@ package fuzzy_test
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"os"
@@ -23,7 +22,7 @@ func TestRunnerNoIsolate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close(t.Context())
-	res := s.Run(context.Background(), []string{"true"})
+	res := s.Run(t.Context(), []string{"true"})
 	if !res.OK() {
 		t.Fatalf("true failed: %#v", res)
 	}
@@ -50,7 +49,7 @@ func TestHostSessionOfflineEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close(t.Context())
-	res := s.Run(context.Background(), []string{"sh", "-c", "test \"$RFT_FUZZY_OFFLINE\" = 1 && test \"$GOPROXY\" = off && test \"$MISE_GPG_VERIFY\" = false && test \"$MISE_NODE_GPG_VERIFY\" = false && test \"$MISE_NPM_PACKAGE_MANAGER\" = npm && echo ok-offline"})
+	res := s.Run(t.Context(), []string{"sh", "-c", "test \"$RFT_FUZZY_OFFLINE\" = 1 && test \"$GOPROXY\" = off && test \"$MISE_GPG_VERIFY\" = false && test \"$MISE_NODE_GPG_VERIFY\" = false && test \"$MISE_NPM_PACKAGE_MANAGER\" = npm && echo ok-offline"})
 	if !res.OK() {
 		t.Fatalf("offline env: %#v\n%s%s", res, res.Stdout, res.Stderr)
 	}
@@ -72,7 +71,7 @@ func TestSessionSetsMiseGpgVerifyOff(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close(t.Context())
-	res := s.Run(context.Background(), []string{"sh", "-c", "printf '%s %s %s' \"$MISE_GPG_VERIFY\" \"$MISE_NODE_GPG_VERIFY\" \"$MISE_NPM_PACKAGE_MANAGER\""})
+	res := s.Run(t.Context(), []string{"sh", "-c", "printf '%s %s %s' \"$MISE_GPG_VERIFY\" \"$MISE_NODE_GPG_VERIFY\" \"$MISE_NPM_PACKAGE_MANAGER\""})
 	if !res.OK() {
 		t.Fatalf("%#v\n%s%s", res, res.Stdout, res.Stderr)
 	}
@@ -96,7 +95,7 @@ func TestCommandOutputStreamsAndCaptures(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close(t.Context())
-	res := s.Run(context.Background(), []string{"sh", "-c", "echo secret-ok"})
+	res := s.Run(t.Context(), []string{"sh", "-c", "echo secret-ok"})
 	if !res.OK() {
 		t.Fatal(res.Err)
 	}
@@ -106,7 +105,7 @@ func TestCommandOutputStreamsAndCaptures(t *testing.T) {
 	if !strings.Contains(res.Stdout, "secret-ok") {
 		t.Fatalf("expected captured stdout, got %q", res.Stdout)
 	}
-	fail := s.Run(context.Background(), []string{"sh", "-c", "echo secret-fail >&2; exit 7"})
+	fail := s.Run(t.Context(), []string{"sh", "-c", "echo secret-fail >&2; exit 7"})
 	if fail.OK() {
 		t.Fatal("expected failure")
 	}

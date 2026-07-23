@@ -43,8 +43,8 @@ type nfaPred struct {
 type predKind int
 
 const (
-	predAny predKind = iota
-	predAnyExceptFunc // like any, but not the "func" keyword (multi stays in one function)
+	predAny           predKind = iota
+	predAnyExceptFunc          // like any, but not the "func" keyword (multi stays in one function)
 	predLit
 	predToken
 	predRef
