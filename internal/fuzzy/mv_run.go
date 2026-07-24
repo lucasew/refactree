@@ -375,18 +375,28 @@ func formatFuzzName(styleHint string, n int) string {
 	if styleHint == "" {
 		return "fuzz_" + hex
 	}
+	// SCREAMING_SNAKE (CI_INSTRUCTIONS, ERR_*)
 	if strings.ToUpper(styleHint) == styleHint && strings.Contains(styleHint, "_") {
 		return "FUZZ_" + strings.ToUpper(hex)
 	}
-	if strings.ToUpper(styleHint[:1]) == styleHint[:1] && strings.ToLower(styleHint[1:]) != styleHint[1:] {
-		return "Fuzz" + hex
-	}
-	if strings.ToLower(styleHint[:1]) == styleHint[:1] && !strings.Contains(styleHint, "_") {
-		return "fuzz" + hex
-	}
+	// ALLCAPS token (ID, URL)
 	if strings.ToUpper(styleHint) == styleHint {
 		return "FUZZ" + strings.ToUpper(hex)
 	}
+	// Exported / public-style leaf: first rune is uppercase.
+	// Catalog bug: renaming go githubutil.Token → fuzz_* made the symbol
+	// unexported while cross-package sites became githubutil.fuzz_* (invalid).
+	// Prior check required styleHint[1:] to contain uppercase, so plain
+	// PascalCase names like Token/Helper fell through to fuzz_*.
+	first := styleHint[:1]
+	if strings.ToUpper(first) == first && strings.ToLower(first) != first {
+		return "Fuzz" + hex
+	}
+	// unexported camelCase (helper, token)
+	if !strings.Contains(styleHint, "_") {
+		return "fuzz" + hex
+	}
+	// snake_case
 	return "fuzz_" + hex
 }
 
