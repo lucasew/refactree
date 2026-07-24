@@ -28,7 +28,7 @@ exclude github.com/modernc-tree-sitter/ccgo-tree-sitter/grammar v0.0.0
 require (
 	github.com/99designs/gqlgen v0.17.86
 	github.com/gorilla/websocket v1.5.0
-	github.com/lewtec/eletrocromo v0.0.0-20260720233412-019f2474a08f
+	github.com/lewtec/eletrocromo v0.0.0-20260723214821-7072ab4d906c
 	github.com/moby/moby/api v1.55.0
 	github.com/vektah/gqlparser/v2 v2.5.31
 	go.lsp.dev/jsonrpc2 v1.0.1
@@ -131,8 +131,8 @@ require (
 	golang.org/x/exp v0.0.0-20251023183803-a4bb9ffd2546 // indirect
 	golang.org/x/mod v0.36.0 // indirect
 	golang.org/x/net v0.55.0 // indirect
-	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.45.0 // indirect
+	golang.org/x/sync v0.21.0 // indirect
+	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/term v0.43.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 	golang.org/x/tools v0.45.0 // indirect
