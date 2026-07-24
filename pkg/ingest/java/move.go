@@ -70,17 +70,13 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 	alsoTypes := map[string]bool{}
 	if len(ourTypes) > 0 {
 		implementsEdges = javaImplementsEdges(rootDir, result)
-		// alsoTypes: implementors of our types and interfaces/supertypes our types implement.
-		for t := range ourTypes {
-			for iface := range implementsEdges[t] {
-				alsoTypes[iface] = true
-			}
-			for impl, ifaces := range implementsEdges {
-				if ifaces[t] {
-					alsoTypes[impl] = true
-				}
-			}
-		}
+		// Full hierarchy connected to ourTypes: transitive parents and all
+		// implementors of those parents. Renaming a subclass override
+		// (MyClassTypeAdapter.read) must also rename TypeAdapter.read and
+		// every other TypeAdapter implementor (NullSafeTypeAdapter, ArrayTypeAdapter, …).
+		// One-level expansion only pulled parents of ourTypes, so abstract
+		// TypeAdapter.read was rewritten while sibling implementors stayed "read".
+		alsoTypes = javaHierarchyTypes(ourTypes, implementsEdges)
 		// Related hierarchy types must count as our receivers so call sites on
 		// expanded override decls (enum implementors, subclasses) rewrite too.
 		// Without this, Worker.helper rename updates Kind's override def but
@@ -126,6 +122,45 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 				NewText: newLeaf,
 			})
 			markOccupied(file, ent.StartByte, ent.EndByte)
+		}
+		// Entity graph often labels anonymous TypeAdapter overrides as
+		// ReturnType.read (BitSet.read) rather than TypeAdapter.read, so the
+		// alsoTypes match above misses them. Walk AST for method_declaration
+		// oldLeaf inside classes/anons that extend/implement hierarchy types.
+		hierarchy := map[string]bool{}
+		for t := range ourTypes {
+			hierarchy[t] = true
+		}
+		for t := range alsoTypes {
+			hierarchy[t] = true
+		}
+		if len(hierarchy) > 0 {
+			for _, f := range result.Files {
+				if f.Language != "java" {
+					continue
+				}
+				rel := strings.TrimPrefix(f.Path, "./")
+				content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+				if err != nil {
+					continue
+				}
+				for _, e := range javaHierarchyMethodDeclEdits(rel, content, oldLeaf, newLeaf, hierarchy) {
+					if ingest.SpanOccupied(occupied[rel], e.StartByte, e.EndByte) {
+						continue
+					}
+					edits = append(edits, e)
+					markOccupied(rel, e.StartByte, e.EndByte)
+				}
+				// Javadoc {@link Type#oldLeaf(} / {@link #oldLeaf(} — ErrorProne
+				// InvalidLink fails gson (-Werror) when abstract methods rename.
+				for _, e := range javaJavadocMethodLinkEdits(rel, content, oldLeaf, newLeaf, hierarchy) {
+					if ingest.SpanOccupied(occupied[rel], e.StartByte, e.EndByte) {
+						continue
+					}
+					edits = append(edits, e)
+					markOccupied(rel, e.StartByte, e.EndByte)
+				}
+			}
 		}
 	}
 
@@ -182,6 +217,227 @@ func javaSplitTypeMethod(symbol string) (typeName, method string, ok bool) {
 		return "", "", false
 	}
 	return symbol[:i], symbol[i+1:], true
+}
+
+// javaJavadocMethodLinkEdits rewrites {@link Type#oldLeaf(} and same-file
+// {@link #oldLeaf(} links for hierarchy types.
+func javaJavadocMethodLinkEdits(fileRel string, content []byte, oldLeaf, newLeaf string, hierarchy map[string]bool) []ingest.Edit {
+	if oldLeaf == "" || oldLeaf == newLeaf {
+		return nil
+	}
+	text := string(content)
+	var edits []ingest.Edit
+	// Type#oldLeaf( for each hierarchy type simple name.
+	for t := range hierarchy {
+		if t == "" {
+			continue
+		}
+		needle := t + "#" + oldLeaf + "("
+		off := 0
+		for {
+			idx := strings.Index(text[off:], needle)
+			if idx < 0 {
+				break
+			}
+			start := off + idx + len(t) + 1 // point at oldLeaf
+			edits = append(edits, ingest.Edit{
+				File:    fileRel,
+				Span:    ingest.Span{StartByte: uint32(start), EndByte: uint32(start + len(oldLeaf))},
+				NewText: newLeaf,
+			})
+			off = start + len(oldLeaf)
+		}
+	}
+	// {@link #oldLeaf( — only in files that declare a hierarchy type (avoid
+	// rewriting unrelated #read links in the same module).
+	declaresHier := false
+	for t := range hierarchy {
+		if strings.Contains(text, "class "+t) || strings.Contains(text, "interface "+t) ||
+			strings.Contains(text, "enum "+t) || strings.Contains(text, "record "+t) {
+			declaresHier = true
+			break
+		}
+	}
+	if declaresHier {
+		needle := "#" + oldLeaf + "("
+		off := 0
+		for {
+			idx := strings.Index(text[off:], needle)
+			if idx < 0 {
+				break
+			}
+			start := off + idx + 1
+			// Skip Type#oldLeaf already handled (char before # is ident).
+			if start > 1 && ingest.IsIdentCharJava(text[start-2]) {
+				off = start + len(oldLeaf)
+				continue
+			}
+			edits = append(edits, ingest.Edit{
+				File:    fileRel,
+				Span:    ingest.Span{StartByte: uint32(start), EndByte: uint32(start + len(oldLeaf))},
+				NewText: newLeaf,
+			})
+			off = start + len(oldLeaf)
+		}
+	}
+	return edits
+}
+
+// javaHierarchyMethodDeclEdits renames method_declaration name spans equal to
+// oldLeaf when the enclosing named class extends/implements a hierarchy type,
+// or when the method sits in an anonymous class created as new HierarchyType(…).
+func javaHierarchyMethodDeclEdits(fileRel string, content []byte, oldLeaf, newLeaf string, hierarchy map[string]bool) []ingest.Edit {
+	if oldLeaf == "" || oldLeaf == newLeaf || len(hierarchy) == 0 {
+		return nil
+	}
+	pf, err := ingest.ParseSource(content, fileRel, "java")
+	if err != nil {
+		return nil
+	}
+	defer pf.Close()
+	var edits []ingest.Edit
+	var walk func(n *grammar.Node, namedExtendsHier, anonExtendsHier bool)
+	walk = func(n *grammar.Node, namedExtendsHier, anonExtendsHier bool) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		switch n.Type() {
+		case "class_declaration", "interface_declaration", "enum_declaration", "record_declaration":
+			inHier := namedExtendsHier
+			// Named type is hierarchy-related if it extends/implements a hierarchy type.
+			if javaTypeDeclExtendsHierarchy(n, content, hierarchy) {
+				inHier = true
+			}
+			// Or the type itself is a hierarchy type (method decls on Base).
+			if nameN := ingest.ChildByField(n, "name"); nameN != nil {
+				if hierarchy[ingest.NodeText(nameN, content)] {
+					inHier = true
+				}
+			}
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				walk(n.Child(i), inHier, false)
+			}
+			return
+		case "object_creation_expression":
+			// new TypeAdapter<T>() { … } — body methods override TypeAdapter.
+			anonHier := anonExtendsHier
+			if t := javaObjectCreationTypeLeaf(n, content); t != "" && hierarchy[t] {
+				anonHier = true
+			}
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				walk(n.Child(i), namedExtendsHier, anonHier)
+			}
+			return
+		case "method_declaration":
+			if namedExtendsHier || anonExtendsHier {
+				if nameN := ingest.ChildByField(n, "name"); nameN != nil {
+					if ingest.NodeText(nameN, content) == oldLeaf {
+						edits = append(edits, ingest.Edit{
+							File:    fileRel,
+							Span:    ingest.Span{StartByte: nameN.StartByte(), EndByte: nameN.EndByte()},
+							NewText: newLeaf,
+						})
+					}
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walk(n.Child(i), namedExtendsHier, anonExtendsHier)
+		}
+	}
+	walk(pf.Root, false, false)
+	return edits
+}
+
+func javaTypeDeclExtendsHierarchy(decl *grammar.Node, content []byte, hierarchy map[string]bool) bool {
+	if decl == nil {
+		return false
+	}
+	for _, field := range []string{"superclass", "interfaces"} {
+		clause := ingest.ChildByField(decl, field)
+		for _, id := range javaTypeNamesInClause(clause, content) {
+			if hierarchy[id] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func javaObjectCreationTypeLeaf(n *grammar.Node, content []byte) string {
+	if n == nil {
+		return ""
+	}
+	// type field or first type_identifier / generic_type leaf.
+	if t := ingest.ChildByField(n, "type"); t != nil {
+		names := javaTypeNamesInClause(t, content)
+		if len(names) > 0 {
+			return names[0]
+		}
+	}
+	for i := uint32(0); i < n.ChildCount(); i++ {
+		c := n.Child(i)
+		switch c.Type() {
+		case "type_identifier", "generic_type", "scoped_type_identifier":
+			names := javaTypeNamesInClause(c, content)
+			if len(names) > 0 {
+				return names[0]
+			}
+		}
+	}
+	return ""
+}
+
+// javaHierarchyTypes returns every type simple name connected to seeds through
+// implements/extends edges: transitive supers and all types that implement or
+// extend any type in that set (sibling implementors of a shared parent).
+func javaHierarchyTypes(seeds map[string]bool, edges map[string]map[string]bool) map[string]bool {
+	out := map[string]bool{}
+	if len(seeds) == 0 {
+		return out
+	}
+	for t := range seeds {
+		if t != "" {
+			out[t] = true
+		}
+	}
+	// Transitive parents (and interfaces).
+	for {
+		added := false
+		for t := range out {
+			for parent := range edges[t] {
+				if parent != "" && !out[parent] {
+					out[parent] = true
+					added = true
+				}
+			}
+		}
+		if !added {
+			break
+		}
+	}
+	// Transitive children: anything that extends/implements a type already in out.
+	for {
+		added := false
+		for impl, parents := range edges {
+			if impl == "" || out[impl] {
+				continue
+			}
+			for parent := range parents {
+				if out[parent] {
+					out[impl] = true
+					added = true
+					break
+				}
+			}
+		}
+		if !added {
+			break
+		}
+	}
+	// Drop seeds — alsoTypes is "related beyond sourceRefs"; matching also
+	// accepts ourTypes separately. Keeping seeds here is harmless for matching.
+	return out
 }
 
 // javaImplementsEdges returns map[typeSimpleName]set[ifaceOrSuperSimpleName]
@@ -761,6 +1017,13 @@ func javaMemberAccessEdits(fileRel string, content []byte, oldLeaf, newLeaf stri
 				classHere = ingest.NodeText(nameN, content)
 			}
 		}
+		// Anonymous new TypeAdapter<T>() { … }: methods and peels use TypeAdapter
+		// as the enclosing receiver type (delegate().read()).
+		if n.Type() == "object_creation_expression" {
+			if t := javaObjectCreationTypeLeaf(n, content); t != "" {
+				classHere = t
+			}
+		}
 		swHere := switchMatchesOur
 		if n.Type() == "switch_expression" || n.Type() == "switch_statement" {
 			swHere = javaSwitchExprMatchesOur(n, content, ourSimple, typedLocals)
@@ -1028,6 +1291,11 @@ func javaShouldRenameMemberAccess(obj *grammar.Node, content []byte, enclosingCl
 		// unwrap peels the ident's type under foreign same-leaf methods.
 		if id := javaOptionalOfIdentUnwrap(obj, content); id != "" {
 			return javaRenameByTypeMaps(id, ourReceivers, foreignReceivers, typedLocals)
+		}
+		// Same-file zero-arg method return: delegate().read() when
+		// TypeAdapter delegate() is declared on the enclosing type (gson FutureTypeAdapter).
+		if et := javaZeroArgEnclosingMethodReturn(obj, content, enclosingClass, typeMembers); et != "" {
+			return javaRenameByTypeMaps(et, ourReceivers, foreignReceivers, nil)
 		}
 		// Unknown method receivers: unique-leaf only.
 		return len(foreignReceivers) == 0
@@ -9460,10 +9728,68 @@ func javaOptionalOfMethodReturnType(call *grammar.Node, content []byte, compOf m
 // foreign same-leaf methods. Primitive/void returns fail closed. Methods with
 // parameters are indexed when the return type is a concrete class leaf
 // (static/instance factories); unknown callees still fail closed at use.
+// javaZeroArgEnclosingMethodReturn recovers T from this.m() / m() when m is a
+// zero-arg method of enclosingClass with return type T in typeMembers.
+func javaZeroArgEnclosingMethodReturn(call *grammar.Node, content []byte, enclosingClass string, typeMembers map[string]map[string]string) string {
+	if call == nil || call.Type() != "method_invocation" || enclosingClass == "" || typeMembers == nil {
+		return ""
+	}
+	if !javaCallIsZeroArg(call) {
+		return ""
+	}
+	obj := ingest.ChildByField(call, "object")
+	if obj != nil && !obj.IsNull() && obj.Type() != "this" {
+		return ""
+	}
+	nameN := ingest.ChildByField(call, "name")
+	if nameN == nil {
+		return ""
+	}
+	methods := typeMembers[enclosingClass]
+	if methods == nil {
+		return ""
+	}
+	return methods[ingest.NodeText(nameN, content)]
+}
+
 func javaSameFileMethodReturns(root *grammar.Node, content []byte) map[string]map[string]string {
 	out := map[string]map[string]string{}
 	if root == nil {
 		return out
+	}
+	mergeMethods := func(typeName string, body *grammar.Node) {
+		if typeName == "" || body == nil {
+			return
+		}
+		methods := out[typeName]
+		if methods == nil {
+			methods = map[string]string{}
+		}
+		for i := uint32(0); i < body.ChildCount(); i++ {
+			ch := body.Child(i)
+			if ch == nil || ch.Type() != "method_declaration" {
+				continue
+			}
+			retN := ingest.ChildByField(ch, "type")
+			mNameN := ingest.ChildByField(ch, "name")
+			if retN == nil || mNameN == nil {
+				continue
+			}
+			ret := javaTypeName(retN, content)
+			mname := ingest.NodeText(mNameN, content)
+			if ret == "" || mname == "" || ret == "void" {
+				continue
+			}
+			// Skip primitive returns (not product method receivers).
+			switch ret {
+			case "boolean", "byte", "short", "int", "long", "float", "double", "char":
+				continue
+			}
+			methods[mname] = ret
+		}
+		if len(methods) > 0 {
+			out[typeName] = methods
+		}
 	}
 	var walk func(n *grammar.Node)
 	walk = func(n *grammar.Node) {
@@ -9474,33 +9800,22 @@ func javaSameFileMethodReturns(root *grammar.Node, content []byte) map[string]ma
 			nameN := ingest.ChildByField(n, "name")
 			body := ingest.ChildByField(n, "body")
 			if nameN != nil && body != nil {
-				typeName := ingest.NodeText(nameN, content)
-				methods := map[string]string{}
-				for i := uint32(0); i < body.ChildCount(); i++ {
-					ch := body.Child(i)
-					if ch == nil || ch.Type() != "method_declaration" {
-						continue
-					}
-					retN := ingest.ChildByField(ch, "type")
-					mNameN := ingest.ChildByField(ch, "name")
-					if retN == nil || mNameN == nil {
-						continue
-					}
-					ret := javaTypeName(retN, content)
-					mname := ingest.NodeText(mNameN, content)
-					if ret == "" || mname == "" || ret == "void" {
-						continue
-					}
-					// Skip primitive returns (not product method receivers).
-					switch ret {
-					case "boolean", "byte", "short", "int", "long", "float", "double", "char":
-						continue
-					}
-					methods[mname] = ret
+				mergeMethods(ingest.NodeText(nameN, content), body)
+			}
+		}
+		// Anonymous new TypeAdapter<T>() { TypeAdapter<T> delegate() {…} }
+		// so delegate().read() peels under TypeAdapter when walking the body.
+		if n.Type() == "object_creation_expression" {
+			typeLeaf := javaObjectCreationTypeLeaf(n, content)
+			var body *grammar.Node
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				if n.Child(i).Type() == "class_body" {
+					body = n.Child(i)
+					break
 				}
-				if len(methods) > 0 {
-					out[typeName] = methods
-				}
+			}
+			if typeLeaf != "" && body != nil {
+				mergeMethods(typeLeaf, body)
 			}
 		}
 		for i := uint32(0); i < n.ChildCount(); i++ {
