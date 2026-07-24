@@ -14,7 +14,7 @@
     "react-dom": "^19.0.0",
     "react-force-graph-2d": "^1.27.0",
     "react-relay": "^18.2.0",
-    "relay-runtime": "^18.2.0"
+    "relay-runtime": "^21.0.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
