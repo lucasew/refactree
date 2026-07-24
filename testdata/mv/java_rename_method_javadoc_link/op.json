@@ -1,0 +1,4 @@
+{
+  "source": "path:./Obj.java::Obj.getAsObj",
+  "destination": "path:./Obj.java::Obj.getAsRenamed"
+}
