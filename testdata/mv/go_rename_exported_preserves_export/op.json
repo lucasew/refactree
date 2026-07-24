@@ -1,0 +1,4 @@
+{
+  "source": "path:./pkg/githubutil/auth.go::Token",
+  "destination": "path:./pkg/githubutil/auth.go::FuzzToken"
+}

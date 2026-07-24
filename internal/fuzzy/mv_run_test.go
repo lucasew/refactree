@@ -83,3 +83,46 @@ class Other { Renamed h = new Renamed(); }
 		}
 	}
 }
+
+func TestFormatFuzzNamePreservesExportCase(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		hint string
+		want string
+	}{
+		// Exported Go/Java-style (catalog Token → must stay exported)
+		{"Token", "Fuzza"},
+		{"Helper", "Fuzza"},
+		{"HTTPClient", "Fuzza"},
+		// SCREAMING_SNAKE
+		{"CI_INSTRUCTIONS", "FUZZ_A"},
+		{"ERR_NOT_FOUND", "FUZZ_A"},
+		// ALLCAPS
+		{"ID", "FUZZA"},
+		// unexported camelCase → fuzz + hex
+		{"token", "fuzza"},
+		{"helper", "fuzza"},
+		// snake_case
+		{"err_not_found", "fuzz_a"},
+		{"", "fuzz_a"},
+	}
+	const n = 10 // hex "a"
+	for _, tc := range cases {
+		got := formatFuzzName(tc.hint, n)
+		if got != tc.want {
+			t.Errorf("formatFuzzName(%q, %d)=%q want %q", tc.hint, n, got, tc.want)
+		}
+	}
+}
+
+func TestUniqueSymbolFromExportedStaysExported(t *testing.T) {
+	t.Parallel()
+	existing := map[string]bool{}
+	name := uniqueSymbolFrom(0xf7017, existing, "Token")
+	if name == "" || name[0] < 'A' || name[0] > 'Z' {
+		t.Fatalf("uniqueSymbolFrom for Token must be exported-style, got %q", name)
+	}
+	if strings.HasPrefix(name, "fuzz") {
+		t.Fatalf("must not produce unexported fuzz* for Token, got %q", name)
+	}
+}
