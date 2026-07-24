@@ -62,6 +62,12 @@ type RenameExpander interface {
 	ExpandRenameSources(rootDir string, result *Result, sourceRef string) []string
 }
 
+// RenameValidator is an optional MoveDriver capability that rejects renames
+// the language cannot perform safely (for example Python dunder methods).
+type RenameValidator interface {
+	ValidateRename(src, dst Reference) error
+}
+
 // CrossFileMoveFinisher is an optional MoveDriver capability for extra edits
 // after declaration extract/insert and consumer import rewrites (for example
 // qualifying same-package call sites when a Go symbol leaves its package).

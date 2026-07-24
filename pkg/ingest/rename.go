@@ -89,6 +89,16 @@ func Rename(dir, sourceRef, destRef string) (Plan, error) {
 		return planPackageMove(dir, result, src, dst)
 	}
 
+	if srcLang := languageForRefPath(result, src.Path); srcLang != "" {
+		if driver, ok := moveDriverForLanguage(srcLang); ok {
+			if v, ok := driver.(RenameValidator); ok {
+				if err := v.ValidateRename(src, dst); err != nil {
+					return Plan{}, err
+				}
+			}
+		}
+	}
+
 	sourceEntity, ok := findEntityByReference(result, sourceRef)
 	if !ok {
 		return Plan{}, fmt.Errorf("no entity found for reference %s", sourceRef)
