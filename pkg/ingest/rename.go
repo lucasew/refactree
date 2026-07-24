@@ -815,10 +815,18 @@ func planPackageMove(dir string, result *Result, src, dst Reference) (Plan, erro
 	}
 
 	// Rewrite imports only in files that the graph shows as consumers of
-	// something defined under srcDir (path: or language import paths via
-	// PackageImportMatcher). Not every file that textually contains the path leaf.
-	consumers := packageMoveConsumerFiles(result, dir, srcDir, movedFiles)
-	slog.Debug("planPackageMove: consumers", "count", len(consumers))
+	// something defined under any co-moved package root (path: or language
+	// import paths via PackageImportMatcher). Multi-root expands (e.g. Java
+	// main+test) must include consumers of every paired tree — moving only
+	// src/test/.../sql still relocates src/main/.../sql, whose importers
+	// (GsonBuilder) would otherwise keep the old FQN.
+	consumers := map[string]bool{}
+	for _, pair := range dirPairs {
+		for c := range packageMoveConsumerFiles(result, dir, pair[0], movedFiles) {
+			consumers[c] = true
+		}
+	}
+	slog.Debug("planPackageMove: consumers", "count", len(consumers), "pairs", len(dirPairs))
 	langByFile := map[string]string{}
 	for _, f := range result.Files {
 		langByFile[strings.TrimPrefix(f.Path, "./")] = f.Language
