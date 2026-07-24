@@ -1,0 +1,4 @@
+{
+  "source": "path:./pkg/git/git.go::SyncRepo",
+  "destination": "path:./pkg/git_fuzz/git.go::SyncRepo"
+}
