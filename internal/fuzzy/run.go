@@ -428,15 +428,15 @@ func resetForMvIteration(ctx context.Context, opts Options, p Project, ws *Works
 func runMvIteration(ctx context.Context, opts Options, p Project, rng *rand.Rand, env *projectEnv, report *Report, out *Result, ingestOpts InvariantOptions, i int) error {
 	iter := i + 1
 	label := fmt.Sprintf("mv[%d/%d]", iter, opts.Iterations)
-	ingestRoot := primaryIngestRoot(p, env.workDir)
 	in := PlanInputFromRand(rng)
 	if len(opts.Grains) > 0 {
 		p.Mv.Grains = append([]string(nil), opts.Grains...)
 	}
 
 	// afterCheck runs the catalog project check so choose/result lines stay in one place.
+	// Pass workDir: pick scopes to ingest_roots; apply covers the full checkout.
 	var checkRes RunResult
-	attempt := RunMvAttempt(ctx, p, ingestRoot, in, opts.StrictRefs, func(ctx context.Context) error {
+	attempt := RunMvAttempt(ctx, p, env.workDir, in, opts.StrictRefs, func(ctx context.Context) error {
 		checkRes = RunCheck(ctx, env.session, p)
 		if !checkRes.OK() {
 			return fmt.Errorf("%s", shortRunErr(checkRes))
@@ -454,7 +454,8 @@ func runMvIteration(ctx context.Context, opts Options, p Project, rng *rand.Rand
 		Dest:      plan.Destination,
 	}
 	scaffold := func() {
-		_ = ScaffoldMvFixture(ingestRoot, report.ScaffoldDir(p.ID, opts.Seed, iter), plan.Source, plan.Destination, attempt.Edits)
+		// Edits are workDir-relative (apply root); plan paths stay ingest-relative.
+		_ = ScaffoldMvFixture(env.workDir, report.ScaffoldDir(p.ID, opts.Seed, iter), plan.Source, plan.Destination, attempt.Edits)
 	}
 
 	switch attempt.Class {
