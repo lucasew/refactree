@@ -147,8 +147,12 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 	}
 }
 
-// goImportsNeededByDecl returns import paths from the source file whose local
+// goImportsNeededByDecl returns import specs from the source file whose local
 // names appear in declText (selectors or unqualified idents).
+// Each entry is either an import path, or "alias path" when the source used an
+// explicit alias that differs from goAssumedImportName (e.g. execdriver for
+// workspaced/pkg/driver/exec). InsertDecl/EnsureImportsInContent preserve the
+// alias so extracted decls still compile.
 func goImportsNeededByDecl(source []byte, declText string) []string {
 	specs := parseGoImportSpecs(source)
 	if len(specs) == 0 {
@@ -166,10 +170,39 @@ func goImportsNeededByDecl(source []byte, declText string) []string {
 		}
 		if goIdentUsed(declText, local) {
 			seen[spec.path] = true
-			out = append(out, spec.path)
+			out = append(out, goImportSpecString(local, spec.path))
 		}
 	}
 	return out
+}
+
+// goImportSpecString encodes an import for DeclExtract.Imports: bare path, or
+// "alias path" when the local name is not the assumed name for path.
+func goImportSpecString(local, path string) string {
+	if path == "" {
+		return ""
+	}
+	assumed := goAssumedImportName(path)
+	if local != "" && local != "." && local != "_" && local != assumed {
+		return local + " " + path
+	}
+	return path
+}
+
+// parseGoImportSpecString splits "alias path" or bare path from goImportSpecString.
+func parseGoImportSpecString(s string) (alias, path string) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", ""
+	}
+	if i := strings.IndexByte(s, ' '); i > 0 {
+		a, p := s[:i], strings.TrimSpace(s[i+1:])
+		// Alias is a single Go identifier; import paths contain '/'.
+		if a != "" && p != "" && !strings.Contains(a, "/") && !strings.Contains(a, ".") {
+			return a, p
+		}
+	}
+	return "", s
 }
 
 type goImportSpec struct {
@@ -503,10 +536,14 @@ func EnsureImportsInContent(content string, paths []string) string {
 	}
 	var missing []string
 	for _, p := range paths {
-		if p == "" || existing[p] {
+		if p == "" {
 			continue
 		}
-		existing[p] = true
+		_, pathOnly := parseGoImportSpecString(p)
+		if pathOnly == "" || existing[pathOnly] {
+			continue
+		}
+		existing[pathOnly] = true
 		missing = append(missing, p)
 	}
 	if len(missing) == 0 {
@@ -541,14 +578,22 @@ func EnsureImportsInContent(content string, paths []string) string {
 	return strings.Join(out, "\n")
 }
 
+func formatGoImportLine(spec string) string {
+	alias, path := parseGoImportSpecString(spec)
+	if alias != "" {
+		return fmt.Sprintf("%s %q", alias, path)
+	}
+	return fmt.Sprintf("%q", path)
+}
+
 func formatGoImportBlock(paths []string) string {
 	if len(paths) == 1 {
-		return fmt.Sprintf("import %q", paths[0])
+		return "import " + formatGoImportLine(paths[0])
 	}
 	var b strings.Builder
 	b.WriteString("import (\n")
 	for _, p := range paths {
-		b.WriteString(fmt.Sprintf("\t%q\n", p))
+		b.WriteString("\t" + formatGoImportLine(p) + "\n")
 	}
 	b.WriteString(")")
 	return b.String()
@@ -562,10 +607,12 @@ func mergeIntoExistingGoImports(content string, missing []string) string {
 	}
 	var add []string
 	for _, p := range missing {
-		if !have[p] {
-			have[p] = true
-			add = append(add, p)
+		_, pathOnly := parseGoImportSpecString(p)
+		if pathOnly == "" || have[pathOnly] {
+			continue
 		}
+		have[pathOnly] = true
+		add = append(add, p)
 	}
 	if len(add) == 0 {
 		return content
@@ -578,7 +625,7 @@ func mergeIntoExistingGoImports(content string, missing []string) string {
 			insertPos := idx + end + 1
 			var b strings.Builder
 			for _, p := range add {
-				b.WriteString(fmt.Sprintf("\t%q\n", p))
+				b.WriteString("\t" + formatGoImportLine(p) + "\n")
 			}
 			return text[:insertPos] + b.String() + text[insertPos:]
 		}
@@ -589,7 +636,7 @@ func mergeIntoExistingGoImports(content string, missing []string) string {
 		if strings.HasPrefix(strings.TrimSpace(line), "import ") {
 			var extra []string
 			for _, p := range add {
-				extra = append(extra, fmt.Sprintf("import %q", p))
+				extra = append(extra, "import "+formatGoImportLine(p))
 			}
 			out := append([]string{}, lines[:i+1]...)
 			out = append(out, extra...)

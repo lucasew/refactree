@@ -1,0 +1,4 @@
+{
+  "source": "path:./pkg/util/main.go::install",
+  "destination": "path:./pkg/util/install.go::install"
+}
