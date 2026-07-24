@@ -1,0 +1,4 @@
+{
+  "source": "path:./gson/src/test/java/com/google/gson/internal/sql",
+  "destination": "path:./gson/src/test/java/com/google/gson/internal/sql_fuzz"
+}

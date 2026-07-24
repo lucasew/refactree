@@ -455,6 +455,14 @@ func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ing
 //     from pkg import mod → from pkg import mod_fuzz as mod
 //     (as-binding keeps local uses working without whole-file renames)
 func rewritePythonModuleFile(fileRelPath string, content []byte, oldPath, newPath string) []ingest.Edit {
+	// Relocating package __init__.py to a non-init file must not rewrite
+	// package imports (from pkg import submodule / import pkg). pythonModuleFromPath
+	// collapses pkg/__init__.py → "pkg", so a naive rewrite turns
+	// `from boltons import fileutils` into `from boltons.__init___fuzz import fileutils`.
+	// Leave consumers alone; remaining modules keep the package importable.
+	if isPythonPackageInitFile(oldPath) && !isPythonPackageInitFile(newPath) {
+		return nil
+	}
 	oldMod := pythonModuleFromPath(oldPath)
 	newMod := pythonModuleFromPath(newPath)
 	if oldMod == "" || newMod == "" || oldMod == newMod {
@@ -1099,6 +1107,12 @@ func pythonPathWithoutSuffix(p string) string {
 // a Python module spec like "pkga.helpers".
 func pythonModuleFromPath(p string) string {
 	return strings.ReplaceAll(pythonPathWithoutSuffix(p), "/", ".")
+}
+
+// isPythonPackageInitFile reports whether p is a package __init__.py (any depth).
+func isPythonPackageInitFile(p string) bool {
+	p = strings.TrimPrefix(filepath.ToSlash(p), "./")
+	return path.Base(p) == "__init__.py"
 }
 
 // pythonFileStem returns the bare module name from a path (e.g. "helpers" from "pkg/helpers.py").
