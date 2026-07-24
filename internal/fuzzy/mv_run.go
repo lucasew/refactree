@@ -54,6 +54,9 @@ func classifyMvError(err error) string {
 		"unsupported",
 		"ambiguous",
 		"no entity found",
+		// Go/Python/JS extractors: "declaration not found in <file>" when the
+		// planned atom is missing or not extractable (not a product crash).
+		"declaration not found",
 		"must both include symbols",
 		"package move requires",
 		"no movable",

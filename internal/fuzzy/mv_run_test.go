@@ -1,6 +1,7 @@
 package fuzzy
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,29 @@ import (
 
 	"github.com/lucasew/refactree/pkg/ingest"
 )
+
+func TestClassifyMvErrorDeclarationNotFound(t *testing.T) {
+	t.Parallel()
+	// Mirrors pkg/ingest/{go,python,js} extract errors when a planned decl is
+	// missing — catalog must treat these as unsupported, not product bugs.
+	cases := []struct {
+		err  error
+		want string
+	}{
+		{errors.New("declaration not found in main.go"), classUnsupported},
+		{errors.New("declaration not found in /tmp/x.py"), classUnsupported},
+		{errors.New("top-level declaration not supported or not found in A.java"), classUnsupported},
+		{errors.New("no entity found for reference path:./a.go::X"), classUnsupported},
+		{errors.New("reading main.go: no such file"), classBug},
+		{nil, ""},
+	}
+	for _, tc := range cases {
+		got := classifyMvError(tc.err)
+		if got != tc.want {
+			t.Errorf("classifyMvError(%v)=%q want %q", tc.err, got, tc.want)
+		}
+	}
+}
 
 // Java public type renames relocate Type.java → NewName.java while the plan
 // destination still names the pre-rename path. dest_present must accept the
