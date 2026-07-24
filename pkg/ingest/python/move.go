@@ -1024,6 +1024,9 @@ func formatPythonFromImport(mod string, items []pythonImportItem) string {
 // module path from the target reference.
 func findImportModulesForFile(consumerFile string, result *ingest.Result, oldPath string) map[string]bool {
 	modules := map[string]bool{}
+	if result == nil {
+		return modules
+	}
 	consumerRel := strings.TrimPrefix(consumerFile, "./")
 	oldMod := pythonModuleFromPath(oldPath)
 	if oldMod == "" {

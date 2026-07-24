@@ -105,7 +105,15 @@ func RunMvAttempt(ctx context.Context, p Project, workDir string, in PlanInput, 
 
 // rewriteExternalConsumers walks workDir excluding ingestRoot and rewrites
 // import sites for the plan. Edit.File paths are workDir-relative.
+//
+// Only module/package moves (no symbol name): symbol moves need a full ingest
+// Result for alias/use graph data, which we do not have for outside-root files.
+// Passing result=nil into RewriteImports panics in python symbol import rewrite.
 func rewriteExternalConsumers(workDir, ingestRoot string, plan movePlan) ([]ingest.Edit, error) {
+	srcRef := ingest.ParseReference(plan.Source)
+	if srcRef.Name != "" {
+		return nil, nil
+	}
 	relIngest, err := filepath.Rel(workDir, ingestRoot)
 	if err != nil || relIngest == "" || relIngest == "." {
 		return nil, nil
