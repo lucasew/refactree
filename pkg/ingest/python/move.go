@@ -118,6 +118,12 @@ func (moveDriver) InsertDecl(dstRelPath string, dstContent []byte, decl ingest.D
 // FinishCrossFileMove adds imports when residual same-file uses remain after a
 // move, and when the moved declaration still depends on names left in the
 // source module (mirrors JS FinishCrossFileMove).
+//
+// If both are needed, the reverse import (source→dest) plus forward import
+// (dest→source) would form a circular import at module load time. Refuse with
+// an unsupported error instead of emitting a non-runnable plan (catalog
+// boltons: moving LRI from cacheutils into debugutils left cacheutils importing
+// LRI from debugutils while LRI imported DEFAULT_MAX_SIZE from cacheutils).
 func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src, dst ingest.Reference, decl ingest.DeclExtract) ([]ingest.Edit, error) {
 	srcRel := strings.TrimPrefix(src.Path, "./")
 	dstRel := strings.TrimPrefix(dst.Path, "./")
@@ -134,11 +140,18 @@ func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src
 		return nil, nil
 	}
 
-	var edits []ingest.Edit
 	srcRef := src.String()
+	residual := pythonFileUsesTargetOutside(result, srcRel, srcRef, decl.RemoveStart, decl.RemoveEnd)
+	localDeps := pythonLocalDepsForDecl(result, src, decl)
+	if residual && len(localDeps) > 0 {
+		return nil, fmt.Errorf("unsupported: moving %s from %s to %s would create a circular import (residual reverse import + local deps %v)",
+			leaf, srcRel, dstRel, localDeps)
+	}
+
+	var edits []ingest.Edit
 
 	// 1. Source file still references the moved symbol → import it from dest.
-	if pythonFileUsesTargetOutside(result, srcRel, srcRef, decl.RemoveStart, decl.RemoveEnd) {
+	if residual {
 		if srcContent, err := os.ReadFile(path.Join(rootDir, srcRel)); err == nil {
 			stmt := pythonFromImportStmt(rootDir, srcRel, dstRel, leaf)
 			edits = append(edits, pythonImportInsertEdits(srcRel, srcContent, []string{stmt})...)
@@ -146,7 +159,6 @@ func (moveDriver) FinishCrossFileMove(rootDir string, result *ingest.Result, src
 	}
 
 	// 2. Moved declaration references other same-file entities → import them at dest.
-	localDeps := pythonLocalDepsForDecl(result, src, decl)
 	if len(localDeps) > 0 {
 		var stmts []string
 		for _, dep := range localDeps {
