@@ -1,0 +1,4 @@
+{
+  "source": "path:./A.java::A.work",
+  "destination": "path:./A.java::A.run"
+}
