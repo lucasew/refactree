@@ -51,7 +51,7 @@ func buildLinkIndex(result *ingest.Result, fileRel string) linkIndex {
 		if p != norm || use.Target == "" || use.StartByte >= use.EndByte {
 			continue
 		}
-		idx[ingest.Span{use.StartByte, use.EndByte}] = use.Target
+		idx[ingest.Span{StartByte: use.StartByte, EndByte: use.EndByte}] = use.Target
 	}
 	return idx
 }
