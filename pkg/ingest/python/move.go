@@ -451,12 +451,17 @@ func (moveDriver) RewriteImports(fileRelPath string, content []byte, result *ing
 //   - package path + stem both update (pkg.a.mod → pkg.b.mod_fuzz)
 //   - same-leaf unrelated modules stay put (pkg.a.utils vs pkg.b.utils)
 //   - relative imports (from .mod / from ..a.mod) resolve and track the move
+//   - parent-import form tracks the submodule name:
+//     from pkg import mod → from pkg import mod_fuzz as mod
+//     (as-binding keeps local uses working without whole-file renames)
 func rewritePythonModuleFile(fileRelPath string, content []byte, oldPath, newPath string) []ingest.Edit {
 	oldMod := pythonModuleFromPath(oldPath)
 	newMod := pythonModuleFromPath(newPath)
 	if oldMod == "" || newMod == "" || oldMod == newMod {
 		return nil
 	}
+	oldLeaf := pythonFileStem(oldPath)
+	newLeaf := pythonFileStem(newPath)
 	consumerDir := pythonDirOf(strings.TrimPrefix(fileRelPath, "./"))
 	text := string(content)
 	var edits []ingest.Edit
@@ -479,18 +484,88 @@ func rewritePythonModuleFile(fileRelPath string, content []byte, oldPath, newPat
 			off = afterFrom + importIdx + 7
 			continue
 		}
-		if !pythonImportMatchesModule(modStr, oldMod, consumerDir) {
-			off = afterFrom + importIdx + 7
+		// End of the import name list (single-line or parenthesized).
+		importStart := afterFrom + importIdx + 7 // skip " import"
+		importEnd := importStart
+		if importStart < len(text) {
+			rest := strings.TrimLeft(text[importStart:], " \t")
+			if len(rest) > 0 && rest[0] == '(' {
+				parenClose := strings.Index(text[importStart:], ")")
+				if parenClose >= 0 {
+					importEnd = importStart + parenClose + 1
+				}
+			} else {
+				nlIdx := strings.IndexByte(text[importStart:], '\n')
+				if nlIdx >= 0 {
+					importEnd = importStart + nlIdx
+				} else {
+					importEnd = len(text)
+				}
+			}
+		}
+
+		if pythonImportMatchesModule(modStr, oldMod, consumerDir) {
+			modStart := afterFrom + strings.Index(modRaw, modStr)
+			modEnd := modStart + len(modStr)
+			edits = append(edits, ingest.Edit{
+				File:    fileRelPath,
+				Span:    ingest.Span{StartByte: uint32(modStart), EndByte: uint32(modEnd)},
+				NewText: pythonReplacementModuleSpec(modStr, oldMod, newMod, consumerDir),
+			})
+			off = importEnd
 			continue
 		}
-		modStart := afterFrom + strings.Index(modRaw, modStr)
-		modEnd := modStart + len(modStr)
-		edits = append(edits, ingest.Edit{
-			File:    fileRelPath,
-			Span:    ingest.Span{StartByte: uint32(modStart), EndByte: uint32(modEnd)},
-			NewText: pythonReplacementModuleSpec(modStr, oldMod, newMod, consumerDir),
-		})
-		off = afterFrom + importIdx + 7
+
+		// from parent import leaf  (submodule bind), e.g. from boltons import fileutils
+		// when relocating fileutils.py → fileutils_fuzz.py.
+		if oldLeaf != "" && newLeaf != "" && oldLeaf != newLeaf {
+			importedNames := text[importStart:importEnd]
+			if items := parsePythonImportItems(importedNames); len(items) > 0 {
+				// Walk the name-list region left-to-right, rewriting matching leaves.
+				// Prefer span edits over rebuilding the whole statement so
+				// formatting/parentheses stay intact.
+				scan := importStart
+				for _, it := range items {
+					composed := pythonComposeImportModule(modStr, it.name, consumerDir)
+					if !pythonImportMatchesModule(composed, oldMod, consumerDir) {
+						continue
+					}
+					// Locate this import name's first occurrence from scan.
+					namePos := -1
+					for i := scan; i+len(it.name) <= importEnd; i++ {
+						if text[i:i+len(it.name)] != it.name {
+							continue
+						}
+						if i > 0 && ingest.IsIdentChar(text[i-1]) {
+							continue
+						}
+						if i+len(it.name) < len(text) && ingest.IsIdentChar(text[i+len(it.name)]) {
+							continue
+						}
+						namePos = i
+						break
+					}
+					if namePos < 0 {
+						continue
+					}
+					// Replacement: new leaf; keep existing alias, else bind as old leaf
+					// so uses of the old local name keep resolving.
+					repl := newLeaf
+					if it.alias != "" {
+						// name changes; " as alias" stays after the name span.
+					} else {
+						repl = newLeaf + " as " + oldLeaf
+					}
+					edits = append(edits, ingest.Edit{
+						File:    fileRelPath,
+						Span:    ingest.Span{StartByte: uint32(namePos), EndByte: uint32(namePos + len(it.name))},
+						NewText: repl,
+					})
+					scan = namePos + len(it.name)
+				}
+			}
+		}
+		off = importEnd
 	}
 
 	// "import <module>" / "import <module> as alias" (possibly comma-separated)
@@ -549,7 +624,35 @@ func rewritePythonModuleFile(fileRelPath string, content []byte, oldPath, newPat
 		off = end
 	}
 
+	// Basename in source (e.g. 'fileutils.py' → 'fileutils_fuzz.py') so tests
+	// and path strings that name the module file track the move. Use full
+	// basename including .py — bare stems are too ambiguous.
+	oldBase := path.Base(strings.TrimPrefix(oldPath, "./"))
+	newBase := path.Base(strings.TrimPrefix(newPath, "./"))
+	if oldBase != "" && newBase != "" && oldBase != newBase {
+		edits = append(edits, ingest.FindAllOccurrences(fileRelPath, content, oldBase, newBase)...)
+	}
+
 	return edits
+}
+
+// pythonComposeImportModule builds the fully-qualified module for
+// `from <modStr> import <name>` (absolute or relative parent).
+func pythonComposeImportModule(modStr, name, consumerDir string) string {
+	if name == "" {
+		return ""
+	}
+	if strings.HasPrefix(modStr, ".") {
+		base := resolvePythonRelative(consumerDir, modStr)
+		if base == "" {
+			return name
+		}
+		return base + "." + name
+	}
+	if modStr == "" {
+		return name
+	}
+	return modStr + "." + name
 }
 
 // pythonImportMatchesModule reports whether an import module string refers to oldMod
