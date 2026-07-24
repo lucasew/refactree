@@ -19,6 +19,26 @@ type moveDriver struct{}
 
 func (moveDriver) Language() string { return "python" }
 
+// ValidateRename rejects renames of Python special methods (__or__, __init__, …).
+// Those names are part of the language/data-model protocol; renaming them
+// breaks operators and builtins while leaving call sites that use |, +, len(), etc.
+func (moveDriver) ValidateRename(src, dst ingest.Reference) error {
+	oldLeaf := ingest.AtomName(src.Name)
+	newLeaf := ingest.AtomName(dst.Name)
+	if oldLeaf == "" || oldLeaf == newLeaf {
+		return nil
+	}
+	if isPythonSpecialMethod(oldLeaf) {
+		return fmt.Errorf("renaming Python special method %s is not supported", oldLeaf)
+	}
+	return nil
+}
+
+// isPythonSpecialMethod reports whether name is a dunder special method (__x__).
+func isPythonSpecialMethod(name string) bool {
+	return len(name) >= 5 && strings.HasPrefix(name, "__") && strings.HasSuffix(name, "__")
+}
+
 func (moveDriver) ExtractDecl(filePath string, entity ingest.Atom) (ingest.DeclExtract, error) {
 	pf, err := ingest.ParseSourceFile(filePath, "")
 	if err != nil {

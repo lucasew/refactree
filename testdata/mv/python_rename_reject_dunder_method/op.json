@@ -1,0 +1,4 @@
+{
+  "source": "path:./mathutils.py::Bits.__or__",
+  "destination": "path:./mathutils.py::Bits.fuzz_or"
+}
