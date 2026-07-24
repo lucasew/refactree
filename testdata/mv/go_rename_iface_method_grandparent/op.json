@@ -1,0 +1,4 @@
+{
+  "source": "path:./pkg/driver/opener/xdg/driver.go::*Factory.New",
+  "destination": "path:./pkg/driver/opener/xdg/driver.go::*Factory.Make"
+}

@@ -1066,6 +1066,19 @@ func (moveDriver) ExpandRenameSources(rootDir string, result *ingest.Result, sou
 	// Interface method → expand to same-leaf methods (implementors + sibling ifaces)
 	// in the package tree so concrete defs and call sites rename together.
 	ifaceExpand := isMethod && goTypeIsInterface(rootDir, result, srcPkgDir, recv)
+	// Concrete method whose interface lives above the one-level scope (e.g.
+	// pkg/driver.DriverFactory.New when renaming pkg/driver/opener/xdg.*Factory.New):
+	// re-scope as an interface-method rename so all implementors stay in sync.
+	if isMethod && !ifaceExpand {
+		if ancPkg, ok := nearestAncestorIfaceMethodPkg(rootDir, result, srcPkgDir, leaf); ok {
+			if ancPkg != srcPkgDir && ancPkg != scopePrefix &&
+				(strings.HasPrefix(srcPkgDir, ancPkg+"/") || srcPkgDir == ancPkg) {
+				ifaceExpand = true
+				srcPkgDir = ancPkg
+				scopePrefix = methodRenameScopePrefix(ancPkg + "/_.go")
+			}
+		}
+	}
 	var extra []string
 	for _, ent := range result.Atoms {
 		ref := ingest.ParseReference(ent.Reference)
@@ -1124,6 +1137,54 @@ func (moveDriver) ExpandRenameSources(rootDir string, result *ingest.Result, sou
 		}
 	}
 	return extra
+}
+
+// nearestAncestorIfaceMethodPkg walks package directories from srcPkgDir up to the
+// module root and returns the nearest package that declares an interface with
+// method leaf (including srcPkgDir itself).
+func nearestAncestorIfaceMethodPkg(rootDir string, result *ingest.Result, srcPkgDir, leaf string) (string, bool) {
+	if leaf == "" || result == nil {
+		return "", false
+	}
+	pkg := srcPkgDir
+	for {
+		if packageDeclaresIfaceMethod(rootDir, result, pkg, leaf) {
+			return pkg, true
+		}
+		if pkg == "" {
+			return "", false
+		}
+		parent := dirOf(pkg)
+		if parent == pkg {
+			return "", false
+		}
+		pkg = parent
+	}
+}
+
+// packageDeclaresIfaceMethod reports whether any Go file in pkgDir declares an
+// interface type that lists method leaf.
+func packageDeclaresIfaceMethod(rootDir string, result *ingest.Result, pkgDir, leaf string) bool {
+	if result == nil || leaf == "" {
+		return false
+	}
+	for _, f := range result.Files {
+		if f.Language != "go" {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Path, "./")
+		if dirOf(rel) != pkgDir {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		if len(interfaceTypeNamesWithMethod(content, leaf)) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // goEntityIsFreeFunc reports whether ent is a package-level function (no receiver),
