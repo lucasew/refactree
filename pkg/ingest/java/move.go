@@ -86,8 +86,29 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		// expanded override decls (enum implementors, subclasses) rewrite too.
 		// Without this, Worker.helper rename updates Kind's override def but
 		// leaves k.helper() stale when k is typed Kind.
+		//
+		// Only project-declared types: implements/extends edges can name JDK
+		// interfaces (e.g. CustomAppendable implements Appendable). Adding
+		// Appendable to ourReceivers rewrote appendable.append(...) in Streams
+		// when renaming a test double's append → fuzz902 (catalog gson).
+		projectTypes := map[string]bool{}
+		for _, ent := range result.Atoms {
+			ref := ingest.ParseReference(ent.Reference)
+			if t, _, ok := javaSplitTypeMethod(ref.Name); ok {
+				projectTypes[t] = true
+				if i := strings.LastIndex(t, "."); i >= 0 {
+					projectTypes[t[i+1:]] = true
+				}
+				continue
+			}
+			if ref.Name != "" && !strings.Contains(ref.Name, ".") {
+				projectTypes[ref.Name] = true
+			}
+		}
 		for t := range alsoTypes {
-			ourReceivers[t] = true
+			if projectTypes[t] {
+				ourReceivers[t] = true
+			}
 		}
 	}
 
@@ -1022,6 +1043,15 @@ func javaRenameByTypeMaps(name string, ourReceivers, foreignReceivers, typedLoca
 	}
 	if typedLocals != nil && typedLocals[name] {
 		return true
+	}
+	// Unique-leaf fallback: only for type-ish receivers (Type.m / empty), not bare
+	// locals. Otherwise renaming Custom.append (implements Appendable) rewrites
+	// appendable.append(...) on JDK-typed locals when no project foreign leaf exists.
+	if name != "" {
+		c := name[0]
+		if c >= 'a' && c <= 'z' {
+			return false
+		}
 	}
 	return len(foreignReceivers) == 0
 }
