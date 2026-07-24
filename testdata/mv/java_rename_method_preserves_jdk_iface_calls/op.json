@@ -1,0 +1,4 @@
+{
+  "source": "path:./Custom.java::Custom.append",
+  "destination": "path:./Custom.java::Custom.fuzz902"
+}

@@ -20,10 +20,11 @@ type moveDriver struct{}
 
 func (moveDriver) Language() string { return "java" }
 
-// ExtraRenameEdits covers two cases relation-based rename misses for Type.member:
+// ExtraRenameEdits covers cases relation-based rename misses for Type.member:
 //  1. Interface/override method names on implementors and related types
 //     (Task.work when Worker.work renames).
 //  2. Instance method_invocation / field_access name spans (m.member) via AST walk.
+//  3. Javadoc {@link #method} / {@link Type#method} targets (ErrorProne InvalidLink).
 func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, sourceRefs []string, oldLeaf, newLeaf string) []ingest.Edit {
 	if oldLeaf == "" || oldLeaf == newLeaf || len(sourceRefs) == 0 || rootDir == "" || result == nil {
 		return nil
@@ -85,8 +86,29 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		// expanded override decls (enum implementors, subclasses) rewrite too.
 		// Without this, Worker.helper rename updates Kind's override def but
 		// leaves k.helper() stale when k is typed Kind.
+		//
+		// Only project-declared types: implements/extends edges can name JDK
+		// interfaces (e.g. CustomAppendable implements Appendable). Adding
+		// Appendable to ourReceivers rewrote appendable.append(...) in Streams
+		// when renaming a test double's append → fuzz902 (catalog gson).
+		projectTypes := map[string]bool{}
+		for _, ent := range result.Atoms {
+			ref := ingest.ParseReference(ent.Reference)
+			if t, _, ok := javaSplitTypeMethod(ref.Name); ok {
+				projectTypes[t] = true
+				if i := strings.LastIndex(t, "."); i >= 0 {
+					projectTypes[t[i+1:]] = true
+				}
+				continue
+			}
+			if ref.Name != "" && !strings.Contains(ref.Name, ".") {
+				projectTypes[ref.Name] = true
+			}
+		}
 		for t := range alsoTypes {
-			ourReceivers[t] = true
+			if projectTypes[t] {
+				ourReceivers[t] = true
+			}
 		}
 	}
 
@@ -173,6 +195,127 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		}
 	}
 
+	// (3) Javadoc method links: {@link #oldLeaf}, {@link #oldLeaf()}, {@link Type#oldLeaf}.
+	// Hierarchy renames (ExtraRename) update defs but leave doc links; ErrorProne
+	// InvalidLink + -Werror fails catalog checks (gson JsonElement after method rename).
+	if len(ourTypes) > 0 || len(alsoTypes) > 0 {
+		linkTypes := map[string]bool{}
+		for t := range ourTypes {
+			linkTypes[t] = true
+			if i := strings.LastIndex(t, "."); i >= 0 {
+				linkTypes[t[i+1:]] = true
+			}
+		}
+		for t := range alsoTypes {
+			linkTypes[t] = true
+			if i := strings.LastIndex(t, "."); i >= 0 {
+				linkTypes[t[i+1:]] = true
+			}
+		}
+		// Files that declare a method we renamed (source or expanded).
+		filesWithRename := map[string]bool{}
+		for _, s := range sourceRefs {
+			ref := ingest.ParseReference(s)
+			if _, m, ok := javaSplitTypeMethod(ref.Name); ok && m == oldLeaf {
+				filesWithRename[strings.TrimPrefix(ref.Path, "./")] = true
+			}
+		}
+		for _, ent := range result.Atoms {
+			ref := ingest.ParseReference(ent.Reference)
+			t, m, ok := javaSplitTypeMethod(ref.Name)
+			if !ok || m != oldLeaf {
+				continue
+			}
+			tLeaf := t
+			if i := strings.LastIndex(t, "."); i >= 0 {
+				tLeaf = t[i+1:]
+			}
+			if ourTypes[t] || ourTypes[tLeaf] || alsoTypes[t] || alsoTypes[tLeaf] {
+				filesWithRename[strings.TrimPrefix(ref.Path, "./")] = true
+			}
+		}
+		for _, f := range result.Files {
+			if f.Language != "java" {
+				continue
+			}
+			rel := strings.TrimPrefix(f.Path, "./")
+			content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+			if err != nil {
+				continue
+			}
+			occ := occupied[rel]
+			for _, e := range rewriteJavaDocMethodLinks(rel, content, oldLeaf, newLeaf, linkTypes, filesWithRename[rel]) {
+				if ingest.SpanOccupied(occ, e.StartByte, e.EndByte) {
+					continue
+				}
+				edits = append(edits, e)
+				markOccupied(rel, e.StartByte, e.EndByte)
+			}
+		}
+	}
+
+	return edits
+}
+
+// rewriteJavaDocMethodLinks rewrites #oldLeaf in Javadoc method links.
+// Relative #oldLeaf only when this file declares a renamed method; Type#oldLeaf
+// when Type is among renamed/related types.
+func rewriteJavaDocMethodLinks(file string, content []byte, oldLeaf, newLeaf string, linkTypes map[string]bool, relativeOK bool) []ingest.Edit {
+	if oldLeaf == "" || oldLeaf == newLeaf {
+		return nil
+	}
+	text := string(content)
+	needle := "#" + oldLeaf
+	var edits []ingest.Edit
+	for off := 0; off < len(text); {
+		i := strings.Index(text[off:], needle)
+		if i < 0 {
+			break
+		}
+		hashPos := off + i
+		nameStart := hashPos + 1
+		nameEnd := nameStart + len(oldLeaf)
+		if nameEnd < len(text) && ingest.IsIdentChar(text[nameEnd]) {
+			off = nameEnd
+			continue
+		}
+		// Classify: relative (#method) vs Type#method / pkg.Type#method
+		relLink := true
+		if hashPos > 0 && (ingest.IsIdentChar(text[hashPos-1]) || text[hashPos-1] == '.') {
+			relLink = false
+			// Walk back for the type token before #
+			tEnd := hashPos
+			tStart := tEnd
+			for tStart > 0 {
+				c := text[tStart-1]
+				if ingest.IsIdentChar(c) || c == '.' {
+					tStart--
+					continue
+				}
+				break
+			}
+			typeTok := text[tStart:tEnd]
+			// Use simple name (last segment)
+			simple := typeTok
+			if j := strings.LastIndex(typeTok, "."); j >= 0 {
+				simple = typeTok[j+1:]
+			}
+			if !linkTypes[typeTok] && !linkTypes[simple] {
+				off = nameEnd
+				continue
+			}
+		}
+		if relLink && !relativeOK {
+			off = nameEnd
+			continue
+		}
+		edits = append(edits, ingest.Edit{
+			File:    file,
+			Span:    ingest.Span{StartByte: uint32(nameStart), EndByte: uint32(nameEnd)},
+			NewText: newLeaf,
+		})
+		off = nameEnd
+	}
 	return edits
 }
 
@@ -900,6 +1043,15 @@ func javaRenameByTypeMaps(name string, ourReceivers, foreignReceivers, typedLoca
 	}
 	if typedLocals != nil && typedLocals[name] {
 		return true
+	}
+	// Unique-leaf fallback: only for type-ish receivers (Type.m / empty), not bare
+	// locals. Otherwise renaming Custom.append (implements Appendable) rewrites
+	// appendable.append(...) on JDK-typed locals when no project foreign leaf exists.
+	if name != "" {
+		c := name[0]
+		if c >= 'a' && c <= 'z' {
+			return false
+		}
 	}
 	return len(foreignReceivers) == 0
 }
