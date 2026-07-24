@@ -454,8 +454,8 @@ func runMvIteration(ctx context.Context, opts Options, p Project, rng *rand.Rand
 		Dest:      plan.Destination,
 	}
 	scaffold := func() {
-		// Edits are workDir-relative (apply root); plan paths stay ingest-relative.
-		_ = ScaffoldMvFixture(env.workDir, report.ScaffoldDir(p.ID, opts.Seed, iter), plan.Source, plan.Destination, attempt.Edits)
+		// Primary edits are ingest-root-relative; plan paths stay ingest-relative.
+		_ = ScaffoldMvFixture(primaryIngestRoot(p, env.workDir), report.ScaffoldDir(p.ID, opts.Seed, iter), plan.Source, plan.Destination, attempt.Edits)
 	}
 
 	switch attempt.Class {

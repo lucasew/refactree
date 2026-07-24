@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 
@@ -22,17 +22,17 @@ type MvAttemptResult struct {
 }
 
 // RunMvAttempt runs on an already-prepared mutable work dir (repo / project root).
-// Flow: pre-ingest on ingest_roots → pick plan → apply on workDir (so consumers
-// outside the ingest root, e.g. boltons tests/, are rewritten) → post invariants
-// → optional afterCheck.
+// Flow: pre-ingest on ingest_roots → pick plan → apply on ingest root → rewrite
+// consumers outside that root (e.g. boltons tests/) → post invariants → afterCheck.
+//
+// Apply stays scoped to the ingest root so monorepo-prefixed workDir paths do not
+// break language resolution (java: vs path: under gson/src/…). External consumers
+// get a second-pass RewriteImports only.
 //
 // Unsupported picks/applies return Class=unsupported and a nil Err (not a fuzzer crash).
 // Bugs return Class=bug and a non-nil Err suitable for t.Fatal.
 // afterCheck is typically the catalog project's mise test/build (via Session), not fixtures.
 // log receives choose/result lines; nil defaults to os.Stdout.
-//
-// workDir is the prepared project checkout. Plans are picked from primaryIngestRoot
-// (paths relative to that root) and rebased onto workDir for apply when they differ.
 func RunMvAttempt(ctx context.Context, p Project, workDir string, in PlanInput, strict bool, afterCheck func(context.Context) error, log io.Writer) MvAttemptResult {
 	if err := ctx.Err(); err != nil {
 		return MvAttemptResult{Class: classEnv, Err: err}
@@ -59,11 +59,8 @@ func RunMvAttempt(ctx context.Context, p Project, workDir string, in PlanInput, 
 		p.ID, plan.Placement, plan.Source, plan.Destination,
 		in.GrainIndex, in.SourceIndex, in.PlacementIndex, in.PeerIndex, in.Entropy)
 
-	// Apply on the full workDir so files outside ingest_roots (tests/, docs/)
-	// that import the moved module still get import rewrites. Plan paths from
-	// pick are relative to ingestRoot — rebase when that root is a subdirectory.
-	applyPlan := rebasePlanToWorkDir(plan, ingestRoot, workDir)
-	edits, err := ApplyMvPlan(workDir, applyPlan)
+	// Apply on the ingest root with plan paths as picked (no monorepo prefix).
+	edits, err := ApplyMvPlan(ingestRoot, plan)
 	if err != nil {
 		class := classifyMvError(err)
 		fmt.Fprintf(log, "mv result: project=%s class=%s apply_err=%v\n", p.ID, class, err)
@@ -73,7 +70,13 @@ func RunMvAttempt(ctx context.Context, p Project, workDir string, in PlanInput, 
 		return MvAttemptResult{Plan: plan, Edits: edits, Class: classBug, Err: fmt.Errorf("apply %s %s -> %s: %w", plan.Placement, plan.Source, plan.Destination, err)}
 	}
 
-	// Post-invariants on the ingest root with original (ingest-relative) plan paths.
+	// Second pass: consumers outside ingest_roots (tests/, docs/, sibling packages).
+	if extra, err := rewriteExternalConsumers(workDir, ingestRoot, plan); err != nil {
+		return MvAttemptResult{Plan: plan, Edits: edits, Class: classBug, Err: fmt.Errorf("external consumers: %w", err)}
+	} else if len(extra) > 0 {
+		edits = append(edits, extra...)
+	}
+
 	if post := postMvInvariants(ingestRoot, plan, strict); len(post) > 0 {
 		fmt.Fprintf(log, "mv result: project=%s class=bug post_invariants=%v\n", p.ID, post)
 		return MvAttemptResult{
@@ -100,41 +103,61 @@ func RunMvAttempt(ctx context.Context, p Project, workDir string, in PlanInput, 
 	return MvAttemptResult{Plan: plan, Edits: edits, Class: classPass}
 }
 
-// rebasePlanToWorkDir prefixes plan path: refs with the ingest root's path relative
-// to workDir when they differ (e.g. boltons/fileutils.py under workDir).
-// No-op when ingestRoot is workDir itself.
-func rebasePlanToWorkDir(plan movePlan, ingestRoot, workDir string) movePlan {
-	rel, err := filepath.Rel(workDir, ingestRoot)
-	if err != nil || rel == "" || rel == "." {
-		return plan
+// rewriteExternalConsumers walks workDir excluding ingestRoot and rewrites
+// import sites for the plan. Edit.File paths are workDir-relative.
+func rewriteExternalConsumers(workDir, ingestRoot string, plan movePlan) ([]ingest.Edit, error) {
+	relIngest, err := filepath.Rel(workDir, ingestRoot)
+	if err != nil || relIngest == "" || relIngest == "." {
+		return nil, nil
 	}
-	// Refuse to leave workDir.
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return plan
+	if relIngest == ".." || strings.HasPrefix(relIngest, ".."+string(filepath.Separator)) {
+		return nil, nil
 	}
-	rel = filepath.ToSlash(rel)
-	return movePlan{
-		Placement:   plan.Placement,
-		Source:      prefixPathRef(plan.Source, rel),
-		Destination: prefixPathRef(plan.Destination, rel),
-	}
-}
+	relIngest = filepath.ToSlash(relIngest)
 
-// prefixPathRef rewrites path:./file.py[::sym] → path:./prefix/file.py[::sym].
-func prefixPathRef(ref, prefix string) string {
-	r := ingest.ParseReference(ref)
-	if r.Provider != "" && r.Provider != "path" {
-		return ref
-	}
-	p := strings.TrimPrefix(r.Path, "./")
-	joined := path.Join(prefix, p)
-	if !strings.HasPrefix(joined, "./") {
-		joined = "./" + joined
-	}
-	if r.Name != "" {
-		return ingest.AtomRef(joined, r.Name)
-	}
-	return "path:" + joined
+	src := plan.Source
+	dst := plan.Destination
+	var edits []ingest.Edit
+
+	err = filepath.WalkDir(workDir, func(abs string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(workDir, abs)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if d.IsDir() {
+			// Skip the ingest tree (already rewritten by ApplyMvPlan).
+			if rel == relIngest || strings.HasPrefix(rel, relIngest+"/") {
+				return fs.SkipDir
+			}
+			switch d.Name() {
+			case ".git", "node_modules", "target", ".venv", ".uv", "dist", "build":
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if rel == "." || strings.HasPrefix(rel, relIngest+"/") {
+			return nil
+		}
+		content, err := os.ReadFile(abs)
+		if err != nil {
+			return nil
+		}
+		occs := ingest.RewriteImportsInFile(rel, content, nil, src, dst)
+		if len(occs) == 0 {
+			return nil
+		}
+		// Apply immediately under workDir so catalog check sees updates.
+		if err := ingest.ApplyEdits(workDir, occs); err != nil {
+			return err
+		}
+		edits = append(edits, occs...)
+		return nil
+	})
+	return edits, err
 }
 
 // ScaffoldAttempt writes a fixture scaffold under destDir for a failed attempt.

@@ -582,9 +582,15 @@ func rewritePythonModuleFile(fileRelPath string, content []byte, oldPath, newPat
 		if idx < 0 {
 			break
 		}
-		// Skip the "import" that is part of "from X import".
 		abs := off + idx
-		if abs >= 5 && text[abs-5:abs] == "from " {
+		// Skip "import" that is part of "from <mod> import …" (not only the
+		// impossible "from import" adjacency — that missed "from boltons import X"
+		// and double-rewrote the imported name).
+		lineStart := abs
+		for lineStart > 0 && text[lineStart-1] != '\n' {
+			lineStart--
+		}
+		if strings.Contains(text[lineStart:abs], "from ") {
 			off = abs + 7
 			continue
 		}

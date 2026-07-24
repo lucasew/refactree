@@ -176,13 +176,13 @@ func (c *CatalogCanvas) Attempt(ctx context.Context, projectIdx int, in PlanInpu
 	if log == nil {
 		log = os.Stdout
 	}
-	// Pass workDir (full checkout): pick uses ingest_roots; apply rewrites
-	// consumers anywhere under the project (e.g. boltons tests/ outside package).
+	// workDir = full checkout. RunMvAttempt applies on ingest_roots then rewrites
+	// external consumers (e.g. boltons tests/) without rebasing plan paths.
 	res = RunMvAttempt(ctx, p, workDir, in, c.Strict, nil, log)
 	if res.Class != classPass {
 		if res.Class == classBug && scaffoldDir != "" {
-			// Edits are workDir-relative (apply root).
-			_ = ScaffoldAttempt(workDir, scaffoldDir, res)
+			// Primary edits are ingest-root-relative.
+			_ = ScaffoldAttempt(primaryIngestRoot(p, workDir), scaffoldDir, res)
 		}
 		return res
 	}
@@ -194,7 +194,7 @@ func (c *CatalogCanvas) Attempt(ctx context.Context, projectIdx int, in PlanInpu
 		res.Err = fmt.Errorf("catalog check after %s %s -> %s: %s", res.Plan.Placement, res.Plan.Source, res.Plan.Destination, detail)
 		fmt.Fprintf(log, "mv result: project=%s class=bug catalog_check=%s\n", p.ID, shortRunErr(check))
 		if scaffoldDir != "" {
-			_ = ScaffoldAttempt(workDir, scaffoldDir, res)
+			_ = ScaffoldAttempt(primaryIngestRoot(p, workDir), scaffoldDir, res)
 		}
 		return res
 	}
