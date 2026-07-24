@@ -296,6 +296,14 @@ func listDeclarationNodes(result *ingest.Result, projectFamily string) []MoveNod
 		if projectFamily == ingest.FamilyGo && ref.Name == "init" {
 			continue
 		}
+		// Python special methods (__or__, __init__, …) are protocol hooks.
+		// Catalog boltons: renaming Bits.__or__ broke operator sites while the
+		// method body still looked fine. Do not pick them as atom grain sources.
+		if projectFamily == ingest.FamilyPython {
+			if isPythonSpecialMethodName(ingest.AtomName(ref.Name)) {
+				continue
+			}
+		}
 		path := ref.Path
 		if !strings.HasPrefix(path, "./") {
 			path = "./" + path
@@ -369,6 +377,12 @@ func isFuzzSymbol(symbol string) bool {
 	return strings.HasPrefix(symbol, "fuzz_") ||
 		strings.HasPrefix(symbol, "Fuzz") ||
 		strings.HasPrefix(symbol, "FUZZ")
+}
+
+// isPythonSpecialMethodName reports a dunder special method leaf (__x__).
+// Minimum length 5 covers __a__; longer names like __init__ / __or__ match too.
+func isPythonSpecialMethodName(name string) bool {
+	return len(name) >= 5 && strings.HasPrefix(name, "__") && strings.HasSuffix(name, "__")
 }
 
 func normalizePath(p string) string {

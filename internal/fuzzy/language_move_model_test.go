@@ -173,3 +173,64 @@ func TestListDeclarationAndPackageNodes(t *testing.T) {
 		t.Fatalf("files in module: %v", same)
 	}
 }
+
+func TestIsPythonSpecialMethodName(t *testing.T) {
+	t.Parallel()
+	cases := map[string]bool{
+		"__or__":   true,
+		"__init__": true,
+		"__a__":    true,
+		"as_int":   false,
+		"__x":      false,
+		"x__":      false,
+		"__":       false,
+		"____":     false, // shorter than __a__
+	}
+	for name, want := range cases {
+		if got := isPythonSpecialMethodName(name); got != want {
+			t.Errorf("isPythonSpecialMethodName(%q)=%v want %v", name, got, want)
+		}
+	}
+}
+
+// Catalog boltons: atom grain must not offer Bits.__or__ (protocol hook).
+func TestPythonListDeclarationNodesSkipDunderMethods(t *testing.T) {
+	t.Parallel()
+	work := t.TempDir()
+	if err := os.WriteFile(filepath.Join(work, "mathutils.py"), []byte(`
+class Bits:
+    def __or__(self, other):
+        return self
+
+    def as_int(self):
+        return 0
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, fails, err := RunIngestOnRoot(work, InvariantOptions{})
+	if err != nil || len(fails) > 0 {
+		t.Fatalf("ingest: %v %v", err, fails)
+	}
+	m, err := moveModelForFamily(ingest.FamilyPython)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decls := m.ListNodes(result, GrainAtom, ingest.FamilyPython)
+	var names []string
+	for _, n := range decls {
+		leaf := ingest.AtomName(n.Name)
+		names = append(names, leaf)
+		if isPythonSpecialMethodName(leaf) {
+			t.Fatalf("dunder method listed as atom grain: %s (all=%v)", n.Name, names)
+		}
+	}
+	found := false
+	for _, leaf := range names {
+		if leaf == "as_int" || leaf == "Bits" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected ordinary symbols among atoms, got %v", names)
+	}
+}
