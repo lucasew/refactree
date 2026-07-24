@@ -1681,8 +1681,16 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 			continue
 		}
 		importsRelated := fileImportsAnyPackage(content, pkgDirs)
+		// Pure field renames: T may flow through a third package without this
+		// file importing ours (e.g. history/list.go imports db only; events come
+		// from db.SearchHistory → []types.HistoryEvent). Still rewrite selectors
+		// on locals typed via those foreign method returns.
+		typeFlowOnly := false
 		if !samePkg && !importsRelated {
-			continue
+			if len(fieldReceivers) == 0 {
+				continue
+			}
+			typeFlowOnly = true
 		}
 		occ := occupied[rel]
 		var selectorEdits []ingest.Edit
@@ -1693,19 +1701,28 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 			// External importers: package qualifiers for our pkgs plus variables
 			// typed as imported interfaces that carry this method (var d a.Driver)
 			// or as our concrete receiver types (b pkga.Box / b := pkga.Box{}).
-			allowed := importAllowedReceivers(content, pkgDirs, ourPkgDirs, ourReceivers, rootDir, result, oldLeaf)
+			allowed := map[string]bool{}
+			if !typeFlowOnly {
+				allowed = importAllowedReceivers(content, pkgDirs, ourPkgDirs, ourReceivers, rootDir, result, oldLeaf)
+			}
 			// Field renames: also allow range/short-var locals typed from methods
 			// that return []T / T for field receiver T (e.g. for _, rf := range
 			// provider.Resolve(...); rf.AbsPath when renaming ResolvedFile.AbsPath),
 			// and locals peeled from map/slice of imported T (b := m["k"]; b.Field).
+			// Methods may live outside our package (db.List → []pkga.Box).
 			if len(fieldReceivers) > 0 {
 				for name := range identsFromImportedFieldReturns(content, ourPkgDirs, fieldReceivers, rootDir, result) {
 					allowed[name] = true
 				}
-				importLocals := importLocalsForPackages(content, ourPkgDirs)
-				for name := range identsFromImportedFieldCollections(content, importLocals, fieldReceivers) {
-					allowed[name] = true
+				if !typeFlowOnly {
+					importLocals := importLocalsForPackages(content, ourPkgDirs)
+					for name := range identsFromImportedFieldCollections(content, importLocals, fieldReceivers) {
+						allowed[name] = true
+					}
 				}
+			}
+			if typeFlowOnly && len(allowed) == 0 {
+				continue
 			}
 			selectorEdits = findSelectorLeafEdits(rel, content, oldLeaf, newLeaf, allowed)
 		}
@@ -2217,20 +2234,20 @@ func findImportedIndexFieldSelectorEdits(file string, content []byte, oldLeaf, n
 	return edits
 }
 
-// ourMethodsReturningFieldReceivers maps method leaf names declared in our
-// packages (methods + interface method_elem) whose result is T, *T, []T, or
-// []*T for some field receiver T. Ambiguous same-leaf methods with different
-// T results last-write; rare for field-return helpers.
-func ourMethodsReturningFieldReceivers(rootDir string, result *ingest.Result, ourPkgDirs, fieldReceivers map[string]bool) map[string]string {
+// ourMethodsReturningFieldReceivers maps method leaf names (methods +
+// interface method_elem) whose result is T, *T, []T, or []*T for some field
+// receiver T. Scans the whole project: helpers that return our type often live
+// in other packages (e.g. db.SearchHistory → []types.HistoryEvent). Restricting
+// to ourPkgDirs missed cross-package consumers ranging over those results.
+// Ambiguous same-leaf methods with different T results last-write; rare for
+// field-return helpers. ourPkgDirs is unused (signature kept for callers).
+func ourMethodsReturningFieldReceivers(rootDir string, result *ingest.Result, _, fieldReceivers map[string]bool) map[string]string {
 	out := map[string]string{}
 	for _, f := range result.Files {
 		if f.Language != "go" {
 			continue
 		}
 		rel := strings.TrimPrefix(f.Path, "./")
-		if !ourPkgDirs[dirOf(rel)] {
-			continue
-		}
 		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
 		if err != nil {
 			continue
