@@ -1,0 +1,4 @@
+{
+  "source": "path:./src/test/java/demo/lib",
+  "destination": "path:./src/test/java/demo/lib_new"
+}
