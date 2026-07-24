@@ -141,6 +141,22 @@ func moveDriverForLanguage(lang string) (MoveDriver, bool) {
 	return d, ok
 }
 
+// RewriteImportsInFile updates import paths/names in one consumer file for a
+// move or rename of oldRef → newRef. Used by fuzzy to rewrite consumers that
+// live outside the scoped ingest root (e.g. boltons tests/ vs boltons/).
+// result may be nil when the driver only needs path/name from the refs.
+func RewriteImportsInFile(fileRelPath string, content []byte, result *Result, oldRef, newRef string) []Edit {
+	lang, ok := LanguageForFile(fileRelPath)
+	if !ok {
+		return nil
+	}
+	driver, ok := moveDriverForLanguage(lang)
+	if !ok {
+		return nil
+	}
+	return driver.RewriteImports(fileRelPath, content, result, ParseReference(oldRef), ParseReference(newRef))
+}
+
 // packageMovePlannerFor picks a PackageMovePlanner for files under srcDir.
 func packageMovePlannerFor(result *Result, srcDir string) (PackageMovePlanner, bool) {
 	srcDir = CleanRelDir(srcDir)

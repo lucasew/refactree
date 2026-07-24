@@ -135,6 +135,11 @@ func sourceRootSuffix(dir string) (string, bool) {
 	// Longer / more specific roots first. The bare "src/" fallback must stay
 	// last so Gradle source sets like jmh/testFixtures are not swallowed as
 	// part of the package path (suffix would become "jmh/java/com/foo").
+	//
+	// Also match when a monorepo/module prefix sits in front of the source
+	// root (e.g. gson/src/test/java/com/foo when fuzzy applies on the repo
+	// workDir but ingest_roots is gson/). Without this, package renames under
+	// a module directory leave package clauses unchanged → PackageLocation.
 	for _, root := range []string{
 		"src/main/java-templates/",
 		"src/test/java-templates/",
@@ -150,6 +155,9 @@ func sourceRootSuffix(dir string) (string, bool) {
 	} {
 		if strings.HasPrefix(dir, root) {
 			return strings.TrimPrefix(dir, root), true
+		}
+		if idx := strings.Index(dir, "/"+root); idx >= 0 {
+			return strings.TrimPrefix(dir[idx+1:], root), true
 		}
 	}
 	return "", false
@@ -172,5 +180,33 @@ func isJavaSupportFile(rel string) bool {
 	return base == "module-info.java" || strings.HasPrefix(base, "Module.")
 }
 
+// ImportPathUnderPackageTree maps java: FQNs (com.foo.Bar or com.foo) onto a
+// project-relative package directory. Needed when consumers resolve imports as
+// java:… rather than path:… (common once a monorepo prefix sits above src/,
+// e.g. gson/src/main/java/… after fuzzy applies on the repo workDir).
+func (moveDriver) ImportPathUnderPackageTree(rootDir, importPath, packageDir string) bool {
+	_ = rootDir
+	pkg, ok := packageNameFromSourceDir(packageDir)
+	if !ok || pkg == "" {
+		return false
+	}
+	p := strings.Trim(importPath, "/")
+	if p == "" {
+		return false
+	}
+	return p == pkg || strings.HasPrefix(p, pkg+".")
+}
+
+// ImportPathIsPackage reports an exact package FQN match (not a type under it).
+func (moveDriver) ImportPathIsPackage(rootDir, importPath, packageDir string) bool {
+	_ = rootDir
+	pkg, ok := packageNameFromSourceDir(packageDir)
+	if !ok || pkg == "" {
+		return false
+	}
+	return strings.Trim(importPath, "/") == pkg
+}
+
 var _ ingest.PackageMovePlanner = moveDriver{}
+var _ ingest.PackageImportMatcher = moveDriver{}
 var _ ingest.MoveDriver = moveDriver{}

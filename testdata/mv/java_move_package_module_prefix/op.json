@@ -1,0 +1,4 @@
+{
+  "source": "path:./gson/src/main/java/com/google/gson/stream",
+  "destination": "path:./gson/src/main/java/com/google/gson/stream_fuzz"
+}

@@ -1,0 +1,4 @@
+{
+  "source": "path:./boltons/fileutils.py",
+  "destination": "path:./boltons/fileutils_fuzz.py"
+}
