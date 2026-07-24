@@ -1667,6 +1667,12 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		}
 	}
 
+	// Once per ExtraRename (not per file): methods anywhere that return T/[]T
+	// for field receivers. Rebuilding this inside each file walk is O(n²).
+	// Entries keep declaring package so per-file we can hide methods from
+	// packages the consumer does not import (db.SearchHistory vs sqlc.SearchHistory).
+	fieldReturnMethods := collectFieldReturnMethods(rootDir, result, fieldReceivers)
+
 	var edits []ingest.Edit
 	for _, f := range result.Files {
 		if f.Language != "go" {
@@ -1675,7 +1681,10 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		rel := strings.TrimPrefix(f.Path, "./")
 		entPkg := dirOf(rel)
 		inOurPkg := ourPkgDirs[entPkg]
-		samePkg := inOurPkg || relatedFiles[rel]
+		// Note: relatedFiles means "graph has a use of our entity", not "same
+		// package". Treating it as samePkg made ExtraRename rewrite every
+		// .OldLeaf in that file (e.g. sqlc row.Timestamp alongside
+		// types.HistoryEvent{Timestamp: ...}).
 		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
 		if err != nil {
 			continue
@@ -1686,7 +1695,7 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		// from db.SearchHistory → []types.HistoryEvent). Still rewrite selectors
 		// on locals typed via those foreign method returns.
 		typeFlowOnly := false
-		if !samePkg && !importsRelated {
+		if !inOurPkg && !importsRelated {
 			if len(fieldReceivers) == 0 {
 				continue
 			}
@@ -1694,7 +1703,7 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		}
 		occ := occupied[rel]
 		var selectorEdits []ingest.Edit
-		if samePkg {
+		if inOurPkg {
 			// Same package tree: rename ident.Leaf only (not Type{}.Leaf).
 			selectorEdits = findSelectorLeafEdits(rel, content, oldLeaf, newLeaf, nil)
 		} else {
@@ -1711,7 +1720,8 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 			// and locals peeled from map/slice of imported T (b := m["k"]; b.Field).
 			// Methods may live outside our package (db.List → []pkga.Box).
 			if len(fieldReceivers) > 0 {
-				for name := range identsFromImportedFieldReturns(content, ourPkgDirs, fieldReceivers, rootDir, result) {
+				retMethods := fieldReturnMethodsVisibleIn(content, entPkg, fieldReturnMethods, rootDir, result)
+				for name := range identsFromImportedFieldReturns(content, fieldReceivers, retMethods) {
 					allowed[name] = true
 				}
 				if !typeFlowOnly {
@@ -1730,7 +1740,7 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 		// not the enclosing method's receiver — so package-level helpers and
 		// cross-type calls inside foreign methods are handled correctly.
 		var callTargetType func(leafStart uint32) (string, bool)
-		if len(foreignReceivers) > 0 && samePkg {
+		if len(foreignReceivers) > 0 && inOurPkg {
 			callTargetType = selectorCallTargetTypeFunc(content)
 		}
 		for _, e := range selectorEdits {
@@ -1742,7 +1752,7 @@ func (moveDriver) ExtraRenameEdits(rootDir string, result *ingest.Result, source
 			}
 			edits = appendUnoccupied(edits, occ, e)
 		}
-		if samePkg {
+		if inOurPkg {
 			// Struct field renames: Type{OldLeaf: …} composite literal keys.
 			if len(fieldReceivers) > 0 {
 				edits = appendUnoccupiedAll(edits, occ, findCompositeFieldKeyEdits(rel, content, oldLeaf, newLeaf, fieldReceivers))
@@ -1841,14 +1851,11 @@ func importAllowedReceivers(content []byte, pkgDirs, ourPkgDirs, ourReceivers ma
 //
 // Returns the element idents (rf) and also direct T values from single-return
 // calls. Used only for pure field renames (not method leaves).
-func identsFromImportedFieldReturns(content []byte, ourPkgDirs, fieldReceivers map[string]bool, rootDir string, result *ingest.Result) map[string]bool {
+// retMethods is method-leaf → element type (from ourMethodsReturningFieldReceivers);
+// pass a precomputed map so ExtraRename stays O(project) not O(n²).
+func identsFromImportedFieldReturns(content []byte, fieldReceivers map[string]bool, retMethods map[string]string) map[string]bool {
 	out := map[string]bool{}
-	if len(fieldReceivers) == 0 {
-		return out
-	}
-	// method leaf → element type name (T for []T / *T / T returns).
-	retMethods := ourMethodsReturningFieldReceivers(rootDir, result, ourPkgDirs, fieldReceivers)
-	if len(retMethods) == 0 {
+	if len(fieldReceivers) == 0 || len(retMethods) == 0 {
 		return out
 	}
 	pf, err := ingest.ParseSource(content, ".go", "")
@@ -1888,6 +1895,32 @@ func identsFromImportedFieldReturns(content []byte, ourPkgDirs, fieldReceivers m
 		}
 	}
 	walkAssign(pf.Root)
+
+	// Index peels from those collections: e := events[i] (search.go preview).
+	var walkIndex func(n *grammar.Node)
+	walkIndex = func(n *grammar.Node) {
+		if n == nil || n.IsNull() {
+			return
+		}
+		if n.Type() == "short_var_declaration" || n.Type() == "assignment_statement" {
+			left := ingest.ChildByField(n, "left")
+			right := ingest.ChildByField(n, "right")
+			if left != nil && right != nil {
+				names := identListNames(left, content)
+				if len(names) > 0 {
+					if elem, ok := elemTypeFromIndexExpr(right, content, rangeSrc, nil); ok && fieldReceivers[elem] {
+						if names[0] != "" && names[0] != "_" {
+							out[names[0]] = true
+						}
+					}
+				}
+			}
+		}
+		for i := uint32(0); i < n.ChildCount(); i++ {
+			walkIndex(n.Child(i))
+		}
+	}
+	walkIndex(pf.Root)
 
 	// Range value vars over those collections.
 	var walkRange func(n *grammar.Node)
@@ -2234,20 +2267,29 @@ func findImportedIndexFieldSelectorEdits(file string, content []byte, oldLeaf, n
 	return edits
 }
 
-// ourMethodsReturningFieldReceivers maps method leaf names (methods +
-// interface method_elem) whose result is T, *T, []T, or []*T for some field
-// receiver T. Scans the whole project: helpers that return our type often live
-// in other packages (e.g. db.SearchHistory → []types.HistoryEvent). Restricting
-// to ourPkgDirs missed cross-package consumers ranging over those results.
-// Ambiguous same-leaf methods with different T results last-write; rare for
-// field-return helpers. ourPkgDirs is unused (signature kept for callers).
-func ourMethodsReturningFieldReceivers(rootDir string, result *ingest.Result, _, fieldReceivers map[string]bool) map[string]string {
-	out := map[string]string{}
+// fieldReturnMethod is a method/interface method whose result is a field
+// receiver type T / *T / []T / []*T, with the declaring package directory.
+type fieldReturnMethod struct {
+	pkgDir string
+	leaf   string
+	elem   string
+}
+
+// collectFieldReturnMethods lists methods project-wide that return field
+// receivers. Helpers that return our type often live in other packages
+// (db.SearchHistory → []types.HistoryEvent). Callers filter by import
+// visibility so db.SearchHistory and sqlc.SearchHistory do not collide.
+func collectFieldReturnMethods(rootDir string, result *ingest.Result, fieldReceivers map[string]bool) []fieldReturnMethod {
+	if len(fieldReceivers) == 0 {
+		return nil
+	}
+	var out []fieldReturnMethod
 	for _, f := range result.Files {
 		if f.Language != "go" {
 			continue
 		}
 		rel := strings.TrimPrefix(f.Path, "./")
+		pkgDir := dirOf(rel)
 		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
 		if err != nil {
 			continue
@@ -2255,6 +2297,11 @@ func ourMethodsReturningFieldReceivers(rootDir string, result *ingest.Result, _,
 		pf, err := ingest.ParseSource(content, rel, "go")
 		if err != nil {
 			continue
+		}
+		add := func(leaf, elem string) {
+			if leaf != "" && elem != "" {
+				out = append(out, fieldReturnMethod{pkgDir: pkgDir, leaf: leaf, elem: elem})
+			}
 		}
 		var walk func(n *grammar.Node, inIface bool)
 		walk = func(n *grammar.Node, inIface bool) {
@@ -2273,11 +2320,8 @@ func ourMethodsReturningFieldReceivers(rootDir string, result *ingest.Result, _,
 					break
 				}
 				leaf := ingest.NodeText(nameN, content)
-				if leaf == "" {
-					break
-				}
 				if elem := fieldReceiverFromResult(ingest.ChildByField(n, "result"), content, fieldReceivers); elem != "" {
-					out[leaf] = elem
+					add(leaf, elem)
 				}
 			case "method_elem":
 				if !inIface {
@@ -2285,7 +2329,6 @@ func ourMethodsReturningFieldReceivers(rootDir string, result *ingest.Result, _,
 				}
 				nameN := ingest.ChildByField(n, "name")
 				if nameN == nil {
-					// Some grammars put name as first field_identifier.
 					for i := uint32(0); i < n.ChildCount(); i++ {
 						c := n.Child(i)
 						if c.Type() == "field_identifier" || c.Type() == "identifier" {
@@ -2298,15 +2341,10 @@ func ourMethodsReturningFieldReceivers(rootDir string, result *ingest.Result, _,
 					break
 				}
 				leaf := ingest.NodeText(nameN, content)
-				if leaf == "" {
-					break
-				}
-				// method_elem: name parameters result (result may be type node).
 				var resultNode *grammar.Node
 				if r := ingest.ChildByField(n, "result"); r != nil {
 					resultNode = r
 				} else {
-					// Last non-parameter type-ish child.
 					for i := n.ChildCount(); i > 0; i-- {
 						c := n.Child(i - 1)
 						switch c.Type() {
@@ -2321,7 +2359,7 @@ func ourMethodsReturningFieldReceivers(rootDir string, result *ingest.Result, _,
 					}
 				}
 				if elem := fieldReceiverFromResult(resultNode, content, fieldReceivers); elem != "" {
-					out[leaf] = elem
+					add(leaf, elem)
 				}
 			}
 			for i := uint32(0); i < n.ChildCount(); i++ {
@@ -2332,6 +2370,133 @@ func ourMethodsReturningFieldReceivers(rootDir string, result *ingest.Result, _,
 		pf.Close()
 	}
 	return out
+}
+
+// fieldReturnMethodsVisibleIn maps method leaf → elem for methods declared in
+// this file's package or in packages it imports. A leaf is used only when it is
+// unambiguous among *all* methods in those packages (any return type): e.g.
+// db.SearchHistory and sqlc.Queries.SearchHistory share a leaf, so we do not
+// guess which one a call site refers to (avoids typing sqlc rows as HistoryEvent).
+func fieldReturnMethodsVisibleIn(content []byte, filePkgDir string, all []fieldReturnMethod, rootDir string, result *ingest.Result) map[string]string {
+	if len(all) == 0 {
+		return nil
+	}
+	visiblePkg := map[string]bool{filePkgDir: true}
+	for _, spec := range parseGoImportSpecs(content) {
+		if spec.path == "" || spec.local == "." || spec.local == "_" {
+			continue
+		}
+		for _, m := range all {
+			if m.pkgDir != "" && importPathMatchesPkgDir(spec.path, m.pkgDir) {
+				visiblePkg[m.pkgDir] = true
+			}
+		}
+		// Also mark import path dirs that may host non-field-return methods
+		// (sqlc) so we can detect leaf collisions.
+		if d := pkgDirFromImportPath(spec.path, result); d != "" {
+			visiblePkg[d] = true
+		}
+	}
+	// Count every method leaf in visible packages (any return type).
+	leafCount := countMethodLeavesInPackages(rootDir, result, visiblePkg)
+	out := map[string]string{}
+	conflict := map[string]bool{}
+	for _, m := range all {
+		if !visiblePkg[m.pkgDir] {
+			continue
+		}
+		if leafCount[m.leaf] != 1 {
+			// Ambiguous method name in visible packages — skip type flow.
+			continue
+		}
+		if prev, ok := out[m.leaf]; ok && prev != m.elem {
+			conflict[m.leaf] = true
+			continue
+		}
+		out[m.leaf] = m.elem
+	}
+	for leaf := range conflict {
+		delete(out, leaf)
+	}
+	return out
+}
+
+// pkgDirFromImportPath finds a source package dir in result that matches importPath.
+func pkgDirFromImportPath(importPath string, result *ingest.Result) string {
+	if result == nil || importPath == "" {
+		return ""
+	}
+	for _, f := range result.Files {
+		if f.Language != "go" {
+			continue
+		}
+		d := dirOf(strings.TrimPrefix(f.Path, "./"))
+		if d != "" && importPathMatchesPkgDir(importPath, d) {
+			return d
+		}
+	}
+	return ""
+}
+
+// countMethodLeavesInPackages counts method_declaration names in the given package dirs.
+func countMethodLeavesInPackages(rootDir string, result *ingest.Result, pkgDirs map[string]bool) map[string]int {
+	counts := map[string]int{}
+	if result == nil || len(pkgDirs) == 0 {
+		return counts
+	}
+	for _, f := range result.Files {
+		if f.Language != "go" {
+			continue
+		}
+		rel := strings.TrimPrefix(f.Path, "./")
+		if !pkgDirs[dirOf(rel)] {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(rootDir, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		pf, err := ingest.ParseSource(content, rel, "go")
+		if err != nil {
+			continue
+		}
+		var walk func(n *grammar.Node)
+		walk = func(n *grammar.Node) {
+			if n == nil || n.IsNull() {
+				return
+			}
+			if n.Type() == "method_declaration" {
+				if nameN := ingest.ChildByField(n, "name"); nameN != nil {
+					if leaf := ingest.NodeText(nameN, content); leaf != "" {
+						counts[leaf]++
+					}
+				}
+			}
+			for i := uint32(0); i < n.ChildCount(); i++ {
+				walk(n.Child(i))
+			}
+		}
+		walk(pf.Root)
+		pf.Close()
+	}
+	return counts
+}
+
+// importPathMatchesPkgDir reports whether an import path refers to source dir
+// pkgDir (e.g. workspaced/pkg/db vs pkg/db, or example.com/m/pkga vs pkga).
+func importPathMatchesPkgDir(importPath, pkgDir string) bool {
+	if importPath == "" || pkgDir == "" {
+		return false
+	}
+	if importPath == pkgDir || strings.HasSuffix(importPath, "/"+pkgDir) {
+		return true
+	}
+	// Last path component only (when monorepo root is the module path).
+	base := importPath
+	if i := strings.LastIndex(base, "/"); i >= 0 {
+		base = base[i+1:]
+	}
+	return base == pkgDir || base == ingest.LastPathComponent(pkgDir)
 }
 
 // fieldReceiverFromResult returns T when result is T/*T/[]T/[]*T/parameter_list
